@@ -47,25 +47,70 @@ no duplicate side effects are the properties every change must preserve.
   `SET` / `SET SESSION` for the tenant**: it outlives the transaction and leaks
   into the next request on a pooled connection.
 - **The app role never owns tables.** `bido_app` owns nothing, cannot `CREATE`,
-  and has no `BYPASSRLS`. All DDL goes through Alembic migrations run as
-  `bido_migrator`, including tables a library would like to create itself.
+  and has no `BYPASSRLS`. All DDL in `public` goes through Alembic migrations
+  run as `bido_migrator`, including tables a library would like to create
+  itself.
+- **Agno's storage is the one exception, and it is fenced off.** Agno keeps its
+  sessions, memory and runs in schema `agno`, owned by role `bido_agno`
+  (`AGNO_DATABASE_URL`), which creates its own tables there and has no access
+  to `public`. Agno's tables have no RLS, so every Agno `user_id` and
+  `session_id` is namespaced by tenant, built only by the agents adapter.
 - Migrations are append-only. Never edit one that has been merged; add a new one.
 - Missing tenant means fail closed. No code path may fall back to "all tenants".
 
 ## Agents and side effects
 
-- **No Anthropic SDK types outside `src/bido_back/agents/llm.py`.** Everything
-  else uses our neutral message, tool, and event types.
-- **`act` tools are never executed by the runner.** A tool that sends, accepts,
-  pays, or otherwise commits is declared `kind="act"`; the runner emits an
-  approval request and stops. Execution happens elsewhere, after a person
-  approves the exact payload.
-- Tools take the tenant from `ToolContext`, never from model-supplied arguments.
+- **Agno does the agent part** (model calls, the tool loop, sessions, memory).
+  It is pinned to an exact version in `pyproject.toml`. Upgrade it deliberately,
+  in its own PR, after reading the changelog; never inside a feature PR or a
+  grouped dependency bump.
+- **Agno and Anthropic types stay inside one module,**
+  `src/bido_back/agents/agno_adapter.py`. Everything else, including the rest of
+  the agents package, the api, the worker and the database layer, uses our own
+  neutral tool, run and event types through `run()`.
+- **Agno telemetry is off:** `AGNO_TELEMETRY=false` in the image, compose and
+  CI, and `telemetry=False` passed explicitly in code (a `.env` file does not
+  reach Agno).
+- **No shell, Python, file-system or MCP toolkits.** Agents get only our typed
+  tools. Adding any built-in Agno toolkit is a security decision, not a
+  convenience.
+- Tools take the tenant from our context, never from model-supplied arguments.
+- **Bido keeps everything that commits.** Auth, tenants, approvals, the outbox
+  and the business endpoints are ours, not Agno's. A tool that sends, accepts,
+  pays, or otherwise commits is declared as an `act` tool. Agno registers it
+  with `external_execution`, so Agno can never run it: the run stops with an
+  `ApprovalRequested` proposal, recorded as a `pending` row in our `approvals`
+  table.
+- **Only our guard turns a proposal into an action.** An approver decides
+  through `POST /v1/approvals/{id}/decision`; the guard checks the tenant, that
+  the decider is an approver or owner and not the requester, and that the
+  stored payload still matches its hash. Execution then happens once, in the
+  worker, keyed by the approval id. Never mount Agno's AgentOS endpoints or
+  resume a paused run from client-supplied state (see the open upstream bug
+  [agno-agi/agno#10589](https://github.com/agno-agi/agno/issues/10589)). Agno's
+  own `agno_approvals` table is never an authority.
 - **Side effects go through the outbox** with a unique idempotency key, written
   in the same transaction as the state change. Workers and providers redeliver;
   handlers must be idempotent.
 - Prompts are versioned files under `prompts/` (`<name>.v<N>.md`). Change a
   prompt by adding a new version, not by editing a released one.
+
+## Observability
+
+- Traces go out through OpenTelemetry (OTLP/HTTP to an ADOT collector, then
+  CloudWatch); errors go to Sentry. Both are set up once per process by
+  `bido_back.observability.init_observability` and are no-ops when
+  `OTEL_EXPORTER_OTLP_ENDPOINT` / `SENTRY_DSN` are unset.
+- **No customer content in logs, span attributes, or Sentry.** That means no
+  prompts, model output, documents, emails, request or response bodies, query
+  strings, cookies, or auth headers. Record IDs instead: `tenant_id`,
+  `run_id`, idempotency keys, the job type, the model name, token counts.
+- Sentry's `before_send` scrubber and the span URL redaction are a safety net,
+  not permission: write log lines and attributes that are safe on their own,
+  and keep exception messages free of payloads.
+- Do not turn on body, header or message-content capture in any
+  instrumentation (`send_default_pii`, request bodies, local variables,
+  `OTEL_INSTRUMENTATION_*_CAPTURE_*`).
 
 ## API contract
 

@@ -70,6 +70,8 @@ jobs:
       ENVIRONMENT: test
       DATABASE_URL: postgresql+asyncpg://bido_app:app@localhost:5432/bido
       MIGRATION_DATABASE_URL: postgresql+asyncpg://bido_migrator:migrator@localhost:5432/bido
+      AGNO_DATABASE_URL: postgresql+asyncpg://bido_agno:agno@localhost:5432/bido
+      AGNO_TELEMETRY: "false"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

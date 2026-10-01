@@ -2,7 +2,7 @@
 
 A tool is a plain async function over our own types: it takes the run's
 `ToolContext` and a validated Pydantic input, and returns a Pydantic output.
-Nothing here knows about any LLM provider.
+Nothing here knows about any LLM provider or agent framework.
 
 Every tool declares a `kind`:
 
@@ -13,6 +13,7 @@ Every tool declares a `kind`:
   proposal; execution happens elsewhere, after a person approves.
 """
 
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
@@ -23,8 +24,8 @@ from bido_back.agents.context import ToolContext
 
 ToolKind = Literal["read", "draft", "act"]
 
-# Reserved for the runner's final-output tool; see runner.py.
-SUBMIT_OUTPUT_TOOL = "submit_output"
+# What model providers accept as a tool name.
+_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class ToolError(Exception):
@@ -50,7 +51,7 @@ class Tool[InT: BaseModel, OutT: BaseModel]:
     artifact_kind: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.name or self.name == SUBMIT_OUTPUT_TOOL:
+        if not _TOOL_NAME.match(self.name):
             raise ValueError(f"invalid tool name: {self.name!r}")
 
     def input_schema(self) -> dict[str, JsonValue]:

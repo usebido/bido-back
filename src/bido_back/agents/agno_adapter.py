@@ -1,0 +1,635 @@
+"""The Agno adapter: the ONLY module that imports Agno (or the Anthropic model it wraps).
+
+Agno runs the agent loop, calls the model, executes tools, and keeps sessions
+and runs in Postgres. Everything that crosses this module's boundary is ours:
+`AgentDefinition` and `Tool` in, `events.Event` out. Swapping Agno means
+rewriting this file, not its callers.
+
+How our rules map onto Agno:
+
+- `read` / `draft` tools become Agno `Function`s whose entrypoint validates
+  the model's arguments with the tool's input model, injects the run's
+  `ToolContext` (the tenant comes from there, never from the model), and runs
+  the handler. Handlers run one at a time per run, as before (Agno would run
+  a batch of tool calls concurrently).
+- `act` tools become Agno `Function`s with `external_execution=True`. Agno
+  never calls the entrypoint of such a function: the run PAUSES with the
+  proposed call (agno/models/base.py `arun_function_calls`; the continue path
+  only appends a caller-supplied result, agno/agent/_tools.py
+  `handle_external_execution_update`). The entrypoint we register refuses
+  anyway, so even a misrouted call cannot execute. We turn the pause into an
+  `ApprovalRequested` and stop. If the proposed arguments do not validate,
+  the error is fed back as the call's result and the run continues, so a
+  person is never asked to approve an invalid payload.
+- The final answer uses Agno's `output_schema` (native structured output on
+  Claude) and is validated again with our output model.
+- Every Agno user_id / session_id is namespaced by tenant (`agno_ids`).
+- Agno telemetry is off: `AGNO_TELEMETRY=false` is forced in the process
+  environment (bido_back/agents/__init__.py, and again per run here, because
+  Agno re-reads it on every run and it overrides the constructor flag:
+  agno/agent/_init.py `set_telemetry`), and `telemetry=False` is passed to
+  every Agno `Agent`.
+- No Agno toolkits, knowledge, memory manager, MCP, skills or filesystem
+  tools are enabled: the model sees exactly the agent definition's tools.
+"""
+
+import asyncio
+import logging
+import os
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from dataclasses import dataclass, field
+from functools import lru_cache
+from typing import Any, Final, Literal
+
+from agno.agent import Agent
+from agno.db.postgres import AsyncPostgresDb, create_async_postgres_engine
+from agno.exceptions import redact_secrets
+from agno.models.anthropic import Claude
+from agno.run.agent import (
+    ModelRequestStartedEvent,
+    RunCancelledEvent,
+    RunCompletedEvent,
+    RunContentEvent,
+    RunContinuedEvent,
+    RunErrorEvent,
+    RunOutput,
+    RunOutputEvent,
+    RunPausedEvent,
+    RunStartedEvent,
+    ToolCallCompletedEvent,
+    ToolCallStartedEvent,
+)
+from agno.run.requirement import RunRequirement
+from agno.tools.function import Function, FunctionCall
+from pydantic import BaseModel, JsonValue, ValidationError
+from sqlalchemy.engine import URL, make_url
+
+from bido_back.agents.approvals import ApprovalProposal, ApprovalSink
+from bido_back.agents.config import RunnerConfig
+from bido_back.agents.context import ToolContext
+from bido_back.agents.definition import AgentDefinition
+from bido_back.agents.events import (
+    ApprovalRequested,
+    Artifact,
+    Event,
+    ReasoningStep,
+    RunCompleted,
+    RunFailed,
+    TextDelta,
+    ToolCalled,
+    ToolResult,
+    args_hash,
+)
+from bido_back.agents.tools import AnyTool, ToolError
+
+logger = logging.getLogger(__name__)
+
+AGNO_SCHEMA: Final = "agno"
+# Agno injects the FunctionCall into an entrypoint parameter with this name
+# (agno/tools/function.py `FunctionCall._build_entrypoint_args`).
+_FC_PARAM: Final = "fc"
+
+_INTERNAL_ERROR: Final = "internal error while running the tool"
+_ACT_REFUSAL: Final = "error: this action needs a person's approval and was not executed"
+
+
+def disable_agno_telemetry() -> None:
+    """Force Agno's telemetry off for this process (see module docstring)."""
+    os.environ["AGNO_TELEMETRY"] = "false"
+
+
+# --- Tenant namespacing ----------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class AgnoIds:
+    user_id: str
+    session_id: str
+    run_id: str
+
+
+def agno_ids(context: ToolContext, session: str | None = None) -> AgnoIds:
+    """The ids every Agno call runs under, all derived from the run's tenant.
+
+    The tenant prefix is a fixed-length UUID followed by ':', so no value of
+    `session` or `user_id` can produce another tenant's id. Without a session
+    key the run is its own session.
+    """
+    if session is not None and not session:
+        raise ValueError("session must be a non-empty string or None")
+    tenant = str(context.tenant_id)
+    user = str(context.user_id) if context.user_id is not None else "system"
+    return AgnoIds(
+        user_id=f"{tenant}:{user}",
+        session_id=f"{tenant}:{session or context.run_id}",
+        run_id=str(context.run_id),
+    )
+
+
+# --- Storage ---------------------------------------------------------------
+
+
+def agno_db_url(url: str) -> URL:
+    """Normalize a Postgres URL to the asyncpg driver, which AsyncPostgresDb needs.
+
+    asyncpg is already a dependency. Agno's own default for a bare
+    `postgresql://` URL is psycopg, which is not installed.
+    """
+    parsed = make_url(url)
+    if parsed.drivername not in ("postgres", "postgresql", "postgresql+asyncpg"):
+        raise ValueError(
+            "agno_database_url must use postgresql or postgresql+asyncpg, "
+            f"got {parsed.drivername!r}"
+        )
+    return parsed.set(drivername="postgresql+asyncpg")
+
+
+@lru_cache(maxsize=4)
+def _agno_db(url: str) -> AsyncPostgresDb:
+    # One engine (one pool) per URL for the process. create_schema=False: the
+    # `agno` schema is provisioned by us and the Agno role cannot CREATE SCHEMA.
+    # Agno creates its own tables inside that schema on first use.
+    engine = create_async_postgres_engine(agno_db_url(url))
+    return AsyncPostgresDb(db_engine=engine, db_schema=AGNO_SCHEMA, create_schema=False)
+
+
+# --- Model -----------------------------------------------------------------
+
+
+def build_model(definition: AgentDefinition[Any], config: RunnerConfig) -> Claude:
+    """The Agno model for a definition. Tests replace this to script responses."""
+    return Claude(
+        id=definition.model,
+        max_tokens=definition.max_tokens,
+        thinking={"type": "adaptive", "display": "summarized"} if definition.thinking else None,
+        output_config={"effort": definition.effort} if definition.effort else None,
+        api_key=config.anthropic_api_key,
+        timeout=config.model_timeout_s,
+        client_params={"max_retries": config.model_max_retries},
+    )
+
+
+# --- Tools -----------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Outcome:
+    status: Literal["ok", "error", "invalid_args"]
+    output: dict[str, JsonValue] | None = None
+    error: str | None = None
+
+
+@dataclass(slots=True)
+class _RunState:
+    # Outcome of each executed tool call, by provider call id.
+    outcomes: dict[str, _Outcome] = field(default_factory=dict[str, _Outcome])
+    # Handlers of one run execute one at a time.
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+def _to_function(tool: AnyTool, context: ToolContext, state: _RunState) -> Function:
+    if _FC_PARAM in tool.input_model.model_fields:
+        raise ValueError(f"tool {tool.name!r}: input field name {_FC_PARAM!r} is reserved")
+    is_act = tool.kind == "act"
+    return Function(
+        name=tool.name,
+        description=tool.description,
+        parameters=dict(tool.input_schema()),
+        entrypoint=_refusing_entrypoint(tool) if is_act else _entrypoint(tool, context, state),
+        # Our schema is used as-is; our own validation is the gate.
+        skip_entrypoint_processing=True,
+        strict=False,
+        external_execution=True if is_act else None,
+        external_execution_silent=True if is_act else None,
+    )
+
+
+def _entrypoint(
+    tool: AnyTool, context: ToolContext, state: _RunState
+) -> Callable[..., Awaitable[str]]:
+    async def entrypoint(fc: FunctionCall, **kwargs: object) -> str:
+        call_id = fc.call_id or ""
+        try:
+            parsed = tool.parse_input(kwargs)
+        except ValidationError as exc:
+            state.outcomes[call_id] = _Outcome(status="invalid_args")
+            return f"error: invalid arguments: {validation_errors(exc)}"
+
+        async with state.lock:
+            try:
+                output = await tool.invoke(context, parsed)
+            except ToolError as exc:
+                message = str(exc) or "tool error"
+            except Exception:
+                logger.exception("tool %s failed in run %s", tool.name, context.run_id)
+                message = _INTERNAL_ERROR
+            else:
+                state.outcomes[call_id] = _Outcome(
+                    status="ok", output=output.model_dump(mode="json")
+                )
+                return output.model_dump_json()
+
+        state.outcomes[call_id] = _Outcome(status="error", error=message)
+        return f"error: {message}"
+
+    return entrypoint
+
+
+def _refusing_entrypoint(tool: AnyTool) -> Callable[..., Awaitable[str]]:
+    # Agno never calls an external_execution function. If it ever does, refuse.
+    async def entrypoint(fc: FunctionCall, **kwargs: object) -> str:
+        logger.error("act tool %s was routed to execution; refused", tool.name)
+        return _ACT_REFUSAL
+
+    return entrypoint
+
+
+def build_agent(
+    definition: AgentDefinition[Any],
+    context: ToolContext,
+    ids: AgnoIds,
+    config: RunnerConfig,
+    state: _RunState | None = None,
+) -> Agent:
+    """A fresh Agno Agent for one run. Never shared: Agno agents hold per-run state."""
+    disable_agno_telemetry()
+    state = state or _RunState()
+    db = _agno_db(config.agno_database_url) if config.agno_database_url else None
+    history = definition.history_runs > 0 and db is not None
+    return Agent(
+        model=build_model(definition, config),
+        name=definition.name,
+        id=f"{definition.name}.v{definition.prompt_version}",
+        user_id=ids.user_id,
+        session_id=ids.session_id,
+        db=db,
+        instructions=definition.load_prompt(),
+        # Prompts are literal text: no `{var}` substitution from session state.
+        resolve_in_context=False,
+        tools=[_to_function(tool, context, state) for tool in definition.tools],
+        output_schema=definition.output_model,
+        add_history_to_context=history,
+        num_history_runs=definition.history_runs if history else None,
+        metadata={
+            "tenant_id": str(context.tenant_id),
+            "agent": definition.name,
+            "prompt_version": definition.prompt_version,
+        },
+        telemetry=False,
+        # Explicitly off, even where off is Agno's default today.
+        enable_agentic_memory=False,
+        update_memory_on_run=False,
+        search_knowledge=False,
+        search_past_sessions=False,
+        read_chat_history=False,
+        read_tool_call_history=False,
+        enable_agentic_state=False,
+        followups=False,
+        markdown=False,
+        store_events=False,
+        debug_mode=False,
+    )
+
+
+# --- Running ---------------------------------------------------------------
+
+
+class _Emitter:
+    def __init__(self, context: ToolContext) -> None:
+        self._run_id = context.run_id
+        self._seq = 0
+
+    def __call__[
+        E: (
+            TextDelta,
+            ReasoningStep,
+            ToolCalled,
+            ToolResult,
+            Artifact,
+            ApprovalRequested,
+            RunCompleted,
+            RunFailed,
+        )
+    ](self, event_type: type[E], **fields: object) -> E:
+        event = event_type.model_validate({"run_id": self._run_id, "seq": self._seq, **fields})
+        self._seq += 1
+        return event
+
+
+class _Translator:
+    """Maps one Agno event stream (a run, then any continuations) to our events."""
+
+    def __init__(self, definition: AgentDefinition[Any], state: _RunState, emit: _Emitter) -> None:
+        self._definition = definition
+        self._state = state
+        self._emit = emit
+        self._turns = 0
+        self._announced: set[str] = set()
+        # Reasoning already emitted in the current run segment (see _on_completed).
+        self._segment_reasoning = ""
+        # Set by consume(): how the segment ended.
+        self.completed = False
+        self.final_content: object = None
+        self.paused = False
+        self.output: RunOutput | None = None
+        self.failure: tuple[str, str] | None = None
+
+    async def consume(
+        self, stream: AsyncIterator[RunOutputEvent | RunOutput]
+    ) -> AsyncIterator[Event]:
+        self.paused = False
+        self.output = None
+        try:
+            async for item in stream:
+                if isinstance(item, RunOutput):
+                    self.output = item
+                    continue
+                for event in self._translate(item):
+                    yield event
+                if self.failure is not None:
+                    return
+        finally:
+            # Leaving early (turn limit) must stop Agno before its next request.
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                await aclose()
+
+    def _translate(self, item: RunOutputEvent) -> list[Event]:
+        emit = self._emit
+        events: list[Event] = []
+        if isinstance(item, RunStartedEvent | RunContinuedEvent):
+            self._segment_reasoning = ""
+        elif isinstance(item, ModelRequestStartedEvent):
+            self._turns += 1
+            if self._turns > self._definition.max_turns:
+                self.failure = (
+                    "max_turns_exceeded",
+                    f"no final output after {self._definition.max_turns} turns",
+                )
+        elif isinstance(item, RunContentEvent):
+            if item.reasoning_content:
+                self._segment_reasoning += item.reasoning_content
+                events.append(emit(ReasoningStep, text=item.reasoning_content))
+            if item.content_type == "str" and isinstance(item.content, str) and item.content:
+                events.append(emit(TextDelta, text=item.content))
+        elif isinstance(item, ToolCallStartedEvent):
+            events.extend(self._on_tool_started(item))
+        elif isinstance(item, ToolCallCompletedEvent):
+            events.extend(self._on_tool_completed(item))
+        elif isinstance(item, RunPausedEvent):
+            self.paused = True
+        elif isinstance(item, RunCompletedEvent):
+            events.extend(self._on_completed(item))
+        elif isinstance(item, RunErrorEvent):
+            self.failure = _failure_from_error(item)
+        elif isinstance(item, RunCancelledEvent):
+            self.failure = ("cancelled", "the run was cancelled")
+        return events
+
+    def _on_tool_started(self, item: ToolCallStartedEvent) -> list[Event]:
+        execution = item.tool
+        if execution is None or execution.tool_call_id is None:
+            return []
+        tool = self._definition.tool(execution.tool_name or "")
+        if tool is None or tool.kind == "act":
+            return []
+        try:
+            parsed = tool.parse_input(execution.tool_args or {})
+        except ValidationError:
+            # The entrypoint reports it to the model; nothing runs, nothing to show.
+            return []
+        self._announced.add(execution.tool_call_id)
+        return [
+            self._emit(
+                ToolCalled,
+                call_id=execution.tool_call_id,
+                tool=tool.name,
+                kind=tool.kind,
+                args=parsed.model_dump(mode="json"),
+            )
+        ]
+
+    def _on_tool_completed(self, item: ToolCallCompletedEvent) -> list[Event]:
+        execution = item.tool
+        if execution is None or execution.tool_call_id not in self._announced:
+            return []
+        call_id = execution.tool_call_id
+        tool = self._definition.tool(execution.tool_name or "")
+        outcome = self._state.outcomes.get(call_id)
+        if tool is None or outcome is None or outcome.status == "invalid_args":
+            return []
+        if outcome.status == "error":
+            return [
+                self._emit(
+                    ToolResult, call_id=call_id, tool=tool.name, ok=False, error=outcome.error
+                )
+            ]
+        events: list[Event] = [
+            self._emit(ToolResult, call_id=call_id, tool=tool.name, ok=True, output=outcome.output)
+        ]
+        if tool.artifact_kind is not None:
+            events.append(self._emit(Artifact, kind=tool.artifact_kind, data=outcome.output))
+        return events
+
+    def _on_completed(self, item: RunCompletedEvent) -> list[Event]:
+        events: list[Event] = []
+        # With structured output Agno does not put the final turn's reasoning on
+        # a content event; it only accumulates it on the run. Emit what is left.
+        full = item.reasoning_content or ""
+        if full.startswith(self._segment_reasoning) and len(full) > len(self._segment_reasoning):
+            events.append(self._emit(ReasoningStep, text=full[len(self._segment_reasoning) :]))
+            self._segment_reasoning = full
+        self.completed = True
+        self.final_content = item.content
+        return events
+
+
+def _failure_from_error(item: RunErrorEvent) -> tuple[str, str]:
+    error_type = item.error_type or "error"
+    logger.warning("agno run %s failed: %s", item.run_id, error_type)
+    if error_type.startswith("model_"):
+        detail = redact_secrets(item.content or "")[:300]
+        return "llm_error", f"{error_type}: {detail}" if detail else error_type
+    return "internal_error", "the run failed unexpectedly"
+
+
+async def stream_run(
+    definition: AgentDefinition[Any],
+    input: BaseModel,
+    context: ToolContext,
+    *,
+    session: str | None,
+    approvals: ApprovalSink,
+    config: RunnerConfig,
+) -> AsyncIterator[Event]:
+    """Run `definition` on Agno, yielding our events; always ends with one terminal event."""
+    emit = _Emitter(context)
+    try:
+        async for event in _drive(definition, input, context, session, approvals, config, emit):
+            yield event
+    except Exception:
+        logger.exception("agent %s run %s: internal error", definition.name, context.run_id)
+        yield emit(RunFailed, code="internal_error", message="the run failed unexpectedly")
+
+
+async def _drive(
+    definition: AgentDefinition[Any],
+    input: BaseModel,
+    context: ToolContext,
+    session: str | None,
+    approvals: ApprovalSink,
+    config: RunnerConfig,
+    emit: _Emitter,
+) -> AsyncIterator[Event]:
+    ids = agno_ids(context, session)
+    state = _RunState()
+    agent = build_agent(definition, context, ids, config, state)
+    translator = _Translator(definition, state, emit)
+
+    # Agno annotates `input` with bare List/Dict, which strict pyright reports
+    # as partially unknown. Our argument is a str and the result is typed here.
+    stream: AsyncIterator[RunOutputEvent | RunOutput] = agent.arun(  # pyright: ignore[reportUnknownMemberType]
+        input.model_dump_json(),
+        stream=True,
+        stream_events=True,
+        yield_run_output=True,
+        user_id=ids.user_id,
+        session_id=ids.session_id,
+        run_id=ids.run_id,
+    )
+    while True:
+        async for event in translator.consume(stream):
+            yield event
+
+        if translator.failure is not None:
+            code, message = translator.failure
+            yield emit(RunFailed, code=code, message=message)
+            return
+
+        if translator.paused and translator.output is not None:
+            output = translator.output
+            try:
+                proposal = _first_valid_proposal(definition, context, session, output)
+            except _UnexpectedPause as exc:
+                logger.error("run %s paused unexpectedly: %s", context.run_id, exc)
+                yield emit(RunFailed, code="internal_error", message="the run paused unexpectedly")
+                return
+            if proposal is not None:
+                yield await _request_approval(approvals, proposal, emit)
+                return
+            # Every proposed act call was invalid: the errors are now the calls'
+            # results. Let the model see them and continue.
+            stream = agent.acontinue_run(
+                run_response=output,
+                requirements=output.requirements,
+                stream=True,
+                stream_events=True,
+                yield_run_output=True,
+                user_id=ids.user_id,
+                session_id=ids.session_id,
+            )
+            continue
+
+        if translator.completed:
+            yield _finish(definition, translator.final_content, emit)
+            return
+
+        yield emit(RunFailed, code="internal_error", message="the run ended without a result")
+        return
+
+
+class _UnexpectedPause(Exception):
+    """Agno paused on something other than one of our act tools."""
+
+
+def _first_valid_proposal(
+    definition: AgentDefinition[Any],
+    context: ToolContext,
+    session: str | None,
+    output: RunOutput,
+) -> ApprovalProposal | None:
+    """The first valid act proposal of a paused run.
+
+    None when every proposal was invalid; each one's validation error is then
+    set as its result, ready for the run to continue.
+    """
+    invalid: list[tuple[RunRequirement, str]] = []
+    for requirement in output.active_requirements:
+        execution = requirement.tool_execution
+        name = execution.tool_name if execution is not None else None
+        tool = definition.tool(name or "")
+        if execution is None or tool is None or tool.kind != "act":
+            # We only ever pause on our own act tools. Anything else: fail closed.
+            raise _UnexpectedPause(f"tool {name!r}")
+        try:
+            parsed = tool.parse_input(execution.tool_args or {})
+        except ValidationError as exc:
+            invalid.append((requirement, f"error: invalid arguments: {validation_errors(exc)}"))
+            continue
+        args: dict[str, JsonValue] = parsed.model_dump(mode="json")
+        return ApprovalProposal(
+            tenant_id=context.tenant_id,
+            run_id=context.run_id,
+            session_id=session or str(context.run_id),
+            tool_call_id=execution.tool_call_id or "",
+            tool=tool.name,
+            args=args,
+            args_hash=args_hash(args),
+            requested_by=context.user_id,
+        )
+    if not invalid:
+        raise _UnexpectedPause("no pending act call")
+    for requirement, message in invalid:
+        requirement.set_external_execution_result(message)
+        if requirement.tool_execution is not None:
+            requirement.tool_execution.tool_call_error = True
+    return None
+
+
+async def _request_approval(
+    approvals: ApprovalSink, proposal: ApprovalProposal, emit: _Emitter
+) -> Event:
+    try:
+        await approvals.request_approval(proposal)
+    except Exception:
+        logger.exception("approval sink failed for run %s", proposal.run_id)
+        return emit(
+            RunFailed, code="approval_not_recorded", message="the approval request was not recorded"
+        )
+    return emit(
+        ApprovalRequested,
+        call_id=proposal.tool_call_id,
+        tool=proposal.tool,
+        args=proposal.args,
+        args_hash=proposal.args_hash,
+    )
+
+
+def _finish(definition: AgentDefinition[Any], content: object, emit: _Emitter) -> Event:
+    try:
+        output = _parse_output(definition.output_model, content)
+    except ValidationError as exc:
+        return emit(RunFailed, code="invalid_output", message=validation_errors(exc))
+    except ValueError as exc:
+        return emit(RunFailed, code="invalid_output", message=str(exc))
+    return emit(RunCompleted, output=output.model_dump(mode="json"))
+
+
+def _parse_output(model: type[BaseModel], content: object) -> BaseModel:
+    # Agno hands back a parsed model when the output validated, else the raw
+    # text. Either way, validate with our model from plain JSON data.
+    if isinstance(content, BaseModel):
+        return model.model_validate(content.model_dump(mode="json"))
+    if isinstance(content, str) and content.strip():
+        return model.model_validate_json(content)
+    if isinstance(content, Mapping):
+        return model.model_validate(content)
+    raise ValueError("the model returned no final output")
+
+
+def validation_errors(exc: ValidationError) -> str:
+    # Field locations and messages only; never echo input values back.
+    return "; ".join(
+        f"{'.'.join(str(p) for p in err['loc']) or '<root>'}: {err['msg']}"
+        for err in exc.errors(include_input=False, include_url=False)
+    )

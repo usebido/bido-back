@@ -7,11 +7,17 @@ Run locally:
 or `uv run python -m bido_back.api`.
 """
 
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import APIRouter, FastAPI, HTTPException, status
 from pydantic import BaseModel
 
+from bido_back.api.approvals import approvals_router
+from bido_back.api.deps import ApiResources
+from bido_back.api.errors import ErrorResponse
+from bido_back.observability import init_observability, instrument_fastapi
 from bido_back.settings import Settings, get_settings
 
 API_TITLE = "Bido API"
@@ -23,10 +29,6 @@ API_VERSION = "0.1.0"
 class HealthResponse(BaseModel):
     status: Literal["ok"]
     environment: str
-
-
-class ErrorResponse(BaseModel):
-    detail: str
 
 
 def _v1_router() -> APIRouter:
@@ -51,8 +53,19 @@ def _v1_router() -> APIRouter:
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or get_settings()
+    # Off unless OTEL_EXPORTER_OTLP_ENDPOINT / SENTRY_DSN are set; once per process.
+    init_observability(resolved, service="api")
 
-    app = FastAPI(title=API_TITLE, version=API_VERSION)
+    # Database and queue clients, created lazily on first use (see api/deps.py).
+    resources = ApiResources(resolved)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
+        yield
+        await resources.aclose()
+
+    app = FastAPI(title=API_TITLE, version=API_VERSION, lifespan=lifespan)
+    app.state.resources = resources
 
     @app.get("/health", tags=["ops"])
     async def health() -> HealthResponse:
@@ -61,4 +74,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return HealthResponse(status="ok", environment=resolved.environment)
 
     app.include_router(_v1_router())
+    app.include_router(approvals_router())
+    instrument_fastapi(app)
     return app

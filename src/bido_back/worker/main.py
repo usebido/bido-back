@@ -28,11 +28,15 @@ import signal
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
-from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
+from pydantic import ValidationError
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from bido_back.approvals.executor import APPROVAL_EXECUTE_JOB, ActToolRegistry, ApprovalExecutor
+from bido_back.db import create_engine
+from bido_back.observability import init_observability
 from bido_back.settings import get_settings
+from bido_back.worker.envelope import Envelope
 
 logger = logging.getLogger(__name__)
 
@@ -40,15 +44,6 @@ Outcome = Literal["handled", "failed", "parked"]
 
 
 # --- Envelope and handlers -------------------------------------------------
-
-
-class Envelope(BaseModel):
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    type: str = Field(min_length=1)
-    tenant_id: UUID
-    idempotency_key: str = Field(min_length=1, max_length=200)
-    payload: dict[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
 
 
 Handler = Callable[[Envelope], Awaitable[None]]
@@ -76,10 +71,16 @@ class HandlerRegistry:
         return self._handlers.get(message_type)
 
 
-def build_registry() -> HandlerRegistry:
+def build_registry(
+    db: AsyncEngine | async_sessionmaker[AsyncSession],
+    act_tools: ActToolRegistry | None = None,
+) -> HandlerRegistry:
     # Job handlers are registered here as features land. Each handler opens its
     # own tenant-scoped session from `envelope.tenant_id`.
-    return HandlerRegistry()
+    registry = HandlerRegistry()
+    # The only place an approved `act` tool runs (see bido_back.approvals).
+    registry.register(APPROVAL_EXECUTE_JOB, ApprovalExecutor(db, act_tools or ActToolRegistry()))
+    return registry
 
 
 # --- Queue abstraction -----------------------------------------------------
@@ -292,18 +293,23 @@ class Worker:
 async def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = get_settings()
+    init_observability(settings, service="worker")
     if not settings.sqs_queue_url:
         raise SystemExit("SQS_QUEUE_URL is not set")
 
+    engine = create_engine(settings)
     worker = Worker(
         SqsQueueClient(
             settings.sqs_queue_url,
             region=settings.aws_region,
             parking_queue_url=settings.sqs_parking_queue_url,
         ),
-        build_registry(),
+        build_registry(engine),
     )
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, worker.request_stop)
-    await worker.run_forever()
+    try:
+        await worker.run_forever()
+    finally:
+        await engine.dispose()

@@ -32,6 +32,8 @@ services:
       # Inside the compose network the database is `db:5432`, not localhost:54320.
       DATABASE_URL: postgresql+asyncpg://bido_app:app@db:5432/bido
       MIGRATION_DATABASE_URL: postgresql+asyncpg://bido_migrator:migrator@db:5432/bido
+      AGNO_DATABASE_URL: postgresql+asyncpg://bido_agno:agno@db:5432/bido
+      AGNO_TELEMETRY: "false"
     ports:
       - "8080:8080"
     depends_on:
@@ -49,6 +51,8 @@ services:
     environment:
       DATABASE_URL: postgresql+asyncpg://bido_app:app@db:5432/bido
       MIGRATION_DATABASE_URL: postgresql+asyncpg://bido_migrator:migrator@db:5432/bido
+      AGNO_DATABASE_URL: postgresql+asyncpg://bido_agno:agno@db:5432/bido
+      AGNO_TELEMETRY: "false"
     depends_on:
       db:
         condition: service_healthy

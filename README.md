@@ -20,8 +20,9 @@ src/bido_back/
   settings.py        runtime configuration (env vars / .env)
   api/               FastAPI app (`create_app` factory)
   worker/            SQS worker (`python -m bido_back.worker`)
-  agents/            the agent runner: definitions, tools, events, LLM seam
+  agents/            the agents adapter: Agno behind our own types and tools
   db/                SQLAlchemy models, sessions, tenant-scoped transactions
+  observability.py   OpenTelemetry tracing and Sentry; off when unset
 prompts/             versioned agent prompts (`<name>.v<N>.md`)
 migrations/          Alembic migrations (run as the migration role)
 docker/postgres/     local/CI database bootstrap (roles, extensions)
@@ -79,20 +80,52 @@ To start over with an empty database: `docker compose down -v && docker compose 
 - Cross-tenant access goes only through a separate, audited staff role
   (not built yet).
 
-## Agent runner seams
+## Agents
 
-Agents are code-owned workflows on the Anthropic SDK plus our own thin runner.
-Four seams keep a later move to another framework small:
+[Agno](https://github.com/agno-agi/agno) does the agent part: model calls, the
+tool loop, sessions and memory. Bido keeps everything that commits: auth,
+tenants, approvals, the outbox, and the business endpoints.
 
-- **One entry point:** `run(agent, input, context)` returns a typed result and
-  a stream of our own events.
-- **Typed tools** are plain async functions that take our `ToolContext`
-  (tenant, user, roles). The tenant comes from the context, never from model
-  arguments. Tools of kind `act` are never executed by the runner; it emits an
-  approval request instead.
-- **Our own schemas:** messages and UI events are ours. Anthropic SDK types
-  never leave `agents/llm.py`.
-- **Prompts are versioned files** in `prompts/`, and evals call `run()`.
+- **Pinned exactly** (`agno==<version>` in `pyproject.toml`). Upgrades are
+  deliberate, in their own PR, after reading the changelog.
+- **Contained:** Agno and Anthropic types live only in
+  `src/bido_back/agents/agno_adapter.py`. Everything else goes through `run()`
+  and sees our own tool, run and event types, so replacing Agno stays a change
+  to one module.
+- **Only our tools:** typed async functions that take the tenant from our
+  context, never from model arguments. No shell, Python, file-system or MCP
+  toolkits.
+- **Telemetry off:** `AGNO_TELEMETRY=false` (image, compose, CI) and
+  `telemetry=False` in code.
+- **Its own storage:** Agno keeps its sessions, memory and runs in schema
+  `agno` through role `bido_agno` (`AGNO_DATABASE_URL`). That role has no
+  access to the business tables in `public`. Agno's tables have no RLS, so
+  every Agno user and session id is namespaced by tenant.
+- **Approvals are ours:** a tool that sends, accepts or pays is an `act` tool,
+  registered with Agno's `external_execution` so Agno can never run it. The run
+  stops with a proposal, stored as a `pending` row in our `approvals` table. An
+  approver decides through `POST /v1/approvals/{id}/decision`; the guard checks
+  tenant, role, requester ≠ approver and the payload hash, and the worker
+  executes the action once. AgentOS endpoints are not mounted, and paused runs
+  are never resumed from client-supplied state (see the open upstream bug
+  [agno-agi/agno#10589](https://github.com/agno-agi/agno/issues/10589)).
+- **Prompts are versioned files** in `prompts/`.
+
+## Observability
+
+- **Traces:** OpenTelemetry, exported over OTLP/HTTP to
+  `OTEL_EXPORTER_OTLP_ENDPOINT` (in AWS, an ADOT collector sidecar that
+  forwards to CloudWatch). Requests, outbound HTTP, AWS calls, and queries on
+  engines passed to `instrument_engine` are traced; `/health` is not.
+- **Errors:** Sentry when `SENTRY_DSN` is set, for errors only (no Sentry
+  tracing).
+- Both are off when unset, so local runs and tests export nothing.
+- **IDs, never content.** Logs, spans and Sentry events carry `tenant_id`,
+  `run_id`, the job type, the model and token counts. They never carry prompts,
+  model output, documents, emails, request bodies, query strings, cookies, or
+  auth headers. Sentry runs with `send_default_pii=False`, no request bodies, no
+  local variables, and a `before_send` scrubber; span URLs lose their query
+  strings, and SQL spans record statements without parameters.
 
 ## Not here yet (deliberately)
 

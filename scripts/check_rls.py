@@ -8,6 +8,14 @@ Rules (enforced in CI after `alembic upgrade head`):
   * Views must be `security_invoker` (otherwise they run as their owner and
     skip the caller's RLS) or be listed in GLOBAL_TABLES.
 
+Scope: schema `public` only, on purpose. Schema `agno` belongs to the Agno
+framework (sessions, memory, runs): its tables have no tenant_id and no RLS
+by design. They are isolated by role instead (bido_agno owns `agno` and has
+no access to `public`; bido_app and bido_migrator have no access to `agno`)
+and tenants are separated there by tenant-namespaced user_id / session_id.
+Those role boundaries are tested in tests/db/test_approvals.py. Every other
+schema is out of scope too; business tables belong in `public`.
+
 Connects with MIGRATION_DATABASE_URL, falling back to DATABASE_URL; only
 reads pg_catalog. Exit code 1 on any violation.
 
@@ -23,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
 
 from bido_back.settings import get_settings
 
+# The only schema inspected. Never add `agno` here: see the module docstring.
 SCHEMA = "public"
 TENANT_COLUMN = "tenant_id"
 # Tables that are tenant-scoped without a tenant_id column (keyed by id).

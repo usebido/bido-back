@@ -23,8 +23,10 @@ The definition refuses a file name whose `vN` does not match `prompt_version`.
   so past runs (and eval baselines) can be reproduced.
 - **Evals run through `run()`**, the same entry point production uses, against
   a specific prompt version. A prompt change ships with its eval results.
-- Keep the final-output instruction out of the prompt: the runner appends the
-  `submit_output` instruction itself.
+- Do not spell out the output format in the prompt: the runner asks the model
+  for the agent's output model as structured output and validates the result.
+- A prompt file is the agent's instructions, verbatim. It is literal text:
+  `{braces}` are not template variables.
 - No secrets, customer data, or tenant-specific content in prompt files.
   Per-run data arrives as the run input.
 

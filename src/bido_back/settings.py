@@ -22,6 +22,9 @@ class Settings(BaseSettings):
     database_url: PostgresDsn
     # The migration role: owns the schema. Used only by Alembic, never by the app.
     migration_database_url: PostgresDsn | None = None
+    # The Agno role: owns only the `agno` schema, where Agno keeps its sessions,
+    # memory and runs. It has no access to the business tables in `public`.
+    agno_database_url: PostgresDsn | None = None
 
     aws_region: str = "us-east-2"
     sqs_queue_url: str | None = None
@@ -29,6 +32,11 @@ class Settings(BaseSettings):
     sqs_parking_queue_url: str | None = None
 
     anthropic_api_key: str | None = Field(default=None, repr=False)
+
+    # Observability. Both are off when unset (local runs and tests stay quiet).
+    otel_exporter_otlp_endpoint: str | None = None
+    otel_service_name: str = "bido-back"
+    sentry_dsn: str | None = Field(default=None, repr=False)
 
 
 @lru_cache

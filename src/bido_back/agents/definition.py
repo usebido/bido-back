@@ -1,7 +1,6 @@
 """What an agent is: a prompt file, a model, a bounded tool set, and an output type.
 
-Agents are code-owned. The definition is data; the loop that runs it lives in
-runner.py.
+Agents are code-owned. The definition is data; `runner.run()` executes it.
 """
 
 import re
@@ -13,7 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
-from bido_back.agents.tools import SUBMIT_OUTPUT_TOOL, AnyTool
+from bido_back.agents.tools import AnyTool
 
 # Repo-root `prompts/`. Resolved from the source tree, which is how the app is
 # deployed (the image copies the repo). Tests and tools may pass another dir.
@@ -31,9 +30,11 @@ class AgentDefinition[OutT: BaseModel]:
     prompt_file: str
     prompt_version: int
     model: str
+    # The run's final answer. The model is asked for it as structured output,
+    # and the runner validates it again before reporting RunCompleted.
     output_model: type[OutT]
     tools: Sequence[AnyTool] = field(default_factory=tuple[AnyTool, ...])
-    # Every LLM call counts as one turn, including a final-output turn.
+    # Every model request counts as one turn, including the final-output turn.
     max_turns: int = 6
     max_tokens: int = 16_000
     # Ask the model for summarized reasoning (rendered as ReasoningStep).
@@ -41,6 +42,9 @@ class AgentDefinition[OutT: BaseModel]:
     thinking: bool = True
     # None = the model's own default effort.
     effort: Effort | None = None
+    # How many earlier runs of the same session the model sees. 0 = none.
+    # Needs run storage (agno_database_url); ignored without it.
+    history_runs: int = 0
 
     def __post_init__(self) -> None:
         match = _PROMPT_FILE.match(self.prompt_file)
@@ -53,11 +57,11 @@ class AgentDefinition[OutT: BaseModel]:
             )
         if self.max_turns < 1:
             raise ValueError("max_turns must be >= 1")
+        if self.history_runs < 0:
+            raise ValueError("history_runs must be >= 0")
         names = [tool.name for tool in self.tools]
         if len(names) != len(set(names)):
             raise ValueError(f"duplicate tool names in agent {self.name!r}: {names}")
-        if SUBMIT_OUTPUT_TOOL in names:
-            raise ValueError(f"{SUBMIT_OUTPUT_TOOL!r} is reserved for the runner")
 
     def tool(self, name: str) -> AnyTool | None:
         for tool in self.tools:
