@@ -1,2 +1,137 @@
 # bido-back
-Bido B2B backend: FastAPI api + worker
+
+Bido's B2B backend: a procurement product for companies. One Python 3.12
+codebase, one container image, two processes:
+
+- **api**: FastAPI, served by uvicorn on port 8080.
+- **worker**: consumes SQS jobs (agent runs, email, OCR, timers).
+
+Both talk to one Postgres database (pgvector included) with pooled tenancy and
+row-level security, and run on AWS ECS Fargate (ARM).
+
+**Architecture:** the decisions behind this repository live in
+[`usebido/engineering` → `b2b/infrastructure.md`](https://github.com/usebido/engineering/blob/main/b2b/infrastructure.md).
+Read it before changing anything structural.
+
+## Layout
+
+```text
+src/bido_back/
+  settings.py        runtime configuration (env vars / .env)
+  api/               FastAPI app (`create_app` factory)
+  worker/            SQS worker (`python -m bido_back.worker`)
+  agents/            the agents adapter: Agno behind our own types and tools
+  db/                SQLAlchemy models, sessions, tenant-scoped transactions
+  observability.py   OpenTelemetry tracing and Sentry; off when unset
+prompts/             versioned agent prompts (`<name>.v<N>.md`)
+migrations/          Alembic migrations (run as the migration role)
+docker/postgres/     local/CI database bootstrap (roles, extensions)
+scripts/             check_rls.py, export_openapi.py
+tests/               api, agents, worker, db (`-m db` needs Postgres)
+openapi.json         committed API contract; CI checks it is current
+```
+
+## Local setup
+
+Prerequisites: [uv](https://docs.astral.sh/uv/), Docker with Compose v2.
+
+```bash
+uv sync                                  # Python 3.12 venv + all dependencies
+cp .env.example .env                     # local settings; never commit .env
+docker compose up -d db                  # Postgres 16 + pgvector on localhost:54320
+uv run alembic upgrade head              # apply migrations as bido_migrator
+```
+
+Run the processes:
+
+```bash
+uv run uvicorn bido_back.api.app:create_app --factory --reload --port 8080
+uv run python -m bido_back.worker
+```
+
+Or run everything in containers: `docker compose --profile app up --build`.
+
+Validate before opening a PR:
+
+```bash
+uv run ruff check && uv run ruff format --check
+uv run pyright
+uv run python scripts/check_rls.py       # every tenant-owned table has forced RLS
+uv run pytest                            # tests marked `db` need `docker compose up db`
+uv run python scripts/export_openapi.py  # then commit openapi.json if it changed
+```
+
+To start over with an empty database: `docker compose down -v && docker compose up -d db`.
+
+## Tenancy and row-level security
+
+- Every tenant-owned table has a `tenant_id` column and, in the same migration,
+  `ENABLE` + `FORCE ROW LEVEL SECURITY` and a tenant policy. CI runs
+  `scripts/check_rls.py` and fails otherwise.
+- The app role (`bido_app`) owns no tables, cannot `CREATE`, and has no
+  `BYPASSRLS`. Only the migration role (`bido_migrator`) owns the schema, and
+  only Alembic uses it.
+- The tenant is set once per transaction with
+  `set_config('app.tenant_id', ..., true)` through the `db` helper. Never with a
+  plain `SET`, which would leak the tenant to the next user of a pooled connection.
+- No tenant means no query: tenant-scoped work without a tenant fails closed.
+  The api and the worker use the same app role; the worker carries the tenant
+  in the job payload.
+- Cross-tenant access goes only through a separate, audited staff role
+  (not built yet).
+
+## Agents
+
+[Agno](https://github.com/agno-agi/agno) does the agent part: model calls, the
+tool loop, sessions and memory. Bido keeps everything that commits: auth,
+tenants, approvals, the outbox, and the business endpoints.
+
+- **Pinned exactly** (`agno==<version>` in `pyproject.toml`). Upgrades are
+  deliberate, in their own PR, after reading the changelog.
+- **Contained:** Agno and Anthropic types live only in
+  `src/bido_back/agents/agno_adapter.py`. Everything else goes through `run()`
+  and sees our own tool, run and event types, so replacing Agno stays a change
+  to one module.
+- **Only our tools:** typed async functions that take the tenant from our
+  context, never from model arguments. No shell, Python, file-system or MCP
+  toolkits.
+- **Telemetry off:** `AGNO_TELEMETRY=false` (image, compose, CI) and
+  `telemetry=False` in code.
+- **Its own storage:** Agno keeps its sessions, memory and runs in schema
+  `agno` through role `bido_agno` (`AGNO_DATABASE_URL`). That role has no
+  access to the business tables in `public`. Agno's tables have no RLS, so
+  every Agno user and session id is namespaced by tenant.
+- **Approvals are ours:** a tool that sends, accepts or pays is an `act` tool,
+  registered with Agno's `external_execution` so Agno can never run it. The run
+  stops with a proposal, stored as a `pending` row in our `approvals` table. An
+  approver decides through `POST /v1/approvals/{id}/decision`; the guard checks
+  tenant, role, requester ≠ approver and the payload hash, and the worker
+  executes the action once. AgentOS endpoints are not mounted, and paused runs
+  are never resumed from client-supplied state (see the open upstream bug
+  [agno-agi/agno#10589](https://github.com/agno-agi/agno/issues/10589)).
+- **Prompts are versioned files** in `prompts/`.
+
+## Observability
+
+- **Traces:** OpenTelemetry, exported over OTLP/HTTP to
+  `OTEL_EXPORTER_OTLP_ENDPOINT` (in AWS, an ADOT collector sidecar that
+  forwards to CloudWatch). Requests, outbound HTTP, AWS calls, and queries on
+  engines passed to `instrument_engine` are traced; `/health` is not.
+- **Errors:** Sentry when `SENTRY_DSN` is set, for errors only (no Sentry
+  tracing).
+- Both are off when unset, so local runs and tests export nothing.
+- **IDs, never content.** Logs, spans and Sentry events carry `tenant_id`,
+  `run_id`, the job type, the model and token counts. They never carry prompts,
+  model output, documents, emails, request bodies, query strings, cookies, or
+  auth headers. Sentry runs with `send_default_pii=False`, no request bodies, no
+  local variables, and a `before_send` scrubber; span URLs lose their query
+  strings, and SQL spans record statements without parameters.
+
+## Not here yet (deliberately)
+
+- **Deploy workflow:** images are built in CI but not pushed. ECR push and the
+  ECS Fargate deploy via GitHub Actions + OIDC come in a later PR.
+- **Authentication and authorization** for the api.
+- **Product features:** this is the scaffold that features build on.
+
+See [AGENTS.md](AGENTS.md) for the rules every change must follow.

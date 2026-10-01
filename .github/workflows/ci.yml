@@ -1,0 +1,222 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# Least privilege: CI only reads the repository. No job pushes, deploys, or
+# talks to AWS.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  UV_VERSION: "0.12.21"
+  PYTHON_VERSION: "3.12"
+  # Pinned oasdiff release, verified by SHA-256 before use.
+  OASDIFF_VERSION: "1.32.1"
+  OASDIFF_SHA256: "7c8939fc49b75ee11fec66a5b83b37a2fca6aee109fed85013b1ba2ac2a1ee7f"
+
+jobs:
+  lint:
+    name: Lint and type-check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: ruff check
+        run: uv run ruff check
+
+      - name: ruff format --check
+        run: uv run ruff format --check
+
+      - name: pyright
+        run: uv run pyright
+
+  test:
+    name: Migrations, RLS check, and tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres # throwaway CI database
+          POSTGRES_DB: bido
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d bido"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      ENVIRONMENT: test
+      DATABASE_URL: postgresql+asyncpg://bido_app:app@localhost:5432/bido
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://bido_migrator:migrator@localhost:5432/bido
+      AGNO_DATABASE_URL: postgresql+asyncpg://bido_agno:agno@localhost:5432/bido
+      AGNO_TELEMETRY: "false"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Bootstrap roles and extensions (init.sql, as superuser)
+        env:
+          PGPASSWORD: postgres
+        run: >-
+          psql -h localhost -p 5432 -U postgres -d bido
+          -v ON_ERROR_STOP=1 -f docker/postgres/init.sql
+
+      - name: Apply migrations (migration role)
+        run: uv run alembic upgrade head
+
+      - name: Check every tenant-owned table has forced RLS
+        run: uv run python scripts/check_rls.py
+
+      - name: pytest
+        run: uv run pytest
+
+  openapi:
+    name: OpenAPI contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # Exporting the schema builds the app but must not touch the database.
+      ENVIRONMENT: test
+      DATABASE_URL: postgresql+asyncpg://bido_app:app@localhost:5432/bido
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Export openapi.json
+        run: uv run python scripts/export_openapi.py
+
+      - name: Fail if the committed openapi.json is stale
+        run: |
+          # Catches both a modified and a never-committed (untracked) file.
+          if [ -n "$(git status --porcelain -- openapi.json)" ]; then
+            git diff -- openapi.json
+            echo "::error file=openapi.json::openapi.json is out of date. Run 'uv run python scripts/export_openapi.py' and commit the result."
+            exit 1
+          fi
+
+      - name: Check out the base branch's openapi.json
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .base
+          sparse-checkout: /openapi.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Does the base have an openapi.json?
+        if: github.event_name == 'pull_request'
+        id: base
+        run: |
+          if [ -f .base/openapi.json ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Base branch has no openapi.json yet; skipping the breaking-change check."
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install oasdiff (pinned, checksum-verified)
+        if: steps.base.outputs.present == 'true'
+        run: |
+          archive="oasdiff_${OASDIFF_VERSION}_linux_amd64.tar.gz"
+          curl -sSfL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/oasdiff/oasdiff/releases/download/v${OASDIFF_VERSION}/${archive}"
+          echo "${OASDIFF_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/oasdiff"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/oasdiff" oasdiff
+          echo "$RUNNER_TEMP/oasdiff" >> "$GITHUB_PATH"
+
+      - name: Fail on breaking API changes
+        if: steps.base.outputs.present == 'true'
+        run: |
+          oasdiff breaking .base/openapi.json openapi.json \
+            --fail-on ERR --format githubactions
+
+  docker:
+    name: Docker build (linux/arm64, no push)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/arm64
+          push: false
+          tags: bido-back:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # The single required status check. It runs even when a dependency fails or
+  # is cancelled, so branch protection never waits on a check that will not
+  # report.
+  ci-ok:
+    name: ci-ok
+    if: always()
+    needs: [lint, test, openapi, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fail if any job failed or was cancelled
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "Job results: $RESULTS"
+          for result in $RESULTS; do
+            case "$result" in
+              success|skipped) ;;
+              *) echo "::error::A required CI job finished with '$result'."; exit 1 ;;
+            esac
+          done
