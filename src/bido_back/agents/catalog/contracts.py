@@ -41,7 +41,9 @@ class RfqIntakeOutput(BaseModel):
     title: str
     response_due: date | None = None
     lines: list[RfqLineDraft] = Field(min_length=1)
-    questions: list[str] = Field(default_factory=list, description="What the buyer must clarify")
+    questions: list[str] = Field(
+        default_factory=list[str], description="What the buyer must clarify"
+    )
 
 
 # --- rfq_email_writer: RFQ + supplier -> email draft in the supplier's language
@@ -127,5 +129,5 @@ class QuoteExtractionOutput(BaseModel):
     valid_until: ExtractedValue
     incoterm: ExtractedValue
     payment_terms: ExtractedValue
-    lines: list[ProposalLineDraft] = Field(default_factory=list)
-    missing_fields: list[str] = Field(default_factory=list)
+    lines: list[ProposalLineDraft] = Field(default_factory=list[ProposalLineDraft])
+    missing_fields: list[str] = Field(default_factory=list[str])
