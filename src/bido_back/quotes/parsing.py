@@ -360,3 +360,15 @@ def mentions_working_days(text: str) -> bool:
         _WORKING_DAY_WORDS.search(text) is not None
         or _WORKING_DAYS_ABBREVIATION.search(text) is not None
     )
+
+
+# "No tooling cost", written as a word instead of 0.
+_NONE_WORDS = re.compile(
+    r"\b(none|nil|free|no\s+charge|n/a|keine?|entfällt|kostenlos|gratuit|aucun[es]?"
+    r"|sans\s+frais|nessun[oa]?|gratis|ninguno|sin\s+costo|nenhum|sem\s+custo)\b|无",
+    re.IGNORECASE,
+)
+
+
+def mentions_none(text: str) -> bool:
+    return _NONE_WORDS.search(text) is not None

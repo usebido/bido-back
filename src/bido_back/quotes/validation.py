@@ -45,6 +45,7 @@ from bido_back.quotes.parsing import (
     detect_currencies,
     find_number,
     incoterms_in,
+    mentions_none,
     mentions_weeks,
     mentions_working_days,
     normalize_text,
@@ -320,7 +321,8 @@ def check_field(
     parsed, value_issues = _parse(kind, raw, decimal)
     issues.extend(value_issues)
     if parsed is not None and source is not None and source.quote.strip():
-        issues.extend(_grounding(kind, parsed, source.quote, decimal))
+        header = _column_header(source, sources) if kind == "days" else None
+        issues.extend(_grounding(kind, parsed, source.quote, decimal, header=header))
     return FieldCheck(name=name, extracted=extracted, parsed=parsed, issues=tuple(issues))
 
 
@@ -360,6 +362,25 @@ def _locate(source: SourceRef, sources: QuoteSources) -> str | None:
         )
         return "wrong_locator" if has_locator else None
     return "quote_not_found"
+
+
+_CELL = re.compile(r"([A-Za-z]+)(\d+)")
+
+
+def _column_header(source: SourceRef, sources: QuoteSources) -> str | None:
+    """The first text cell above a cited sheet cell, in the same column."""
+    if source.kind != "sheet" or not source.cell or source.attachment is None:
+        return None
+    document = sources.documents.get(source.attachment)
+    match = _CELL.fullmatch(source.cell.strip())
+    if document is None or match is None:
+        return None
+    column, row = match.group(1).upper(), int(match.group(2))
+    for above in range(1, row):
+        text = cell_text(document, source.sheet, f"{column}{above}")
+        if text is not None and any(c.isalpha() for c in text):
+            return text
+    return None
 
 
 def pdf_page_text(document: DocumentText, page: int) -> str | None:
@@ -442,9 +463,17 @@ def _parse(
 
 
 def _grounding(
-    kind: FieldKind, parsed: Parsed, quote: str, decimal: DecimalSeparator | None
+    kind: FieldKind,
+    parsed: Parsed,
+    quote: str,
+    decimal: DecimalSeparator | None,
+    *,
+    header: str | None = None,
 ) -> list[str]:
+    """`header` is the column header of a cited sheet cell (`Lieferzeit (Wochen)`)."""
     match kind:
+        case "amount" if parsed == 0 and mentions_none(quote):
+            return []  # "Werkzeugkosten: keine"
         case "amount" | "quantity":
             assert isinstance(parsed, Decimal)
             return _number_grounding(parsed, quote, decimal)
@@ -456,7 +485,7 @@ def _grounding(
                 issues.extend(["ambiguous_number"] if direct.ambiguous else [])
             elif not (
                 parsed % 7 == 0
-                and mentions_weeks(quote)
+                and (mentions_weeks(quote) or (header is not None and mentions_weeks(header)))
                 and find_number(Decimal(parsed // 7), quote, decimal=decimal).found
             ):
                 issues.append("not_grounded")

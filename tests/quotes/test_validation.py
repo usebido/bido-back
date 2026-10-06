@@ -415,3 +415,30 @@ def test_a_quote_without_lines_needs_review() -> None:
     result = validate(output(lines=[]))
 
     assert result.issues == ("no_lines",)
+
+
+def test_lead_time_in_weeks_from_the_column_header() -> None:
+    sheet = extract_text(
+        "offer.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        build_xlsx({"Angebot": [["Teil", "Lieferzeit (Wochen)"], ["TPS7A4701RGWR", 6]]}),
+    )
+
+    def cited(days: str) -> ExtractedValue:
+        return ev(days, "6", kind="sheet", attachment="offer.xlsx", sheet="Angebot", cell="B2")
+
+    results = [
+        validate(output(line(lead_time_days=cited(days))), documents=[sheet])
+        for days in ("42", "40")
+    ]
+
+    assert [issues_of(r, "lead_time_days") for r in results] == [(), ("not_grounded",)]
+
+
+def test_a_cost_written_as_none_grounds_zero() -> None:
+    body = BODY + "Werkzeugkosten: keine.\nRüstkosten: siehe Anlage.\n"
+    none = validate(output(line(tooling_cost=ev("0", "Werkzeugkosten: keine."))), body=body)
+    other = validate(output(line(tooling_cost=ev("0", "Rüstkosten: siehe Anlage."))), body=body)
+
+    assert issues_of(none, "tooling_cost") == ()
+    assert issues_of(other, "tooling_cost") == ("not_grounded",)

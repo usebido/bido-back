@@ -7,9 +7,9 @@ the API, the extraction job and the evals depend on them.
 
 from datetime import date
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, WithJsonSchema
 
 LineCategory = Literal["catalog", "drawing", "cell", "material"]
 
@@ -24,12 +24,17 @@ class RfqIntakeInput(BaseModel):
     base_currency: str = "EUR"
 
 
+# Pydantic's schema for Decimal carries a regex with lookarounds, which OpenAI's
+# strict structured output rejects. The model answers a plain number instead.
+ModelDecimal = Annotated[Decimal, WithJsonSchema({"type": "number"})]
+
+
 class RfqLineDraft(BaseModel):
     description: str
     mpn: str | None = None
     manufacturer: str | None = None
     category: LineCategory = "catalog"
-    quantities: list[Decimal] = Field(min_length=1, description="Requested quantity tiers")
+    quantities: list[ModelDecimal] = Field(min_length=1, description="Requested quantity tiers")
     unit: str = "pcs"
     need_by: date | None = None
     incoterm: str | None = None

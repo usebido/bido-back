@@ -1,5 +1,6 @@
 """The RFQ-flow agent definitions, run end to end on Agno against a scripted client."""
 
+import json
 from collections.abc import Mapping
 from datetime import date
 from decimal import Decimal
@@ -95,6 +96,14 @@ def test_agents_are_single_shot_without_tools(agent: AgentDefinition[Any]) -> No
     assert agent.tools == ()
     assert agent.max_turns <= 2
     assert agent.history_runs == 0
+
+
+@pytest.mark.parametrize("agent", AGENTS, ids=lambda a: a.name)
+def test_output_schema_has_no_regex_lookarounds(agent: AgentDefinition[Any]) -> None:
+    # OpenAI's strict structured output rejects them (pydantic's Decimal pattern has one).
+    schema = json.dumps(agent.output_model.model_json_schema())
+
+    assert "(?" not in schema
 
 
 def test_models() -> None:
