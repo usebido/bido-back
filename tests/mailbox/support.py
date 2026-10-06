@@ -32,6 +32,7 @@ def make_settings(**overrides: object) -> Settings:
         "microsoft_client_secret": "ms-secret",
         "microsoft_tenant": "common",
         "oauth_redirect_base_url": "https://api.bido.example",
+        "mailbox_connect_return_url": "https://app.bido.example/settings/mailbox",
         "token_encryption_key": FERNET_KEY,
     }
     return Settings.model_validate({**base, **overrides})

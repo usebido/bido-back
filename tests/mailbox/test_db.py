@@ -1,9 +1,10 @@
 """Mailbox connections against a real Postgres: RLS, the tenant lookup, the sender
-factory, thread binding, sync and the OAuth callback. Providers are MockTransport."""
+factory, thread binding, sync and the OAuth connect flow. Providers are MockTransport."""
 
 # ruff: noqa: S105, S106 - fake OAuth tokens and keys, never real credentials
 
 import json
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from urllib.parse import parse_qs, urlsplit
@@ -26,6 +27,7 @@ from bido_back.email.types import OutboundEmail
 from bido_back.mailbox.base import MailboxNotConnected, TokenSet, b64url_encode
 from bido_back.mailbox.crypto import FernetTokenCipher, TokenContext, decrypt_tokens
 from bido_back.mailbox.google import GmailMailbox
+from bido_back.mailbox.oauth import STATE_TTL_S, OAuthState, StateSealer, new_code_verifier
 from bido_back.mailbox.service import (
     active_mailbox_tenants,
     disconnect_mailbox,
@@ -499,7 +501,9 @@ async def test_sync_marks_revoked_consent(app_engine: AsyncEngine, rfq: RfqFixtu
 @dataclass
 class Api:
     http: httpx.AsyncClient
+    # The signed-in caller; tests switch it to act as another user.
     principal: Principal
+    tenants: TwoTenants
 
 
 @pytest_asyncio.fixture
@@ -508,7 +512,6 @@ async def api(app_engine: AsyncEngine, tenants: TwoTenants) -> AsyncIterator[Api
     app.state.resources = ApiResources(make_settings())
     app.include_router(mailbox_router())
     sessionmaker: async_sessionmaker[AsyncSession] = create_sessionmaker(app_engine)
-    principal = Principal(tenant_id=tenants.a.tenant_id, user_id=tenants.a.user_id)
 
     def provider(request: httpx.Request) -> httpx.Response:
         if request.url.host == "oauth2.googleapis.com":
@@ -532,12 +535,17 @@ async def api(app_engine: AsyncEngine, tenants: TwoTenants) -> AsyncIterator[Api
         async with httpx.AsyncClient(transport=httpx.MockTransport(provider)) as client:
             yield client
 
-    app.dependency_overrides[get_db] = lambda: sessionmaker
-    app.dependency_overrides[get_principal] = lambda: principal
-    app.dependency_overrides[get_mailbox_http] = provider_http
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-        yield Api(http=http, principal=principal)
+        state = Api(
+            http=http,
+            principal=Principal(tenant_id=tenants.a.tenant_id, user_id=tenants.a.user_id),
+            tenants=tenants,
+        )
+        app.dependency_overrides[get_db] = lambda: sessionmaker
+        app.dependency_overrides[get_principal] = lambda: state.principal
+        app.dependency_overrides[get_mailbox_http] = provider_http
+        yield state
 
 
 def _state_of(connect: httpx.Response) -> str:
@@ -546,32 +554,53 @@ def _state_of(connect: httpx.Response) -> str:
     return parse_qs(urlsplit(url).query)["state"][0]
 
 
-async def test_connect_callback_status_and_delete(api: Api) -> None:
+def _fragment(redirect: httpx.Response) -> dict[str, str]:
+    location = redirect.headers["location"]
+    assert location.startswith("https://app.bido.example/settings/mailbox#")
+    return {k: v[0] for k, v in parse_qs(urlsplit(location).fragment).items()}
+
+
+async def test_callback_only_forwards_code_and_state_to_the_frontend(api: Api) -> None:
+    state = _state_of(await api.http.get("/v1/mailbox/connect/google"))
+
+    callback = await api.http.get(
+        "/v1/mailbox/callback/google", params={"code": "the-code", "state": state}
+    )
+    declined = await api.http.get(
+        "/v1/mailbox/callback/google",
+        params={"error": "access_denied", "error_description": "<script>", "state": state},
+    )
+
+    assert callback.status_code == 303
+    assert callback.headers["cache-control"] == "no-store"
+    assert _fragment(callback) == {"provider": "google", "code": "the-code", "state": state}
+    assert _fragment(declined) == {"provider": "google", "error": "declined"}
+    # Nothing was linked by the redirect itself.
+    assert (await api.http.get("/v1/mailbox")).json()["connections"] == []
+
+
+async def test_connect_complete_status_and_delete(api: Api) -> None:
     connect = await api.http.get("/v1/mailbox/connect/google")
     assert connect.status_code == 200
     assert connect.headers["cache-control"] == "no-store"
     state = _state_of(connect)
 
-    tampered = await api.http.get(
-        "/v1/mailbox/callback/google", params={"code": "the-code", "state": state[:-4] + "AAAA"}
-    )
-    other_provider = await api.http.get(
-        "/v1/mailbox/callback/microsoft", params={"code": "the-code", "state": state}
-    )
-    declined = await api.http.get(
-        "/v1/mailbox/callback/google", params={"error": "access_denied", "state": state}
-    )
-    assert [r.status_code for r in (tampered, other_provider, declined)] == [400, 400, 400]
+    def complete(provider: str, state: str) -> dict[str, str]:
+        return {"provider": provider, "code": "the-code", "state": state}
 
-    callback = await api.http.get(
-        "/v1/mailbox/callback/google", params={"code": "the-code", "state": state}
+    tampered = await api.http.post(
+        "/v1/mailbox/complete", json=complete("google", state[:-4] + "AAAA")
     )
-    assert callback.status_code == 200, callback.text
-    body = callback.json()
+    other_provider = await api.http.post("/v1/mailbox/complete", json=complete("microsoft", state))
+    assert [r.status_code for r in (tampered, other_provider)] == [400, 400]
+
+    completed = await api.http.post("/v1/mailbox/complete", json=complete("google", state))
+    assert completed.status_code == 200, completed.text
+    body = completed.json()
     assert body["provider"] == "google"
     assert body["email_address"] == BUYER
     assert body["status"] == "active"
-    assert "access-1" not in callback.text
+    assert "access-1" not in completed.text
 
     status_response = await api.http.get("/v1/mailbox")
     assert [c["email_address"] for c in status_response.json()["connections"]] == [BUYER]
@@ -585,17 +614,52 @@ async def test_connect_callback_status_and_delete(api: Api) -> None:
     assert after.json()["connections"][0]["status"] == "revoked"
 
 
-async def test_callback_refuses_a_user_no_longer_in_the_tenant(
+async def test_complete_refuses_a_user_other_than_the_one_who_started(api: Api) -> None:
+    state = _state_of(await api.http.get("/v1/mailbox/connect/google"))
+
+    # Another tenant's user, and the same tenant's id with another user id.
+    api.principal = Principal(tenant_id=api.tenants.b.tenant_id, user_id=api.tenants.b.user_id)
+    other_tenant = await api.http.post(
+        "/v1/mailbox/complete", json={"provider": "google", "code": "the-code", "state": state}
+    )
+    api.principal = Principal(tenant_id=api.tenants.a.tenant_id, user_id=api.tenants.b.user_id)
+    other_user = await api.http.post(
+        "/v1/mailbox/complete", json={"provider": "google", "code": "the-code", "state": state}
+    )
+
+    assert [other_tenant.status_code, other_user.status_code] == [403, 403]
+    api.principal = Principal(tenant_id=api.tenants.a.tenant_id, user_id=api.tenants.a.user_id)
+    assert (await api.http.get("/v1/mailbox")).json()["connections"] == []
+
+
+async def test_complete_refuses_an_expired_state(api: Api) -> None:
+    old = StateSealer(FERNET_KEY, clock=lambda: time.time() - STATE_TTL_S - 60).seal(
+        OAuthState(
+            tenant_id=api.principal.tenant_id,
+            user_id=api.principal.user_id,
+            provider="google",
+            code_verifier=new_code_verifier(),
+        )
+    )
+
+    expired = await api.http.post(
+        "/v1/mailbox/complete", json={"provider": "google", "code": "the-code", "state": old}
+    )
+
+    assert expired.status_code == 400
+    assert "expired" in expired.json()["detail"]
+
+
+async def test_complete_refuses_a_user_no_longer_in_the_tenant(
     api: Api, migrator_engine: AsyncEngine
 ) -> None:
-    connect = await api.http.get("/v1/mailbox/connect/google")
-    state = _state_of(connect)
+    state = _state_of(await api.http.get("/v1/mailbox/connect/google"))
     async with tenant_session(migrator_engine, api.principal.tenant_id) as session:
         await session.execute(
             text("DELETE FROM memberships WHERE user_id = :u"), {"u": api.principal.user_id}
         )
 
-    callback = await api.http.get(
-        "/v1/mailbox/callback/google", params={"code": "the-code", "state": state}
+    completed = await api.http.post(
+        "/v1/mailbox/complete", json={"provider": "google", "code": "the-code", "state": state}
     )
-    assert callback.status_code == 403
+    assert completed.status_code == 403

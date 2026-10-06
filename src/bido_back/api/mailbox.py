@@ -3,10 +3,17 @@
 * `GET /v1/mailbox/connect/{provider}`: the provider's consent URL for the
   calling user (PKCE + a sealed state bound to tenant, user and provider).
 * `GET /v1/mailbox/callback/{provider}`: where the provider redirects the
-  browser. It carries no bearer token: the sealed `state` authenticates it
-  (see `bido_back.mailbox.oauth`), and the user must still be a member of the
-  tenant. The code is exchanged, the mailbox address resolved, and the tokens
-  stored encrypted.
+  browser. It finishes nothing: it carries no bearer token, so it only
+  forwards `code` and `state` (or the provider's `error`) to the frontend's
+  `MAILBOX_CONNECT_RETURN_URL`, in the URL fragment so they stay out of
+  server and CDN logs.
+* `POST /v1/mailbox/complete`: the frontend, as the signed-in user, finishes
+  the link. The sealed state must open (else 400) and name the same tenant and
+  user as the caller (else 403); only then is the code exchanged, the mailbox
+  address resolved, and the tokens stored encrypted. Requiring the signed-in
+  user closes login CSRF on the link: a victim who follows an attacker's
+  callback URL cannot have the attacker's mailbox (or theirs) attached to the
+  wrong account, because the caller must be the user who started the flow.
 * `GET /v1/mailbox`: the calling user's connections (never tokens).
 * `DELETE /v1/mailbox/{provider}`: erase the tokens and mark the connection
   revoked, then revoke at the provider (best effort).
@@ -18,10 +25,12 @@ Bido uses a connection only in the RFQ threads it started; see
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Annotated, Literal
+from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel
+from fastapi.responses import RedirectResponse
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bido_back.api.deps import ApiResources, get_db, get_principal
@@ -55,6 +64,14 @@ _NO_STORE = {"Cache-Control": "no-store"}
 
 class ConnectResponse(BaseModel):
     authorization_url: str
+
+
+class CompleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    provider: Provider
+    code: str = Field(min_length=1, max_length=4096)
+    state: str = Field(min_length=1, max_length=2048)
 
 
 class MailboxConnectionResponse(BaseModel):
@@ -145,43 +162,66 @@ def mailbox_router() -> APIRouter:
 
     @router.get(
         "/callback/{provider}",
+        status_code=status.HTTP_303_SEE_OTHER,
+        response_class=RedirectResponse,
+        responses={status.HTTP_303_SEE_OTHER: {"description": "Back to the frontend"}},
+    )
+    async def callback(  # pyright: ignore[reportUnusedFunction]
+        provider: Provider,
+        settings: Annotated[Settings, Depends(get_mailbox_settings)],
+        code: Annotated[str | None, Query(max_length=4096)] = None,
+        state: Annotated[str | None, Query(max_length=2048)] = None,
+        error: Annotated[str | None, Query(max_length=256)] = None,
+    ) -> RedirectResponse:
+        params: dict[str, str] = {"provider": provider}
+        if error is not None or not code or not state:
+            # The provider's own error text is not forwarded.
+            params["error"] = "declined" if error is not None else "missing_code"
+        else:
+            params["code"] = code
+            params["state"] = state
+        target = f"{settings.mailbox_connect_return_url}#{urlencode(params)}"
+        return RedirectResponse(target, status.HTTP_303_SEE_OTHER, headers=_NO_STORE)
+
+    @router.post(
+        "/complete",
         responses=_errors(
             status.HTTP_400_BAD_REQUEST,
+            status.HTTP_401_UNAUTHORIZED,
             status.HTTP_403_FORBIDDEN,
             status.HTTP_502_BAD_GATEWAY,
             status.HTTP_503_SERVICE_UNAVAILABLE,
         ),
     )
-    async def callback(  # pyright: ignore[reportUnusedFunction]
-        provider: Provider,
+    async def complete(  # pyright: ignore[reportUnusedFunction]
+        body: CompleteRequest,
+        principal: Annotated[Principal, Depends(get_principal)],
         settings: Annotated[Settings, Depends(get_mailbox_settings)],
         db: Annotated[async_sessionmaker[AsyncSession], Depends(get_db)],
         http: Annotated[httpx.AsyncClient, Depends(get_mailbox_http)],
         cipher: Annotated[TokenCipher, Depends(get_token_cipher)],
         response: Response,
-        code: Annotated[str | None, Query(max_length=4096)] = None,
-        state: Annotated[str | None, Query(max_length=2048)] = None,
-        error: Annotated[str | None, Query(max_length=256)] = None,
     ) -> MailboxConnectionResponse:
         response.headers.update(_NO_STORE)
-        if error is not None:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "the mailbox connection was declined")
-        if not code or not state:
-            raise HTTPException(status.HTTP_400_BAD_REQUEST, "missing code or state")
+        provider = body.provider
         try:
             client = oauth_client(settings, provider)
-            sealed = StateSealer.from_settings(settings).open(state, provider)
+            sealed = StateSealer.from_settings(settings).open(body.state, provider)
         except MailboxNotConfigured as exc:
             raise _unavailable(exc) from None
         except InvalidOAuthState as exc:
             raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
 
+        if sealed.tenant_id != principal.tenant_id or sealed.user_id != principal.user_id:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, "this mailbox connection was started by another user"
+            )
         if not await user_is_member(db, sealed.tenant_id, sealed.user_id):
             raise HTTPException(status.HTTP_403_FORBIDDEN, "not a member of this tenant")
 
         try:
             tokens = await exchange_code(
-                http, client, code=code, code_verifier=sealed.code_verifier
+                http, client, code=body.code, code_verifier=sealed.code_verifier
             )
             address = await account_email(http, provider, tokens.access_token)
         except (OAuthExchangeFailed, MissingPermissions) as exc:

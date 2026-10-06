@@ -6,7 +6,9 @@ client secret is sent on the token calls too).
 The `state` parameter
 ---------------------
 The callback is a browser redirect from the provider, without our bearer
-token, so the state is what authenticates it. It is a Fernet token (AES-CBC +
+token. It only forwards the code and state to the frontend; the link is
+finished by `POST /v1/mailbox/complete`, as the signed-in user, who must be
+the tenant and user sealed in the state. The state is a Fernet token (AES-CBC +
 HMAC-SHA256, with a timestamp) under a key derived with HKDF from
 `TOKEN_ENCRYPTION_KEY`, so it is both signed and encrypted. It carries the
 tenant id, the user id, the provider and the PKCE code verifier, and expires

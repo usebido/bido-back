@@ -73,6 +73,601 @@
         "title": "ApprovalQueueItem",
         "type": "object"
       },
+      "AwaitingSupplier": {
+        "properties": {
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "supplier_id": {
+            "format": "uuid",
+            "title": "Supplier Id",
+            "type": "string"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invite_id",
+          "supplier_id",
+          "supplier_name",
+          "status"
+        ],
+        "title": "AwaitingSupplier",
+        "type": "object"
+      },
+      "Cell": {
+        "properties": {
+          "break_min_quantity": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Break Min Quantity"
+          },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
+          "effective_unit_price_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Unit Price Base"
+          },
+          "flags": {
+            "items": {
+              "enum": [
+                "alternative_part",
+                "needs_review",
+                "low_confidence",
+                "missing_price",
+                "missing_lead_time",
+                "missing_currency",
+                "fx_rate_missing",
+                "missing_unit",
+                "unit_mismatch",
+                "below_min_quantity",
+                "below_moq",
+                "min_quantity_assumed",
+                "incoterm_differs",
+                "missing_incoterm",
+                "validity_expired",
+                "missing_validity",
+                "no_quote_for_line"
+              ],
+              "type": "string"
+            },
+            "title": "Flags",
+            "type": "array"
+          },
+          "is_alternative": {
+            "title": "Is Alternative",
+            "type": "boolean"
+          },
+          "lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lead Time Days"
+          },
+          "line_total_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Total Base"
+          },
+          "low_confidence_fields": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Low Confidence Fields",
+            "type": "array"
+          },
+          "moq": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Moq"
+          },
+          "offered_mpn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offered Mpn"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "rfq_line_id": {
+            "format": "uuid",
+            "title": "Rfq Line Id",
+            "type": "string"
+          },
+          "tier": {
+            "title": "Tier",
+            "type": "integer"
+          },
+          "tooling_cost": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tooling Cost"
+          },
+          "tooling_per_unit_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tooling Per Unit Base"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit"
+          },
+          "unit_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Price"
+          },
+          "unit_price_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Price Base"
+          }
+        },
+        "required": [
+          "rfq_line_id",
+          "tier",
+          "quantity",
+          "offered_mpn",
+          "is_alternative",
+          "break_min_quantity",
+          "unit",
+          "currency",
+          "unit_price",
+          "tooling_cost",
+          "moq",
+          "lead_time_days",
+          "unit_price_base",
+          "tooling_per_unit_base",
+          "effective_unit_price_base",
+          "line_total_base",
+          "flags",
+          "low_confidence_fields"
+        ],
+        "title": "Cell",
+        "type": "object"
+      },
+      "Comparison": {
+        "properties": {
+          "awaiting": {
+            "items": {
+              "$ref": "#/components/schemas/AwaitingSupplier"
+            },
+            "title": "Awaiting",
+            "type": "array"
+          },
+          "base_currency": {
+            "title": "Base Currency",
+            "type": "string"
+          },
+          "computed_on": {
+            "format": "date",
+            "title": "Computed On",
+            "type": "string"
+          },
+          "fx_rates": {
+            "items": {
+              "$ref": "#/components/schemas/RateUsed"
+            },
+            "title": "Fx Rates",
+            "type": "array"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/ComparisonLine"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
+          "rfq_id": {
+            "format": "uuid",
+            "title": "Rfq Id",
+            "type": "string"
+          },
+          "suppliers": {
+            "items": {
+              "$ref": "#/components/schemas/SupplierColumn"
+            },
+            "title": "Suppliers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "rfq_id",
+          "base_currency",
+          "computed_on",
+          "lines",
+          "suppliers",
+          "awaiting",
+          "fx_rates"
+        ],
+        "title": "Comparison",
+        "type": "object"
+      },
+      "ComparisonLine": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "incoterm": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Incoterm"
+          },
+          "mpn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mpn"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "quantities": {
+            "items": {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            "title": "Quantities",
+            "type": "array"
+          },
+          "unit": {
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "position",
+          "description",
+          "mpn",
+          "unit",
+          "quantities",
+          "incoterm"
+        ],
+        "title": "ComparisonLine",
+        "type": "object"
+      },
+      "CompleteRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "code": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "title": "Code",
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "google",
+              "microsoft"
+            ],
+            "title": "Provider",
+            "type": "string"
+          },
+          "state": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "title": "State",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "code",
+          "state"
+        ],
+        "title": "CompleteRequest",
+        "type": "object"
+      },
+      "ConnectResponse": {
+        "properties": {
+          "authorization_url": {
+            "title": "Authorization Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "authorization_url"
+        ],
+        "title": "ConnectResponse",
+        "type": "object"
+      },
+      "ContactIn": {
+        "additionalProperties": false,
+        "properties": {
+          "email": {
+            "maxLength": 254,
+            "pattern": "^[^@\\s<>,;:\\\"()\\[\\]\\\\]+@[^@\\s<>,;:\\\"()\\[\\]\\\\]+\\.[^@\\s<>,;:\\\"()\\[\\]\\\\]+$",
+            "title": "Email",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "phone": {
+            "anyOf": [
+              {
+                "maxLength": 50,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Phone"
+          }
+        },
+        "required": [
+          "email"
+        ],
+        "title": "ContactIn",
+        "type": "object"
+      },
+      "ContactView": {
+        "properties": {
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "email"
+        ],
+        "title": "ContactView",
+        "type": "object"
+      },
+      "CreateInviteRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "contact_id": {
+            "format": "uuid",
+            "title": "Contact Id",
+            "type": "string"
+          },
+          "supplier_id": {
+            "format": "uuid",
+            "title": "Supplier Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "supplier_id",
+          "contact_id"
+        ],
+        "title": "CreateInviteRequest",
+        "type": "object"
+      },
+      "CreateRfqRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "text": {
+            "description": "The buyer's request",
+            "maxLength": 50000,
+            "minLength": 1,
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "title": "CreateRfqRequest",
+        "type": "object"
+      },
+      "CreateSupplierRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "contacts": {
+            "items": {
+              "$ref": "#/components/schemas/ContactIn"
+            },
+            "maxItems": 20,
+            "title": "Contacts",
+            "type": "array"
+          },
+          "country": {
+            "anyOf": [
+              {
+                "pattern": "^[A-Z]{2}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Country"
+          },
+          "email_domain": {
+            "anyOf": [
+              {
+                "maxLength": 253,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email Domain"
+          },
+          "language": {
+            "default": "en",
+            "pattern": "^[a-z]{2}$",
+            "title": "Language",
+            "type": "string"
+          },
+          "name": {
+            "maxLength": 500,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "type": {
+            "default": "distributor",
+            "enum": [
+              "authorized_distributor",
+              "distributor",
+              "reseller",
+              "manufacturer",
+              "machining",
+              "other"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "title": "CreateSupplierRequest",
+        "type": "object"
+      },
       "DecisionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -159,6 +754,417 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "InviteView": {
+        "properties": {
+          "contact_id": {
+            "format": "uuid",
+            "title": "Contact Id",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "responded_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Responded At"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          },
+          "status": {
+            "enum": [
+              "draft",
+              "pending_approval",
+              "sent",
+              "responded",
+              "declined"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "supplier_id": {
+            "format": "uuid",
+            "title": "Supplier Id",
+            "type": "string"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "supplier_id",
+          "supplier_name",
+          "contact_id",
+          "status",
+          "sent_at",
+          "responded_at"
+        ],
+        "title": "InviteView",
+        "type": "object"
+      },
+      "MailboxConnectionResponse": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "email_address": {
+            "title": "Email Address",
+            "type": "string"
+          },
+          "provider": {
+            "enum": [
+              "google",
+              "microsoft"
+            ],
+            "title": "Provider",
+            "type": "string"
+          },
+          "scopes": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Scopes",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "revoked",
+              "error"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "email_address",
+          "status",
+          "scopes",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "MailboxConnectionResponse",
+        "type": "object"
+      },
+      "MailboxStatusResponse": {
+        "properties": {
+          "connections": {
+            "items": {
+              "$ref": "#/components/schemas/MailboxConnectionResponse"
+            },
+            "title": "Connections",
+            "type": "array"
+          }
+        },
+        "required": [
+          "connections"
+        ],
+        "title": "MailboxStatusResponse",
+        "type": "object"
+      },
+      "MeResponse": {
+        "properties": {
+          "email": {
+            "title": "Email",
+            "type": "string"
+          },
+          "role": {
+            "anyOf": [
+              {
+                "enum": [
+                  "member",
+                  "approver",
+                  "owner"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Role"
+          },
+          "tenant_id": {
+            "format": "uuid",
+            "title": "Tenant Id",
+            "type": "string"
+          },
+          "tenant_name": {
+            "title": "Tenant Name",
+            "type": "string"
+          },
+          "user_id": {
+            "format": "uuid",
+            "title": "User Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "user_id",
+          "email",
+          "tenant_id",
+          "tenant_name",
+          "role"
+        ],
+        "title": "MeResponse",
+        "type": "object"
+      },
+      "PrepareSendResponse": {
+        "properties": {
+          "approvals": {
+            "description": "One pending approval per invite that was in draft",
+            "items": {
+              "$ref": "#/components/schemas/PreparedInvite"
+            },
+            "title": "Approvals",
+            "type": "array"
+          },
+          "rfq_id": {
+            "format": "uuid",
+            "title": "Rfq Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rfq_id",
+          "approvals"
+        ],
+        "title": "PrepareSendResponse",
+        "type": "object"
+      },
+      "PreparedInvite": {
+        "properties": {
+          "approval_id": {
+            "format": "uuid",
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invite_id",
+          "approval_id"
+        ],
+        "title": "PreparedInvite",
+        "type": "object"
+      },
+      "RateUsed": {
+        "properties": {
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "per_eur": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Per Eur",
+            "type": "string"
+          },
+          "rate_date": {
+            "format": "date",
+            "title": "Rate Date",
+            "type": "string"
+          }
+        },
+        "required": [
+          "currency",
+          "per_eur",
+          "rate_date"
+        ],
+        "title": "RateUsed",
+        "type": "object"
+      },
+      "RfqCreated": {
+        "properties": {
+          "base_currency": {
+            "title": "Base Currency",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "invites": {
+            "items": {
+              "$ref": "#/components/schemas/InviteView"
+            },
+            "title": "Invites",
+            "type": "array"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/RfqLineView"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
+          "questions": {
+            "description": "What the buyer should clarify before sending",
+            "items": {
+              "type": "string"
+            },
+            "title": "Questions",
+            "type": "array"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "response_due": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Due"
+          },
+          "status": {
+            "enum": [
+              "draft",
+              "open",
+              "closed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "ref",
+          "title",
+          "status",
+          "response_due",
+          "created_at",
+          "base_currency",
+          "lines",
+          "invites",
+          "questions"
+        ],
+        "title": "RfqCreated",
+        "type": "object"
+      },
+      "RfqDetail": {
+        "properties": {
+          "base_currency": {
+            "title": "Base Currency",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "invites": {
+            "items": {
+              "$ref": "#/components/schemas/InviteView"
+            },
+            "title": "Invites",
+            "type": "array"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/RfqLineView"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "response_due": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Due"
+          },
+          "status": {
+            "enum": [
+              "draft",
+              "open",
+              "closed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "ref",
+          "title",
+          "status",
+          "response_due",
+          "created_at",
+          "base_currency",
+          "lines",
+          "invites"
+        ],
+        "title": "RfqDetail",
+        "type": "object"
+      },
       "RfqEmailDraft": {
         "description": "The exact email an approver approves (the stored, hashed arguments).",
         "properties": {
@@ -241,6 +1247,570 @@
           "body"
         ],
         "title": "RfqEmailDraft",
+        "type": "object"
+      },
+      "RfqLineView": {
+        "properties": {
+          "category": {
+            "enum": [
+              "catalog",
+              "drawing",
+              "cell",
+              "material"
+            ],
+            "title": "Category",
+            "type": "string"
+          },
+          "delivery_location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivery Location"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "incoterm": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Incoterm"
+          },
+          "manufacturer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manufacturer"
+          },
+          "mpn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mpn"
+          },
+          "need_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need By"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "qualification": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qualification"
+          },
+          "quantities": {
+            "items": {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            "title": "Quantities",
+            "type": "array"
+          },
+          "unit": {
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "position",
+          "description",
+          "mpn",
+          "manufacturer",
+          "category",
+          "quantities",
+          "unit",
+          "need_by",
+          "incoterm",
+          "delivery_location",
+          "qualification"
+        ],
+        "title": "RfqLineView",
+        "type": "object"
+      },
+      "RfqSummary": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "response_due": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Due"
+          },
+          "status": {
+            "enum": [
+              "draft",
+              "open",
+              "closed",
+              "cancelled"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "ref",
+          "title",
+          "status",
+          "response_due",
+          "created_at"
+        ],
+        "title": "RfqSummary",
+        "type": "object"
+      },
+      "SupplierColumn": {
+        "properties": {
+          "cells": {
+            "items": {
+              "$ref": "#/components/schemas/Cell"
+            },
+            "title": "Cells",
+            "type": "array"
+          },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
+          "flags": {
+            "items": {
+              "enum": [
+                "alternative_part",
+                "needs_review",
+                "low_confidence",
+                "missing_price",
+                "missing_lead_time",
+                "missing_currency",
+                "fx_rate_missing",
+                "missing_unit",
+                "unit_mismatch",
+                "below_min_quantity",
+                "below_moq",
+                "min_quantity_assumed",
+                "incoterm_differs",
+                "missing_incoterm",
+                "validity_expired",
+                "missing_validity",
+                "no_quote_for_line"
+              ],
+              "type": "string"
+            },
+            "title": "Flags",
+            "type": "array"
+          },
+          "incoterm": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Incoterm"
+          },
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          },
+          "low_confidence_fields": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Low Confidence Fields",
+            "type": "array"
+          },
+          "max_lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Lead Time Days"
+          },
+          "proposal_id": {
+            "format": "uuid",
+            "title": "Proposal Id",
+            "type": "string"
+          },
+          "proposal_version": {
+            "title": "Proposal Version",
+            "type": "integer"
+          },
+          "supplier_id": {
+            "format": "uuid",
+            "title": "Supplier Id",
+            "type": "string"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          },
+          "totals": {
+            "items": {
+              "$ref": "#/components/schemas/TierTotal"
+            },
+            "title": "Totals",
+            "type": "array"
+          },
+          "valid_until": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid Until"
+          }
+        },
+        "required": [
+          "invite_id",
+          "supplier_id",
+          "supplier_name",
+          "proposal_id",
+          "proposal_version",
+          "currency",
+          "valid_until",
+          "incoterm",
+          "flags",
+          "low_confidence_fields",
+          "max_lead_time_days",
+          "cells",
+          "totals"
+        ],
+        "title": "SupplierColumn",
+        "type": "object"
+      },
+      "SupplierView": {
+        "properties": {
+          "contacts": {
+            "items": {
+              "$ref": "#/components/schemas/ContactView"
+            },
+            "title": "Contacts",
+            "type": "array"
+          },
+          "country": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Country"
+          },
+          "email_domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email Domain"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "language": {
+            "title": "Language",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "type": {
+            "enum": [
+              "authorized_distributor",
+              "distributor",
+              "reseller",
+              "manufacturer",
+              "machining",
+              "other"
+            ],
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "type",
+          "country",
+          "language",
+          "email_domain",
+          "contacts"
+        ],
+        "title": "SupplierView",
+        "type": "object"
+      },
+      "TierTotal": {
+        "properties": {
+          "complete": {
+            "title": "Complete",
+            "type": "boolean"
+          },
+          "lines_priced": {
+            "title": "Lines Priced",
+            "type": "integer"
+          },
+          "lines_requested": {
+            "title": "Lines Requested",
+            "type": "integer"
+          },
+          "tier": {
+            "title": "Tier",
+            "type": "integer"
+          },
+          "total_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total Base"
+          }
+        },
+        "required": [
+          "tier",
+          "total_base",
+          "lines_priced",
+          "lines_requested",
+          "complete"
+        ],
+        "title": "TierTotal",
+        "type": "object"
+      },
+      "UpdateLineRequest": {
+        "additionalProperties": false,
+        "description": "Only the fields present are changed; `null` clears an optional field.",
+        "properties": {
+          "category": {
+            "anyOf": [
+              {
+                "enum": [
+                  "catalog",
+                  "drawing",
+                  "cell",
+                  "material"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Category"
+          },
+          "delivery_location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivery Location"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "incoterm": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Incoterm"
+          },
+          "manufacturer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manufacturer"
+          },
+          "mpn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mpn"
+          },
+          "need_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need By"
+          },
+          "qualification": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qualification"
+          },
+          "quantities": {
+            "anyOf": [
+              {
+                "items": {
+                  "anyOf": [
+                    {
+                      "exclusiveMinimum": 0.0,
+                      "type": "number"
+                    },
+                    {
+                      "pattern": "^(?!^[-+.]*$)[+-]?0*(?:\\d{0,14}|(?=[\\d.]{1,19}0*$)\\d{0,14}\\.\\d{0,4}0*$)",
+                      "type": "string"
+                    }
+                  ]
+                },
+                "maxItems": 20,
+                "minItems": 1,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quantities"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit"
+          }
+        },
+        "title": "UpdateLineRequest",
         "type": "object"
       },
       "ValidationError": {
@@ -553,11 +2123,41 @@
         ]
       }
     },
-    "/v1/me": {
+    "/v1/mailbox": {
       "get": {
-        "operationId": "get_me_v1_me_get",
+        "operationId": "mailbox_status_v1_mailbox_get",
+        "parameters": [
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
         "responses": {
-          "501": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MailboxStatusResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
             "content": {
               "application/json": {
                 "schema": {
@@ -565,12 +2165,1595 @@
                 }
               }
             },
-            "description": "Successful Response"
+            "description": "Unauthorized"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Mailbox Status",
+        "tags": [
+          "mailbox"
+        ]
+      }
+    },
+    "/v1/mailbox/callback/{provider}": {
+      "get": {
+        "operationId": "callback_v1_mailbox_callback__provider__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "enum": [
+                "google",
+                "microsoft"
+              ],
+              "title": "Provider",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "code",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 4096,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Code"
+            }
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2048,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "State"
+            }
+          },
+          {
+            "in": "query",
+            "name": "error",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 256,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Error"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "Back to the frontend"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Callback",
+        "tags": [
+          "mailbox"
+        ]
+      }
+    },
+    "/v1/mailbox/complete": {
+      "post": {
+        "operationId": "complete_v1_mailbox_complete_post",
+        "parameters": [
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MailboxConnectionResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Complete",
+        "tags": [
+          "mailbox"
+        ]
+      }
+    },
+    "/v1/mailbox/connect/{provider}": {
+      "get": {
+        "operationId": "connect_v1_mailbox_connect__provider__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "enum": [
+                "google",
+                "microsoft"
+              ],
+              "title": "Provider",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConnectResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Connect",
+        "tags": [
+          "mailbox"
+        ]
+      }
+    },
+    "/v1/mailbox/{provider}": {
+      "delete": {
+        "operationId": "disconnect_v1_mailbox__provider__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "provider",
+            "required": true,
+            "schema": {
+              "enum": [
+                "google",
+                "microsoft"
+              ],
+              "title": "Provider",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Disconnect",
+        "tags": [
+          "mailbox"
+        ]
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "operationId": "get_me_v1_me_get",
+        "parameters": [
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Get Me",
         "tags": [
           "v1"
+        ]
+      }
+    },
+    "/v1/rfqs": {
+      "get": {
+        "operationId": "list_rfqs_v1_rfqs_get",
+        "parameters": [
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RfqSummary"
+                  },
+                  "title": "Response List Rfqs V1 Rfqs Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Rfqs",
+        "tags": [
+          "rfqs"
+        ]
+      },
+      "post": {
+        "operationId": "create_rfq_v1_rfqs_post",
+        "parameters": [
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateRfqRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RfqCreated"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Rfq",
+        "tags": [
+          "rfqs"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}": {
+      "get": {
+        "operationId": "get_rfq_v1_rfqs__rfq_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RfqDetail"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Rfq",
+        "tags": [
+          "rfqs"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/comparison": {
+      "get": {
+        "operationId": "comparison_v1_rfqs__rfq_id__comparison_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Comparison"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Comparison",
+        "tags": [
+          "rfqs"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/invites": {
+      "post": {
+        "operationId": "add_invite_v1_rfqs__rfq_id__invites_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateInviteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Add Invite",
+        "tags": [
+          "rfqs"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/lines/{line_id}": {
+      "patch": {
+        "operationId": "update_line_v1_rfqs__rfq_id__lines__line_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "line_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Line Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateLineRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RfqLineView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Line",
+        "tags": [
+          "rfqs"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/send": {
+      "post": {
+        "description": "Draft each invite's email and queue it for approval. Sends nothing.",
+        "operationId": "prepare_send_v1_rfqs__rfq_id__send_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PrepareSendResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Prepare Send",
+        "tags": [
+          "rfqs"
+        ]
+      }
+    },
+    "/v1/suppliers": {
+      "get": {
+        "operationId": "list_suppliers_v1_suppliers_get",
+        "parameters": [
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/SupplierView"
+                  },
+                  "title": "Response List Suppliers V1 Suppliers Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Suppliers",
+        "tags": [
+          "suppliers"
+        ]
+      },
+      "post": {
+        "operationId": "create_supplier_v1_suppliers_post",
+        "parameters": [
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateSupplierRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupplierView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Supplier",
+        "tags": [
+          "suppliers"
+        ]
+      }
+    },
+    "/v1/suppliers/{supplier_id}/contacts": {
+      "post": {
+        "operationId": "add_contact_v1_suppliers__supplier_id__contacts_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "supplier_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Supplier Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ContactIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContactView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Add Contact",
+        "tags": [
+          "suppliers"
         ]
       }
     }
