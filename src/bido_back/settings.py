@@ -43,6 +43,19 @@ class Settings(BaseSettings):
     smtp_host: str = "localhost"  # Mailpit locally
     smtp_port: int = 1025
 
+    # Buyer mailbox connections (OAuth). Bido reads and sends only in RFQ threads it
+    # started; the rest of the mailbox is never listed or stored.
+    google_client_id: str | None = None
+    google_client_secret: str | None = Field(default=None, repr=False)
+    microsoft_client_id: str | None = None
+    microsoft_client_secret: str | None = Field(default=None, repr=False)
+    microsoft_tenant: str = "common"
+    oauth_redirect_base_url: str = "http://localhost:8080"
+    # Encrypts stored OAuth tokens. Local: a Fernet key. AWS: KMS (kms_key_id).
+    token_encryption_key: str | None = Field(default=None, repr=False)
+    kms_key_id: str | None = None
+    mailbox_sync_interval_seconds: int = 120
+
     # Blob storage for raw emails and attachments.
     storage_backend: Literal["local", "s3"] = "local"
     storage_local_dir: str = ".data/blobs"

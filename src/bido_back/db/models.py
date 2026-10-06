@@ -22,6 +22,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     Text,
     UniqueConstraint,
@@ -29,7 +30,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 MEMBERSHIP_ROLES = ("member", "approver", "owner")
@@ -251,6 +252,12 @@ class Invite(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # The thread in the buyer's own mailbox (Gmail threadId / Graph
+    # conversationId) and the connection it lives in (migration 0006).
+    provider_thread_id: Mapped[str | None] = mapped_column(Text)
+    mailbox_connection_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("mailbox_connections.id", ondelete="SET NULL")
+    )
 
 
 class Message(Base):
@@ -333,3 +340,48 @@ class FxRate(Base):
     rate_date: Mapped[date] = mapped_column(Date, primary_key=True)
     currency: Mapped[str] = mapped_column(Text, primary_key=True)
     per_eur: Mapped[Decimal] = mapped_column(Numeric(18, 8))
+
+
+# --- Mailbox connections (migration 0006) -----------------------------------
+
+MAILBOX_PROVIDERS = ("google", "microsoft")
+MAILBOX_STATUSES = ("active", "revoked", "error")
+
+
+class MailboxConnection(Base):
+    """A buyer's own mailbox (Gmail / Microsoft 365), connected over OAuth.
+
+    `token_ciphertext` is the encrypted token set (`bido_back.mailbox.crypto`),
+    NULL once revoked. `email_address` is the buyer's own work address.
+    `sync_state` holds, per provider thread, the provider message ids already
+    handled; nothing else from the mailbox is stored.
+    """
+
+    __tablename__ = "mailbox_connections"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "user_id", "provider", name="mailbox_connections_tenant_user_provider_key"
+        ),
+        CheckConstraint(
+            "provider IN ('google', 'microsoft')", name="mailbox_connections_provider_check"
+        ),
+        CheckConstraint(
+            "status IN ('active', 'revoked', 'error')", name="mailbox_connections_status_check"
+        ),
+        CheckConstraint(
+            "status <> 'active' OR token_ciphertext IS NOT NULL",
+            name="mailbox_connections_active_has_tokens_check",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    provider: Mapped[str] = mapped_column(Text)
+    email_address: Mapped[str] = mapped_column(Text)
+    token_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)
+    scopes: Mapped[list[str]] = mapped_column(ARRAY(Text), server_default=text("'{}'::text[]"))
+    status: Mapped[str] = mapped_column(Text, server_default=text("'active'"))
+    sync_state: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

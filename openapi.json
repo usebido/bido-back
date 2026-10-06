@@ -1,6 +1,78 @@
 {
   "components": {
     "schemas": {
+      "ApprovalQueueItem": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "requested_by": {
+            "format": "uuid",
+            "title": "Requested By",
+            "type": "string"
+          },
+          "requested_by_me": {
+            "title": "Requested By Me",
+            "type": "boolean"
+          },
+          "rfq_email": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RfqEmailDraft"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "approved",
+              "rejected",
+              "executed",
+              "expired"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "tool",
+          "status",
+          "requested_by",
+          "requested_by_me",
+          "created_at",
+          "decided_at",
+          "rfq_email"
+        ],
+        "title": "ApprovalQueueItem",
+        "type": "object"
+      },
       "DecisionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -87,6 +159,90 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "RfqEmailDraft": {
+        "description": "The exact email an approver approves (the stored, hashed arguments).",
+        "properties": {
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "cc": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Cc",
+            "type": "array"
+          },
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          },
+          "rfq_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rfq Id"
+          },
+          "rfq_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rfq Ref"
+          },
+          "sender_user_id": {
+            "format": "uuid",
+            "title": "Sender User Id",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          },
+          "supplier_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Name"
+          },
+          "to": {
+            "items": {
+              "type": "string"
+            },
+            "title": "To",
+            "type": "array"
+          }
+        },
+        "required": [
+          "invite_id",
+          "rfq_id",
+          "rfq_ref",
+          "supplier_name",
+          "sender_user_id",
+          "to",
+          "cc",
+          "subject",
+          "body"
+        ],
+        "title": "RfqEmailDraft",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -127,6 +283,13 @@
         "title": "ValidationError",
         "type": "object"
       }
+    },
+    "securitySchemes": {
+      "HTTPBearer": {
+        "description": "Clerk session token",
+        "scheme": "bearer",
+        "type": "http"
+      }
     }
   },
   "info": {
@@ -156,6 +319,114 @@
         ]
       }
     },
+    "/v1/approvals": {
+      "get": {
+        "description": "The approval queue, oldest first, with the email draft of each RFQ send.",
+        "operationId": "queue_v1_approvals_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "default": "pending",
+              "enum": [
+                "pending",
+                "approved",
+                "rejected",
+                "executed",
+                "expired"
+              ],
+              "title": "Status",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ApprovalQueueItem"
+                  },
+                  "title": "Response Queue V1 Approvals Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Queue",
+        "tags": [
+          "approvals"
+        ]
+      }
+    },
     "/v1/approvals/{approval_id}/decision": {
       "post": {
         "operationId": "decide_v1_approvals__approval_id__decision_post",
@@ -168,6 +439,24 @@
               "format": "uuid",
               "title": "Approval Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
             }
           }
         ],
@@ -253,6 +542,11 @@
             "description": "Service Unavailable"
           }
         },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
         "summary": "Decide",
         "tags": [
           "approvals"

@@ -3,3 +3,6 @@
 APPROVAL_EXECUTE = "approval.execute"
 QUOTE_EXTRACT = "quote.extract"  # payload: {"message_id": "<uuid>"}
 FX_REFRESH = "fx.refresh"  # payload: {}
+# payload: {}. tenant_id = the all-zeros UUID for the scheduled every-tenant run
+# (EventBridge Scheduler), or a real tenant id to sync just that tenant.
+MAILBOX_SYNC = "mailbox.sync"
