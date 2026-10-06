@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     # memory and runs. It has no access to the business tables in `public`.
     agno_database_url: PostgresDsn | None = None
 
-    aws_region: str = "eu-central-1"
+    aws_region: str = "us-east-2"
     sqs_queue_url: str | None = None
     # Raw inbound emails (SES -> S3 -> this queue); no tenant until matched.
     sqs_intake_queue_url: str | None = None
