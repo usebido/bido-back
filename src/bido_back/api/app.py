@@ -18,6 +18,7 @@ from bido_back.api.approvals import approvals_router
 from bido_back.api.deps import ApiResources
 from bido_back.api.mailbox import mailbox_router
 from bido_back.api.me import me_router
+from bido_back.api.onboarding import onboarding_router
 from bido_back.api.rfqs import rfqs_router
 from bido_back.api.suppliers import suppliers_router
 from bido_back.observability import init_observability, instrument_fastapi
@@ -61,6 +62,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(suppliers_router())
     app.include_router(approvals_router())
     app.include_router(mailbox_router())
+    app.include_router(onboarding_router())
     if resolved.environment == "local":
         # Never mounted elsewhere (and every route refuses outside local too).
         from bido_back.api.dev import dev_router

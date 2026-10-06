@@ -14,8 +14,10 @@ from bido_back.agents.catalog import (
     DEFAULT_MODEL,
     EXTRACTION_MODEL,
     QUOTE_EXTRACTION,
+    RFQ_CANDIDATE_CLASSIFIER,
     RFQ_EMAIL_WRITER,
     RFQ_INTAKE,
+    RFQ_TEMPLATE_BUILDER,
     quote_extraction,
     rfq_email_problems,
 )
@@ -37,7 +39,13 @@ from tests.agents.test_runner import Script, final, script
 __all__ = ["script"]
 
 CONFIG = RunnerConfig(openai_api_key="test-not-a-real-key")
-AGENTS: list[AgentDefinition[Any]] = [RFQ_INTAKE, RFQ_EMAIL_WRITER, QUOTE_EXTRACTION]
+AGENTS: list[AgentDefinition[Any]] = [
+    RFQ_INTAKE,
+    RFQ_EMAIL_WRITER,
+    QUOTE_EXTRACTION,
+    RFQ_CANDIDATE_CLASSIFIER,
+    RFQ_TEMPLATE_BUILDER,
+]
 
 
 def ctx() -> ToolContext:

@@ -1,6 +1,7 @@
-"""The RFQ-flow agents: intake, RFQ email writer, quote extraction.
+"""The RFQ-flow agents: intake, RFQ email writer, quote extraction, and the two
+onboarding agents (sent-mail candidate classifier, RFQ template builder).
 
-All three are single-shot structured output: no tools at all. In particular
+All of them are single-shot structured output: no tools at all. In particular
 the extraction agent reads supplier content, which is untrusted (prompt
 injection), so it gets nothing it could act with: no `act` tools, no tools
 that send, no tools at all. Its output is data that `bido_back.quotes`
@@ -16,9 +17,11 @@ from typing import Final
 
 from bido_back.agents.catalog.contracts import (
     QuoteExtractionOutput,
+    RfqCandidateClassifierOutput,
     RfqEmailInput,
     RfqEmailOutput,
     RfqIntakeOutput,
+    RfqTemplateBuilderOutput,
 )
 from bido_back.agents.definition import AgentDefinition
 
@@ -26,6 +29,8 @@ DEFAULT_MODEL: Final = "gpt-6-luna"
 # Quote extraction turns supplier documents into the prices the buyer compares,
 # so it runs on the stronger model.
 EXTRACTION_MODEL: Final = "gpt-6.1-sol"
+# The template is learned once per tenant from a handful of documents.
+TEMPLATE_MODEL: Final = "gpt-6.1-sol"
 
 # One request for the answer plus one spare, in case the model's first final
 # answer does not validate and Agno asks again.
@@ -68,9 +73,38 @@ def quote_extraction(model: str = EXTRACTION_MODEL) -> AgentDefinition[QuoteExtr
     )
 
 
+def rfq_candidate_classifier(
+    model: str = DEFAULT_MODEL,
+) -> AgentDefinition[RfqCandidateClassifierOutput]:
+    return AgentDefinition(
+        name="rfq_candidate_classifier",
+        prompt_file="rfq_candidate_classifier.v1.md",
+        prompt_version=1,
+        model=model,
+        output_model=RfqCandidateClassifierOutput,
+        max_turns=_MAX_TURNS,
+        thinking=False,
+        effort="low",
+    )
+
+
+def rfq_template_builder(model: str = TEMPLATE_MODEL) -> AgentDefinition[RfqTemplateBuilderOutput]:
+    return AgentDefinition(
+        name="rfq_template_builder",
+        prompt_file="rfq_template_builder.v1.md",
+        prompt_version=1,
+        model=model,
+        output_model=RfqTemplateBuilderOutput,
+        max_turns=_MAX_TURNS,
+        effort="medium",
+    )
+
+
 RFQ_INTAKE: Final = rfq_intake()
 RFQ_EMAIL_WRITER: Final = rfq_email_writer()
 QUOTE_EXTRACTION: Final = quote_extraction()
+RFQ_CANDIDATE_CLASSIFIER: Final = rfq_candidate_classifier()
+RFQ_TEMPLATE_BUILDER: Final = rfq_template_builder()
 
 
 # --- Deterministic checks on the RFQ email draft ---------------------------------

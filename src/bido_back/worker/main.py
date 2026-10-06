@@ -28,6 +28,7 @@ import signal
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
+from uuid import UUID
 
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -37,7 +38,13 @@ from bido_back.db import create_engine
 from bido_back.observability import init_observability
 from bido_back.settings import Settings, get_settings
 from bido_back.worker.envelope import Envelope
-from bido_back.worker.job_types import FX_REFRESH, MAILBOX_SYNC, QUOTE_EXTRACT
+from bido_back.worker.job_types import (
+    FX_REFRESH,
+    MAILBOX_SYNC,
+    QUOTE_EXTRACT,
+    TEMPLATE_BUILD,
+    TEMPLATE_SCAN,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +98,14 @@ def build_worker_registry(
     from bido_back.agents.config import RunnerConfig
     from bido_back.fx.ecb import FxRefreshHandler
     from bido_back.intake.consumer import build_inbound_service
-    from bido_back.mailbox import MailboxSyncDeps, MailboxSyncHandler
+    from bido_back.mailbox import MailboxSyncDeps, MailboxSyncHandler, open_connection
+    from bido_back.onboarding.agents import default_onboarding_agents
+    from bido_back.onboarding.jobs import (
+        OnboardingJobDeps,
+        ScanMailbox,
+        TemplateBuildHandler,
+        TemplateScanHandler,
+    )
     from bido_back.quotes.extract_job import quote_extract_handler
     from bido_back.rfqs.mailbox import mailbox_senders_for
     from bido_back.rfqs.send import RfqActDeps, register_act_tools
@@ -107,13 +121,11 @@ def build_worker_registry(
         ),
     )
     registry = build_registry(engine, act_tools)
+    storage = build_storage(settings)
+    runner_config = RunnerConfig.from_settings(settings)
     registry.register(
         QUOTE_EXTRACT,
-        quote_extract_handler(
-            db=engine,
-            storage=build_storage(settings),
-            runner_config=RunnerConfig.from_settings(settings),
-        ),
+        quote_extract_handler(db=engine, storage=storage, runner_config=runner_config),
     )
     registry.register(FX_REFRESH, FxRefreshHandler(engine))
     inbound = build_inbound_service(settings, engine, sqs=sqs)
@@ -123,6 +135,18 @@ def build_worker_registry(
             MailboxSyncDeps(db=engine, ingest=inbound.ingest_for_invite, settings=settings)
         ),
     )
+
+    async def open_mailbox(tenant_id: UUID, connection_id: UUID) -> ScanMailbox:
+        return await open_connection(engine, tenant_id, connection_id, settings=settings)
+
+    onboarding = OnboardingJobDeps(
+        db=engine,
+        storage=storage,
+        agents=default_onboarding_agents(runner_config),
+        open_mailbox=open_mailbox,
+    )
+    registry.register(TEMPLATE_SCAN, TemplateScanHandler(onboarding))
+    registry.register(TEMPLATE_BUILD, TemplateBuildHandler(onboarding))
     return registry
 
 

@@ -66,6 +66,14 @@ class RfqEmailLine(BaseModel):
     qualification: str | None = None
 
 
+class RfqEmailTemplate(BaseModel):
+    """The buyer's usual RFQ style (their default template), when they have one."""
+
+    language: str = Field(description="ISO 639-1 of the template, e.g. pt, en")
+    greeting: str = Field(description="The buyer's usual opening, to adapt, not to copy")
+    fields: list[str] = Field(description="What the buyer usually asks suppliers for")
+
+
 class RfqEmailInput(BaseModel):
     rfq_ref: str
     rfq_title: str
@@ -75,6 +83,7 @@ class RfqEmailInput(BaseModel):
     supplier_language: str = Field(description="ISO 639-1, e.g. de, en, fr, zh")
     response_due: date | None = None
     lines: list[RfqEmailLine]
+    template: RfqEmailTemplate | None = None
 
 
 class RfqEmailOutput(BaseModel):
@@ -136,3 +145,54 @@ class QuoteExtractionOutput(BaseModel):
     payment_terms: ExtractedValue
     lines: list[ProposalLineDraft] = Field(default_factory=list[ProposalLineDraft])
     missing_fields: list[str] = Field(default_factory=list[str])
+
+
+# --- rfq_candidate_classifier: sent-mail metadata -> is it an RFQ the buyer sent?
+
+
+class RfqCandidate(BaseModel):
+    """One sent email, as metadata only: no body, no addresses (domains only)."""
+
+    id: str
+    subject: str
+    recipient_count: int
+    recipient_domains: list[str]
+    attachments: list[str] = Field(description="Attachment file names")
+    sent_on: date | None = None
+
+
+class RfqCandidateClassifierInput(BaseModel):
+    candidates: list[RfqCandidate]
+
+
+class RfqCandidateVerdict(BaseModel):
+    id: str
+    is_rfq: bool = Field(
+        description="True if this looks like a request for quotation the buyer sent"
+    )
+    confident: bool
+    note: str | None = Field(
+        default=None,
+        description="When in doubt: a short reason in Brazilian Portuguese, else null",
+    )
+
+
+class RfqCandidateClassifierOutput(BaseModel):
+    verdicts: list[RfqCandidateVerdict]
+
+
+# --- rfq_template_builder: the buyer's own RFQs -> their RFQ template ----------
+
+
+class RfqTemplateBuilderInput(BaseModel):
+    example_count: int
+    examples: str = Field(description="The example RFQs as text, each starting with a [marker]")
+
+
+class RfqTemplateBuilderOutput(BaseModel):
+    language: str = Field(description="ISO 639-1 of the examples, e.g. pt, en")
+    greeting: str = Field(description="The opening the buyer uses, generalized")
+    # No length constraints here (strict structured output): the build job caps them.
+    columns: list[str] = Field(description="Item table headings, at most 8")
+    footer_fields: list[str] = Field(description="Commercial terms asked for after the items")
+    fields: list[str] = Field(description="Every field the buyer asks for")
