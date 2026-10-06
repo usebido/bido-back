@@ -27,6 +27,7 @@ from bido_back.rfqs.schemas import (
     UpdateLineRequest,
 )
 from bido_back.rfqs.send import (
+    REJECT_HOOKS,
     SEND_RFQ_EMAIL,
     RfqActDeps,
     SendRfqEmailArgs,
@@ -307,5 +308,70 @@ async def test_send_refuses_a_sender_who_did_not_request_it(
         await tool.invoke(
             ToolContext(tenant_id=rfq_rows.tenant, user_id=rfq_rows.approver, run_id=run_id),
             forged,
+        )
+    assert mailboxes.sender.sent == []
+
+
+async def test_rejected_send_returns_the_invite_to_draft_and_can_be_proposed_again(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    mailboxes = FakeMailboxes()
+    rfq, invite_id, rejected_id, _ = await prepared(app_engine, rfq_rows, mailboxes)
+    jobs = FakeJobQueue()
+    await decide_approval(
+        app_engine, approver(rfq_rows), rejected_id, "reject", jobs=jobs, on_reject=REJECT_HOOKS
+    )
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        invite = await session.get(Invite, invite_id)
+    assert invite is not None and invite.status == "draft"
+    assert jobs.jobs == []
+
+    # A second proposal is a new attempt: a new approval, not the rejected one.
+    again = await service.prepare_send(app_engine, buyer(rfq_rows), rfq.id, FakeWriter(), mailboxes)
+    [proposal] = again.approvals
+    assert proposal.invite_id == invite_id and proposal.approval_id != rejected_id
+    await decide_approval(
+        app_engine, approver(rfq_rows), proposal.approval_id, "approve", jobs=jobs
+    )
+    registry = ActToolRegistry()
+    register_act_tools(
+        registry, RfqActDeps(db=app_engine, email_domain=EMAIL_DOMAIN, mailbox_senders=mailboxes)
+    )
+    await ApprovalExecutor(app_engine, registry)(jobs.jobs[0])
+
+    assert len(mailboxes.sender.sent) == 1
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        invite = await session.get(Invite, invite_id)
+    assert invite is not None and invite.status == "sent"
+
+
+async def test_rejected_proposal_is_refused_by_the_send_tool(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    mailboxes = FakeMailboxes()
+    _, _, approval_id, _ = await prepared(app_engine, rfq_rows, mailboxes)
+    await decide_approval(
+        app_engine,
+        approver(rfq_rows),
+        approval_id,
+        "reject",
+        jobs=FakeJobQueue(),
+        on_reject=REJECT_HOOKS,
+    )
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        approval = await session.get(Approval, approval_id)
+    assert approval is not None
+    registry = ActToolRegistry()
+    register_act_tools(
+        registry, RfqActDeps(db=app_engine, email_domain=EMAIL_DOMAIN, mailbox_senders=mailboxes)
+    )
+    tool = registry.get(SEND_RFQ_EMAIL)
+    assert tool is not None
+    with pytest.raises(InvalidState, match="rejected"):
+        await tool.invoke(
+            ToolContext(
+                tenant_id=rfq_rows.tenant, user_id=rfq_rows.approver, run_id=UUID(approval.run_id)
+            ),
+            SendRfqEmailArgs.model_validate(approval.args),
         )
     assert mailboxes.sender.sent == []

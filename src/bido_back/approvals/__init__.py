@@ -31,6 +31,7 @@ from bido_back.approvals.guard import (
     APPROVER_ROLES,
     Decision,
     DecisionOutcome,
+    RejectHook,
     decide_approval,
 )
 from bido_back.approvals.sink import PostgresApprovalSink
@@ -50,6 +51,7 @@ __all__ = [
     "ApprovalRequesterMissing",
     "Decision",
     "DecisionOutcome",
+    "RejectHook",
     "InvalidApprovalJob",
     "PostgresApprovalSink",
     "UnknownActTool",

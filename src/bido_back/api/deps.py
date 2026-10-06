@@ -31,7 +31,7 @@ from bido_back.auth import (
 )
 from bido_back.db import create_engine, create_sessionmaker
 from bido_back.rfqs.agents import RfqAgents, default_rfq_agents
-from bido_back.rfqs.mailbox import MailboxSenderFactory, default_mailbox_sender
+from bido_back.rfqs.mailbox import MailboxSenderFactory, mailbox_senders_for
 from bido_back.settings import Settings
 from bido_back.worker.jobs import JobQueue, SqsJobQueue
 
@@ -64,7 +64,14 @@ class ApiResources:
 
     def job_queue(self) -> JobQueue | None:
         if self._jobs is None and self._settings.sqs_queue_url:
-            self._jobs = SqsJobQueue(self._settings.sqs_queue_url, region=self._settings.aws_region)
+            from bido_back.intake.consumer import sqs_client
+
+            # sqs_client honours SQS_ENDPOINT_URL (ElasticMQ locally).
+            self._jobs = SqsJobQueue(
+                self._settings.sqs_queue_url,
+                region=self._settings.aws_region,
+                sqs=sqs_client(self._settings),
+            )
         return self._jobs
 
     def verifier(self) -> ClerkJwtVerifier | None:
@@ -104,9 +111,9 @@ def get_rfq_agents() -> RfqAgents:
     return default_rfq_agents()
 
 
-def get_mailbox_senders() -> MailboxSenderFactory:
-    """How to get a buyer's mailbox sender (bido_back.mailbox); tests override it."""
-    return default_mailbox_sender
+def get_mailbox_senders(request: Request) -> MailboxSenderFactory:
+    """How to get a buyer's sender (`EMAIL_TRANSPORT`, see rfqs.mailbox); tests override it."""
+    return mailbox_senders_for(_resources(request).settings)
 
 
 def _unauthorized(detail: str) -> HTTPException:

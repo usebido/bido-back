@@ -31,6 +31,13 @@ Idempotency (the executor may retry after a crash):
 A crash after the send and before that commit resends on retry with the SAME
 Message-ID, so mail clients and reply matching see one thread. Removing that
 window needs the transactional outbox, which does not exist yet.
+
+Rejection: `release_rejected_send` (a `RejectHook`, see `REJECT_HOOKS`) puts
+the invite back from `pending_approval` to `draft` in the decision's
+transaction, so the buyer can prepare the email again. Each proposal for an
+invite is one attempt: the run id is derived from the invite id and the number
+of earlier rejected proposals, so a new proposal does not collide with the
+rejected one while concurrent prepares of the same attempt still do.
 """
 
 import logging
@@ -47,6 +54,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from bido_back.agents.context import ToolContext
 from bido_back.agents.tools import Tool
 from bido_back.approvals.executor import ActToolRegistry
+from bido_back.approvals.guard import RejectHook
 from bido_back.db import tenant_session
 from bido_back.db.models import Approval, AuditEvent, Contact, Invite, Message, Rfq, Tenant, User
 from bido_back.email.addresses import make_message_id
@@ -65,9 +73,15 @@ _MESSAGES_UNIQUE = "messages_tenant_id_message_id_header_key"
 _SEND_NAMESPACE: Final = UUID("6f1d2c0e-5b8a-4f53-9a43-2f6b1f0c7e11")
 
 
-def send_proposal_ids(invite_id: UUID) -> tuple[UUID, str]:
-    """The (run_id, tool_call_id) under which an invite's send is proposed."""
-    return uuid5(_SEND_NAMESPACE, f"{SEND_RFQ_EMAIL}:{invite_id}"), f"{SEND_RFQ_EMAIL}:{invite_id}"
+def send_proposal_ids(invite_id: UUID, attempt: int = 0) -> tuple[UUID, str]:
+    """The (run_id, tool_call_id) under which an invite's send is proposed.
+
+    `attempt` is the number of earlier proposals for the invite that were
+    rejected. The tool-call id is the same for every attempt.
+    """
+    call_id = f"{SEND_RFQ_EMAIL}:{invite_id}"
+    name = call_id if attempt == 0 else f"{call_id}:{attempt}"
+    return uuid5(_SEND_NAMESPACE, name), call_id
 
 
 def subject_marker(rfq_ref: str) -> str:
@@ -128,18 +142,24 @@ class _SendRfqEmail:
 
     async def _claim(self, ctx: ToolContext, args: SendRfqEmailArgs) -> _Claim | SendRfqEmailResult:
         """Check who sends, then store the invite's Message-ID before sending (committed)."""
-        run_id, call_id = send_proposal_ids(args.invite_id)
-        if ctx.run_id != run_id:
-            raise InvalidState(f"invite {args.invite_id}: approval was not proposed for it")
+        _, call_id = send_proposal_ids(args.invite_id)
         async with tenant_session(self._deps.db, ctx.tenant_id) as session:
-            requester = await session.scalar(
-                select(Approval.requested_by).where(
-                    Approval.run_id == str(run_id),
-                    Approval.tool_call_id == call_id,
-                    Approval.tool == SEND_RFQ_EMAIL,
+            # The approval being executed must be a send proposal for THIS invite.
+            proposal = (
+                await session.execute(
+                    select(Approval.requested_by, Approval.status).where(
+                        Approval.run_id == str(ctx.run_id),
+                        Approval.tool_call_id == call_id,
+                        Approval.tool == SEND_RFQ_EMAIL,
+                    )
                 )
-            )
-            if requester is None or requester != args.sender_user_id:
+            ).one_or_none()
+            if proposal is None:
+                raise InvalidState(f"invite {args.invite_id}: approval was not proposed for it")
+            requester, approval_status = proposal
+            if approval_status == "rejected":
+                raise InvalidState(f"invite {args.invite_id}: the send was rejected")
+            if requester != args.sender_user_id:
                 raise InvalidState(f"invite {args.invite_id}: sender is not the requester")
 
             invite = await session.scalar(
@@ -264,6 +284,20 @@ def send_rfq_email_tool(deps: RfqActDeps) -> Tool[SendRfqEmailArgs, SendRfqEmail
         kind="act",
         handler=_SendRfqEmail(deps),
     )
+
+
+async def release_rejected_send(session: AsyncSession, approval: Approval) -> None:
+    """A rejected send: the invite goes back to `draft` so it can be prepared again."""
+    args = SendRfqEmailArgs.model_validate(approval.args)
+    await session.execute(
+        update(Invite)
+        .where(Invite.id == args.invite_id, Invite.status == "pending_approval")
+        .values(status="draft")
+    )
+
+
+# What a rejection releases, per act tool (passed to `decide_approval`).
+REJECT_HOOKS: Final[dict[str, RejectHook]] = {SEND_RFQ_EMAIL: release_rejected_send}
 
 
 def register_act_tools(registry: ActToolRegistry, deps: RfqActDeps) -> None:

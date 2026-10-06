@@ -6,7 +6,7 @@ Two schemes, told apart by the first byte of the ciphertext:
   Fernet has no associated data, so the encryption context is sealed inside
   the plaintext and compared on decrypt.
 * `0x02` KMS envelope encryption (AWS): a fresh AES-256 data key per write
-  from KMS `GenerateDataKey` (key `KMS_KEY_ID`), the tokens sealed with
+  from KMS `GenerateDataKey` (key `OAUTH_TOKEN_KMS_KEY_ID`), the tokens sealed with
   AES-GCM under it, and the KMS-encrypted data key stored next to them:
 
       0x02 | len(encrypted data key) (2 bytes, big endian) | encrypted data key
@@ -17,7 +17,7 @@ Two schemes, told apart by the first byte of the ciphertext:
   condition on it) and is the AES-GCM associated data.
 
 Either way a ciphertext copied onto another tenant's, user's or provider's
-row fails to decrypt. With neither `KMS_KEY_ID` nor `TOKEN_ENCRYPTION_KEY`
+row fails to decrypt. With neither `OAUTH_TOKEN_KMS_KEY_ID` nor `TOKEN_ENCRYPTION_KEY`
 set, tokens are refused, never stored in clear; in `prd` the Fernet path is
 refused too (KMS only). When both are set, new writes use KMS and Fernet
 rows stay readable.
@@ -177,7 +177,7 @@ class SchemeDispatchCipher:
 
 def kms_key_id(settings: Settings) -> str | None:
     """The KMS key for token encryption: the ONE place that names the setting."""
-    return settings.kms_key_id
+    return settings.oauth_token_kms_key_id
 
 
 def build_token_cipher(settings: Settings, *, kms: KmsApi | None = None) -> TokenCipher:
@@ -194,10 +194,13 @@ def build_token_cipher(settings: Settings, *, kms: KmsApi | None = None) -> Toke
         return SchemeDispatchCipher(kms_cipher, by_scheme)
     if fernet is None:
         raise MailboxNotConfigured(
-            "token encryption is not configured (set KMS_KEY_ID or TOKEN_ENCRYPTION_KEY)"
+            "token encryption is not configured "
+            "(set OAUTH_TOKEN_KMS_KEY_ID or TOKEN_ENCRYPTION_KEY)"
         )
     if settings.environment == "prd":
-        raise MailboxNotConfigured("production stores mailbox tokens only under KMS (KMS_KEY_ID)")
+        raise MailboxNotConfigured(
+            "production stores mailbox tokens only under KMS (OAUTH_TOKEN_KMS_KEY_ID)"
+        )
     return SchemeDispatchCipher(fernet, {FERNET_SCHEME: fernet})
 
 

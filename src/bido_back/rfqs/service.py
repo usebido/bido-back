@@ -390,6 +390,18 @@ async def prepare_send(
             .order_by(Invite.created_at, Invite.id)
         )
         drafts = list(rows)
+        # Earlier rejected proposals per invite: the next proposal is a new attempt.
+        call_ids = [send_proposal_ids(invite.id)[1] for invite, _, _ in drafts]
+        rejected_counts = await session.execute(
+            select(Approval.tool_call_id, func.count())
+            .where(
+                Approval.tool == SEND_RFQ_EMAIL,
+                Approval.status == "rejected",
+                Approval.tool_call_id.in_(call_ids),
+            )
+            .group_by(Approval.tool_call_id)
+        )
+        attempts = {call_id: count for call_id, count in rejected_counts}
         tenant = await session.get(Tenant, principal.tenant_id)
         user = await session.get(User, principal.user_id)
         if tenant is None or user is None:
@@ -439,7 +451,8 @@ async def prepare_send(
             body=draft.body,
         )
         payload = cast(dict[str, JsonValue], args.model_dump(mode="json"))
-        run_id, call_id = send_proposal_ids(invite.id)
+        call_id = send_proposal_ids(invite.id)[1]
+        run_id, _ = send_proposal_ids(invite.id, attempts.get(call_id, 0))
         try:
             await sink.request_approval(
                 ApprovalProposal(

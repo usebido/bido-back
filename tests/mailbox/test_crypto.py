@@ -127,12 +127,12 @@ async def test_kms_refuses_truncated_ciphertext() -> None:
 
 def test_refuses_to_store_tokens_without_a_key() -> None:
     with pytest.raises(MailboxNotConfigured):
-        build_token_cipher(make_settings(token_encryption_key=None, kms_key_id=None))
+        build_token_cipher(make_settings(token_encryption_key=None, oauth_token_kms_key_id=None))
 
 
 def test_production_requires_kms() -> None:
     with pytest.raises(MailboxNotConfigured):
-        build_token_cipher(make_settings(environment="prd", kms_key_id=None))
+        build_token_cipher(make_settings(environment="prd", oauth_token_kms_key_id=None))
 
 
 def test_invalid_fernet_key_is_a_configuration_error() -> None:
@@ -143,7 +143,9 @@ def test_invalid_fernet_key_is_a_configuration_error() -> None:
 async def test_kms_is_primary_and_fernet_rows_stay_readable() -> None:
     context = _context()
     legacy = await encrypt_tokens(FernetTokenCipher(FERNET_KEY), TOKENS, context)
-    cipher = build_token_cipher(make_settings(kms_key_id="alias/bido-tokens"), kms=FakeKms())
+    cipher = build_token_cipher(
+        make_settings(oauth_token_kms_key_id="alias/bido-tokens"), kms=FakeKms()
+    )
 
     fresh = await encrypt_tokens(cipher, TOKENS, context)
 

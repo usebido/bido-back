@@ -10,6 +10,7 @@
 # Inside the compose network: Mailpit, ElasticMQ and local blob storage.
 # Dummy AWS credentials are for ElasticMQ only (boto3 refuses to sign without any).
 x-local-services: &local-services
+  EMAIL_TRANSPORT: smtp
   SMTP_HOST: mailpit
   SMTP_PORT: "1025"
   SQS_ENDPOINT_URL: http://elasticmq:9324

@@ -13,8 +13,9 @@ Creates:
   * two suppliers, each with one contact (example.test addresses).
 
 Then prints the X-Dev-User values. With AUTH_DEV_MODE=true and
-ENVIRONMENT=local the api accepts `X-Dev-User: <clerk_user_id>`. The buyer
-still needs a connected mailbox to prepare sends.
+ENVIRONMENT=local the api accepts `X-Dev-User: <clerk_user_id>`. With
+EMAIL_TRANSPORT=smtp, RFQ emails go to Mailpit; with "mailbox", the buyer
+needs a connected mailbox to prepare sends.
 """
 
 import asyncio

@@ -23,3 +23,7 @@ class AgentFailed(RfqError):
 
 class MailboxNotConnected(InvalidState):
     """The buyer who would send has no connected mailbox (Gmail / Microsoft 365)."""
+
+
+class MailboxNotConfigured(InvalidState):
+    """This deployment cannot use buyer mailboxes (token encryption is not set up)."""

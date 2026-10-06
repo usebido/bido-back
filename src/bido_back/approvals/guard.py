@@ -16,7 +16,10 @@ principal's tenant, checking, in order:
    decided, and an `approval.integrity_failed` audit event is kept.
 
 Then the status, `decided_by` and `decided_at` are set and an audit event is
-written (ids and hash only, never the args), in the same transaction.
+written (ids and hash only, never the args), in the same transaction. On a
+rejection, the tool's `RejectHook` (if the caller passes one for that tool)
+runs in that transaction too, so the feature can release what the proposal
+held (e.g. an RFQ invite goes back to `draft`).
 
 Approving does not execute anything. After the commit, an `approval.execute`
 job is enqueued (idempotency key `approval:<id>`); the worker runs the tool
@@ -28,6 +31,7 @@ outbox, closes this gap).
 """
 
 import logging
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final, Literal
@@ -60,6 +64,10 @@ APPROVER_ROLES: Final = frozenset({"approver", "owner"})
 _STATUS: Final[dict[Decision, DecidedStatus]] = {"approve": "approved", "reject": "rejected"}
 
 
+# Runs inside the decision's transaction, after the payload was verified.
+RejectHook = Callable[[AsyncSession, Approval], Awaitable[None]]
+
+
 @dataclass(frozen=True, slots=True)
 class DecisionOutcome:
     approval_id: UUID
@@ -73,6 +81,7 @@ async def decide_approval(
     decision: Decision,
     *,
     jobs: JobQueue,
+    on_reject: Mapping[str, RejectHook] | None = None,
 ) -> DecisionOutcome:
     """Record `principal`'s decision on one approval; enqueue execution if approved.
 
@@ -113,6 +122,9 @@ async def decide_approval(
             approval.decided_by = principal.user_id
             approval.decided_at = datetime.now(UTC)
             session.add(approval_audit(approval, f"approval.{status}", principal.user_id))
+            hook = (on_reject or {}).get(approval.tool) if status == "rejected" else None
+            if hook is not None:
+                await hook(session, approval)
         await session.flush()
 
     if integrity_failed:

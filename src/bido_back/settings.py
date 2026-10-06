@@ -37,9 +37,13 @@ class Settings(BaseSettings):
 
     anthropic_api_key: str | None = Field(default=None, repr=False)
 
-    # Email. Outbound RFQs go from `rfq-<token>@<email_domain>`; replies come back there.
+    # Email. `email_domain` names our Message-IDs and the Bido reply addresses.
     email_domain: str = "quotes.usebido.com"
-    email_transport: Literal["smtp", "ses"] = "smtp"
+    # How RFQ emails go out. "mailbox": from the requesting buyer's connected
+    # Gmail / Microsoft 365 (the product behavior). "smtp" / "ses": through that
+    # transport instead, From the buyer's address; only for local and test runs
+    # (Mailpit locally), so no mailbox connection is needed to try the flow.
+    email_transport: Literal["mailbox", "smtp", "ses"] = "mailbox"
     smtp_host: str = "localhost"  # Mailpit locally
     smtp_port: int = 1025
 
@@ -51,9 +55,14 @@ class Settings(BaseSettings):
     microsoft_client_secret: str | None = Field(default=None, repr=False)
     microsoft_tenant: str = "common"
     oauth_redirect_base_url: str = "http://localhost:8080"
-    # Encrypts stored OAuth tokens. Local: a Fernet key. AWS: KMS (kms_key_id).
+    # The frontend page the provider callback forwards `code` and `state` to (in
+    # the URL fragment). It finishes the link with POST /v1/mailbox/complete as
+    # the signed-in user, who must be the one who started it.
+    mailbox_connect_return_url: str = "http://localhost:3000/settings/mailbox"
+    # Encrypts stored OAuth tokens. Local: a Fernet key. AWS: KMS envelope
+    # encryption under `oauth_token_kms_key_id`.
     token_encryption_key: str | None = Field(default=None, repr=False)
-    kms_key_id: str | None = None
+    oauth_token_kms_key_id: str | None = None
     mailbox_sync_interval_seconds: int = 120
 
     # Blob storage for raw emails and attachments.

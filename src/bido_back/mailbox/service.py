@@ -697,6 +697,8 @@ async def handle_mailbox_sync(envelope: Envelope, deps: MailboxSyncDeps) -> None
     tenants: Sequence[UUID] = (
         [envelope.tenant_id] if single else await active_mailbox_tenants(deps.db)
     )
+    if not tenants:
+        return
     cipher = deps.cipher or build_token_cipher(deps.settings)
     for tenant_id in tenants:
         try:

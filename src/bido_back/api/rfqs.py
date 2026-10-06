@@ -24,6 +24,7 @@ from bido_back.rfqs.errors import (
     AgentFailed,
     Duplicate,
     InvalidState,
+    MailboxNotConfigured,
     MailboxNotConnected,
     NotFound,
     RfqError,
@@ -63,6 +64,11 @@ def rfq_http_error(exc: RfqError) -> HTTPException:
         return HTTPException(
             status.HTTP_409_CONFLICT,
             "connect your mailbox before sending RFQs: they are sent from it",
+        )
+    if isinstance(exc, MailboxNotConfigured):
+        return HTTPException(
+            status.HTTP_409_CONFLICT,
+            "sending from a mailbox is not set up on this server yet",
         )
     if isinstance(exc, Duplicate | InvalidState):
         return HTTPException(status.HTTP_409_CONFLICT, str(exc))
