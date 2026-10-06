@@ -1,4 +1,4 @@
-"""Microsoft 365 (Graph): send as the buyer, and read one RFQ thread. Plain REST.
+"""Microsoft 365 (Graph): send as the buyer, read one RFQ thread, scan sent mail. Plain REST.
 
 Sending: MIME draft, then send
 ------------------------------
@@ -28,9 +28,20 @@ Reading: `GET /me/messages?$filter=conversationId eq '<id>'` (one thread only,
 graph.microsoft.com, bounded), then `GET /me/messages/{id}/$value` (the MIME)
 for each new message. Drafts are never read; the buyer's own messages are
 skipped without downloading their content.
+
+The onboarding scan (`list_sent`, started by the user):
+`GET /me/mailFolders/sentitems/messages?$search="<keywords> AND sent>=<date>"`
+with `$select` of id, subject, recipients, sent date and hasAttachments (no
+body), paged like a thread read; for a message with attachments,
+`GET /me/messages/{id}/attachments?$select=name,contentType` (names and types,
+no content). Messages older than `since` are dropped here too, in case the
+search ignores the date. `get_message` reuses `$value`, only for the messages
+the user picked.
 """
 
 import base64
+from collections.abc import AsyncIterator, Sequence
+from datetime import datetime
 from typing import cast
 from urllib.parse import quote
 
@@ -40,6 +51,8 @@ from bido_back.mailbox.base import (
     Provider,
     ProviderError,
     ProviderSent,
+    SentAttachment,
+    SentSummary,
     ThreadBinding,
     ThreadFetch,
     ThreadState,
@@ -57,6 +70,12 @@ def _id(value: str) -> str:
     if not value or len(value) > 512:
         raise ValueError("not a Graph id")
     return quote(value, safe="")
+
+
+def sent_search(keywords: Sequence[str], since: datetime) -> str:
+    """The KQL `$search` value for sent messages since `since` matching any keyword."""
+    terms = " OR ".join(f'\\"{k}\\"' if " " in k else k for k in keywords)
+    return f'"({terms}) AND sent>={since:%Y-%m-%d}"'
 
 
 def conversation_filter(conversation_id: str) -> str:
@@ -152,6 +171,63 @@ class GraphMailbox(MailboxSender):
             params = None
         return ThreadFetch(messages=tuple(messages), skipped_ids=tuple(skipped))
 
+    async def list_sent(
+        self, *, keywords: Sequence[str], since: datetime, limit: int
+    ) -> AsyncIterator[list[SentSummary]]:
+        url: str | None = f"{GRAPH_API}/mailFolders/sentitems/messages"
+        params: dict[str, str] | None = {
+            "$search": sent_search(keywords, since),
+            "$select": "id,subject,toRecipients,ccRecipients,sentDateTime,hasAttachments",
+            "$top": str(_PAGE_SIZE),
+        }
+        listed = 0
+        while url is not None and listed < limit:
+            response = await self._http.request("GET", url, operation="list sent", params=params)
+            body = json_object(response)
+            page: list[SentSummary] = []
+            for meta in list_field(body, "value")[: limit - listed]:
+                listed += 1
+                message_id = str_field(meta, "id")
+                sent_at = _parse_datetime(str_field(meta, "sentDateTime"))
+                if message_id is None or (sent_at is not None and sent_at < since):
+                    continue
+                attachments: tuple[SentAttachment, ...] = ()
+                if meta.get("hasAttachments") is True:
+                    attachments = await self._attachment_names(message_id)
+                page.append(
+                    SentSummary(
+                        provider_message_id=message_id,
+                        subject=str_field(meta, "subject") or "",
+                        recipients=(
+                            *_addresses(meta, "toRecipients"),
+                            *_addresses(meta, "ccRecipients"),
+                        ),
+                        sent_at=sent_at,
+                        attachments=attachments,
+                    )
+                )
+            yield page
+            next_link = str_field(body, "@odata.nextLink")
+            # Never send the bearer token anywhere but Graph.
+            url = next_link if next_link and next_link.startswith(_GRAPH_ORIGIN) else None
+            params = None
+
+    async def _attachment_names(self, message_id: str) -> tuple[SentAttachment, ...]:
+        response = await self._http.request(
+            "GET",
+            f"{GRAPH_API}/messages/{_id(message_id)}/attachments",
+            operation="attachment names",
+            params={"$select": "name,contentType"},
+        )
+        return tuple(
+            SentAttachment(str_field(a, "name") or "", str_field(a, "contentType") or "")
+            for a in list_field(json_object(response), "value")
+            if str_field(a, "name")
+        )
+
+    async def get_message(self, provider_message_id: str) -> bytes:
+        return await self._raw(provider_message_id)
+
     async def _raw(self, message_id: str) -> bytes:
         response = await self._http.request(
             "GET", f"{GRAPH_API}/messages/{_id(message_id)}/$value", operation="message"
@@ -168,3 +244,23 @@ def _from_address(meta: dict[str, object]) -> str | None:
         return None
     value = cast(dict[str, object], address).get("address")
     return value.strip().lower() if isinstance(value, str) else None
+
+
+def _addresses(meta: dict[str, object], key: str) -> list[str]:
+    found: list[str] = []
+    for recipient in list_field(meta, key):
+        address = recipient.get("emailAddress")
+        if isinstance(address, dict):
+            value = cast(dict[str, object], address).get("address")
+            if isinstance(value, str) and value:
+                found.append(value)
+    return found
+
+
+def _parse_datetime(value: str | None) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None

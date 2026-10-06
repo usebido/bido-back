@@ -1,6 +1,6 @@
 """Types and errors shared by the mailbox providers, the service and the api.
 
-A connected mailbox is used in exactly two ways, both confined to RFQ threads
+A connected mailbox is used in three ways. Two are confined to RFQ threads
 Bido started:
 
 * sending (`MailboxSender.send`): the first RFQ email starts a new thread in
@@ -8,7 +8,17 @@ Bido started:
 * reading (`fetch_thread_new_messages`): the messages of ONE given thread that
   were not handled yet.
 
-There is deliberately no method that lists, searches or reads anything else.
+The third is the onboarding scan, which the user starts themselves to teach
+Bido what their RFQs look like:
+
+* `list_sent`: metadata (subject, recipients, date, attachment names) of SENT
+  messages from a recent window that match RFQ keywords, bounded by a limit;
+* `get_message`: the raw bytes of one of those messages, only for the ones the
+  user picked.
+
+There is deliberately no method that lists, searches or reads anything else
+(no inbox, no other folders).
+
 Error messages carry provider names, HTTP statuses and ids, never tokens,
 addresses or message content.
 """
@@ -17,8 +27,9 @@ import base64
 import json
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from datetime import datetime
 from email.utils import getaddresses
 from typing import Literal, Protocol, cast
 
@@ -221,6 +232,39 @@ def with_seen(state: ThreadState | None, ids: Sequence[str]) -> dict[str, JsonVa
     return {"seen": kept}
 
 
+# --- The onboarding scan (sent mail) ------------------------------------------------
+
+# Words an RFQ subject or body usually carries (pt-BR and English).
+SCAN_KEYWORDS: tuple[str, ...] = (
+    "RFQ",
+    "cotação",
+    "cotacao",
+    "orçamento",
+    "orcamento",
+    "quotation",
+    "request for quote",
+    "quote request",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SentAttachment:
+    name: str
+    content_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class SentSummary:
+    """Metadata of one sent message. No body, no attachment content."""
+
+    provider_message_id: str
+    subject: str
+    # To and Cc addresses, in header order.
+    recipients: tuple[str, ...]
+    sent_at: datetime | None
+    attachments: tuple[SentAttachment, ...] = ()
+
+
 def same_address(header_value: str | None, address: str) -> bool:
     """True if the (first) address in a From header value is `address` (case-insensitive)."""
     if not header_value:
@@ -288,6 +332,19 @@ class MailboxSender(ABC):
         reported in `skipped_ids` without being downloaded, when the provider
         exposes the sender in its metadata.
         """
+
+    @abstractmethod
+    def list_sent(
+        self, *, keywords: Sequence[str], since: datetime, limit: int
+    ) -> AsyncIterator[list[SentSummary]]:
+        """Sent messages since `since` matching any of `keywords`, page by page.
+
+        Metadata only. Stops after `limit` messages in total.
+        """
+
+    @abstractmethod
+    async def get_message(self, provider_message_id: str) -> bytes:
+        """The raw RFC 822 bytes of one message."""
 
 
 def b64url_decode(data: str) -> bytes:

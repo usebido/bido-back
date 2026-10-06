@@ -1,9 +1,14 @@
 """Mailbox connections: storing them, sending through them, syncing RFQ threads.
 
-Scope (CTO decision): Bido sends from and reads the buyer's own mailbox, but
-ONLY in RFQ threads Bido started. Reading means: for each invite that has a
-provider thread id, the messages of that one thread. Nothing lists, searches
-or stores the rest of the mailbox. Every send still needs an approval; the
+Scope (CTO decision, extended for onboarding): Bido sends from and reads the
+buyer's own mailbox in RFQ threads Bido started. Reading means: for each
+invite that has a provider thread id, the messages of that one thread. The
+one exception is the onboarding scan, which the user starts themselves: a
+one-off search of their SENT mail from the last 12 months for messages that
+look like RFQs (`bido_back.onboarding`). It stores metadata only (subject,
+recipients, date, attachment names), and reads the full message only for the
+ones the user picks to build the RFQ template from. Nothing else in the
+mailbox is listed, searched or stored. Every send still needs an approval; the
 act tool that calls `send` runs only after the approval guard.
 
 Sending: `get_mailbox_sender(session, tenant_id, user_id)` returns an
@@ -317,6 +322,42 @@ async def get_mailbox_sender(
         http=http,
         threads=_InviteThreads(session, row.id),
     )
+
+
+async def open_connection(
+    db: Db,
+    tenant_id: UUID,
+    connection_id: UUID,
+    *,
+    settings: Settings,
+    cipher: TokenCipher | None = None,
+    http: httpx.AsyncClient | None = None,
+) -> MailboxSender:
+    """A mailbox for one active connection, outside any caller transaction.
+
+    For background reads (the onboarding scan): refreshed tokens and a revoked
+    status are written in their own transactions. Raises MailboxNotConnected
+    when the connection is gone, inactive, or its tokens do not decrypt.
+    """
+    async with tenant_session(db, tenant_id) as session:
+        row = await session.scalar(
+            select(MailboxConnection).where(
+                MailboxConnection.id == connection_id, MailboxConnection.status == "active"
+            )
+        )
+    if row is None or row.token_ciphertext is None:
+        raise MailboxNotConnected(f"connection {connection_id} is not active")
+    used_cipher = cipher or build_token_cipher(settings)
+    context = _context(row)
+    try:
+        tokens = await decrypt_tokens(used_cipher, row.token_ciphertext, context)
+    except TokenDecryptionError:
+        logger.error("mailbox tokens do not decrypt tenant=%s connection=%s", tenant_id, row.id)
+        raise MailboxNotConnected(f"connection {connection_id} must be reconnected") from None
+    store = _ConnectionTokenStore(
+        tenant_id=tenant_id, connection_id=row.id, context=context, cipher=used_cipher, db=db
+    )
+    return _open_mailbox(row, tokens, settings=settings, store=store, http=http)
 
 
 # --- Connect / list / disconnect ----------------------------------------------------------
