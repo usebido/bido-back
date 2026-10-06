@@ -109,3 +109,30 @@ def build_xlsx(
     out = io.BytesIO()
     workbook.save(out)
     return out.getvalue()
+
+
+_DOCX_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"'
+
+
+def build_docx(paragraphs: Sequence[str], table: Sequence[Sequence[str]] = ()) -> bytes:
+    """A minimal .docx: paragraphs (split into two runs each), then an optional table."""
+
+    def runs(text: str) -> str:
+        half = len(text) // 2
+        return f"<w:r><w:t>{text[:half]}</w:t></w:r><w:r><w:t>{text[half:]}</w:t></w:r>"
+
+    body = "".join(f"<w:p>{runs(p)}</w:p>" for p in paragraphs)
+    if table:
+        rows = "".join(
+            "<w:tr>" + "".join(f"<w:tc><w:p>{runs(c)}</w:p></w:tc>" for c in row) + "</w:tr>"
+            for row in table
+        )
+        body += f"<w:tbl>{rows}</w:tbl>"
+    document = f'<?xml version="1.0"?><w:document {_DOCX_NS}><w:body>{body}</w:body></w:document>'
+    out = io.BytesIO()
+    import zipfile
+
+    with zipfile.ZipFile(out, "w") as archive:
+        archive.writestr("[Content_Types].xml", "<Types/>")
+        archive.writestr("word/document.xml", document)
+    return out.getvalue()

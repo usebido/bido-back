@@ -6,7 +6,14 @@ import pytest
 
 from bido_back.documents import Limits, extract_text, marker_name, render_documents
 from bido_back.documents.extract import column_letter, format_cell
-from tests.documents.fixtures import PdfPage, PdfText, build_pdf, build_xlsx, table_page
+from tests.documents.fixtures import (
+    PdfPage,
+    PdfText,
+    build_docx,
+    build_pdf,
+    build_xlsx,
+    table_page,
+)
 
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -223,3 +230,29 @@ def test_cell_formatting_helpers() -> None:
     assert format_cell(12.0) == "12"
     assert format_cell(True) == "TRUE"
     assert format_cell("  a \n b ") == "a b"
+
+
+DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+
+def test_docx_paragraphs_and_tables_are_read() -> None:
+    data = build_docx(
+        ["Prezados, segue solicitação de cotação.", "Favor informar prazo de entrega."],
+        table=[["Item", "Qtd.", "Un."], ["Rolamento 6205", "200", "pç"]],
+    )
+    doc = extract_text("pedido.docx", DOCX, data)
+
+    assert doc.kind == "docx"
+    assert doc.readable
+    assert doc.text.splitlines() == [
+        "[pedido.docx]",
+        "Prezados, segue solicitação de cotação.",
+        "Favor informar prazo de entrega.",
+        "Item | Qtd. | Un.",
+        "Rolamento 6205 | 200 | pç",
+    ]
+
+
+def test_broken_docx_is_reported_not_raised() -> None:
+    doc = extract_text("pedido.docx", DOCX, b"PK\x03\x04 not really a zip")
+    assert doc.skipped == "unreadable"
