@@ -32,6 +32,11 @@ Write a professional, concise business email:
 - If an alternative part is proposed, ask them to say so clearly and give its
   MPN and manufacturer.
 - If `response_due` is set, ask for the quote by that date.
+- If `template` is set, it is how this buyer usually writes RFQs: open the
+  email in the spirit of `template.greeting`, translated to the supplier's
+  language when it differs from `template.language` (never copy it word for
+  word into another language), and also ask for every field in
+  `template.fields` that the list above does not already cover.
 
 Never state or suggest a price, a target price, a budget, or a competitor's
 offer. Do not invent requirements, dates, or contact details that are not in

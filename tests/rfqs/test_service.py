@@ -4,7 +4,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.context import ToolContext
@@ -16,7 +16,16 @@ from bido_back.approvals import (
 )
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
-from bido_back.db.models import Approval, AuditEvent, Invite, Message, Rfq, RfqLine, Tenant
+from bido_back.db.models import (
+    Approval,
+    AuditEvent,
+    Invite,
+    Message,
+    Rfq,
+    RfqLine,
+    RfqTemplate,
+    Tenant,
+)
 from bido_back.rfqs import service, suppliers
 from bido_back.rfqs.errors import Duplicate, InvalidState, MailboxNotConnected, NotFound
 from bido_back.rfqs.schemas import (
@@ -203,6 +212,49 @@ async def _tenant_name(engine: AsyncEngine, tenant_id: UUID) -> str:
         tenant = await session.get(Tenant, tenant_id)
     assert tenant is not None
     return tenant.name
+
+
+async def test_prepare_send_follows_the_tenants_default_template(
+    app_engine: AsyncEngine, migrator_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    principal = buyer(rfq_rows)
+    rfq = await make_rfq(app_engine, principal)
+    supplier = await make_supplier(app_engine, principal, "Rhein")
+    await service.add_invite(app_engine, principal, rfq.id, supplier.id, supplier.contacts[0].id)
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        session.add_all(
+            [
+                RfqTemplate(
+                    tenant_id=rfq_rows.tenant,
+                    source="search",
+                    status="ready",
+                    language="pt",
+                    greeting="Prezados, segue solicitação de cotação.",
+                    fields=["Item", "Frete"],
+                    is_default=True,
+                ),
+                # Not the default: ignored.
+                RfqTemplate(
+                    tenant_id=rfq_rows.tenant, source="none", status="ready", greeting="Olá"
+                ),
+            ]
+        )
+    writer = FakeWriter()
+    try:
+        await service.prepare_send(app_engine, principal, rfq.id, writer, FakeMailboxes())
+    finally:
+        async with tenant_session(migrator_engine, rfq_rows.tenant) as session:
+            await session.execute(
+                delete(RfqTemplate).where(RfqTemplate.tenant_id == rfq_rows.tenant)
+            )
+
+    [task] = writer.calls
+    assert task.template is not None
+    assert task.template.model_dump() == {
+        "language": "pt",
+        "greeting": "Prezados, segue solicitação de cotação.",
+        "fields": ["Item", "Frete"],
+    }
 
 
 async def test_prepare_send_without_a_mailbox_fails_before_any_draft(
