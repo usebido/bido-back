@@ -40,3 +40,6 @@ htmlcov/
 
 # Local scratch
 *.log
+
+# Local blob storage (STORAGE_LOCAL_DIR default)
+.data/
