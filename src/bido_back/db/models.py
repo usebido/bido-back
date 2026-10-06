@@ -9,17 +9,23 @@ global (one person can belong to several tenants) and is on the explicit RLS
 allowlist in `scripts/check_rls.py`.
 """
 
-from datetime import datetime
+from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
+    Integer,
+    Numeric,
     Text,
     UniqueConstraint,
+    false,
     func,
     text,
 )
@@ -136,3 +142,194 @@ class Approval(Base):
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# --- RFQ flow (migration 0003) ----------------------------------------------
+#
+# Personal data lives only in `contacts`; every other table references a
+# contact by id, so erasing a person is a change to one row.
+
+CONTACT_KINDS = ("buyer", "supplier")
+SUPPLIER_TYPES = (
+    "authorized_distributor",
+    "distributor",
+    "reseller",
+    "manufacturer",
+    "machining",
+    "other",
+)
+RFQ_STATUSES = ("draft", "open", "closed", "cancelled")
+LINE_CATEGORIES = ("catalog", "drawing", "cell", "material")
+INVITE_STATUSES = ("draft", "pending_approval", "sent", "responded", "declined")
+MESSAGE_STATUSES = ("stored", "unmatched", "quarantined", "extracted", "failed")
+
+
+class Contact(Base):
+    __tablename__ = "contacts"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    kind: Mapped[str] = mapped_column(Text)
+    name: Mapped[str | None] = mapped_column(Text)
+    email: Mapped[str | None] = mapped_column(Text)
+    phone: Mapped[str | None] = mapped_column(Text)
+    pseudonymized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Supplier(Base):
+    __tablename__ = "suppliers"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    name: Mapped[str] = mapped_column(Text)
+    type: Mapped[str] = mapped_column(Text, server_default=text("'distributor'"))
+    country: Mapped[str | None] = mapped_column(Text)
+    language: Mapped[str] = mapped_column(Text, server_default=text("'en'"))
+    email_domain: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SupplierContact(Base):
+    __tablename__ = "supplier_contacts"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    supplier_id: Mapped[UUID] = mapped_column(ForeignKey("suppliers.id", ondelete="CASCADE"))
+    contact_id: Mapped[UUID] = mapped_column(ForeignKey("contacts.id", ondelete="CASCADE"))
+
+
+class Rfq(Base):
+    __tablename__ = "rfqs"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    ref: Mapped[str] = mapped_column(Text)
+    title: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'draft'"))
+    base_currency: Mapped[str] = mapped_column(Text, server_default=text("'EUR'"))
+    response_due: Mapped[date | None] = mapped_column(Date)
+    source_text: Mapped[str | None] = mapped_column(Text)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RfqLine(Base):
+    __tablename__ = "rfq_lines"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    rfq_id: Mapped[UUID] = mapped_column(ForeignKey("rfqs.id", ondelete="CASCADE"))
+    position: Mapped[int] = mapped_column(Integer)
+    description: Mapped[str] = mapped_column(Text)
+    mpn: Mapped[str | None] = mapped_column(Text)
+    manufacturer: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str] = mapped_column(Text, server_default=text("'catalog'"))
+    # Requested quantity tiers, e.g. [1000, 2000, 5000].
+    quantities: Mapped[list[Any]] = mapped_column(JSONB)
+    unit: Mapped[str] = mapped_column(Text, server_default=text("'pcs'"))
+    need_by: Mapped[date | None] = mapped_column(Date)
+    incoterm: Mapped[str | None] = mapped_column(Text)
+    delivery_location: Mapped[str | None] = mapped_column(Text)
+    qualification: Mapped[str | None] = mapped_column(Text)
+
+
+class Invite(Base):
+    """One RFQ sent to one supplier. `reply_token` is the unguessable part of the
+    per-invite reply address; replies are matched by it first."""
+
+    __tablename__ = "invites"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    rfq_id: Mapped[UUID] = mapped_column(ForeignKey("rfqs.id", ondelete="CASCADE"))
+    supplier_id: Mapped[UUID] = mapped_column(ForeignKey("suppliers.id"))
+    contact_id: Mapped[UUID] = mapped_column(ForeignKey("contacts.id"))
+    reply_token: Mapped[str] = mapped_column(Text, unique=True)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'draft'"))
+    thread_message_id: Mapped[str | None] = mapped_column(Text)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    responded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Message(Base):
+    __tablename__ = "messages"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    invite_id: Mapped[UUID | None] = mapped_column(ForeignKey("invites.id"))
+    direction: Mapped[str] = mapped_column(Text)
+    message_id_header: Mapped[str | None] = mapped_column(Text)
+    in_reply_to: Mapped[str | None] = mapped_column(Text)
+    from_contact_id: Mapped[UUID | None] = mapped_column(ForeignKey("contacts.id"))
+    subject: Mapped[str | None] = mapped_column(Text)
+    body_text: Mapped[str | None] = mapped_column(Text)
+    raw_key: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'stored'"))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Attachment(Base):
+    __tablename__ = "attachments"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    message_id: Mapped[UUID] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"))
+    filename: Mapped[str] = mapped_column(Text)
+    content_type: Mapped[str] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    storage_key: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Proposal(Base):
+    """One supplier answer, versioned: a revised quote is a new version."""
+
+    __tablename__ = "proposals"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    invite_id: Mapped[UUID] = mapped_column(ForeignKey("invites.id", ondelete="CASCADE"))
+    message_id: Mapped[UUID] = mapped_column(ForeignKey("messages.id"))
+    version: Mapped[int] = mapped_column(Integer)
+    currency: Mapped[str | None] = mapped_column(Text)
+    valid_until: Mapped[date | None] = mapped_column(Date)
+    incoterm: Mapped[str | None] = mapped_column(Text)
+    payment_terms: Mapped[str | None] = mapped_column(Text)
+    # Per-field provenance: {"currency": {"source": {...}, "confidence": 0.93}, ...}
+    fields: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ProposalLine(Base):
+    __tablename__ = "proposal_lines"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("proposals.id", ondelete="CASCADE"))
+    rfq_line_id: Mapped[UUID | None] = mapped_column(ForeignKey("rfq_lines.id"))
+    offered_mpn: Mapped[str | None] = mapped_column(Text)
+    is_alternative: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    min_quantity: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    unit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    unit: Mapped[str | None] = mapped_column(Text)
+    tooling_cost: Mapped[Decimal | None] = mapped_column(Numeric(18, 2))
+    moq: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    lead_time_days: Mapped[int | None] = mapped_column(Integer)
+    origin_country: Mapped[str | None] = mapped_column(Text)
+    # Per-field provenance, same shape as Proposal.fields.
+    fields: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    needs_review: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FxRate(Base):
+    """Daily ECB reference rates: how many units of `currency` per 1 EUR. Global."""
+
+    __tablename__ = "fx_rates"
+
+    rate_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    currency: Mapped[str] = mapped_column(Text, primary_key=True)
+    per_eur: Mapped[Decimal] = mapped_column(Numeric(18, 8))
