@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from bido_back.agents.catalog import (
     DEFAULT_MODEL,
+    EXTRACTION_MODEL,
     QUOTE_EXTRACTION,
     RFQ_EMAIL_WRITER,
     RFQ_INTAKE,
@@ -34,7 +35,7 @@ from tests.agents.test_runner import Script, final, script
 
 __all__ = ["script"]
 
-CONFIG = RunnerConfig(anthropic_api_key="test-not-a-real-key")
+CONFIG = RunnerConfig(openai_api_key="test-not-a-real-key")
 AGENTS: list[AgentDefinition[Any]] = [RFQ_INTAKE, RFQ_EMAIL_WRITER, QUOTE_EXTRACTION]
 
 
@@ -91,14 +92,19 @@ def test_prompt_files_load_and_match_their_version(agent: AgentDefinition[Any]) 
 
 @pytest.mark.parametrize("agent", AGENTS, ids=lambda a: a.name)
 def test_agents_are_single_shot_without_tools(agent: AgentDefinition[Any]) -> None:
-    assert agent.model == DEFAULT_MODEL == "claude-sonnet-5-5"
     assert agent.tools == ()
     assert agent.max_turns <= 2
     assert agent.history_runs == 0
 
 
+def test_models() -> None:
+    assert RFQ_INTAKE.model == RFQ_EMAIL_WRITER.model == DEFAULT_MODEL == "gpt-6-luna"
+    # Extraction produces the prices the buyer compares: the stronger model.
+    assert QUOTE_EXTRACTION.model == EXTRACTION_MODEL == "gpt-6.1-sol"
+
+
 def test_model_is_configurable() -> None:
-    assert quote_extraction("claude-opus-5-5").model == "claude-opus-5-5"
+    assert quote_extraction("gpt-6-luna").model == "gpt-6-luna"
 
 
 def test_extraction_prompt_treats_supplier_content_as_data() -> None:
@@ -122,16 +128,17 @@ async def _run_one(
 
 
 def _check_request(request: dict[str, Any], agent: AgentDefinition[Any], task: BaseModel) -> None:
-    assert request["model"] == "claude-sonnet-5-5"
+    assert request["model"] == agent.model
     assert not request.get("tools")
-    system = cast(list[dict[str, Any]], request["system"])
-    assert system[0]["text"].startswith(agent.load_prompt()[:60])
-    output_config = cast(dict[str, Any], request["output_config"])
-    assert output_config["effort"] == agent.effort
-    schema = output_config["format"]["schema"]
-    assert set(schema["properties"]) == set(agent.output_model.model_fields)
-    first = cast(list[dict[str, Any]], request["messages"])[0]
-    assert first["content"] == [{"type": "text", "text": task.model_dump_json()}]
+    assert request["store"] is False
+    assert request["reasoning"]["effort"] == agent.effort
+    instructions, first = cast(list[dict[str, Any]], request["input"])
+    assert instructions["role"] == "developer"
+    assert instructions["content"].startswith(agent.load_prompt()[:60])
+    output_format = cast(dict[str, Any], request["text"])["format"]
+    assert output_format["strict"] is True
+    assert set(output_format["schema"]["properties"]) == set(agent.output_model.model_fields)
+    assert first == {"role": "user", "content": task.model_dump_json()}
 
 
 async def test_rfq_intake_runs(script: Script) -> None:

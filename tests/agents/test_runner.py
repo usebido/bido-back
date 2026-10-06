@@ -1,7 +1,7 @@
-"""Runner behavior on Agno, against a scripted Anthropic client. No network.
+"""Runner behavior on Agno, against a scripted OpenAI client. No network.
 
-The model is Agno's real `Claude`, built by the adapter; only its Anthropic
-SDK client is replaced by a stub that returns scripted Messages API responses
+The model is the adapter's real Agno OpenAI Responses model; only its OpenAI
+SDK client is replaced by a stub that returns scripted Responses API responses
 and records every request. So these tests exercise Agno's loop, tool calls,
 pause, structured output, and message formatting end to end.
 """
@@ -13,11 +13,11 @@ from collections.abc import Callable, Sequence
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-import anthropic
+import openai
 import pytest
 from agno.agent import Agent
 from agno.db.postgres import AsyncPostgresDb
-from anthropic.types.beta import BetaMessage
+from openai.types.responses import Response, ResponseReasoningItem
 from pydantic import BaseModel, Field, JsonValue
 
 from bido_back.agents import agno_adapter
@@ -38,49 +38,81 @@ from bido_back.agents.events import (
 from bido_back.agents.runner import Completed, Failed, NeedsApproval, run, run_to_completion
 from bido_back.agents.tools import Tool, ToolError
 
-# --- Scripted Anthropic client ----------------------------------------------
+# --- Scripted OpenAI client -------------------------------------------------
 
-type Block = dict[str, object]
+MODEL = "gpt-6-luna"
 
-
-def thinking(text: str, signature: str = "sig") -> Block:
-    return {"type": "thinking", "thinking": text, "signature": signature}
+type Item = dict[str, Any]
 
 
-def text(value: str) -> Block:
-    return {"type": "text", "text": value}
+def thinking(summary: str, encrypted: str = "enc") -> Item:
+    """A reasoning item: its summary is shown, its encrypted content replayed."""
+    return {
+        "type": "reasoning",
+        "id": f"rs_{uuid4().hex[:12]}",
+        "summary": [{"type": "summary_text", "text": summary}],
+        "encrypted_content": encrypted,
+    }
 
 
-def tool_use(call_id: str, name: str, **args: object) -> Block:
-    return {"type": "tool_use", "id": call_id, "name": name, "input": args}
+def text(value: str) -> Item:
+    return {
+        "type": "message",
+        "id": f"msg_{uuid4().hex[:12]}",
+        "role": "assistant",
+        "status": "completed",
+        "content": [{"type": "output_text", "text": value, "annotations": []}],
+    }
 
 
-def reply(*blocks: Block) -> BetaMessage:
-    stop = "tool_use" if any(b["type"] == "tool_use" for b in blocks) else "end_turn"
-    return BetaMessage.model_validate(
+def tool_use(item_id: str, name: str, **args: object) -> Item:
+    """A function call. Agno keys calls by the item id (`fc_1`); the API pairs
+    the call with its output by `call_id` (`call_1`)."""
+    return {
+        "type": "function_call",
+        "id": item_id,
+        "call_id": item_id.replace("fc_", "call_", 1),
+        "name": name,
+        "arguments": json.dumps(args),
+        "status": "completed",
+    }
+
+
+def reply(*items: Item) -> Response:
+    return Response.model_validate(
         {
-            "id": f"msg_{uuid4().hex}",
-            "type": "message",
-            "role": "assistant",
-            "model": "claude-opus-5-5",
-            "content": list(blocks),
-            "stop_reason": stop,
-            "stop_sequence": None,
-            "usage": {"input_tokens": 10, "output_tokens": 5},
+            "id": f"resp_{uuid4().hex}",
+            "object": "response",
+            "created_at": 0,
+            "model": MODEL,
+            "status": "completed",
+            "output": list(items),
+            "parallel_tool_calls": True,
+            "tool_choice": "auto",
+            "tools": [],
+            "usage": {
+                "input_tokens": 10,
+                "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0},
+                "output_tokens": 5,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 15,
+            },
         }
     )
 
 
-def final(*before: Block, **output: object) -> BetaMessage:
+def final(*before: Item, **output: object) -> Response:
     return reply(*before, text(json.dumps(output)))
 
 
-class _StubMessages:
-    def __init__(self, responses: Sequence[BetaMessage | Exception]) -> None:
+class _StubResponses:
+    def __init__(self, responses: Sequence[Response | Exception]) -> None:
         self._responses = list(responses)
         self.calls: list[dict[str, Any]] = []
 
-    async def create(self, **kwargs: Any) -> BetaMessage:
+    async def create(self, **kwargs: Any) -> Response:
+        # With an output schema Agno requests whole responses, never a stream.
+        assert not kwargs.get("stream"), "streamed requests are not scripted"
         self.calls.append(kwargs)
         if not self._responses:
             raise AssertionError("the stub ran out of scripted responses")
@@ -90,43 +122,42 @@ class _StubMessages:
         return response
 
 
-class _StubBeta:
-    def __init__(self, messages: _StubMessages) -> None:
-        self.messages = messages
+class StubOpenAI:
+    """Stands in for openai.AsyncOpenAI's Responses API."""
 
-
-class StubAnthropic:
-    """Stands in for anthropic.AsyncAnthropic: both endpoints share one script."""
-
-    def __init__(self, responses: Sequence[BetaMessage | Exception]) -> None:
-        self.messages = _StubMessages(responses)
-        self.beta = _StubBeta(self.messages)
+    def __init__(self, responses: Sequence[Response | Exception]) -> None:
+        self.responses = _StubResponses(responses)
 
     def is_closed(self) -> bool:
         return False
 
     @property
     def calls(self) -> list[dict[str, Any]]:
-        return self.messages.calls
+        return self.responses.calls
 
 
-type Script = Callable[..., StubAnthropic]
+type Script = Callable[..., StubOpenAI]
+
+
+def install_stub(monkeypatch: pytest.MonkeyPatch, stub: StubOpenAI) -> None:
+    """Make every model the adapter builds use `stub` as its client."""
+    real = agno_adapter.build_model
+
+    def build_model(definition: AgentDefinition[Any], config: RunnerConfig) -> Any:
+        model = real(definition, config)
+        model.async_client = cast(openai.AsyncOpenAI, stub)
+        return model
+
+    monkeypatch.setattr(agno_adapter, "build_model", build_model)
 
 
 @pytest.fixture
 def script(monkeypatch: pytest.MonkeyPatch) -> Script:
     """Install a scripted client into every model the adapter builds."""
 
-    def install(*responses: BetaMessage | Exception) -> StubAnthropic:
-        stub = StubAnthropic(responses)
-        real = agno_adapter.build_model
-
-        def build_model(definition: AgentDefinition[Any], config: RunnerConfig) -> Any:
-            model = real(definition, config)
-            model.async_client = cast(anthropic.AsyncAnthropic, stub)
-            return model
-
-        monkeypatch.setattr(agno_adapter, "build_model", build_model)
+    def install(*responses: Response | Exception) -> StubOpenAI:
+        stub = StubOpenAI(responses)
+        install_stub(monkeypatch, stub)
         return stub
 
     return install
@@ -204,7 +235,7 @@ def agent(max_turns: int = 4) -> AgentDefinition[Answer]:
         name="example",
         prompt_file="example.v1.md",
         prompt_version=1,
-        model="claude-opus-5-5",
+        model=MODEL,
         output_model=Answer,
         tools=(LOOKUP, SEND),
         max_turns=max_turns,
@@ -212,7 +243,7 @@ def agent(max_turns: int = 4) -> AgentDefinition[Answer]:
     )
 
 
-CONFIG = RunnerConfig(anthropic_api_key="test-not-a-real-key")
+CONFIG = RunnerConfig(openai_api_key="test-not-a-real-key")
 
 
 class RecordingSink:
@@ -241,24 +272,24 @@ def ctx(user_id: UUID | None = None) -> ToolContext:
 TASK = Task(question="How much is SKU-1?")
 
 
-def messages_of(call: dict[str, Any]) -> list[dict[str, Any]]:
-    return cast(list[dict[str, Any]], call["messages"])
+def input_of(call: dict[str, Any]) -> list[Any]:
+    """The request's input items: dict messages and calls, plus replayed reasoning items."""
+    return cast(list[Any], call["input"])
+
+
+def items_of(call: dict[str, Any], item_type: str) -> list[dict[str, Any]]:
+    """The request's dict input items of one type."""
+    items = [cast(dict[str, Any], i) for i in input_of(call) if isinstance(i, dict)]
+    return [i for i in items if i.get("type") == item_type]
 
 
 def tool_results(call: dict[str, Any]) -> list[dict[str, Any]]:
-    """Every tool_result block sent in a request."""
-    found: list[dict[str, Any]] = []
-    for message in messages_of(call):
-        content = message["content"]
-        if isinstance(content, list):
-            for block in cast(list[dict[str, Any]], content):
-                if block.get("type") == "tool_result":
-                    found.append(block)
-    return found
+    """Every function_call_output item sent in a request."""
+    return items_of(call, "function_call_output")
 
 
 def result_text(block: dict[str, Any]) -> str:
-    return json.dumps(block["content"])
+    return cast(str, block["output"])
 
 
 # --- Tests -----------------------------------------------------------------
@@ -266,7 +297,9 @@ def result_text(block: dict[str, Any]) -> str:
 
 async def test_read_tool_runs_and_its_result_is_fed_back(script: Script) -> None:
     stub = script(
-        reply(thinking("I need the price.", "sig-1"), tool_use("c1", "lookup_price", sku="SKU-1")),
+        reply(
+            thinking("I need the price.", "enc-1"), tool_use("fc_1", "lookup_price", sku="SKU-1")
+        ),
         final(thinking("Got it."), answer="12.50", confidence=0.9),
     )
     context = ctx()
@@ -279,23 +312,26 @@ async def test_read_tool_runs_and_its_result_is_fed_back(script: Script) -> None
     assert lookup_calls == [(context.tenant_id, LookupIn(sku="SKU-1"))]
 
     second = stub.calls[1]
-    assistant = messages_of(second)[1]
-    assert assistant["role"] == "assistant"
-    # Reasoning is replayed verbatim, signature included.
-    assert {"type": "thinking", "thinking": "I need the price.", "signature": "sig-1"} in (
-        assistant["content"]
-    )
+    # Stateless: no chaining to a stored response; the context is replayed.
+    assert "previous_response_id" not in second
+    replayed = input_of(second)
+    # The encrypted reasoning is replayed before the call it led to.
+    [reasoning] = [i for i in replayed if isinstance(i, ResponseReasoningItem)]
+    assert reasoning.encrypted_content == "enc-1"
+    [call] = items_of(second, "function_call")
+    assert (call["id"], call["call_id"], call["name"]) == ("fc_1", "call_1", "lookup_price")
+    assert replayed.index(reasoning) < replayed.index(call)
     [fed_back] = tool_results(second)
-    assert fed_back["tool_use_id"] == "c1"
-    assert '{\\"sku\\":\\"SKU-1\\",\\"price_cents\\":1250}' in result_text(fed_back)
+    assert fed_back["call_id"] == "call_1"
+    assert '{"sku":"SKU-1","price_cents":1250}' in result_text(fed_back)
 
     kinds = [type(e) for e in result.events]
     assert kinds == [ReasoningStep, ToolCalled, ToolResult, Artifact, ReasoningStep, RunCompleted]
-    reasoning = [e.text for e in result.events if isinstance(e, ReasoningStep)]
-    assert reasoning == ["I need the price.", "Got it."]
+    reasoning_steps = [e.text for e in result.events if isinstance(e, ReasoningStep)]
+    assert reasoning_steps == ["I need the price.", "Got it."]
     called = result.events[1]
     assert isinstance(called, ToolCalled)
-    assert (called.call_id, called.tool, called.kind) == ("c1", "lookup_price", "read")
+    assert (called.call_id, called.tool, called.kind) == ("fc_1", "lookup_price", "read")
     assert called.args == {"sku": "SKU-1"}
     artifact = result.events[3]
     assert isinstance(artifact, Artifact)
@@ -309,25 +345,29 @@ async def test_prompt_tools_and_model_options_are_sent(script: Script) -> None:
     await run_to_completion(agent(), TASK, ctx(), config=CONFIG)
 
     request = stub.calls[0]
-    assert request["model"] == "claude-opus-5-5"
-    system = cast(list[dict[str, Any]], request["system"])
-    assert system[0]["text"].startswith("You are a procurement assistant")
+    assert request["model"] == MODEL
+    # Stateless: OpenAI stores nothing, so reasoning comes back encrypted for replay.
+    assert request["store"] is False
+    assert "reasoning.encrypted_content" in request["include"]
+    assert request["reasoning"] == {"effort": "low", "summary": "auto"}
+    assert request["max_output_tokens"] == 16_000
     tools = cast(list[dict[str, Any]], request["tools"])
     # Exactly our tools: no Agno built-ins (memory, knowledge, shell...).
     assert [t["name"] for t in tools] == ["lookup_price", "send_payment"]
-    assert tools[1]["input_schema"]["required"] == ["supplier_id", "amount_cents"]
-    assert request["thinking"] == {"type": "adaptive", "display": "summarized"}
-    output_config = cast(dict[str, Any], request["output_config"])
-    assert output_config["effort"] == "low"
-    assert output_config["format"]["type"] == "json_schema"
-    assert set(output_config["format"]["schema"]["properties"]) == {"answer", "confidence"}
-    first = messages_of(request)[0]
-    assert first["role"] == "user"
-    assert first["content"] == [{"type": "text", "text": TASK.model_dump_json()}]
+    assert {t["type"] for t in tools} == {"function"}
+    assert tools[1]["parameters"]["required"] == ["supplier_id", "amount_cents"]
+    output_format = cast(dict[str, Any], request["text"])["format"]
+    assert output_format["type"] == "json_schema"
+    assert output_format["strict"] is True
+    assert set(output_format["schema"]["properties"]) == {"answer", "confidence"}
+    instructions, first = input_of(request)
+    assert instructions["role"] == "developer"
+    assert instructions["content"].startswith("You are a procurement assistant")
+    assert first == {"role": "user", "content": TASK.model_dump_json()}
 
 
 async def test_act_tool_is_never_executed_and_requests_approval(script: Script) -> None:
-    stub = script(reply(tool_use("c1", "send_payment", supplier_id="sup_9", amount_cents=50_000)))
+    stub = script(reply(tool_use("fc_1", "send_payment", supplier_id="sup_9", amount_cents=50_000)))
     sink = RecordingSink()
     context = ctx()
 
@@ -342,7 +382,7 @@ async def test_act_tool_is_never_executed_and_requests_approval(script: Script) 
     canonical = json.dumps(expected_args, sort_keys=True, separators=(",", ":"))
     expected_hash = hashlib.sha256(canonical.encode()).hexdigest()
     assert result.approval.tool == "send_payment"
-    assert result.approval.call_id == "c1"
+    assert result.approval.call_id == "fc_1"
     assert result.approval.args == expected_args
     assert result.approval.args_hash == expected_hash
     assert not any(isinstance(e, ToolCalled | ToolResult) for e in result.events)
@@ -352,7 +392,7 @@ async def test_act_tool_is_never_executed_and_requests_approval(script: Script) 
             tenant_id=context.tenant_id,
             run_id=context.run_id,
             session_id="rfq-42",
-            tool_call_id="c1",
+            tool_call_id="fc_1",
             tool="send_payment",
             args=expected_args,
             args_hash=expected_hash,
@@ -364,22 +404,22 @@ async def test_act_tool_is_never_executed_and_requests_approval(script: Script) 
 async def test_read_tools_in_the_same_turn_as_an_act_still_run(script: Script) -> None:
     script(
         reply(
-            tool_use("c1", "lookup_price", sku="SKU-1"),
-            tool_use("c2", "send_payment", supplier_id="sup_9", amount_cents=1250),
+            tool_use("fc_1", "lookup_price", sku="SKU-1"),
+            tool_use("fc_2", "send_payment", supplier_id="sup_9", amount_cents=1250),
         )
     )
 
     result = await run_to_completion(agent(), TASK, ctx(), config=CONFIG)
 
     assert isinstance(result, NeedsApproval)
-    assert result.approval.call_id == "c2"
+    assert result.approval.call_id == "fc_2"
     assert [args for _, args in lookup_calls] == [LookupIn(sku="SKU-1")]
     assert send_calls == []
 
 
 async def test_act_tool_with_invalid_args_is_sent_back_not_proposed(script: Script) -> None:
     stub = script(
-        reply(tool_use("c1", "send_payment", supplier_id="sup_9", amount_cents="lots")),
+        reply(tool_use("fc_1", "send_payment", supplier_id="sup_9", amount_cents="lots")),
         final(answer="gave up", confidence=0),
     )
     sink = RecordingSink()
@@ -390,13 +430,13 @@ async def test_act_tool_with_invalid_args_is_sent_back_not_proposed(script: Scri
     assert sink.proposals == []
     assert send_calls == []
     [error] = tool_results(stub.calls[1])
-    assert error["tool_use_id"] == "c1"
+    assert error["call_id"] == "call_1"
     assert "amount_cents" in result_text(error)
     assert "lots" not in result_text(error)  # input values are not echoed
 
 
 async def test_approval_that_cannot_be_recorded_fails_the_run(script: Script) -> None:
-    script(reply(tool_use("c1", "send_payment", supplier_id="sup_9", amount_cents=1)))
+    script(reply(tool_use("fc_1", "send_payment", supplier_id="sup_9", amount_cents=1)))
 
     result = await run_to_completion(
         agent(), TASK, ctx(), approvals=RecordingSink(fail=True), config=CONFIG
@@ -408,7 +448,7 @@ async def test_approval_that_cannot_be_recorded_fails_the_run(script: Script) ->
 
 
 async def test_max_turns_exceeded_fails(script: Script) -> None:
-    stub = script(*[reply(tool_use(f"c{i}", "lookup_price", sku="SKU-1")) for i in range(5)])
+    stub = script(*[reply(tool_use(f"fc_{i}", "lookup_price", sku="SKU-1")) for i in range(5)])
 
     result = await run_to_completion(agent(max_turns=3), TASK, ctx(), config=CONFIG)
 
@@ -439,9 +479,9 @@ async def test_text_without_output_fails(script: Script) -> None:
 async def test_tool_errors_become_error_results(script: Script) -> None:
     stub = script(
         reply(
-            tool_use("c1", "lookup_price", sku="missing"),
-            tool_use("c2", "lookup_price", sku="boom"),
-            tool_use("c3", "no_such_tool"),
+            tool_use("fc_1", "lookup_price", sku="missing"),
+            tool_use("fc_2", "lookup_price", sku="boom"),
+            tool_use("fc_3", "no_such_tool"),
         ),
         final(answer="unknown", confidence=0),
     )
@@ -451,11 +491,11 @@ async def test_tool_errors_become_error_results(script: Script) -> None:
     assert isinstance(result, Completed)
     results = [e for e in result.events if isinstance(e, ToolResult)]
     assert [(r.call_id, r.ok, r.error) for r in results] == [
-        ("c1", False, "no such sku"),
-        ("c2", False, "internal error while running the tool"),
+        ("fc_1", False, "no such sku"),
+        ("fc_2", False, "internal error while running the tool"),
     ]
     sent = tool_results(stub.calls[1])
-    assert sorted(b["tool_use_id"] for b in sent) == ["c1", "c2", "c3"]
+    assert sorted(b["call_id"] for b in sent) == ["call_1", "call_2", "call_3"]
     assert "hunter2" not in json.dumps(sent)
 
 
@@ -470,7 +510,7 @@ async def test_provider_error_fails_the_run(script: Script) -> None:
 
 async def test_events_have_increasing_seq_and_round_trip(script: Script) -> None:
     script(
-        reply(thinking("thinking"), tool_use("c1", "lookup_price", sku="SKU-1")),
+        reply(thinking("thinking"), tool_use("fc_1", "lookup_price", sku="SKU-1")),
         final(answer="12.50", confidence=0.9),
     )
     context = ctx()
@@ -580,7 +620,7 @@ def test_prompt_version_must_match_file() -> None:
             name="example",
             prompt_file="example.v1.md",
             prompt_version=2,
-            model="claude-opus-5-5",
+            model=MODEL,
             output_model=Answer,
         )
 
@@ -625,7 +665,7 @@ def test_no_storage_without_a_database_url() -> None:
 def test_storage_is_agno_postgres_in_schema_agno() -> None:
     # Building the engine does not connect, so no database is needed here.
     config = RunnerConfig(
-        anthropic_api_key="test-not-a-real-key",
+        openai_api_key="test-not-a-real-key",
         agno_database_url="postgresql+asyncpg://bido_agno:pw@localhost:54320/bido",
     )
     context = ctx()

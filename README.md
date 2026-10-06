@@ -86,9 +86,13 @@ To start over with an empty database: `docker compose down -v && docker compose 
 tool loop, sessions and memory. Bido keeps everything that commits: auth,
 tenants, approvals, the outbox, and the business endpoints.
 
+- **Models:** OpenAI, through the Responses API (`OPENAI_API_KEY`).
+  `gpt-6-luna` by default, `gpt-6.1-sol` for quote extraction; each agent's
+  model is set in `agents/catalog/definitions.py`. Requests are stateless
+  (`store=False`): OpenAI keeps no conversation state between turns.
 - **Pinned exactly** (`agno==<version>` in `pyproject.toml`). Upgrades are
   deliberate, in their own PR, after reading the changelog.
-- **Contained:** Agno and Anthropic types live only in
+- **Contained:** Agno and OpenAI types live only in
   `src/bido_back/agents/agno_adapter.py`. Everything else goes through `run()`
   and sees our own tool, run and event types, so replacing Agno stays a change
   to one module.

@@ -2,6 +2,7 @@
 
 from bido_back.agents.catalog.definitions import (
     DEFAULT_MODEL,
+    EXTRACTION_MODEL,
     QUOTE_EXTRACTION,
     RFQ_EMAIL_WRITER,
     RFQ_INTAKE,
@@ -13,6 +14,7 @@ from bido_back.agents.catalog.definitions import (
 
 __all__ = [
     "DEFAULT_MODEL",
+    "EXTRACTION_MODEL",
     "QUOTE_EXTRACTION",
     "RFQ_EMAIL_WRITER",
     "RFQ_INTAKE",

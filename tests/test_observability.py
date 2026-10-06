@@ -244,7 +244,7 @@ def test_sentry_scrubber_keeps_ids_and_drops_content() -> None:
             "tenant_id": "6f1c0e9e-0000-4000-8000-000000000001",
             "run_id": "run-1",
             "job_type": "agent.run",
-            "model": "claude-sonnet",
+            "model": "gpt-6-luna",
             "input_tokens": 1200,
             "output_tokens": 300,
             "prompt": CONTENT,
@@ -287,7 +287,7 @@ def test_sentry_scrubber_keeps_ids_and_drops_content() -> None:
         "tenant_id": "6f1c0e9e-0000-4000-8000-000000000001",
         "run_id": "run-1",
         "job_type": "agent.run",
-        "model": "claude-sonnet",
+        "model": "gpt-6-luna",
         "input_tokens": 1200,
         "output_tokens": 300,
     }

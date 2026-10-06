@@ -299,7 +299,7 @@ def _init_tracing(settings: Settings, service: Service) -> None:
     trace.set_tracer_provider(provider)
     _state.tracer_provider = provider
 
-    # Outbound HTTP (Anthropic, providers) and AWS calls (SQS, S3). Headers and
+    # Outbound HTTP (OpenAI, providers) and AWS calls (SQS, S3). Headers and
     # bodies are not captured; Bedrock message capture stays at its default (off).
     HTTPXClientInstrumentor().instrument(
         tracer_provider=provider,

@@ -39,7 +39,7 @@ __all__ = ["app_engine", "migrator_engine", "script", "two_tenants"]
 
 pytestmark = pytest.mark.db
 
-CONFIG = RunnerConfig(anthropic_api_key="test-not-a-real-key")
+CONFIG = RunnerConfig(openai_api_key="test-not-a-real-key")
 TODAY = date(2026, 10, 6)
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -291,7 +291,7 @@ async def test_reply_becomes_a_proposal_with_provenance(seeded: Seeded, script: 
     # The model saw the sheet with cell markers, and nothing that could act.
     [request] = stub.calls
     assert not request.get("tools")
-    user_text = cast(list[dict[str, Any]], request["messages"])[0]["content"][0]["text"]
+    user_text = cast(list[dict[str, Any]], request["input"])[1]["content"]
     assert "[Angebot.xlsx Preise!D2] 0.45" in user_text
 
     [(proposal, lines)] = await proposals_of(seeded)

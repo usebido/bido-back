@@ -1,4 +1,4 @@
-"""The Agno adapter: the ONLY module that imports Agno (or the Anthropic model it wraps).
+"""The Agno adapter: the ONLY module that imports Agno (or the OpenAI model it wraps).
 
 Agno runs the agent loop, calls the model, executes tools, and keeps sessions
 and runs in Postgres. Everything that crosses this module's boundary is ours:
@@ -21,8 +21,11 @@ How our rules map onto Agno:
   `ApprovalRequested` and stop. If the proposed arguments do not validate,
   the error is fed back as the call's result and the run continues, so a
   person is never asked to approve an invalid payload.
-- The final answer uses Agno's `output_schema` (native structured output on
-  Claude) and is validated again with our output model.
+- The model is OpenAI's, through the Responses API, stateless: `store=False`,
+  so OpenAI keeps no conversation state, and each turn replays the full
+  context, including the encrypted reasoning items of earlier turns.
+- The final answer uses Agno's `output_schema` (native strict structured
+  output on OpenAI) and is validated again with our output model.
 - Every Agno user_id / session_id is namespaced by tenant (`agno_ids`).
 - Agno telemetry is off: `AGNO_TELEMETRY=false` is forced in the process
   environment (bido_back/agents/__init__.py, and again per run here, because
@@ -44,7 +47,7 @@ from typing import Any, Final, Literal
 from agno.agent import Agent
 from agno.db.postgres import AsyncPostgresDb, create_async_postgres_engine
 from agno.exceptions import redact_secrets
-from agno.models.anthropic import Claude
+from agno.models.openai.responses import OpenAIResponses
 from agno.run.agent import (
     ModelRequestStartedEvent,
     RunCancelledEvent,
@@ -156,16 +159,31 @@ def _agno_db(url: str) -> AsyncPostgresDb:
 # --- Model -----------------------------------------------------------------
 
 
-def build_model(definition: AgentDefinition[Any], config: RunnerConfig) -> Claude:
+class _ReasoningResponses(OpenAIResponses):
+    """OpenAIResponses for models that reason.
+
+    Agno recognizes reasoning models by id prefix (o3, o4-mini, gpt-5) and
+    otherwise drops the reasoning items between turns. Every model we run
+    reasons, so this is always true: with `store=False` Agno then asks for the
+    encrypted reasoning and replays it, which a reasoning model needs to
+    continue after a tool call.
+    """
+
+    def _using_reasoning_model(self) -> bool:
+        return True
+
+
+def build_model(definition: AgentDefinition[Any], config: RunnerConfig) -> OpenAIResponses:
     """The Agno model for a definition. Tests replace this to script responses."""
-    return Claude(
+    return _ReasoningResponses(
         id=definition.model,
-        max_tokens=definition.max_tokens,
-        thinking={"type": "adaptive", "display": "summarized"} if definition.thinking else None,
-        output_config={"effort": definition.effort} if definition.effort else None,
-        api_key=config.anthropic_api_key,
+        max_output_tokens=definition.max_tokens,
+        reasoning_effort=definition.effort,
+        reasoning_summary="auto" if definition.thinking else None,
+        store=False,
+        api_key=config.openai_api_key,
         timeout=config.model_timeout_s,
-        client_params={"max_retries": config.model_max_retries},
+        max_retries=config.model_max_retries,
     )
 
 

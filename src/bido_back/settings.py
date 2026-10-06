@@ -35,7 +35,7 @@ class Settings(BaseSettings):
     # Messages the worker cannot handle (no tenant, unknown type) go here.
     sqs_parking_queue_url: str | None = None
 
-    anthropic_api_key: str | None = Field(default=None, repr=False)
+    openai_api_key: str | None = Field(default=None, repr=False)
 
     # Email. `email_domain` names our Message-IDs and the Bido reply addresses.
     email_domain: str = "quotes.usebido.com"

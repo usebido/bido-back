@@ -9,7 +9,7 @@ It yields OUR events (`events.py`) and ends with exactly one terminal event:
 
 The agent loop itself (model calls, tool execution, sessions, run storage)
 is Agno's, behind `agno_adapter.py`. Nothing here, and nothing a caller
-sees, is an Agno or Anthropic type. Evals call `run()` too.
+sees, is an Agno or OpenAI type. Evals call `run()` too.
 """
 
 from collections.abc import AsyncIterator

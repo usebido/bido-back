@@ -7,7 +7,8 @@ that send, no tools at all. Its output is data that `bido_back.quotes`
 validates before anything is stored.
 
 Each agent has a factory taking the model id, so the caller can choose it
-from configuration; the module constants use `DEFAULT_MODEL`.
+from configuration; the module constants use `DEFAULT_MODEL`, except quote
+extraction, which uses `EXTRACTION_MODEL`.
 """
 
 import re
@@ -21,7 +22,10 @@ from bido_back.agents.catalog.contracts import (
 )
 from bido_back.agents.definition import AgentDefinition
 
-DEFAULT_MODEL: Final = "claude-sonnet-5-5"
+DEFAULT_MODEL: Final = "gpt-6-luna"
+# Quote extraction turns supplier documents into the prices the buyer compares,
+# so it runs on the stronger model.
+EXTRACTION_MODEL: Final = "gpt-6.1-sol"
 
 # One request for the answer plus one spare, in case the model's first final
 # answer does not validate and Agno asks again.
@@ -52,7 +56,7 @@ def rfq_email_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[RfqEmailOutp
     )
 
 
-def quote_extraction(model: str = DEFAULT_MODEL) -> AgentDefinition[QuoteExtractionOutput]:
+def quote_extraction(model: str = EXTRACTION_MODEL) -> AgentDefinition[QuoteExtractionOutput]:
     return AgentDefinition(
         name="quote_extraction",
         prompt_file="quote_extraction.v1.md",
