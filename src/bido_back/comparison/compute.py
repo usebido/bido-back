@@ -113,6 +113,8 @@ class QuotedLine:
     lead_time_days: int | None = None
     needs_review: bool = False
     fields: Mapping[str, FieldInfo] = field(default_factory=dict[str, FieldInfo])
+    # Line-level validation issues (`_review.issues`); None when not recorded.
+    review_issues: tuple[str, ...] | None = None
     # Qualification the supplier states for this offer (grounded text), if any.
     qualification: str | None = None
 
@@ -384,6 +386,27 @@ _LINE_FIELDS: Final = (
     "lead_time_days",
 )
 _PROPOSAL_FIELDS: Final = ("currency", "valid_until", "incoterm")
+# Fields that do not count against an offer when the RFQ line requests no part number.
+_UNREQUESTED_WITHOUT_MPN: Final = ("offered_mpn",)
+
+
+def _needs_review(line: QuotedLine, ignored: Sequence[str]) -> bool:
+    """The line's review flag, recomputed without the `ignored` fields when possible.
+
+    Without the recorded line issues the stored flag stands: an unknown issue may be
+    the reason for it.
+    """
+    if not line.needs_review or not ignored or line.review_issues is None:
+        return line.needs_review
+    if line.review_issues:
+        return True
+    return any(
+        info.needs_review and not info.corrected
+        for name, info in line.fields.items()
+        if name not in ignored
+    )
+
+
 # What `corrected_fields` reports: every field a person can correct.
 _CORRECTABLE_LINE_FIELDS: Final = (
     "offered_mpn",
@@ -436,12 +459,14 @@ def compute_cell(
         )
 
     chosen, applies = picked
+    # A part number the buyer did not ask for cannot make an offer doubtful.
+    ignored = () if line.mpn else _UNREQUESTED_WITHOUT_MPN
     flags: list[Flag] = []
     if chosen.is_alternative:
         flags.append("alternative_part")
-    if chosen.needs_review:
+    if _needs_review(chosen, ignored):
         flags.append("needs_review")
-    low = _low_fields(chosen.fields, _LINE_FIELDS)
+    low = _low_fields(chosen.fields, [n for n in _LINE_FIELDS if n not in ignored])
     if low:
         flags.append("low_confidence")
     if chosen.unit_price is None:

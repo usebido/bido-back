@@ -48,6 +48,17 @@ def parsed_text(raw: Mapping[str, object], name: str) -> str | None:
     return parsed
 
 
+def review_issues(raw: Mapping[str, object]) -> tuple[str, ...] | None:
+    """Line-level validation issues from the provenance (`_review.issues`), if recorded."""
+    review = raw.get("_review")
+    if not isinstance(review, dict):
+        return None
+    issues = cast(dict[str, object], review).get("issues")
+    if not isinstance(issues, list):
+        return None
+    return tuple(str(i) for i in cast(list[object], issues))
+
+
 def field_infos(raw: Mapping[str, object]) -> dict[str, FieldInfo]:
     """Per-field provenance (`{"unit_price": {"confidence": 0.9, "needs_review": false}}`).
 
@@ -178,6 +189,7 @@ async def load_comparison(db: Db, principal: Principal, rfq_id: UUID, today: dat
                         lead_time_days=pl.lead_time_days,
                         needs_review=pl.needs_review,
                         fields=field_infos(pl.fields),
+                        review_issues=review_issues(pl.fields),
                         qualification=parsed_text(pl.fields, "qualification"),
                     )
                     for pl in proposal_lines[proposal.id]
