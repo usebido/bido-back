@@ -11,6 +11,7 @@ import pytest
 from pydantic import BaseModel
 
 from bido_back.agents.catalog import (
+    AWARD_NOTICE_WRITER,
     DEFAULT_MODEL,
     EXTRACTION_MODEL,
     QUOTE_EXTRACTION,
@@ -51,6 +52,7 @@ AGENTS: list[AgentDefinition[Any]] = [
     RFQ_TEMPLATE_BUILDER,
     RFQ_FOLLOWUP_WRITER,
     RFQ_NEGOTIATION_WRITER,
+    AWARD_NOTICE_WRITER,
 ]
 
 

@@ -98,6 +98,7 @@ def build_worker_registry(
 ) -> HandlerRegistry:
     """Every job handler of the RFQ flow, wired from settings (the production registry)."""
     from bido_back.agents.config import RunnerConfig
+    from bido_back.awards.send import register_award_act_tools
     from bido_back.followups.agents import default_followup_writer
     from bido_back.followups.jobs import FollowupSweepHandler
     from bido_back.followups.send import register_followup_act_tools
@@ -128,6 +129,7 @@ def build_worker_registry(
     register_act_tools(act_tools, act_deps)
     register_followup_act_tools(act_tools, act_deps)
     register_negotiation_act_tools(act_tools, act_deps)
+    register_award_act_tools(act_tools, act_deps)
     registry = build_registry(engine, act_tools)
     storage = build_storage(settings)
     runner_config = RunnerConfig.from_settings(settings)

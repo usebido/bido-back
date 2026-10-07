@@ -27,6 +27,9 @@ EXPECTED_TOOLS = {
     "prepare_send": "draft",
     "get_negotiation_status": "read",
     "propose_counteroffers": "draft",
+    "get_award_status": "read",
+    "list_open_pos": "read",
+    "prepare_award": "draft",
 }
 
 

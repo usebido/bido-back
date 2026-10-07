@@ -13,6 +13,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from bido_back.agents.catalog.contracts import LineCategory
+from bido_back.awards.views import AwardApprovalView, ThreadEmailApprovalView
 
 # Deliberately strict and single-line: these end up in email headers.
 EmailAddress = Annotated[
@@ -218,3 +219,7 @@ class ApprovalQueueItem(BaseModel):
     rfq_email: RfqEmailDraft | None
     # Set for `send_negotiation_email`: a counter-offer or best-and-final request.
     negotiation_email: NegotiationEmailDraft | None = None
+    # Set for `award_rfq`: the exact lines, suppliers and prices to award.
+    award: AwardApprovalView | None = None
+    # Set for `send_purchase_order` and `send_award_notice`: the exact email.
+    thread_email: ThreadEmailApprovalView | None = None
