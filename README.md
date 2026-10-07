@@ -191,6 +191,23 @@ names become supplier contacts.
   local variables, and a `before_send` scrubber; span URLs lose their query
   strings, and SQL spans record statements without parameters.
 
+## Working with the dev environment (AWS)
+
+The `aws dev:` tasks in `.vscode/tasks.json` (health, status, logs, dead
+letters, deploy) use an AWS CLI profile for the dev account. Sign in with
+IAM Identity Center (`aws: login (SSO)`), then define the profile once in
+`~/.aws/config`. Until AWS activates `b2b-dev`, dev runs temporarily in
+account 045064752511:
+
+```ini
+[profile bido-dev-temp]
+source_profile = bido-mgmt
+role_arn = arn:aws:iam::045064752511:role/OrganizationAccountAccessRole
+region = us-east-2
+```
+
+The tasks ask for the profile name and default to `bido-dev-temp`.
+
 ## Deploy (dev)
 
 `.github/workflows/deploy-dev.yml` deploys to the `dev` environment (AWS
