@@ -227,6 +227,15 @@ class Rfq(Base):
     followup_first_after_days: Mapped[int] = mapped_column(Integer, server_default=text("2"))
     followup_every_days: Mapped[int] = mapped_column(Integer, server_default=text("2"))
     followup_max_chases: Mapped[int] = mapped_column(Integer, server_default=text("3"))
+    # The supplier negotiation (migration 0013): not_started, open,
+    # ready_to_close, closed.
+    negotiation_status: Mapped[str] = mapped_column(Text, server_default=text("'not_started'"))
+    negotiation_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    negotiation_max_rounds: Mapped[int] = mapped_column(Integer, server_default=text("3"))
+    negotiation_early_close: Mapped[bool] = mapped_column(Boolean, server_default=true())
+    negotiation_ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    negotiation_closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    negotiation_outcome: Mapped[list[Any] | None] = mapped_column(JSONB)
 
 
 class RfqLine(Base):
@@ -247,6 +256,10 @@ class RfqLine(Base):
     incoterm: Mapped[str | None] = mapped_column(Text)
     delivery_location: Mapped[str | None] = mapped_column(Text)
     qualification: Mapped[str | None] = mapped_column(Text)
+    # The buyer's negotiation limits, in the RFQ's base currency (migration 0013).
+    target_unit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    max_unit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    max_lead_time_days: Mapped[int | None] = mapped_column(Integer)
 
 
 class Invite(Base):
@@ -274,6 +287,12 @@ class Invite(Base):
     )
     # No chase before this (an auto-reply / out of office; migration 0008).
     followups_paused_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Where this supplier stands in the negotiation, and the offer (proposal
+    # version) last evaluated (migration 0013).
+    negotiation_status: Mapped[str] = mapped_column(Text, server_default=text("'open'"))
+    negotiation_evaluated_proposal_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("proposals.id", ondelete="SET NULL")
+    )
 
 
 class Message(Base):
@@ -588,6 +607,31 @@ class FollowupMessage(Base):
     proposal_id: Mapped[UUID | None] = mapped_column(ForeignKey("proposals.id", ondelete="CASCADE"))
     status: Mapped[str] = mapped_column(Text, server_default=text("'proposed'"))
     approval_id: Mapped[UUID | None] = mapped_column(ForeignKey("approvals.id"))
+    message_id_header: Mapped[str | None] = mapped_column(Text)
+    canceled_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class NegotiationMessage(Base):
+    """A counter-offer or best-and-final request Bido proposed (migration 0013).
+
+    The id is derived from (invite, round). `terms` holds the numbers asked
+    for; the approved text lives in the approval's args and, once sent, in
+    `messages`.
+    """
+
+    __tablename__ = "negotiation_messages"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    invite_id: Mapped[UUID] = mapped_column(ForeignKey("invites.id", ondelete="CASCADE"))
+    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("proposals.id", ondelete="CASCADE"))
+    round: Mapped[int] = mapped_column(Integer)
+    action: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'proposed'"))
+    approval_id: Mapped[UUID | None] = mapped_column(ForeignKey("approvals.id"))
+    terms: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     message_id_header: Mapped[str | None] = mapped_column(Text)
     canceled_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

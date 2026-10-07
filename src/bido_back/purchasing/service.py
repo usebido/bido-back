@@ -795,6 +795,12 @@ async def create_rfq_from_analysis(
         wanted: dict[UUID, str] = {}
         for (line, _), rfq_line in zip(rows, rfq_lines, strict=True):
             line.rfq_line_id = rfq_line.id
+            # The analysis prices become the negotiation's default limits (the buyer
+            # can still change them). Only in the RFQ's own currency: the strategy
+            # compares offers in base currency and there is no FX here.
+            if line.currency == rfq.base_currency:
+                rfq_line.target_unit_price = line.target_price
+                rfq_line.max_unit_price = line.max_price
             suggested = [s for s in line.suppliers if s.get("suggested")]
             for supplier in suggested[: request.max_suppliers_per_line]:
                 wanted.setdefault(UUID(str(supplier["supplier_id"])), str(supplier["name"]))

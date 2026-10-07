@@ -58,6 +58,7 @@ from bido_back.db.models import (
     Supplier,
 )
 from bido_back.documents import DocumentText, extract_text, render_documents
+from bido_back.negotiation.hooks import cancel_on_new_offer
 from bido_back.quotes.parsing import decimal_separator_for
 from bido_back.quotes.validation import (
     LineCheck,
@@ -390,6 +391,8 @@ async def _persist(
         await session.flush()
         session.add_all(_proposal_line(tenant_id, proposal.id, line) for line in validated.lines)
         message.status = "extracted"
+        # A counter-offer awaiting approval answered an older offer: cancel it.
+        await cancel_on_new_offer(session, invite.id)
         await session.flush()
         logger.info(
             "quote.extract: proposal stored message=%s proposal=%s version=%s lines=%s "

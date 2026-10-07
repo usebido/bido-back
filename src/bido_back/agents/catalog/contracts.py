@@ -253,3 +253,49 @@ class FollowupEmailInput(BaseModel):
 
 class FollowupEmailOutput(BaseModel):
     body: str = Field(description="Plain text. The subject is set by code (Re: the RFQ email).")
+
+
+# --- rfq_negotiation_writer: a counter-offer or a best-and-final request ---------
+
+NegotiationAction = Literal["counter", "bafo"]
+
+
+class NegotiationLineAsk(BaseModel):
+    """One line of the counter-offer. Every number is decided by code; the model
+    writes them as given (it may use the language's decimal separator)."""
+
+    position: int
+    line: str = Field(description="The line's description and MPN, as requested")
+    quantity: Decimal
+    unit: str
+    currency: str
+    offered_unit_price: Decimal | None = Field(
+        description="The supplier's current unit price; null if the line is not repriced"
+    )
+    target_unit_price: Decimal | None = Field(
+        description="The unit price we ask for; null when only the lead time is asked"
+    )
+    offered_lead_time_days: int | None = None
+    required_lead_time_days: int | None = Field(
+        default=None, description="The lead time we need, when the offer's is too long"
+    )
+
+
+class NegotiationEmailInput(BaseModel):
+    action: NegotiationAction
+    rfq_ref: str
+    rfq_title: str
+    buyer_company: str
+    buyer_name: str
+    supplier_name: str
+    supplier_language: str = Field(description="ISO 639-1, e.g. de, en, fr, it, pt")
+    round: int = Field(description="1 for the first counter-offer")
+    reply_by: date | None = Field(description="Answer by this date; null if none")
+    mention_competition: bool = Field(
+        description="True: we may say a more competitive offer exists (no names, no numbers)"
+    )
+    lines: list[NegotiationLineAsk]
+
+
+class NegotiationEmailOutput(BaseModel):
+    body: str = Field(description="Plain text. The subject is set by code (Re: the RFQ email).")

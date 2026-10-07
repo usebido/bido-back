@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
-from bido_back.db.models import AnalysisLine, Invite, Item, PoLine
+from bido_back.db.models import AnalysisLine, Invite, Item, PoLine, RfqLine
 from bido_back.onboarding import service as onboarding
 from bido_back.purchasing import service
 from bido_back.purchasing.importers import ImportType
@@ -195,8 +195,16 @@ async def test_rfq_from_analysis_drafts_lines_and_invites(
         linked = list(
             await session.scalars(select(AnalysisLine).where(AnalysisLine.rfq_line_id.is_not(None)))
         )
+        limits = {
+            line.id: (line.target_unit_price, line.max_unit_price)
+            for line in await session.scalars(select(RfqLine).where(RfqLine.rfq_id == rfq.id))
+        }
     assert [i.status for i in invites] == ["draft"]
     assert {line.target_price for line in linked} == {Decimal("2.1333"), None}
+    # The analysis prices are the negotiation's default limits, line by line.
+    for line in linked:
+        assert line.rfq_line_id is not None
+        assert limits[line.rfq_line_id] == (line.target_price, line.max_price)
 
     with pytest.raises(service.Conflict):
         await service.create_rfq_from_analysis(app_engine, who, view.id, RfqFromAnalysisRequest())

@@ -1,7 +1,7 @@
 """Purchase analysis: imported company data and the analyses built from it.
 
 Revision ID: 0014
-Revises: 0012
+Revises: 0013
 Create Date: 2026-10-07
 
 The data a buyer needs to answer "what do I buy for the next build, how much,
@@ -36,7 +36,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0014"
-down_revision: str | Sequence[str] | None = "0012"
+down_revision: str | Sequence[str] | None = "0013"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

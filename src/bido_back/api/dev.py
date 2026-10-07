@@ -1,4 +1,5 @@
-"""Local-only dev endpoints: `POST /dev/inbound` and `POST /dev/followups/sweep`.
+"""Local-only dev endpoints: `POST /dev/inbound`, `POST /dev/followups/sweep` and
+`POST /dev/negotiation/sweep`.
 
 `POST /dev/inbound` simulates an inbound email locally.
 
@@ -34,7 +35,7 @@ from bido_back.api.deps import get_db, get_job_queue
 from bido_back.intake.service import InboundService
 from bido_back.settings import Settings, get_settings
 from bido_back.worker.envelope import Envelope
-from bido_back.worker.job_types import FOLLOWUPS_SWEEP
+from bido_back.worker.job_types import FOLLOWUPS_SWEEP, NEGOTIATION_SWEEP
 from bido_back.worker.jobs import JobQueue
 
 MAX_EML_BYTES = 25 * 1024 * 1024
@@ -100,6 +101,16 @@ async def post_followups_sweep(
     """Run the follow-up sweep now for every tenant (in AWS it runs on a schedule)."""
     key = f"followups.sweep:dev:{uuid4()}"
     await jobs.enqueue(Envelope(type=FOLLOWUPS_SWEEP, tenant_id=UUID(int=0), idempotency_key=key))
+    return {"enqueued": key}
+
+
+@dev_router.post("/negotiation/sweep", dependencies=[Depends(require_local)])
+async def post_negotiation_sweep(
+    jobs: Annotated[JobQueue, Depends(get_job_queue)],
+) -> dict[str, str]:
+    """Run the negotiation sweep now for every tenant (in AWS it runs on a schedule)."""
+    key = f"negotiation.sweep:dev:{uuid4()}"
+    await jobs.enqueue(Envelope(type=NEGOTIATION_SWEEP, tenant_id=UUID(int=0), idempotency_key=key))
     return {"enqueued": key}
 
 
