@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from bido_back.api.approvals import approvals_router
+from bido_back.api.compliance import compliance_router
 from bido_back.api.deps import ApiResources
 from bido_back.api.mailbox import mailbox_router
 from bido_back.api.me import me_router
@@ -63,6 +64,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(approvals_router())
     app.include_router(mailbox_router())
     app.include_router(onboarding_router())
+    app.include_router(compliance_router())
     if resolved.environment == "local":
         # Never mounted elsewhere (and every route refuses outside local too).
         from bido_back.api.dev import dev_router

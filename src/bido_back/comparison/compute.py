@@ -33,7 +33,9 @@ from decimal import Decimal
 from typing import Final, Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+
+from bido_back.compliance.schemas import SupplierComplianceSummary
 
 EUR: Final = "EUR"
 # Same threshold as the quote extraction's review rule.
@@ -202,6 +204,10 @@ class Comparison(BaseModel):
     suppliers: list[SupplierColumn]
     awaiting: list[AwaitingSupplier]
     fx_rates: list[RateUsed]
+    # Per invited supplier, filled by the API from bido_back.compliance.
+    compliance: list[SupplierComplianceSummary] = Field(
+        default_factory=list[SupplierComplianceSummary]
+    )
 
 
 # --- Pure helpers ----------------------------------------------------------------------
