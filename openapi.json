@@ -844,6 +844,203 @@
         "title": "ErrorResponse",
         "type": "object"
       },
+      "FollowupMessageView": {
+        "properties": {
+          "approval_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Id"
+          },
+          "canceled_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Canceled Reason"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "chase",
+              "clarification"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "proposed",
+              "sent",
+              "canceled",
+              "rejected"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "sequence",
+          "status",
+          "approval_id",
+          "canceled_reason",
+          "created_at",
+          "sent_at"
+        ],
+        "title": "FollowupMessageView",
+        "type": "object"
+      },
+      "FollowupSettings": {
+        "description": "The RFQ's chase schedule, in business days (weekends and supplier holidays skipped).",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "every_business_days": {
+            "description": "Then one chase every this many business days",
+            "title": "Every Business Days",
+            "type": "integer"
+          },
+          "first_after_business_days": {
+            "description": "First chase this many business days after the RFQ email",
+            "title": "First After Business Days",
+            "type": "integer"
+          },
+          "max_chases": {
+            "title": "Max Chases",
+            "type": "integer"
+          },
+          "response_due": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Due"
+          }
+        },
+        "required": [
+          "enabled",
+          "first_after_business_days",
+          "every_business_days",
+          "max_chases",
+          "response_due"
+        ],
+        "title": "FollowupSettings",
+        "type": "object"
+      },
+      "FollowupSettingsUpdate": {
+        "additionalProperties": false,
+        "description": "Only the fields sent are changed.",
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "every_business_days": {
+            "anyOf": [
+              {
+                "maximum": 30.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Every Business Days"
+          },
+          "first_after_business_days": {
+            "anyOf": [
+              {
+                "maximum": 30.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First After Business Days"
+          },
+          "max_chases": {
+            "anyOf": [
+              {
+                "maximum": 10.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Chases"
+          },
+          "response_due": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Due"
+          }
+        },
+        "title": "FollowupSettingsUpdate",
+        "type": "object"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -874,6 +1071,95 @@
           "environment"
         ],
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "InviteFollowups": {
+        "properties": {
+          "chase_state": {
+            "enum": [
+              "scheduled",
+              "awaiting_approval",
+              "paused",
+              "done",
+              "disabled",
+              "not_applicable"
+            ],
+            "title": "Chase State",
+            "type": "string"
+          },
+          "chases_used": {
+            "title": "Chases Used",
+            "type": "integer"
+          },
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          },
+          "invite_status": {
+            "title": "Invite Status",
+            "type": "string"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/FollowupMessageView"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "next_chase_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Chase At"
+          },
+          "paused_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paused Until"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invite_id",
+          "supplier_name",
+          "invite_status",
+          "sent_at",
+          "chase_state",
+          "next_chase_at",
+          "paused_until",
+          "chases_used",
+          "messages"
+        ],
+        "title": "InviteFollowups",
         "type": "object"
       },
       "InviteView": {
@@ -1371,6 +1657,16 @@
             "title": "Invite Id",
             "type": "string"
           },
+          "kind": {
+            "default": "rfq",
+            "enum": [
+              "rfq",
+              "chase",
+              "clarification"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
           "rfq_id": {
             "anyOf": [
               {
@@ -1434,6 +1730,32 @@
           "body"
         ],
         "title": "RfqEmailDraft",
+        "type": "object"
+      },
+      "RfqFollowups": {
+        "properties": {
+          "invites": {
+            "items": {
+              "$ref": "#/components/schemas/InviteFollowups"
+            },
+            "title": "Invites",
+            "type": "array"
+          },
+          "rfq_id": {
+            "format": "uuid",
+            "title": "Rfq Id",
+            "type": "string"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/FollowupSettings"
+          }
+        },
+        "required": [
+          "rfq_id",
+          "settings",
+          "invites"
+        ],
+        "title": "RfqFollowups",
         "type": "object"
       },
       "RfqLineView": {
@@ -4372,6 +4694,226 @@
         "summary": "Comparison",
         "tags": [
           "rfqs"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/followups": {
+      "get": {
+        "operationId": "get_followups_v1_rfqs__rfq_id__followups_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RfqFollowups"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Followups",
+        "tags": [
+          "followups"
+        ]
+      },
+      "patch": {
+        "operationId": "update_followups_v1_rfqs__rfq_id__followups_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FollowupSettingsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RfqFollowups"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Followups",
+        "tags": [
+          "followups"
         ]
       }
     },

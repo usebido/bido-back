@@ -16,6 +16,7 @@ from pydantic import BaseModel
 
 from bido_back.api.approvals import approvals_router
 from bido_back.api.deps import ApiResources
+from bido_back.api.followups import followups_router
 from bido_back.api.mailbox import mailbox_router
 from bido_back.api.me import me_router
 from bido_back.api.onboarding import onboarding_router
@@ -59,6 +60,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     app.include_router(me_router())
     app.include_router(rfqs_router())
+    app.include_router(followups_router())
     app.include_router(suppliers_router())
     app.include_router(approvals_router())
     app.include_router(mailbox_router())
