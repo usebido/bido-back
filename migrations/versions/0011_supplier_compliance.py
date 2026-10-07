@@ -1,7 +1,7 @@
 """Supplier compliance: the tenant's requirement set and the documents on record.
 
 Revision ID: 0011
-Revises: 0007
+Revises: 0010
 Create Date: 2026-10-07
 
 `compliance_requirements`: the documents a tenant expects from its suppliers
@@ -34,7 +34,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0011"
-down_revision: str | Sequence[str] | None = "0007"
+down_revision: str | Sequence[str] | None = "0010"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

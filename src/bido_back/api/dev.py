@@ -1,4 +1,6 @@
-"""`POST /dev/inbound`: simulate an inbound email locally.
+"""Local-only dev endpoints: `POST /dev/inbound` and `POST /dev/followups/sweep`.
+
+`POST /dev/inbound` simulates an inbound email locally.
 
 Stands in for SES inbound -> S3 -> SQS: the body is a raw .eml, either as the
 request body itself or as the first file of a multipart/form-data upload
@@ -22,15 +24,18 @@ from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
 from typing import Annotated, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bido_back.api.deps import get_db
+from bido_back.api.deps import get_db, get_job_queue
 from bido_back.intake.service import InboundService
 from bido_back.settings import Settings, get_settings
+from bido_back.worker.envelope import Envelope
+from bido_back.worker.job_types import FOLLOWUPS_SWEEP
+from bido_back.worker.jobs import JobQueue
 
 MAX_EML_BYTES = 25 * 1024 * 1024
 
@@ -86,6 +91,16 @@ async def post_inbound(
         matched_by=result.matched_by,
         extraction_enqueued=result.extraction_enqueued,
     )
+
+
+@dev_router.post("/followups/sweep", dependencies=[Depends(require_local)])
+async def post_followups_sweep(
+    jobs: Annotated[JobQueue, Depends(get_job_queue)],
+) -> dict[str, str]:
+    """Run the follow-up sweep now for every tenant (in AWS it runs on a schedule)."""
+    key = f"followups.sweep:dev:{uuid4()}"
+    await jobs.enqueue(Envelope(type=FOLLOWUPS_SWEEP, tenant_id=UUID(int=0), idempotency_key=key))
+    return {"enqueued": key}
 
 
 async def _read_eml(request: Request) -> bytes:

@@ -16,6 +16,7 @@ from bido_back.agents.catalog import (
     QUOTE_EXTRACTION,
     RFQ_CANDIDATE_CLASSIFIER,
     RFQ_EMAIL_WRITER,
+    RFQ_FOLLOWUP_WRITER,
     RFQ_INTAKE,
     RFQ_TEMPLATE_BUILDER,
     quote_extraction,
@@ -45,6 +46,7 @@ AGENTS: list[AgentDefinition[Any]] = [
     QUOTE_EXTRACTION,
     RFQ_CANDIDATE_CLASSIFIER,
     RFQ_TEMPLATE_BUILDER,
+    RFQ_FOLLOWUP_WRITER,
 ]
 
 
@@ -112,6 +114,21 @@ def test_output_schema_has_no_regex_lookarounds(agent: AgentDefinition[Any]) -> 
     schema = json.dumps(agent.output_model.model_json_schema())
 
     assert "(?" not in schema
+
+
+@pytest.mark.parametrize("agent", AGENTS, ids=lambda a: a.name)
+def test_output_schema_refs_have_no_sibling_keywords(agent: AgentDefinition[Any]) -> None:
+    # OpenAI's strict structured output rejects {"$ref": ..., "description": ...}.
+    def walk(node: object) -> list[str]:
+        if isinstance(node, dict):
+            fields = cast(dict[str, object], node)
+            bad = [str(fields)] if "$ref" in fields and len(fields) > 1 else []
+            return bad + [b for value in fields.values() for b in walk(value)]
+        if isinstance(node, list):
+            return [b for value in cast(list[object], node) for b in walk(value)]
+        return []
+
+    assert walk(agent.output_model.model_json_schema()) == []
 
 
 def test_models() -> None:
@@ -226,6 +243,7 @@ async def test_quote_extraction_runs(script: Script) -> None:
                 "moq": _NONE,
                 "lead_time_days": _NONE,
                 "origin_country": _NONE,
+                "qualification": _NONE,
             }
         ],
         "missing_fields": ["lead_time", "validity"],

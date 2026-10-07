@@ -29,6 +29,7 @@ from sqlalchemy import (
     false,
     func,
     text,
+    true,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -215,6 +216,11 @@ class Rfq(Base):
     source_text: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # The chase schedule, in business days (migration 0008).
+    followups_enabled: Mapped[bool] = mapped_column(Boolean, server_default=true())
+    followup_first_after_days: Mapped[int] = mapped_column(Integer, server_default=text("2"))
+    followup_every_days: Mapped[int] = mapped_column(Integer, server_default=text("2"))
+    followup_max_chases: Mapped[int] = mapped_column(Integer, server_default=text("3"))
 
 
 class RfqLine(Base):
@@ -260,6 +266,8 @@ class Invite(Base):
     mailbox_connection_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("mailbox_connections.id", ondelete="SET NULL")
     )
+    # No chase before this (an auto-reply / out of office; migration 0008).
+    followups_paused_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Message(Base):
@@ -331,6 +339,44 @@ class ProposalLine(Base):
     # Per-field provenance, same shape as Proposal.fields.
     fields: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     needs_review: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+CORRECTION_ACTIONS = ("corrected", "confirmed")
+
+
+class FieldCorrection(Base):
+    """A user's correction (or confirmation) of one extracted value (migration 0010).
+
+    `proposal_line_id` is NULL for a proposal header field. `old_provenance` is
+    the extraction's record of the old value; the proposal tables hold the
+    effective value. Append-only: these rows are the extraction's eval set.
+    """
+
+    __tablename__ = "field_corrections"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('corrected', 'confirmed')", name="field_corrections_action_check"
+        ),
+        Index("field_corrections_proposal_idx", "tenant_id", "proposal_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("proposals.id", ondelete="CASCADE"))
+    proposal_line_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("proposal_lines.id", ondelete="CASCADE")
+    )
+    field: Mapped[str] = mapped_column(Text)
+    action: Mapped[str] = mapped_column(Text)
+    # JSON of the column value (decimals and dates as strings); SQL NULL when empty.
+    old_value: Mapped[Any] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    new_value: Mapped[Any] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    old_provenance: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, server_default=text("'{}'::jsonb")
+    )
+    reason: Mapped[str | None] = mapped_column(Text)
+    corrected_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -484,6 +530,29 @@ class TemplateUpload(Base):
     size_bytes: Mapped[int] = mapped_column(Integer)
     storage_key: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FollowupMessage(Base):
+    """A chase or clarification email Bido proposed for an invite (migration 0008).
+
+    The id is derived from (invite, kind, sequence). The approved text lives in
+    the approval's args; once sent, in `messages`.
+    """
+
+    __tablename__ = "followup_messages"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    invite_id: Mapped[UUID] = mapped_column(ForeignKey("invites.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(Text)
+    sequence: Mapped[int] = mapped_column(Integer)
+    proposal_id: Mapped[UUID | None] = mapped_column(ForeignKey("proposals.id", ondelete="CASCADE"))
+    status: Mapped[str] = mapped_column(Text, server_default=text("'proposed'"))
+    approval_id: Mapped[UUID | None] = mapped_column(ForeignKey("approvals.id"))
+    message_id_header: Mapped[str | None] = mapped_column(Text)
+    canceled_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 # --- Supplier compliance (migration 0011) -----------------------------------

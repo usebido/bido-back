@@ -7,6 +7,7 @@ Sentry) is exercised in a subprocess so it cannot leak into other tests.
 import json
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, cast
 
@@ -56,6 +57,9 @@ def _run_isolated(script: str) -> str:
     """Run `script` in a fresh interpreter and return its last stdout line."""
     result = subprocess.run(  # noqa: S603 - fixed argv, our own interpreter
         [sys.executable, "-c", script],
+        # Not the repo root (the child must not read a developer's .env) and not
+        # tests/ (its `email` package would shadow the stdlib in the child).
+        cwd=tempfile.gettempdir(),
         capture_output=True,
         text=True,
         timeout=60,
