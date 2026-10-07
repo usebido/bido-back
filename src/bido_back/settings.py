@@ -6,10 +6,11 @@ has a production default: a missing value should fail at startup, not at
 the first request.
 """
 
+import re
 from functools import lru_cache
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import Field, PostgresDsn
+from pydantic import Field, PostgresDsn, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -77,10 +78,34 @@ class Settings(BaseSettings):
     clerk_authorized_parties: list[str] = []
     auth_dev_mode: bool = False
 
+    # CORS: the browser origins allowed to call the api (the frontend runs on
+    # another origin, e.g. Vercel). Exact origins, plus an optional regex for
+    # preview deployments. The frontend authenticates with a bearer token, so
+    # no credentials (cookies) are allowed cross-origin. "*" is refused outside
+    # local.
+    cors_allowed_origins: list[str] = []
+    cors_allowed_origin_regex: str | None = None
+
     # Observability. Both are off when unset (local runs and tests stay quiet).
     otel_exporter_otlp_endpoint: str | None = None
     otel_service_name: str = "bido-back"
     sentry_dsn: str | None = Field(default=None, repr=False)
+
+    @field_validator("cors_allowed_origin_regex")
+    @classmethod
+    def _regex_compiles(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                re.compile(value)
+            except re.error as exc:
+                raise ValueError(f"CORS_ALLOWED_ORIGIN_REGEX is not a valid regex: {exc}") from exc
+        return value
+
+    @model_validator(mode="after")
+    def _no_wildcard_cors_outside_local(self) -> Self:
+        if self.environment != "local" and "*" in self.cors_allowed_origins:
+            raise ValueError('CORS_ALLOWED_ORIGINS may contain "*" only when ENVIRONMENT=local')
+        return self
 
 
 @lru_cache
