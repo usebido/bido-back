@@ -13,13 +13,22 @@ Authentication has two steps:
 1. `ClerkJwtVerifier` verifies a Clerk session JWT: RS256 only, signature
    against Clerk's JWKS (cached, refetched on an unknown `kid` at most once
    per cooldown), `exp`/`nbf` with a small leeway, `iss` equal to the
-   configured issuer, and `azp` in the configured authorized parties. The
-   only thing taken from the token is `sub` (the Clerk user id).
-2. `resolve_principal` maps the Clerk user id to our user and memberships
-   through the `memberships_for_clerk_user` SECURITY DEFINER function
-   (migration 0005): memberships are under forced RLS and no tenant is known
-   yet. One membership: that tenant. Several: the client names one with
-   `X-Tenant-Id`, and it must be one of them. None: refused.
+   configured issuer, and `azp` in the configured authorized parties. From
+   the verified token it takes the Clerk user id (`sub`), the active
+   organization (session token v2 `o.id/rol/slg`, or v1
+   `org_id/org_role/org_slug`) and, if the session token was customized to
+   carry it, `email`.
+2. With an organization (every Clerk-authenticated request: the frontend
+   always has one active), the organization IS the company:
+   `bido_back.orgs.principal_for_org` finds the tenant linked to it and the
+   caller's membership there, creating the membership on first sight (the
+   token proves the caller belongs to the organization) and, with
+   `AUTH_AUTO_PROVISION`, the tenant too. `X-Tenant-Id` is ignored.
+   Without an organization (dev mode only), `resolve_principal` maps the
+   Clerk user id to our memberships through the `memberships_for_clerk_user`
+   SECURITY DEFINER function (migration 0005): one membership is that
+   tenant, several need `X-Tenant-Id` naming one of them, none is refused.
+   A Clerk token without an organization is refused.
 
 Dev mode (`AUTH_DEV_MODE=true`) lets a local run act as a seeded user through
 the `X-Dev-User: <clerk_user_id>` header, skipping step 1 only. It is refused
@@ -79,6 +88,14 @@ class TenantSelectionRequired(AuthError):
     """Member of several tenants and no valid `X-Tenant-Id` was sent (400)."""
 
 
+class OrganizationRequired(AuthError):
+    """A Clerk token without an active organization (403)."""
+
+
+class OrganizationNotEnabled(AuthError):
+    """The organization is not linked to a company and may not create one (403)."""
+
+
 class AuthConfigError(RuntimeError):
     """The process is configured in a way auth refuses to run with (startup)."""
 
@@ -106,6 +123,56 @@ def dev_mode_enabled(settings: Settings) -> bool:
 
 
 # --- JWT verification ---------------------------------------------------------
+
+_MAX_ID_LENGTH: Final = 255
+
+
+@dataclass(frozen=True, slots=True)
+class ClerkOrg:
+    """The session's active Clerk organization, as the verified token states it."""
+
+    id: str
+    # Clerk's role key: "org:admin" / "org:member" (v1) or "admin" / "member" (v2).
+    role: str | None = None
+    slug: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedSession:
+    """What a verified Clerk session token tells us."""
+
+    user_id: str  # the Clerk user id (`sub`)
+    org: ClerkOrg | None = None
+    # Only present when the Clerk session token is customized to carry it.
+    email: str | None = None
+
+
+def _short_str(value: object) -> str | None:
+    if isinstance(value, str) and 0 < len(value) <= _MAX_ID_LENGTH:
+        return value
+    return None
+
+
+def org_from_claims(claims: Mapping[str, object]) -> ClerkOrg | None:
+    """The active organization from session token v2 (`o`) or v1 (`org_*`) claims."""
+    compact: object = claims.get("o")
+    if isinstance(compact, dict):
+        o = cast(dict[str, object], compact)
+        org_id = _short_str(o.get("id"))
+        if org_id is not None:
+            return ClerkOrg(id=org_id, role=_short_str(o.get("rol")), slug=_short_str(o.get("slg")))
+    org_id = _short_str(claims.get("org_id"))
+    if org_id is None:
+        return None
+    return ClerkOrg(
+        id=org_id, role=_short_str(claims.get("org_role")), slug=_short_str(claims.get("org_slug"))
+    )
+
+
+def membership_role_for(org_role: str | None) -> Role:
+    """Our role for a Clerk organization role: admins own the company, others are members."""
+    key = (org_role or "").removeprefix("org:")
+    return "owner" if key == "admin" else "member"
 
 
 class JwksFetcher:
@@ -135,7 +202,7 @@ FetchJwks = Callable[[], Awaitable[Mapping[str, object]]]
 
 
 class ClerkJwtVerifier:
-    """Verifies Clerk session tokens and returns the Clerk user id (`sub`)."""
+    """Verifies Clerk session tokens; returns the user id, organization and e-mail."""
 
     def __init__(
         self,
@@ -169,8 +236,8 @@ class ClerkJwtVerifier:
             fetch_jwks=JwksFetcher(settings.clerk_jwks_url),
         )
 
-    async def verify(self, token: str) -> str:
-        """Return the verified Clerk user id. Raises AuthenticationFailed."""
+    async def verify(self, token: str) -> VerifiedSession:
+        """Return what the verified token says. Raises AuthenticationFailed."""
         try:
             header = jwt.get_unverified_header(token)
         except jwt.PyJWTError:
@@ -204,10 +271,11 @@ class ClerkJwtVerifier:
         # Fail closed: with no authorized parties configured, no token passes.
         if not isinstance(azp, str) or azp not in self._authorized_parties:
             raise AuthenticationFailed("token was issued for an unauthorized party")
-        sub: object = claims.get("sub")
-        if not isinstance(sub, str) or not sub:
+        sub = _short_str(claims.get("sub"))
+        if sub is None:
             raise AuthenticationFailed("token has no subject")
-        return sub
+        email = _short_str(claims.get("email"))
+        return VerifiedSession(user_id=sub, org=org_from_claims(claims), email=email)
 
     async def _key(self, kid: str) -> jwt.PyJWK:
         now = time.monotonic()

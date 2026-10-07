@@ -3641,6 +3641,17 @@
             "title": "Allow Self Approval",
             "type": "boolean"
           },
+          "clerk_org_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Clerk Org Id"
+          },
           "email": {
             "title": "Email",
             "type": "string"
@@ -7203,7 +7214,7 @@
         "operationId": "create_analysis_v1_analyses_post",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -7216,7 +7227,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -7319,7 +7330,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -7332,7 +7343,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -7425,7 +7436,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -7438,7 +7449,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -7566,7 +7577,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -7579,7 +7590,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -7666,7 +7677,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -7679,7 +7690,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -7782,7 +7793,7 @@
         "operationId": "get_requirements_v1_compliance_requirements_get",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -7795,7 +7806,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -7866,7 +7877,7 @@
         "operationId": "put_requirements_v1_compliance_requirements_put",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -7879,7 +7890,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -7973,7 +7984,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -7986,7 +7997,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -8070,7 +8081,7 @@
         "operationId": "post_message_v1_copilot_messages_post",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -8083,7 +8094,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -8176,7 +8187,7 @@
         "operationId": "import_data_v1_data_imports_post",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -8189,7 +8200,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -8282,7 +8293,7 @@
         "operationId": "products_v1_data_products_get",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -8295,7 +8306,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -8372,7 +8383,7 @@
         "operationId": "mailbox_status_v1_mailbox_get",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -8385,7 +8396,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -8528,7 +8539,7 @@
         "operationId": "complete_v1_mailbox_complete_post",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -8541,7 +8552,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -8657,7 +8668,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -8670,7 +8681,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -8746,7 +8757,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -8759,7 +8770,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -8815,7 +8826,7 @@
         "operationId": "get_me_v1_me_get",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -8828,7 +8839,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -8911,7 +8922,7 @@
         "operationId": "state_v1_onboarding_get",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -8924,7 +8935,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -8997,7 +9008,7 @@
         "operationId": "complete_v1_onboarding_complete_post",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -9010,7 +9021,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -9084,7 +9095,7 @@
         "operationId": "start_scan_v1_onboarding_scans_post",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -9097,7 +9108,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -9217,7 +9228,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -9230,7 +9241,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -9314,7 +9325,7 @@
         "operationId": "create_template_v1_onboarding_templates_post",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -9327,7 +9338,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -9450,7 +9461,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -9463,7 +9474,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -9556,7 +9567,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -9569,7 +9580,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -9684,7 +9695,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -9697,7 +9708,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -9811,7 +9822,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -9824,7 +9835,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -9916,7 +9927,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -9929,7 +9940,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -10042,7 +10053,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -10055,7 +10066,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -10163,7 +10174,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -10176,7 +10187,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -10300,7 +10311,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -10313,7 +10324,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -10400,7 +10411,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -10413,7 +10424,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -10520,7 +10531,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -10533,7 +10544,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -10633,7 +10644,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -10646,7 +10657,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -10739,7 +10750,7 @@
         "operationId": "list_templates_v1_rfq_templates_get",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -10752,7 +10763,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -10840,7 +10851,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -10853,7 +10864,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -10940,7 +10951,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -10953,7 +10964,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -11045,7 +11056,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -11058,7 +11069,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -11171,7 +11182,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -11184,7 +11195,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -11287,7 +11298,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -11300,7 +11311,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -11413,7 +11424,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -11426,7 +11437,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -11513,7 +11524,7 @@
         "operationId": "list_rfqs_v1_rfqs_get",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -11526,7 +11537,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -11601,7 +11612,7 @@
         "operationId": "create_rfq_v1_rfqs_post",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -11614,7 +11625,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -11721,7 +11732,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -11734,7 +11745,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -11824,7 +11835,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -11837,7 +11848,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -11930,7 +11941,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -11943,7 +11954,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -12035,7 +12046,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -12048,7 +12059,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -12162,7 +12173,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -12175,7 +12186,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -12278,7 +12289,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -12291,7 +12302,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -12398,7 +12409,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -12411,7 +12422,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -12511,7 +12522,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -12524,7 +12535,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -12615,7 +12626,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -12628,7 +12639,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -12731,7 +12742,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -12744,7 +12755,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -12868,7 +12879,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -12881,7 +12892,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -13004,7 +13015,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -13017,7 +13028,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -13130,7 +13141,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -13143,7 +13154,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -13234,7 +13245,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -13247,7 +13258,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -13360,7 +13371,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -13373,7 +13384,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -13467,7 +13478,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -13480,7 +13491,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -13619,7 +13630,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -13632,7 +13643,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -13705,7 +13716,7 @@
         "operationId": "list_suppliers_v1_suppliers_get",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -13718,7 +13729,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -13793,7 +13804,7 @@
         "operationId": "create_supplier_v1_suppliers_post",
         "parameters": [
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -13806,7 +13817,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -13918,7 +13929,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -13931,7 +13942,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -14024,7 +14035,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -14037,7 +14048,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }
@@ -14140,7 +14151,7 @@
             }
           },
           {
-            "description": "Required only for users with memberships in several tenants.",
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
             "name": "X-Tenant-Id",
             "required": false,
@@ -14153,7 +14164,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Required only for users with memberships in several tenants.",
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
               "title": "X-Tenant-Id"
             }
           }

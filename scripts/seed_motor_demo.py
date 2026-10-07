@@ -36,7 +36,7 @@ from typing import Any, Final, cast
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from bido_back.auth import Principal
 from bido_back.db import create_engine, tenant_session
@@ -271,6 +271,32 @@ async def _supplier(
     await session.flush()
 
 
+async def seed(engine: AsyncEngine, today: date | None = None) -> list[UUID]:
+    """Create or refresh the demo tenant, its users, suppliers and data; return the user ids.
+
+    Idempotent. No environment check: callers decide (main() is local only;
+    scripts/link_demo_org.py also allows dev).
+    """
+    books = workbooks(today or date.today())
+    async with tenant_session(engine, TENANT_ID) as session:
+        if await session.get(Tenant, TENANT_ID) is None:
+            session.add(Tenant(id=TENANT_ID, name=TENANT_NAME))
+            await session.flush()
+        users = [await _user(session, *user) for user in USERS]
+        for supplier in SUPPLIERS:
+            await _supplier(session, *supplier)
+    principal = Principal(tenant_id=TENANT_ID, user_id=users[0])
+    for kind, rows in books.items():
+        report = await import_rows(
+            engine, principal, kind, read_table(to_xlsx(rows), f"{kind}.xlsx")
+        )
+        failed = f", {report.rows_failed} failed" if report.rows_failed else ""
+        print(f"import    {kind:<17} {report.rows_total} rows{failed}")
+        for error in report.errors:
+            print(f"  row {error.row} {error.field}: {error.message}", file=sys.stderr)
+    return users
+
+
 async def main() -> int:
     parser = argparse.ArgumentParser(description="Seed the Motori Demo tenant (local only).")
     parser.add_argument("--write-fixtures", action="store_true", help="refresh demo_data/*.xlsx")
@@ -280,31 +306,14 @@ async def main() -> int:
     if settings.environment != "local":
         print("seed_motor_demo.py runs only with ENVIRONMENT=local", file=sys.stderr)
         return 1
-    today = date.today()
-    books = workbooks(today)
     if args.write_fixtures:
         FIXTURES.mkdir(exist_ok=True)
-        for kind, rows in books.items():
+        for kind, rows in workbooks(date.today()).items():
             (FIXTURES / f"motor_ev120_{kind}.xlsx").write_bytes(to_xlsx(rows))
 
     engine = create_engine(settings)
     try:
-        async with tenant_session(engine, TENANT_ID) as session:
-            if await session.get(Tenant, TENANT_ID) is None:
-                session.add(Tenant(id=TENANT_ID, name=TENANT_NAME))
-                await session.flush()
-            users = [await _user(session, *user) for user in USERS]
-            for supplier in SUPPLIERS:
-                await _supplier(session, *supplier)
-        principal = Principal(tenant_id=TENANT_ID, user_id=users[0])
-        for kind, rows in books.items():
-            report = await import_rows(
-                engine, principal, kind, read_table(to_xlsx(rows), f"{kind}.xlsx")
-            )
-            failed = f", {report.rows_failed} failed" if report.rows_failed else ""
-            print(f"import    {kind:<17} {report.rows_total} rows{failed}")
-            for error in report.errors:
-                print(f"  row {error.row} {error.field}: {error.message}", file=sys.stderr)
+        users = await seed(engine)
     finally:
         await engine.dispose()
 
