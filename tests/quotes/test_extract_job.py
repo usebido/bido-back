@@ -224,6 +224,7 @@ def _line(row: int, quantity: str, price: str, price_quote: str | None = None) -
         "moq": _NONE,
         "lead_time_days": _body("42", "Lieferzeit: 6 Wochen"),
         "origin_country": _NONE,
+        "qualification": _NONE,
     }
 
 

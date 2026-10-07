@@ -1,4 +1,4 @@
-"""The comparison loader against Postgres: latest proposal version per invite, FX."""
+"""The comparison loader against Postgres: latest proposal version per invite, FX, rules."""
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -72,7 +72,14 @@ async def test_uses_the_latest_proposal_and_the_rate_in_effect(
                         unit_price=Decimal(price),
                         unit="pcs",
                         lead_time_days=21,
-                        fields={"unit_price": {"confidence": 0.6, "needs_review": True}},
+                        fields={
+                            "unit_price": {"confidence": 0.6, "needs_review": True},
+                            "qualification": {
+                                "parsed": "AEC-Q200",
+                                "confidence": 0.95,
+                                "needs_review": False,
+                            },
+                        },
                     )
                 )
             await session.flush()
@@ -92,3 +99,9 @@ async def test_uses_the_latest_proposal_and_the_rate_in_effect(
     assert [r.currency for r in result.fx_rates] == ["XTS"]
     assert [a.supplier_name for a in result.awaiting] == ["Lyon"]
     assert column.totals[0].complete is False  # line 2 was not quoted
+    # Sector rules and the recommendation come through the loader.
+    assert column.supplier_type == "distributor"
+    assert cell.qualification == "AEC-Q200"
+    rec = next(r for r in result.recommendations if r.rfq_line_id == line.id and r.tier == 0)
+    assert rec.invite_id is None  # the only offer has a low-confidence price
+    assert [e.reasons for e in rec.excluded] == [["low_confidence"]]
