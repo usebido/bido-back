@@ -42,7 +42,9 @@ Both paths then:
        `attachments/<tenant_id>/<message row id>/<n>-<filename>` and insert
        its `attachments` row (`n` keeps two files with one name apart);
      * for a 'stored' reply, mark the invite responded (`responded_at` keeps
-       the first response; a declined invite stays declined);
+       the first response; a declined invite stays declined) and cancel any
+       proposed follow-up; for an auto-reply, pause chases until the stated
+       return date (`bido_back.followups.hooks`);
 3. after the commit, for a 'stored' reply, enqueue QUOTE_EXTRACT with
    idempotency key `extract:<message row id>`.
 
@@ -68,6 +70,7 @@ from bido_back.db import create_sessionmaker, tenant_session
 from bido_back.db.models import Attachment, Contact, Invite, Message, Supplier
 from bido_back.email.addresses import address_domain, extract_reply_tokens, extract_rfq_refs
 from bido_back.email.inbound import InboundEmail, parse_inbound
+from bido_back.followups.hooks import cancel_on_reply, pause_on_auto_reply
 from bido_back.storage import BlobStorage
 from bido_back.worker.envelope import Envelope
 from bido_back.worker.job_types import QUOTE_EXTRACT
@@ -303,6 +306,16 @@ class InboundService:
                         status="responded",
                         responded_at=func.coalesce(Invite.responded_at, occurred_at),
                     )
+                )
+                # An answer makes any proposed chase or clarification moot.
+                await cancel_on_reply(session, match.invite_id)
+            elif reason == "auto_reply":
+                # Out of office: no chase before the stated return date.
+                await pause_on_auto_reply(
+                    session,
+                    match.invite_id,
+                    f"{email.subject or ''}\n{email.text_body}",
+                    occurred_at,
                 )
             await session.flush()
 
