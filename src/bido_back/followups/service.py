@@ -367,7 +367,9 @@ async def _reconcile(session: AsyncSession) -> int:
             .where(
                 FollowupMessage.kind == "chase",
                 FollowupMessage.status == "proposed",
-                (Invite.status != "sent") | (Rfq.status != "open"),
+                (Invite.status != "sent")
+                | (Rfq.status != "open")
+                | (Rfq.negotiation_status == "closed"),
             )
             .with_for_update(of=FollowupMessage)
         )
@@ -405,7 +407,11 @@ async def _due_followups(session: AsyncSession, tenant_id: UUID, now: datetime) 
             .join(Rfq, Rfq.id == Invite.rfq_id)
             .join(Supplier, Supplier.id == Invite.supplier_id)
             .join(Contact, Contact.id == Invite.contact_id)
-            .where(Rfq.status == "open", Invite.status.in_(("sent", "responded")))
+            .where(
+                Rfq.status == "open",
+                Rfq.negotiation_status != "closed",
+                Invite.status.in_(("sent", "responded")),
+            )
             .order_by(Invite.sent_at, Invite.id)
         )
     ).all()
