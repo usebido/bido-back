@@ -49,7 +49,10 @@ def parsed_text(raw: Mapping[str, object], name: str) -> str | None:
 
 
 def field_infos(raw: Mapping[str, object]) -> dict[str, FieldInfo]:
-    """Per-field provenance (`{"unit_price": {"confidence": 0.9, "needs_review": false}}`)."""
+    """Per-field provenance (`{"unit_price": {"confidence": 0.9, "needs_review": false}}`).
+
+    `corrected` is set by `bido_back.corrections` when a person fixed the value.
+    """
     infos: dict[str, FieldInfo] = {}
     for name, value in raw.items():
         if name.startswith("_") or not isinstance(value, dict):
@@ -59,6 +62,7 @@ def field_infos(raw: Mapping[str, object]) -> dict[str, FieldInfo]:
         infos[name] = FieldInfo(
             confidence=float(confidence) if isinstance(confidence, int | float) else None,
             needs_review=entry.get("needs_review") is True,
+            corrected=entry.get("corrected") is True,
         )
     return infos
 
@@ -162,6 +166,7 @@ async def load_comparison(db: Db, principal: Principal, rfq_id: UUID, today: dat
                 supplier_type=supplier_type,
                 lines=tuple(
                     QuotedLine(
+                        id=pl.id,
                         rfq_line_id=pl.rfq_line_id,
                         offered_mpn=pl.offered_mpn,
                         is_alternative=pl.is_alternative,

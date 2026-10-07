@@ -342,6 +342,44 @@ class ProposalLine(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+CORRECTION_ACTIONS = ("corrected", "confirmed")
+
+
+class FieldCorrection(Base):
+    """A user's correction (or confirmation) of one extracted value (migration 0010).
+
+    `proposal_line_id` is NULL for a proposal header field. `old_provenance` is
+    the extraction's record of the old value; the proposal tables hold the
+    effective value. Append-only: these rows are the extraction's eval set.
+    """
+
+    __tablename__ = "field_corrections"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('corrected', 'confirmed')", name="field_corrections_action_check"
+        ),
+        Index("field_corrections_proposal_idx", "tenant_id", "proposal_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("proposals.id", ondelete="CASCADE"))
+    proposal_line_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("proposal_lines.id", ondelete="CASCADE")
+    )
+    field: Mapped[str] = mapped_column(Text)
+    action: Mapped[str] = mapped_column(Text)
+    # JSON of the column value (decimals and dates as strings); SQL NULL when empty.
+    old_value: Mapped[Any] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    new_value: Mapped[Any] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    old_provenance: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, server_default=text("'{}'::jsonb")
+    )
+    reason: Mapped[str | None] = mapped_column(Text)
+    corrected_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class FxRate(Base):
     """Daily ECB reference rates: how many units of `currency` per 1 EUR. Global."""
 
