@@ -6,11 +6,13 @@ from the model's arguments, and works in that tenant's RLS-scoped session.
 - `read` tools answer questions: RFQs and their status, who responded, what is
   missing, proposals, the comparison, quoted price history, supplier
   suggestions, the RFQ template.
-- `draft` tools change only drafts or the tenant's own settings: create an RFQ
-  (draft), invite suppliers (draft invites), update the RFQ template, and
-  prepare sends. Preparing a send does NOT send: it records one pending
-  approval per email (`rfqs.service.prepare_send`), which an approver who is
-  not the requester decides on; the worker sends only after that.
+- `draft` tools change only drafts or the tenant's own settings: run a
+  purchase analysis (stored, from the imported BOM, stock and purchase
+  history), create an RFQ (draft, from text or from an analysis), invite
+  suppliers (draft invites), update the RFQ template, and prepare sends.
+  Preparing a send does NOT send: it records one pending approval per email
+  (`rfqs.service.prepare_send`), which an approver who is not the requester
+  decides on; the worker sends only after that.
 
 There is no `act` tool here on purpose: the only thing the copilot can make
 happen outside Bido is an email, and that already goes through the approval
@@ -37,6 +39,8 @@ from bido_back.copilot import queries
 from bido_back.db import tenant_session
 from bido_back.db.models import Invite, Rfq, RfqLine, RfqTemplate
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
+from bido_back.purchasing import service as purchasing_service
+from bido_back.purchasing.schemas import AnalysisRequest, RfqFromAnalysisRequest
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.errors import Duplicate, MailboxNotConfigured, MailboxNotConnected, RfqError
@@ -51,6 +55,7 @@ Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
 MAX_LIST: Final = 20
 MAX_TEMPLATE_ITEMS: Final = 16
+MAX_ANALYSIS_SUPPLIERS: Final = 4
 RfqStatus = Literal["draft", "open", "closed", "cancelled"]
 
 
@@ -352,6 +357,89 @@ class PrepareSendOut(BaseModel):
 
 
 # --- Handlers ------------------------------------------------------------------------------
+
+
+# --- run_purchase_analysis / create_rfq_from_analysis ---------------------------------------
+
+
+class PurchaseAnalysisIn(BaseModel):
+    product: str = Field(
+        min_length=1,
+        max_length=200,
+        description="The product to build, as named in the BOM (e.g. 'Motor EV-120' or 'motor')",
+    )
+    quantity: int | None = Field(
+        default=None,
+        ge=1,
+        le=1_000_000,
+        description="Units to build; omit to use the production plan from today on",
+    )
+    safety_stock_pct: int = Field(default=0, ge=0, le=100, description="Extra % to buy")
+
+
+class AnalysisSupplierItem(BaseModel):
+    supplier_id: UUID
+    name: str
+    type: str
+    last_price: Decimal
+    last_ordered_at: date
+    avg_price: Decimal
+    on_time_rate: Decimal | None
+    quality_rate: Decimal | None
+    suggested: bool
+
+
+class AnalysisFlagItem(BaseModel):
+    code: str
+    supplier: str | None = None
+    value: Decimal | None = None
+
+
+class AnalysisLineItem(BaseModel):
+    part_number: str
+    description: str
+    mpn: str | None
+    unit: str
+    required: Decimal
+    on_hand: Decimal
+    on_order: Decimal
+    to_buy: Decimal
+    need_by: date | None
+    currency: str | None
+    last_price: Decimal | None
+    avg_price: Decimal | None
+    trend_pct: Decimal | None
+    target_price: Decimal | None
+    max_price: Decimal | None
+    suppliers: list[AnalysisSupplierItem]
+    flags: list[AnalysisFlagItem]
+
+
+class PurchaseAnalysisOut(BaseModel):
+    analysis_id: UUID
+    product: str
+    quantity: Decimal
+    need_by: date | None
+    items: int
+    items_to_buy: int
+    currency: str | None
+    total_at_target: Decimal | None
+    total_at_last_price: Decimal | None
+    lines: list[AnalysisLineItem]
+
+
+class RfqFromAnalysisIn(BaseModel):
+    analysis_id: UUID = Field(description="The analysis_id returned by run_purchase_analysis")
+
+
+class RfqFromAnalysisOut(BaseModel):
+    id: UUID
+    ref: str
+    title: str
+    status: str
+    lines: list[LineItem]
+    invited_suppliers: list[str]
+    skipped_suppliers: list[str]
 
 
 def _line_item(line: RfqLine) -> LineItem:
@@ -721,6 +809,104 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             ),
         )
 
+    async def run_purchase_analysis(
+        ctx: ToolContext, args: PurchaseAnalysisIn
+    ) -> PurchaseAnalysisOut:
+        principal = _principal(ctx)
+        try:
+            view = await purchasing_service.create_analysis(
+                db,
+                principal,
+                AnalysisRequest(
+                    product=args.product,
+                    quantity=Decimal(args.quantity) if args.quantity is not None else None,
+                    safety_stock_pct=Decimal(args.safety_stock_pct),
+                ),
+                today=deps.today(),
+            )
+        except purchasing_service.PurchasingError as exc:
+            raise ToolError(str(exc)) from None
+        return PurchaseAnalysisOut(
+            analysis_id=view.id,
+            product=view.product,
+            quantity=view.quantity,
+            need_by=view.need_by,
+            items=view.summary.items,
+            items_to_buy=view.summary.items_to_buy,
+            currency=view.summary.currency,
+            total_at_target=view.summary.total_at_target,
+            total_at_last_price=view.summary.total_at_last_price,
+            lines=[
+                AnalysisLineItem(
+                    part_number=line.part_number,
+                    description=line.description,
+                    mpn=line.mpn,
+                    unit=line.unit,
+                    required=line.required,
+                    on_hand=line.on_hand,
+                    on_order=line.on_order,
+                    to_buy=line.to_buy,
+                    need_by=line.need_by,
+                    currency=line.currency,
+                    last_price=line.last_price,
+                    avg_price=line.avg_price,
+                    trend_pct=line.trend_pct,
+                    target_price=line.target_price,
+                    max_price=line.max_price,
+                    suppliers=[
+                        AnalysisSupplierItem(
+                            supplier_id=s.supplier_id,
+                            name=s.name,
+                            type=s.type,
+                            last_price=s.last_price,
+                            last_ordered_at=s.last_ordered_at,
+                            avg_price=s.avg_price,
+                            on_time_rate=s.on_time_rate,
+                            quality_rate=s.quality_rate,
+                            suggested=s.suggested,
+                        )
+                        for s in line.suppliers[:MAX_ANALYSIS_SUPPLIERS]
+                    ],
+                    flags=[
+                        AnalysisFlagItem(code=f.code, supplier=f.supplier, value=f.value)
+                        for f in line.flags
+                    ],
+                )
+                for line in view.lines
+            ],
+        )
+
+    async def create_rfq_from_analysis(
+        ctx: ToolContext, args: RfqFromAnalysisIn
+    ) -> RfqFromAnalysisOut:
+        principal = _principal(ctx)
+        try:
+            created = await purchasing_service.create_rfq_from_analysis(
+                db, principal, args.analysis_id, RfqFromAnalysisRequest()
+            )
+        except purchasing_service.PurchasingError as exc:
+            raise ToolError(str(exc)) from None
+        rfq = created.rfq
+        return RfqFromAnalysisOut(
+            id=rfq.id,
+            ref=rfq.ref,
+            title=rfq.title,
+            status=rfq.status,
+            lines=[
+                LineItem(
+                    position=line.position,
+                    description=line.description,
+                    mpn=line.mpn,
+                    quantities=list(line.quantities),
+                    unit=line.unit,
+                    need_by=line.need_by,
+                )
+                for line in rfq.lines
+            ],
+            invited_suppliers=[s.name for s in created.invited],
+            skipped_suppliers=[f"{s.name} ({s.reason})" for s in created.skipped],
+        )
+
     rfq_ref_hint = " Takes the RFQ's reference (RFQ-12) or id."
     return (
         Tool(
@@ -808,6 +994,29 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             "draft",
             update_rfq_template,
             artifact_kind="rfq_template",
+        ),
+        Tool(
+            "run_purchase_analysis",
+            "Analyse what to buy to build a product: per part, how much is needed (BOM x "
+            "units - stock - open orders), how much to buy, the suppliers who sold it with "
+            "their last and average PURCHASE prices, on-time and quality rates, and a target "
+            "and maximum price. Saves the analysis (no email, no RFQ).",
+            PurchaseAnalysisIn,
+            PurchaseAnalysisOut,
+            "draft",
+            run_purchase_analysis,
+            artifact_kind="purchase_analysis",
+        ),
+        Tool(
+            "create_rfq_from_analysis",
+            "Create a DRAFT RFQ from a purchase analysis: the parts to buy with their "
+            "quantities and need-by dates, and the suggested suppliers as DRAFT invites. "
+            "Nothing is sent.",
+            RfqFromAnalysisIn,
+            RfqFromAnalysisOut,
+            "draft",
+            create_rfq_from_analysis,
+            artifact_kind="rfq_draft",
         ),
         Tool(
             "create_rfq",
