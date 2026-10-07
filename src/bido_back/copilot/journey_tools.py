@@ -26,7 +26,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import func, select
 
-from bido_back.agents.catalog.contracts import ExtraOfferDraft
+from bido_back.agents.catalog.contracts import ExtraOfferDraft, ModelDecimal
 from bido_back.agents.context import ToolContext
 from bido_back.agents.tools import AnyTool, Tool, ToolError
 from bido_back.auth import Principal
@@ -90,7 +90,7 @@ class AddContactOut(BaseModel):
 
 class QuantityOverride(BaseModel):
     part_number: str
-    quantity: Decimal = Field(ge=0)
+    quantity: ModelDecimal = Field(ge=0)
 
 
 class RefineAnalysisIn(BaseModel):

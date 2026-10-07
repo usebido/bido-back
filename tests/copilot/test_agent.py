@@ -30,6 +30,15 @@ EXPECTED_TOOLS = {
     "get_award_status": "read",
     "list_open_pos": "read",
     "prepare_award": "draft",
+    "import_spreadsheet": "draft",
+    "add_supplier_contact": "draft",
+    "refine_analysis": "draft",
+    "propose_negotiation_mandate": "draft",
+    "pause_negotiation": "draft",
+    "resume_negotiation": "draft",
+    "close_negotiation": "draft",
+    "get_negotiation_outcome": "read",
+    "list_extra_offers": "read",
 }
 
 

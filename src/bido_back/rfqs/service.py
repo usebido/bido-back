@@ -621,13 +621,14 @@ async def prepare_send(
             .order_by(Invite.created_at, Invite.id)
         )
         drafts = list(rows)
-        # Earlier rejected proposals per invite: the next proposal is a new attempt.
+        # Earlier rejected (or expired, e.g. with a rejected mandate) proposals per
+        # invite: the next proposal is a new attempt.
         call_ids = [send_proposal_ids(invite.id)[1] for invite, _, _ in drafts]
         rejected_counts = await session.execute(
             select(Approval.tool_call_id, func.count())
             .where(
                 Approval.tool == SEND_RFQ_EMAIL,
-                Approval.status == "rejected",
+                Approval.status.in_(("rejected", "expired")),
                 Approval.tool_call_id.in_(call_ids),
             )
             .group_by(Approval.tool_call_id)

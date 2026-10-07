@@ -154,9 +154,16 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             (
                 "po",
                 "po number",
+                "po no",
                 "pedido",
                 "numero pedido",
+                "numero do pedido",
                 "n pedido",
+                "no pedido",
+                "n do pedido",
+                "num pedido",
+                "nr ordine",
+                "n ordine",
                 "ordine",
                 "numero ordine",
                 "order number",
@@ -444,8 +451,12 @@ def map_columns(
     index: dict[str, int] = {}
     for spec in SPECS[import_type]:
         wanted = {_norm(s) for s in (spec.name.replace("_", " "), *spec.synonyms)}
+        # "E-mail" and "Email", "Nº Pedido" and "N Pedido": compare without spaces too.
+        compact = {w.replace(" ", "") for w in wanted}
         for position, name in enumerate(normalized):
-            if position not in used and name and name in wanted:
+            if position in used or not name:
+                continue
+            if name in wanted or name.replace(" ", "") in compact:
                 index[spec.name] = position
                 used.add(position)
                 break

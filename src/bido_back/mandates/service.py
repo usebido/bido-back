@@ -45,6 +45,7 @@ from bido_back.agents.tools import Tool
 from bido_back.approvals.audit import approval_audit
 from bido_back.approvals.errors import ApprovalConflict
 from bido_back.approvals.executor import ActToolRegistry, approval_execute_envelope
+from bido_back.approvals.guard import RejectHook
 from bido_back.approvals.integrity import payload_matches
 from bido_back.approvals.sink import PostgresApprovalSink
 from bido_back.auth import Principal
@@ -86,7 +87,7 @@ from bido_back.negotiation.service import apply_settings
 from bido_back.rfqs.agents import EmailWriterAgent
 from bido_back.rfqs.errors import InvalidState, NotFound
 from bido_back.rfqs.mailbox import MailboxSenderFactory
-from bido_back.rfqs.send import SEND_RFQ_EMAIL, SendRfqEmailArgs
+from bido_back.rfqs.send import SEND_RFQ_EMAIL, SendRfqEmailArgs, release_rejected_send
 from bido_back.rfqs.service import prepare_send
 from bido_back.worker.jobs import JobQueue
 
@@ -492,6 +493,26 @@ def approve_mandate_tool(deps: MandateActDeps) -> Tool[ApproveMandateArgs, Manda
 
 def register_mandate_act_tools(registry: ActToolRegistry, deps: MandateActDeps) -> None:
     registry.register(approve_mandate_tool(deps))
+
+
+async def release_rejected_mandate(session: AsyncSession, approval: Approval) -> None:
+    """A rejected mandate: its initial emails expire and their invites go back to draft,
+    so the RFQ can be proposed again (with or without a mandate)."""
+    args = ApproveMandateArgs.model_validate(approval.args)
+    for email in args.initial_emails:
+        row = await session.scalar(
+            select(Approval).where(Approval.id == email.approval_id).with_for_update()
+        )
+        if row is None or row.status != "pending" or row.tool != SEND_RFQ_EMAIL:
+            continue
+        row.status = "expired"
+        session.add(approval_audit(row, "approval.expired", None))
+        await release_rejected_send(session, row)
+
+
+MANDATE_REJECT_HOOKS: Final[dict[str, RejectHook]] = {
+    APPROVE_NEGOTIATION_MANDATE: release_rejected_mandate
+}
 
 
 # --- Automatic approval under a mandate ---------------------------------------------------
