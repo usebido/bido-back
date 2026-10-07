@@ -10,8 +10,9 @@ supplier to the buyer, attaches a small .xlsx quote, and posts the raw email
 to the api's `/dev/inbound`, which stands in for the mailbox sync. The worker
 then runs quote extraction (needs OPENAI_API_KEY in .env).
 
-The quote is synthetic: one price per requested line, made up from the RFQ's
-own `[RFQ-n]` marker. Nothing here reaches a real mailbox.
+The quote is synthetic: one made-up price per requested line and quantity
+tier. The lines come from the api, read as the seeded dev buyer. Nothing here
+reaches a real mailbox.
 """
 
 import argparse
@@ -21,14 +22,22 @@ import sys
 from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
-from typing import Any, cast
+from typing import Any, NamedTuple, cast
 
 import httpx
 
 MAILPIT = "http://localhost:8025"
 API = "http://localhost:8080"
-_RFQ_MARKER = re.compile(r"\[RFQ-\d+\]")
-_LINE = re.compile(r"^\s*(?:Position|Pos\.?|Item|Line)\s*(\d+)\s*[:.-]\s*(.+)$", re.I | re.M)
+DEV_USER = {"X-Dev-User": "user_dev_buyer"}  # from scripts/seed_dev.py
+_RFQ_MARKER = re.compile(r"\[(RFQ-\d+)\]")
+
+
+class Line(NamedTuple):
+    position: int
+    description: str
+    mpn: str
+    unit: str
+    quantity: str
 
 
 def _rfq_messages(client: httpx.Client) -> list[dict[str, Any]]:
@@ -44,16 +53,50 @@ def _rfq_messages(client: httpx.Client) -> list[dict[str, Any]]:
     ]
 
 
-def _xlsx(lines: list[tuple[str, str]]) -> bytes:
+def _rfq_lines(client: httpx.Client, subject: str) -> list[Line]:
+    """The RFQ's requested lines, one per quantity tier, read from the api as the dev buyer."""
+    marker = _RFQ_MARKER.search(subject)
+    if marker is None:
+        return []
+    rfqs = cast(list[dict[str, Any]], client.get(f"{API}/v1/rfqs", headers=DEV_USER).json())
+    match = next((r for r in rfqs if r.get("ref") == marker.group(1)), None)
+    if match is None:
+        return []
+    rfq = cast(dict[str, Any], client.get(f"{API}/v1/rfqs/{match['id']}", headers=DEV_USER).json())
+    return [
+        Line(
+            int(item["position"]),
+            str(item["description"]),
+            str(item.get("mpn") or ""),
+            str(item["unit"]),
+            str(quantity),
+        )
+        for item in cast(list[dict[str, Any]], rfq.get("lines", []))
+        for quantity in cast(list[Any], item.get("quantities", []))
+    ]
+
+
+def _xlsx(lines: list[Line]) -> bytes:
     from openpyxl import Workbook  # pyright: ignore[reportMissingTypeStubs]
 
     workbook = cast(Any, Workbook())
     sheet = workbook.active
     sheet.title = "Quote"
-    sheet.append(["Pos", "Description", "Qty", "Unit", "Unit price (EUR)", "Lead time (weeks)"])
-    for index, (position, description) in enumerate(lines):
+    sheet.append(
+        ["Pos", "Description", "MPN", "Qty", "Unit", "Unit price (EUR)", "Lead time (weeks)"]
+    )
+    for index, line in enumerate(lines):
+        price = round(0.05 + 0.01 * index, 4)
         sheet.append(
-            [int(position), description[:60], 10000, "pcs", round(0.05 + 0.01 * index, 4), 6]
+            [
+                line.position,
+                line.description[:60],
+                line.mpn,
+                int(float(line.quantity)),
+                line.unit,
+                price,
+                6,
+            ]
         )
     sheet.append([])
     sheet.append(["Tooling: none. MOQ 4000 pcs. Origin: DE."])
@@ -62,12 +105,12 @@ def _xlsx(lines: list[tuple[str, str]]) -> bytes:
     return buffer.getvalue()
 
 
-def _reply(original: dict[str, Any], body_text: str) -> bytes:
+def _reply(original: dict[str, Any], lines: list[Line]) -> bytes:
     subject = str(original["Subject"])
     buyer = cast(dict[str, str], original["From"])
     supplier = cast(list[dict[str, str]], original["To"])[0]
     message_id = str(original["MessageID"])
-    lines = [(m.group(1), m.group(2).strip()) for m in _LINE.finditer(body_text)] or [("1", "Item")]
+    lines = lines or [Line(1, "Item", "", "pcs", "10000")]
     valid_until = (datetime.now(UTC) + timedelta(days=45)).strftime("%d.%m.%Y")
 
     reply = EmailMessage()
@@ -116,8 +159,9 @@ def main() -> int:
 
         newest = messages[0]
         full = cast(dict[str, Any], client.get(f"{MAILPIT}/api/v1/message/{newest['ID']}").json())
-        raw = _reply(full, str(full.get("Text", "")))
         try:
+            lines = _rfq_lines(client, str(newest["Subject"]))
+            raw = _reply(full, lines)
             response = client.post(
                 f"{API}/dev/inbound", content=raw, headers={"content-type": "message/rfc822"}
             )
