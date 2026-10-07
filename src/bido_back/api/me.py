@@ -24,6 +24,9 @@ class MeResponse(BaseModel):
     tenant_id: UUID
     tenant_name: str
     role: Role | None
+    # Read-only tenant policy: true (default) = the caller may approve what
+    # they requested; false = four-eyes, someone else must decide.
+    allow_self_approval: bool
 
 
 def me_router() -> APIRouter:
@@ -45,6 +48,7 @@ def me_router() -> APIRouter:
             tenant_id=tenant.id,
             tenant_name=tenant.name,
             role=principal.role,
+            allow_self_approval=tenant.allow_self_approval,
         )
 
     return router

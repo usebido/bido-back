@@ -2169,6 +2169,10 @@
       },
       "MeResponse": {
         "properties": {
+          "allow_self_approval": {
+            "title": "Allow Self Approval",
+            "type": "boolean"
+          },
           "email": {
             "title": "Email",
             "type": "string"
@@ -2209,7 +2213,8 @@
           "email",
           "tenant_id",
           "tenant_name",
-          "role"
+          "role",
+          "allow_self_approval"
         ],
         "title": "MeResponse",
         "type": "object"

@@ -8,12 +8,14 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.api.app import create_app
 from bido_back.api.deps import get_db, get_job_queue, get_principal
 from bido_back.auth import Principal
-from bido_back.db import create_sessionmaker
+from bido_back.db import create_sessionmaker, tenant_session
+from bido_back.db.models import Tenant
 from bido_back.settings import Settings
 from bido_back.worker.jobs import JobQueue
 
@@ -113,6 +115,11 @@ async def test_approver_rejects(api: Api, app_engine: AsyncEngine, people: Peopl
 async def test_refusals_map_to_http_statuses(
     api: Api, app_engine: AsyncEngine, migrator_engine: AsyncEngine, people: People
 ) -> None:
+    # A four-eyes tenant, so deciding one's own request is refused too.
+    async with tenant_session(migrator_engine, people.tenant) as session:
+        await session.execute(
+            update(Tenant).where(Tenant.id == people.tenant).values(allow_self_approval=False)
+        )
     approval_id = await propose(app_engine, people.tenant, people.approver)
     approve = {"decision": "approve"}
 

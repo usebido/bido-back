@@ -9,8 +9,9 @@ from the model's arguments, and works in that tenant's RLS-scoped session.
 - `draft` tools change only drafts or the tenant's own settings: create an RFQ
   (draft), invite suppliers (draft invites), update the RFQ template, and
   prepare sends. Preparing a send does NOT send: it records one pending
-  approval per email (`rfqs.service.prepare_send`), which an approver who is
-  not the requester decides on; the worker sends only after that.
+  approval per email (`rfqs.service.prepare_send`), which a person decides on
+  (by default the buyer themself; a second person in four-eyes tenants); the
+  worker sends only after that.
 
 There is no `act` tool here on purpose: the only thing the copilot can make
 happen outside Bido is an email, and that already goes through the approval
@@ -830,7 +831,8 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         Tool(
             "prepare_send",
             "Write the RFQ email for every draft invite and ask for approval. Nothing is "
-            "sent: an approver (not the requester) must approve each email first." + rfq_ref_hint,
+            "sent: the buyer (or, if the company requires it, a second person) must approve "
+            "each email first." + rfq_ref_hint,
             RfqRef,
             PrepareSendOut,
             "draft",
