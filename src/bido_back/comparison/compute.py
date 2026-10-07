@@ -22,6 +22,8 @@ requested line and every requested quantity tier:
   unit, expired validity, Incoterm different from the requested one, MOQ.
 
 Nothing uncertain is hidden: values are shown as quoted, with their flags.
+A value a person corrected or confirmed (`bido_back.corrections`) is shown as
+corrected, listed in `corrected_fields`, and never counts as low confidence.
 Supplier totals per tier sum what could be priced and say whether that is
 every requested line (`complete`).
 """
@@ -33,7 +35,7 @@ from decimal import Decimal
 from typing import Final, Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 EUR: Final = "EUR"
 # Same threshold as the quote extraction's review rule.
@@ -73,6 +75,8 @@ class FieldInfo:
 
     confidence: float | None = None
     needs_review: bool = False
+    # A person corrected or confirmed the value.
+    corrected: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +93,8 @@ class RequestedLine:
 @dataclass(frozen=True, slots=True)
 class QuotedLine:
     rfq_line_id: UUID | None
+    # The proposal line's id (to correct it); None in tests that do not need it.
+    id: UUID | None = None
     offered_mpn: str | None = None
     is_alternative: bool = False
     min_quantity: Decimal | None = None
@@ -155,6 +161,8 @@ class Cell(BaseModel):
     line_total_base: Decimal | None
     flags: list[Flag]
     low_confidence_fields: list[str]
+    proposal_line_id: UUID | None = None
+    corrected_fields: list[str] = Field(default_factory=list[str])
 
 
 class TierTotal(BaseModel):
@@ -176,6 +184,7 @@ class SupplierColumn(BaseModel):
     incoterm: str | None
     flags: list[Flag]
     low_confidence_fields: list[str]
+    corrected_fields: list[str] = Field(default_factory=list[str])
     max_lead_time_days: int | None
     cells: list[Cell]
     totals: list[TierTotal]
@@ -273,11 +282,15 @@ def _low_fields(fields: Mapping[str, FieldInfo], names: Sequence[str]) -> list[s
     low: list[str] = []
     for name in names:
         info = fields.get(name)
-        if info is None:
+        if info is None or info.corrected:
             continue
         if info.needs_review or (info.confidence is not None and info.confidence < LOW_CONFIDENCE):
             low.append(name)
     return low
+
+
+def _corrected(fields: Mapping[str, FieldInfo], names: Sequence[str]) -> list[str]:
+    return [name for name in names if (info := fields.get(name)) is not None and info.corrected]
 
 
 def _q(value: Decimal | None, places: Decimal) -> Decimal | None:
@@ -294,6 +307,20 @@ _LINE_FIELDS: Final = (
     "lead_time_days",
 )
 _PROPOSAL_FIELDS: Final = ("currency", "valid_until", "incoterm")
+# What `corrected_fields` reports: every field a person can correct.
+_CORRECTABLE_LINE_FIELDS: Final = (
+    "offered_mpn",
+    "is_alternative",
+    "rfq_line_id",
+    "min_quantity",
+    "unit_price",
+    "unit",
+    "tooling_cost",
+    "moq",
+    "lead_time_days",
+    "origin_country",
+)
+_CORRECTABLE_PROPOSAL_FIELDS: Final = (*_PROPOSAL_FIELDS, "payment_terms")
 
 
 def compute_cell(
@@ -416,6 +443,8 @@ def compute_cell(
         line_total_base=_q(total, _MONEY_PLACES),
         flags=flags,
         low_confidence_fields=low,
+        proposal_line_id=chosen.id,
+        corrected_fields=_corrected(chosen.fields, _CORRECTABLE_LINE_FIELDS),
     )
 
 
@@ -472,6 +501,7 @@ def compute_supplier(
         incoterm=quote.incoterm,
         flags=flags,
         low_confidence_fields=low,
+        corrected_fields=_corrected(quote.fields, _CORRECTABLE_PROPOSAL_FIELDS),
         max_lead_time_days=max(lead_times) if lead_times else None,
         cells=cells,
         totals=totals,
