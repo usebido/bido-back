@@ -75,6 +75,50 @@
       "problemMatcher": []
     },
     {
+      "label": "front: dev (local API)",
+      "detail": "bido-front (sibling folder ../bido-front) on http://localhost:3000, calling the local API on :8080",
+      "type": "shell",
+      "command": "pnpm install --frozen-lockfile && pnpm dev",
+      "options": {
+        "cwd": "${workspaceFolder}/../bido-front",
+        "env": { "NEXT_PUBLIC_API_URL": "http://localhost:8080" }
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": { "regexp": "^__never__$" },
+        "background": { "beginsPattern": "next dev|Starting", "endsPattern": "Ready in|ready" }
+      },
+      "presentation": { "group": "dev", "panel": "dedicated" }
+    },
+    {
+      "label": "front: dev (AWS dev API)",
+      "detail": "bido-front on http://localhost:3000, calling https://api.dev.usebido.com (no local backend needed)",
+      "type": "shell",
+      "command": "pnpm install --frozen-lockfile && pnpm dev",
+      "options": {
+        "cwd": "${workspaceFolder}/../bido-front",
+        "env": { "NEXT_PUBLIC_API_URL": "https://api.dev.usebido.com" }
+      },
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": { "regexp": "^__never__$" },
+        "background": { "beginsPattern": "next dev|Starting", "endsPattern": "Ready in|ready" }
+      },
+      "presentation": { "group": "dev", "panel": "dedicated" }
+    },
+    {
+      "label": "dev: full stack",
+      "detail": "Services, migrations, seed, then api + worker + frontend (needs Clerk settings in .env, see README)",
+      "dependsOrder": "sequence",
+      "dependsOn": ["dev: services up", "dev: migrate", "dev: seed", "dev: api + worker + front"],
+      "problemMatcher": []
+    },
+    {
+      "label": "dev: api + worker + front",
+      "dependsOn": ["dev: api", "dev: worker", "front: dev (local API)"],
+      "problemMatcher": []
+    },
+    {
       "label": "dev: supplier reply",
       "detail": "Answer the latest RFQ email in Mailpit with a synthetic quote (xlsx) via /dev/inbound",
       "type": "shell",

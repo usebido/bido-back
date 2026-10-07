@@ -191,6 +191,25 @@ names become supplier contacts.
   local variables, and a `before_send` scrubber; span URLs lose their query
   strings, and SQL spans record statements without parameters.
 
+## Running the frontend against this backend
+
+`bido-front` is expected next to this repository (`../bido-front`). Tasks:
+`front: dev (local API)`, `front: dev (AWS dev API)` and `dev: full stack`
+(everything local, frontend included).
+
+The frontend signs in with the real Clerk dev instance, so the local backend
+must verify Clerk tokens. In `.env`:
+
+```
+CLERK_ISSUER=https://<instance>.clerk.accounts.dev
+CLERK_JWKS_URL=https://<instance>.clerk.accounts.dev/.well-known/jwks.json
+CLERK_AUTHORIZED_PARTIES=["http://localhost:3000"]
+AUTH_AUTO_PROVISION=true
+```
+
+The frontend reads `NEXT_PUBLIC_API_URL` (the tasks set it) and its own
+`NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY` from the same Clerk instance.
+
 ## Working with the dev environment (AWS)
 
 The `aws dev:` tasks in `.vscode/tasks.json` (health, status, logs, dead
