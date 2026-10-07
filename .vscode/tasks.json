@@ -89,6 +89,64 @@
       "problemMatcher": []
     },
     {
+      "label": "dev: seed motor demo",
+      "detail": "Local demo company Motori Demo S.p.A.: EV motor BOM, stock, 12 months of purchases (idempotent)",
+      "type": "shell",
+      "command": "uv run python scripts/seed_motor_demo.py",
+      "problemMatcher": []
+    },
+    {
+      "label": "aws: login (SSO)",
+      "detail": "IAM Identity Center login; the aws dev tasks below use it",
+      "type": "shell",
+      "command": "aws sso login --sso-session bido",
+      "problemMatcher": []
+    },
+    {
+      "label": "aws dev: health",
+      "detail": "GET https://api.dev.usebido.com/health",
+      "type": "shell",
+      "command": "curl -sS -m 10 https://api.dev.usebido.com/health && echo",
+      "problemMatcher": []
+    },
+    {
+      "label": "aws dev: status",
+      "detail": "api/worker running vs desired tasks and the rollout state",
+      "type": "shell",
+      "command": "aws ecs describe-services --profile ${input:awsProfile} --region us-east-2 --cluster bido-dev --services api worker --query 'services[].[serviceName,runningCount,desiredCount,deployments[0].rolloutState]' --output table",
+      "problemMatcher": []
+    },
+    {
+      "label": "aws dev: logs api",
+      "detail": "Follow the api logs (last 15 min)",
+      "type": "shell",
+      "command": "aws logs tail /ecs/bido-dev/api --profile ${input:awsProfile} --region us-east-2 --since 15m --follow",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "aws dev: logs worker",
+      "detail": "Follow the worker logs (last 15 min)",
+      "type": "shell",
+      "command": "aws logs tail /ecs/bido-dev/worker --profile ${input:awsProfile} --region us-east-2 --since 15m --follow",
+      "isBackground": true,
+      "problemMatcher": []
+    },
+    {
+      "label": "aws dev: dead letters",
+      "detail": "Messages in the -dlq queues = jobs that failed 5 times",
+      "type": "shell",
+      "command": "for q in bido-jobs-dlq bido-intake-dlq bido-parking-dlq; do url=$(aws sqs get-queue-url --profile ${input:awsProfile} --region us-east-2 --queue-name $q --query QueueUrl --output text) && echo \"$q: $(aws sqs get-queue-attributes --profile ${input:awsProfile} --region us-east-2 --queue-url $url --attribute-names ApproximateNumberOfMessages --query Attributes.ApproximateNumberOfMessages --output text)\"; done",
+      "problemMatcher": []
+    },
+    {
+      "label": "aws dev: deploy main",
+      "detail": "Run the Deploy (dev) workflow on main and watch it (GitHub CLI)",
+      "type": "shell",
+      "command": "gh workflow run deploy-dev.yml --ref main && sleep 5 && gh run watch $(gh run list --workflow deploy-dev.yml --limit 1 --json databaseId --jq '.[0].databaseId') --exit-status",
+      "problemMatcher": []
+    },
+    {
       "label": "check: lint + types",
       "type": "shell",
       "command": "uv run ruff check && uv run ruff format --check && uv run pyright",
@@ -114,6 +172,14 @@
       "dependsOrder": "sequence",
       "dependsOn": ["check: lint + types", "check: RLS + OpenAPI", "check: tests"],
       "problemMatcher": []
+    }
+  ],
+  "inputs": [
+    {
+      "id": "awsProfile",
+      "type": "promptString",
+      "description": "AWS CLI profile for the dev account (see README: Deploy (dev))",
+      "default": "bido-dev-temp"
     }
   ]
 }
