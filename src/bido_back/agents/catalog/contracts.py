@@ -253,3 +253,19 @@ class FollowupEmailInput(BaseModel):
 
 class FollowupEmailOutput(BaseModel):
     body: str = Field(description="Plain text. The subject is set by code (Re: the RFQ email).")
+
+
+# --- award_notice_writer: the polite "not selected" email after an award ------------
+
+
+class AwardNoticeInput(BaseModel):
+    rfq_ref: str
+    rfq_title: str
+    buyer_company: str
+    buyer_name: str
+    supplier_name: str
+    supplier_language: str = Field(description="ISO 639-1, e.g. de, en, fr, it, pt")
+
+
+class AwardNoticeOutput(BaseModel):
+    body: str = Field(description="Plain text. The subject is set by code (Re: the RFQ email).")

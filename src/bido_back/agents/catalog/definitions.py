@@ -16,6 +16,8 @@ import re
 from typing import Final
 
 from bido_back.agents.catalog.contracts import (
+    AwardNoticeInput,
+    AwardNoticeOutput,
     FollowupEmailInput,
     FollowupEmailOutput,
     QuoteExtractionOutput,
@@ -129,6 +131,22 @@ RFQ_TEMPLATE_BUILDER: Final = rfq_template_builder()
 RFQ_FOLLOWUP_WRITER: Final = rfq_followup_writer()
 
 
+def award_notice_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[AwardNoticeOutput]:
+    return AgentDefinition(
+        name="award_notice_writer",
+        prompt_file="award_notice_writer.v1.md",
+        prompt_version=1,
+        model=model,
+        output_model=AwardNoticeOutput,
+        max_turns=_MAX_TURNS,
+        thinking=False,
+        effort="low",
+    )
+
+
+AWARD_NOTICE_WRITER: Final = award_notice_writer()
+
+
 # --- Deterministic checks on the RFQ email draft ---------------------------------
 
 # A number next to a currency symbol or code: `12.50 EUR`, `€ 0,45`, `USD 3`.
@@ -173,5 +191,24 @@ def followup_email_problems(task: FollowupEmailInput, draft: FollowupEmailOutput
     if _PRICE.search(body):
         problems.append("price_mentioned")
     if len(body) > _MAX_FOLLOWUP_CHARS:
+        problems.append("too_long")
+    return problems
+
+
+_MAX_NOTICE_CHARS: Final = 2000
+
+
+def award_notice_problems(task: AwardNoticeInput, draft: AwardNoticeOutput) -> list[str]:
+    """What is wrong with a "not selected" draft, as codes. Empty means it may go to
+    approval: the RFQ reference is in the body, no prices, and it stays short."""
+    problems: list[str] = []
+    body = draft.body.strip()
+    if not body:
+        problems.append("empty")
+    if task.rfq_ref not in body:
+        problems.append("rfq_ref_missing_in_body")
+    if _PRICE.search(body):
+        problems.append("price_mentioned")
+    if len(body) > _MAX_NOTICE_CHARS:
         problems.append("too_long")
     return problems

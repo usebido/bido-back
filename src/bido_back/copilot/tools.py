@@ -11,6 +11,8 @@ from the model's arguments, and works in that tenant's RLS-scoped session.
   prepare sends. Preparing a send does NOT send: it records one pending
   approval per email (`rfqs.service.prepare_send`), which an approver who is
   not the requester decides on; the worker sends only after that.
+- `prepare_award` asks for approval to award an RFQ (`awards.service`); the
+  award and its purchase orders exist only after an approver executes it.
 
 There is no `act` tool here on purpose: the only thing the copilot can make
 happen outside Bido is an email, and that already goes through the approval
@@ -32,6 +34,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from bido_back.agents.context import ToolContext
 from bido_back.agents.tools import AnyTool, Tool, ToolError
 from bido_back.auth import Principal
+from bido_back.awards import service as award_service
+from bido_back.awards.schemas import AwardLine, AwardRequest, AwardSelection, PurchaseOrderSummary
 from bido_back.comparison.loader import load_comparison
 from bido_back.copilot import queries
 from bido_back.db import tenant_session
@@ -351,6 +355,70 @@ class PrepareSendOut(BaseModel):
     note: str
 
 
+# --- Award and purchase orders -------------------------------------------------------------
+
+
+class AwardChoice(BaseModel):
+    line_position: int = Field(description="The RFQ line's position (1, 2, ...)")
+    supplier: str = Field(description="The supplier's name, as in get_comparison")
+    tier: int = Field(default=0, description="Quantity tier index; 0 = the first quantity")
+
+
+class PrepareAwardIn(BaseModel):
+    rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
+    choices: list[AwardChoice] = Field(
+        default_factory=list[AwardChoice],
+        description="Only when the buyer picks suppliers; empty = the recommendation",
+    )
+    reason: str | None = Field(
+        default=None, description="Why, when the choice differs from the recommendation"
+    )
+
+
+class AwardedLineItem(BaseModel):
+    position: int
+    description: str
+    supplier_name: str
+    quantity: Decimal
+    unit: str
+    unit_price: Decimal
+    currency: str
+
+
+class PoItem(BaseModel):
+    ref: str
+    rfq_ref: str
+    status: str
+    supplier_name: str
+    total: Decimal
+    currency: str
+
+
+class AwardStatusOut(BaseModel):
+    ref: str
+    state: Literal["none", "pending_approval", "awarded"]
+    differs_from_recommendation: bool | None
+    reason: str | None
+    lines: list[AwardedLineItem]
+    purchase_orders: list[PoItem]
+
+
+class PrepareAwardOut(BaseModel):
+    ref: str
+    approval_id: UUID
+    differs_from_recommendation: bool
+    lines: list[AwardedLineItem]
+    note: str
+
+
+class ListOpenPosIn(BaseModel):
+    include_sent: bool = Field(default=False, description="Also list POs already sent")
+
+
+class ListOpenPosOut(BaseModel):
+    purchase_orders: list[PoItem]
+
+
 # --- Handlers ------------------------------------------------------------------------------
 
 
@@ -391,6 +459,32 @@ def _template_out(row: RfqTemplate | None) -> TemplateOut:
         columns=[str(c) for c in row.columns],
         footer=row.footer,
         fields=[str(f) for f in row.fields],
+    )
+
+
+def _awarded_items(lines: list[AwardLine]) -> list[AwardedLineItem]:
+    return [
+        AwardedLineItem(
+            position=line.position,
+            description=line.description,
+            supplier_name=line.supplier_name,
+            quantity=Decimal(line.quantity),
+            unit=line.unit,
+            unit_price=Decimal(line.unit_price),
+            currency=line.currency,
+        )
+        for line in lines
+    ]
+
+
+def _po_item(po: PurchaseOrderSummary) -> PoItem:
+    return PoItem(
+        ref=po.ref,
+        rfq_ref=po.rfq_ref,
+        status=po.status,
+        supplier_name=po.supplier_name,
+        total=po.total,
+        currency=po.currency,
     )
 
 
@@ -721,6 +815,77 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             ),
         )
 
+    async def get_award_status(ctx: ToolContext, args: RfqRef) -> AwardStatusOut:
+        principal = _principal(ctx)
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+        view = await award_service.get_award(db, principal, rfq.id)
+        return AwardStatusOut(
+            ref=view.rfq_ref,
+            state=view.state,
+            differs_from_recommendation=view.differs_from_recommendation,
+            reason=view.reason,
+            lines=_awarded_items(view.lines),
+            purchase_orders=[_po_item(po) for po in view.purchase_orders],
+        )
+
+    async def list_open_pos(ctx: ToolContext, args: ListOpenPosIn) -> ListOpenPosOut:
+        principal = _principal(ctx)
+        orders = await award_service.list_purchase_orders(db, principal)
+        return ListOpenPosOut(
+            purchase_orders=[
+                _po_item(po) for po in orders if args.include_sent or po.status != "sent"
+            ][:MAX_LIST]
+        )
+
+    async def prepare_award(ctx: ToolContext, args: PrepareAwardIn) -> PrepareAwardOut:
+        principal = _principal(ctx)
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+        selections: list[AwardSelection] = []
+        if args.choices:
+            comparison = await load_comparison(db, principal, rfq.id, deps.today())
+            lines = {line.position: line for line in comparison.lines}
+            for choice in args.choices:
+                line = lines.get(choice.line_position)
+                if line is None:
+                    raise ToolError(f"{rfq.ref} has no line {choice.line_position}")
+                wanted = choice.supplier.strip().casefold()
+                matches = [
+                    column
+                    for column in comparison.suppliers
+                    if column.supplier_name.casefold() == wanted
+                ]
+                if len(matches) != 1:
+                    raise ToolError(
+                        f"no single supplier named {choice.supplier!r} has a proposal on {rfq.ref}"
+                    )
+                selections.append(
+                    AwardSelection(
+                        rfq_line_id=line.id, tier=choice.tier, invite_id=matches[0].invite_id
+                    )
+                )
+        try:
+            requested = await award_service.request_award(
+                db,
+                principal,
+                rfq.id,
+                AwardRequest(lines=selections, reason=args.reason),
+                deps.today(),
+            )
+        except RfqError as exc:
+            raise _service_error(exc) from None
+        return PrepareAwardOut(
+            ref=rfq.ref,
+            approval_id=requested.approval_id,
+            differs_from_recommendation=requested.differs_from_recommendation,
+            lines=_awarded_items(requested.lines),
+            note=(
+                "Nothing was awarded yet. An approver other than the buyer must approve "
+                "the award; then the purchase orders are created as drafts."
+            ),
+        )
+
     rfq_ref_hint = " Takes the RFQ's reference (RFQ-12) or id."
     return (
         Tool(
@@ -835,6 +1000,34 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             PrepareSendOut,
             "draft",
             prepare_send,
+            artifact_kind="approvals",
+        ),
+        Tool(
+            "get_award_status",
+            "Whether an RFQ is awarded or waiting for award approval, the awarded "
+            "lines and the purchase orders." + rfq_ref_hint,
+            RfqRef,
+            AwardStatusOut,
+            "read",
+            get_award_status,
+        ),
+        Tool(
+            "list_open_pos",
+            "Purchase orders not sent yet (drafts and those waiting for approval).",
+            ListOpenPosIn,
+            ListOpenPosOut,
+            "read",
+            list_open_pos,
+        ),
+        Tool(
+            "prepare_award",
+            "Ask for approval to award an RFQ: the recommendation, or the suppliers the "
+            "buyer chose (then a reason is required). Nothing is awarded until an "
+            "approver (not the requester) approves." + rfq_ref_hint,
+            PrepareAwardIn,
+            PrepareAwardOut,
+            "draft",
+            prepare_award,
             artifact_kind="approvals",
         ),
     )

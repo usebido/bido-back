@@ -672,3 +672,89 @@ class SupplierComplianceDocument(Base):
     expires_on: Mapped[date | None] = mapped_column(Date)
     recorded_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# --- Award and purchase orders (migration 0015) -------------------------------
+
+PURCHASE_ORDER_STATUSES = ("draft", "pending_approval", "sent")
+AWARD_NOTICE_STATUSES = ("proposed", "sent", "rejected", "canceled")
+
+
+class Award(Base):
+    """The executed award of one RFQ: the approved selection per line (migration 0015)."""
+
+    __tablename__ = "awards"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    rfq_id: Mapped[UUID] = mapped_column(ForeignKey("rfqs.id", ondelete="CASCADE"), unique=True)
+    # The executed `award_rfq` approval. No FK on purpose (see migration 0015).
+    approval_id: Mapped[UUID | None] = mapped_column()
+    requested_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    approved_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    differs_from_recommendation: Mapped[bool] = mapped_column(Boolean)
+    reason: Mapped[str | None] = mapped_column(Text)
+    lines: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PurchaseOrder(Base):
+    """One purchase order per awarded supplier, numbered PO-<n> per tenant."""
+
+    __tablename__ = "purchase_orders"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    award_id: Mapped[UUID] = mapped_column(ForeignKey("awards.id", ondelete="CASCADE"))
+    rfq_id: Mapped[UUID] = mapped_column(ForeignKey("rfqs.id", ondelete="CASCADE"))
+    invite_id: Mapped[UUID] = mapped_column(ForeignKey("invites.id", ondelete="CASCADE"))
+    supplier_id: Mapped[UUID] = mapped_column(ForeignKey("suppliers.id"))
+    number: Mapped[int] = mapped_column(Integer)
+    ref: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'draft'"))
+    currency: Mapped[str] = mapped_column(Text)
+    incoterm: Mapped[str | None] = mapped_column(Text)
+    payment_terms: Mapped[str | None] = mapped_column(Text)
+    total: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    message_id_header: Mapped[str | None] = mapped_column(Text)
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PurchaseOrderLine(Base):
+    __tablename__ = "purchase_order_lines"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    purchase_order_id: Mapped[UUID] = mapped_column(
+        ForeignKey("purchase_orders.id", ondelete="CASCADE")
+    )
+    position: Mapped[int] = mapped_column(Integer)
+    rfq_line_id: Mapped[UUID | None] = mapped_column(ForeignKey("rfq_lines.id"))
+    proposal_line_id: Mapped[UUID | None] = mapped_column(ForeignKey("proposal_lines.id"))
+    description: Mapped[str] = mapped_column(Text)
+    mpn: Mapped[str | None] = mapped_column(Text)
+    quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4))
+    unit: Mapped[str] = mapped_column(Text)
+    unit_price: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    line_total: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    need_by: Mapped[date | None] = mapped_column(Date)
+    lead_time_days: Mapped[int | None] = mapped_column(Integer)
+
+
+class AwardNotice(Base):
+    """A "not selected" email proposed to a supplier that did not win (one per invite)."""
+
+    __tablename__ = "award_notices"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    award_id: Mapped[UUID] = mapped_column(ForeignKey("awards.id", ondelete="CASCADE"))
+    invite_id: Mapped[UUID] = mapped_column(
+        ForeignKey("invites.id", ondelete="CASCADE"), unique=True
+    )
+    status: Mapped[str] = mapped_column(Text, server_default=text("'proposed'"))
+    approval_id: Mapped[UUID | None] = mapped_column(ForeignKey("approvals.id"))
+    message_id_header: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

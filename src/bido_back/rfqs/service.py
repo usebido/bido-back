@@ -655,6 +655,10 @@ async def list_approvals(
                 .where(Invite.id.in_(invite_ids))
             )
             context = {invite_id: (rfq_id, ref, name) for invite_id, rfq_id, ref, name in rows}
+        # Imported here: the award service builds on this module.
+        from bido_back.awards.service import queue_details
+
+        details = await queue_details(session, approvals)
 
     items: list[ApprovalQueueItem] = []
     for approval in approvals:
@@ -685,6 +689,8 @@ async def list_approvals(
                 created_at=approval.created_at,
                 decided_at=approval.decided_at,
                 rfq_email=email,
+                award=details.awards.get(approval.id),
+                thread_email=details.emails.get(approval.id),
             )
         )
     return items

@@ -29,6 +29,7 @@ from bido_back.auth import (
     dev_mode_enabled,
     resolve_principal,
 )
+from bido_back.awards.agents import NoticeWriter, default_notice_writer
 from bido_back.db import create_engine, create_sessionmaker
 from bido_back.rfqs.agents import RfqAgents, default_rfq_agents
 from bido_back.rfqs.mailbox import MailboxSenderFactory, mailbox_senders_for
@@ -120,6 +121,11 @@ def get_storage(request: Request) -> BlobStorage:
 def get_rfq_agents() -> RfqAgents:
     """The RFQ agents (intake, email writer) over the real runner; tests override it."""
     return default_rfq_agents()
+
+
+def get_notice_writer() -> NoticeWriter:
+    """The "not selected" notice writer over the real runner; tests override it."""
+    return default_notice_writer()
 
 
 def get_mailbox_senders(request: Request) -> MailboxSenderFactory:

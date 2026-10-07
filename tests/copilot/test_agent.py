@@ -23,6 +23,9 @@ EXPECTED_TOOLS = {
     "create_rfq": "draft",
     "invite_suppliers": "draft",
     "prepare_send": "draft",
+    "get_award_status": "read",
+    "list_open_pos": "read",
+    "prepare_award": "draft",
 }
 
 
