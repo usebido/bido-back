@@ -124,6 +124,9 @@ class ProposalLineDraft(BaseModel):
     moq: ExtractedValue
     lead_time_days: ExtractedValue
     origin_country: ExtractedValue
+    qualification: ExtractedValue = Field(
+        description="Automotive qualification the supplier states for this offer, e.g. AEC-Q200"
+    )
 
 
 class QuoteExtractionInput(BaseModel):

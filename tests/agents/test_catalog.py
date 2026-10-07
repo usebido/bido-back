@@ -226,6 +226,7 @@ async def test_quote_extraction_runs(script: Script) -> None:
                 "moq": _NONE,
                 "lead_time_days": _NONE,
                 "origin_country": _NONE,
+                "qualification": _NONE,
             }
         ],
         "missing_fields": ["lead_time", "validity"],
