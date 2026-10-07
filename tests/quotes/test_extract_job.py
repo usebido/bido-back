@@ -313,7 +313,8 @@ async def test_reply_becomes_a_proposal_with_provenance(seeded: Seeded, script: 
         "declined": False,
     }
     assert proposal.fields["_extraction"]["agent"] == "quote_extraction"
-    assert proposal.fields["_extraction"]["prompt_version"] == 1
+    assert proposal.fields["_extraction"]["prompt_version"] == 2
+    assert proposal.fields["extra_offers"] == []
 
     assert [(pl.min_quantity, pl.unit_price) for pl in lines] == [
         (Decimal("1000.0000"), Decimal("0.450000")),

@@ -376,6 +376,10 @@ async def _persist(
         )
         fields = validated.provenance()
         fields["_extraction"] = {key: value for key, value in meta.items()}
+        # Offers for things not requested: kept as written, never compared or priced.
+        fields["extra_offers"] = [
+            offer.model_dump(mode="json") for offer in validated.output.extra_offers[:20]
+        ]
         proposal = Proposal(
             tenant_id=tenant_id,
             invite_id=invite.id,

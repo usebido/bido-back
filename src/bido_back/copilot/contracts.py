@@ -19,6 +19,10 @@ class CopilotInput(BaseModel):
     attachments: list[str] = Field(
         default_factory=list[str], description="File names the buyer attached to this message"
     )
+    attachment_ids: list[UUID] = Field(
+        default_factory=list[UUID],
+        description="The attachments' ids, in the same order (for import_spreadsheet)",
+    )
     attachments_text: str = Field(
         default="", description="Text read from the attachments, with [file] markers"
     )

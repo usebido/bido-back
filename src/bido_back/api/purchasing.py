@@ -3,6 +3,9 @@
 * `POST /v1/data/imports`: import a spreadsheet uploaded with
   `POST /v1/onboarding/uploads` as items, a BOM, inventory, purchase history
   or a production plan. `dry_run` checks it without writing.
+* `POST /v1/data/workbook-imports`: import ANY workbook (every sheet, any
+  layout; supplier contacts too). Answers `needs_confirmation` with questions
+  when unsure; send `confirmed: true` after the buyer answered.
 * `GET  /v1/data/products`: products with a BOM and/or a production plan.
 * `POST /v1/analyses`: what to buy to build a product (quantity, or the
   production plan from today on), from whom and at what price.
@@ -15,6 +18,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bido_back.api.deps import get_db, get_principal, get_storage
@@ -29,6 +33,13 @@ from bido_back.purchasing.schemas import (
     ProductView,
     RfqFromAnalysis,
     RfqFromAnalysisRequest,
+)
+from bido_back.purchasing.workbook import (
+    SheetMapper,
+    WorkbookFileError,
+    WorkbookImportReport,
+    default_sheet_mapper,
+    import_workbook,
 )
 from bido_back.storage import BlobStorage
 
@@ -47,8 +58,45 @@ def purchasing_http_error(exc: service.PurchasingError) -> HTTPException:
     return HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "purchasing operation failed")
 
 
+class WorkbookImportRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # A file uploaded with POST /v1/onboarding/uploads (.xlsx or .csv).
+    upload_id: UUID
+    # True after the buyer answered the questions of a previous call.
+    confirmed: bool = False
+
+
+def get_sheet_mapper() -> SheetMapper:
+    """The sheet mapper over the real runner; tests override it."""
+    return default_sheet_mapper()
+
+
 def purchasing_router() -> APIRouter:
     router = APIRouter(tags=["purchasing"])
+
+    @router.post(
+        "/v1/data/workbook-imports",
+        responses=error_responses(status.HTTP_422_UNPROCESSABLE_CONTENT),
+    )
+    async def import_any_workbook(  # pyright: ignore[reportUnusedFunction]
+        request: WorkbookImportRequest,
+        principal: CurrentPrincipal,
+        db: Db,
+        storage: Storage,
+        mapper: Annotated[SheetMapper, Depends(get_sheet_mapper)],
+    ) -> WorkbookImportReport:
+        try:
+            return await import_workbook(
+                db,
+                storage,
+                principal,
+                request.upload_id,
+                mapper=mapper,
+                confirmed=request.confirmed,
+            )
+        except WorkbookFileError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc)) from None
 
     @router.post(
         "/v1/data/imports",

@@ -15,6 +15,11 @@ The five import types and their columns (* = required):
   unit_price*, ordered_at*, currency, promised_at, received_at, received_qty,
   rejected_qty, quality_ok, line_no, description
 * `production_plan`: product*, quantity*, need_by*
+* `supplier_contacts`: supplier*, email*, contact_name, phone, country, language
+
+Workbooks with several sheets, headers below row 1 or mixed content go
+through `bido_back.purchasing.workbook`, which finds the header row and the
+columns of each section and then validates rows here (`parse_mapped`).
 """
 
 import csv
@@ -29,7 +34,9 @@ from typing import Final, Literal, Protocol, cast
 
 from bido_back.quotes.parsing import DecimalSeparator, parse_decimal
 
-ImportType = Literal["items", "bom", "inventory", "purchase_history", "production_plan"]
+# What POST /v1/data/imports accepts (unchanged contract); workbooks add contacts.
+TableImportType = Literal["items", "bom", "inventory", "purchase_history", "production_plan"]
+ImportType = TableImportType | Literal["supplier_contacts"]
 FieldKind = Literal["text", "number", "date", "bool", "int"]
 
 MAX_ROWS: Final = 20_000
@@ -147,9 +154,16 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             (
                 "po",
                 "po number",
+                "po no",
                 "pedido",
                 "numero pedido",
+                "numero do pedido",
                 "n pedido",
+                "no pedido",
+                "n do pedido",
+                "num pedido",
+                "nr ordine",
+                "n ordine",
                 "ordine",
                 "numero ordine",
                 "order number",
@@ -277,7 +291,55 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             ),
         ),  # fmt: skip
     ),
+    "supplier_contacts": (
+        FieldSpec(
+            "supplier",
+            "text",
+            True,
+            (
+                "supplier",
+                "fornecedor",
+                "fornitore",
+                "vendor",
+                "supplier name",
+                "nome fornecedor",
+                "razao social",
+                "ragione sociale",
+                "company",
+                "empresa",
+                "azienda",
+            ),
+        ),  # fmt: skip
+        FieldSpec(
+            "email",
+            "text",
+            True,
+            (
+                "email",
+                "e mail",
+                "mail",
+                "email contato",
+                "email do contato",
+                "contact email",
+                "supplier email",
+                "email fornecedor",
+                "email fornitore",
+                "indirizzo email",
+            ),
+        ),  # fmt: skip
+        FieldSpec(
+            "contact_name",
+            "text",
+            False,
+            ("contact", "contact name", "contato", "nome contato", "referente", "nome referente"),
+        ),  # fmt: skip
+        FieldSpec("phone", "text", False, ("phone", "telefone", "telefono", "tel", "celular")),
+        FieldSpec("country", "text", False, ("country", "pais", "paese", "nazione")),
+        FieldSpec("language", "text", False, ("language", "idioma", "lingua", "lang")),
+    ),
 }
+
+_EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 _TRUE = frozenset({"yes", "y", "sim", "s", "si", "true", "1", "ok", "x", "conforme", "vero"})
 _FALSE = frozenset({"no", "n", "nao", "false", "0", "ko", "nok", "nc", "falso", "non conforme"})
@@ -389,8 +451,12 @@ def map_columns(
     index: dict[str, int] = {}
     for spec in SPECS[import_type]:
         wanted = {_norm(s) for s in (spec.name.replace("_", " "), *spec.synonyms)}
+        # "E-mail" and "Email", "Nº Pedido" and "N Pedido": compare without spaces too.
+        compact = {w.replace(" ", "") for w in wanted}
         for position, name in enumerate(normalized):
-            if position not in used and name and name in wanted:
+            if position in used or not name:
+                continue
+            if name in wanted or name.replace(" ", "") in compact:
                 index[spec.name] = position
                 used.add(position)
                 break
@@ -452,20 +518,51 @@ def parse_rows(
     *,
     decimal: DecimalSeparator | None = None,
 ) -> ParsedTable:
-    """Map the header row and validate every data row of one import."""
+    """Map the header row (the first non-empty row) and validate every data row."""
     header_at = next((i for i, row in enumerate(raw_rows) if any(not _blank(c) for c in row)), None)
     if header_at is None:
         raise ImportFileError("the file has no header row")
     header = raw_rows[header_at]
-    index, columns, missing, unknown = map_columns(import_type, header)
+    index, _, _, _ = map_columns(import_type, header)
+    data = [(n, row) for n, row in enumerate(raw_rows[header_at + 1 :], start=header_at + 2)]
+    return parse_mapped(import_type, header, index, data, decimal=decimal)
+
+
+def parse_mapped(
+    import_type: ImportType,
+    header: Sequence[object],
+    index: Mapping[str, int],
+    rows: Iterable[tuple[int, Sequence[object]]],
+    *,
+    decimal: DecimalSeparator | None = None,
+) -> ParsedTable:
+    """Validate data rows given an explicit field -> column index (any header row).
+
+    `rows` are (1-based spreadsheet row number, cells). Unknown fields are refused.
+    """
+    specs = {s.name: s for s in SPECS[import_type]}
+    unknown_fields = set(index) - set(specs)
+    if unknown_fields:
+        raise ImportFileError(f"unknown fields for {import_type}: {sorted(unknown_fields)}")
+    width = len(header)
+    columns = {
+        name: (str(header[i]) if i < width and header[i] is not None else f"column {i + 1}")
+        for name, i in index.items()
+    }
+    used = set(index.values())
+    missing = [s.name for s in SPECS[import_type] if s.required and s.name not in index]
+    unknown = [
+        str(cell) for i, cell in enumerate(header) if i not in used and cell not in (None, "")
+    ]
     table = ParsedTable(import_type, columns, missing, unknown)
     if missing:
         return table
-    specs = {s.name: s for s in SPECS[import_type]}
-    for offset, raw in enumerate(raw_rows[header_at + 1 :], start=header_at + 2):
+    for offset, raw in rows:
         if all(_blank(c) for c in raw):
             continue
         table.total_rows += 1
+        if table.total_rows > MAX_ROWS:
+            raise ImportFileError(f"imports are limited to {MAX_ROWS} rows")
         values: dict[str, object] = {}
         row_errors: list[RowError] = []
         for name, position in index.items():
@@ -531,6 +628,13 @@ def _check_row(import_type: ImportType, row: int, values: Mapping[str, object]) 
                 errors.append(RowError(row, "currency", "use a 3-letter code such as EUR"))
         case "production_plan":
             positive("quantity")
+        case "supplier_contacts":
+            email = values.get("email")
+            if isinstance(email, str) and not _EMAIL.fullmatch(email):
+                errors.append(RowError(row, "email", "not an email address"))
+            language = values.get("language")
+            if isinstance(language, str) and not re.fullmatch(r"[A-Za-z]{2}", language):
+                errors.append(RowError(row, "language", "use a 2-letter code such as it"))
         case "items":
             pass
     return errors

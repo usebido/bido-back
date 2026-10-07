@@ -11,6 +11,7 @@ from bido_back.agents.catalog.definitions import (
     RFQ_INTAKE,
     RFQ_NEGOTIATION_WRITER,
     RFQ_TEMPLATE_BUILDER,
+    SHEET_MAPPER,
     TEMPLATE_MODEL,
     award_notice_problems,
     award_notice_writer,
@@ -24,6 +25,7 @@ from bido_back.agents.catalog.definitions import (
     rfq_intake,
     rfq_negotiation_writer,
     rfq_template_builder,
+    sheet_mapper,
 )
 
 __all__ = [
@@ -37,6 +39,7 @@ __all__ = [
     "RFQ_INTAKE",
     "RFQ_NEGOTIATION_WRITER",
     "RFQ_TEMPLATE_BUILDER",
+    "SHEET_MAPPER",
     "TEMPLATE_MODEL",
     "award_notice_problems",
     "award_notice_writer",
@@ -50,4 +53,5 @@ __all__ = [
     "rfq_intake",
     "rfq_negotiation_writer",
     "rfq_template_builder",
+    "sheet_mapper",
 ]

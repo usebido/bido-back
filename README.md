@@ -149,17 +149,31 @@ tenants, approvals, the outbox, and the business endpoints.
 
 ## Scheduled jobs
 
-Long waits are database rows; nothing sleeps. EventBridge Scheduler puts two
+Long waits are database rows; nothing sleeps. EventBridge Scheduler puts these
 jobs on the jobs queue with the all-zeros tenant id (= every tenant):
 
 | Job | Every | What |
 |---|---|---|
 | `mailbox.sync` | 2 min | new messages in the RFQ threads of connected mailboxes |
 | `followups.sweep` | 15 min | chases due (business days, supplier holidays, auto-reply pauses), clarifications for offers with missing fields, cleanup of stale proposals |
+| `negotiation.sweep` | 15 min | counter-offers and best-and-final requests, early close, closing at the deadline |
 
-Every chase or clarification is proposed as a pending approval and sent only
-after a person approves it, in the RFQ's thread. Locally, trigger a sweep with
-`curl -X POST localhost:8080/dev/followups/sweep`.
+Every chase, clarification or counter-offer is proposed as a pending approval
+and sent in the RFQ's thread once approved. Under an approved negotiation
+mandate (`POST /v1/rfqs/{id}/negotiation/mandate`), the sweeps also approve the
+in-bounds ones on the buyer's behalf right away; out-of-bounds drafts are held
+for a person, and `POST .../negotiation/mandate/pause` stops it all. Locally,
+trigger a sweep with `curl -X POST localhost:8080/dev/followups/sweep`.
+
+## Spreadsheets
+
+Buyers send what they have. `POST /v1/data/workbook-imports` (and the
+copilot's `import_spreadsheet`) reads every sheet of an `.xlsx` or a `.csv`:
+rules find the header row and columns (Portuguese, English, Italian), the
+`sheet_mapper` agent proposes a mapping for sheets the rules cannot read, and
+code validates every value. When unsure it answers `needs_confirmation` with
+questions and writes nothing until confirmed. Supplier emails next to supplier
+names become supplier contacts.
 
 ## Observability
 

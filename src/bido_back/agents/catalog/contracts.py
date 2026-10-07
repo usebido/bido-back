@@ -158,6 +158,22 @@ class QuoteExtractionInput(BaseModel):
     attachments_text: str = Field(description="Extracted text with [file p.N] / [sheet!A1] markers")
 
 
+class ExtraOfferDraft(BaseModel):
+    """Something the supplier offers that the RFQ did not ask for: another item,
+    a volume discount, a bundle, another department's offer in the same email.
+    Kept as written; never priced into the comparison."""
+
+    description: str = Field(description="What is offered, in the supplier's words, short")
+    mpn: str | None = Field(description="Part number if given, else null")
+    quantity: str | None = Field(description="Quantity or volume condition as written, or null")
+    unit_price: str | None = Field(description="Price as written (number only), or null")
+    currency: str | None = Field(description="ISO 4217 code if stated, or null")
+    conditions: str | None = Field(
+        description="Validity, minimums or other conditions as written, or null"
+    )
+    quote: str = Field(description="The exact text the offer was read from")
+
+
 class QuoteExtractionOutput(BaseModel):
     is_quote: bool = Field(
         description="False for out-of-office, refusals, questions without prices"
@@ -169,6 +185,8 @@ class QuoteExtractionOutput(BaseModel):
     payment_terms: ExtractedValue
     lines: list[ProposalLineDraft] = Field(default_factory=list[ProposalLineDraft])
     missing_fields: list[str] = Field(default_factory=list[str])
+    # Offers for things not requested; empty when there are none.
+    extra_offers: list[ExtraOfferDraft] = Field(default_factory=list[ExtraOfferDraft])
 
 
 # --- rfq_candidate_classifier: sent-mail metadata -> is it an RFQ the buyer sent?
@@ -315,3 +333,59 @@ class AwardNoticeInput(BaseModel):
 
 class AwardNoticeOutput(BaseModel):
     body: str = Field(description="Plain text. The subject is set by code (Re: the RFQ email).")
+
+
+# --- sheet_mapper: an arbitrary workbook -> import sections ------------------------------
+
+SheetImportType = Literal[
+    "items",
+    "bom",
+    "inventory",
+    "purchase_history",
+    "production_plan",
+    "supplier_contacts",
+    "ignore",
+]
+
+
+class SheetPreview(BaseModel):
+    sheet: str
+    rows: int
+    columns: int
+    preview: str = Field(
+        description="The first rows, one per line: 'row N: [0] value | [1] value | ...'"
+    )
+
+
+class ImportFieldCatalog(BaseModel):
+    import_type: str
+    fields: list[str]
+    required: list[str]
+
+
+class SheetMappingInput(BaseModel):
+    filename: str
+    sheets: list[SheetPreview]
+    catalog: list[ImportFieldCatalog]
+
+
+class ColumnAssignment(BaseModel):
+    field: str = Field(description="A field name of the section's import type")
+    column: int = Field(description="0-based column index, as in the preview's [N]")
+
+
+class SheetSection(BaseModel):
+    sheet: str
+    import_type: SheetImportType
+    header_row: int = Field(description="1-based row of the column headers")
+    first_data_row: int = Field(description="1-based first data row")
+    last_data_row: int | None = Field(description="1-based last data row, or null for the end")
+    columns: list[ColumnAssignment]
+    confidence: float = Field(ge=0, le=1)
+    question: str | None = Field(
+        description="When unsure: one short question for the buyer, in their language; else null"
+    )
+
+
+class SheetMappingOutput(BaseModel):
+    sections: list[SheetSection]

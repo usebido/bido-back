@@ -21,6 +21,7 @@ from bido_back.agents.catalog import (
     RFQ_INTAKE,
     RFQ_NEGOTIATION_WRITER,
     RFQ_TEMPLATE_BUILDER,
+    SHEET_MAPPER,
     quote_extraction,
     rfq_email_problems,
 )
@@ -53,6 +54,7 @@ AGENTS: list[AgentDefinition[Any]] = [
     RFQ_FOLLOWUP_WRITER,
     RFQ_NEGOTIATION_WRITER,
     AWARD_NOTICE_WRITER,
+    SHEET_MAPPER,
 ]
 
 

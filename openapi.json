@@ -3635,6 +3635,225 @@
         "title": "MailboxSummary",
         "type": "object"
       },
+      "MandateActivity": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/MandateActivityItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "mandate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MandateView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "rfq_id": {
+            "format": "uuid",
+            "title": "Rfq Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rfq_id",
+          "mandate",
+          "items"
+        ],
+        "title": "MandateActivity",
+        "type": "object"
+      },
+      "MandateActivityItem": {
+        "properties": {
+          "approval_id": {
+            "format": "uuid",
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "approval_status": {
+            "title": "Approval Status",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "invite_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invite Id"
+          },
+          "outcome": {
+            "enum": [
+              "auto_approved",
+              "held"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          },
+          "supplier_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Name"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          }
+        },
+        "required": [
+          "approval_id",
+          "tool",
+          "outcome",
+          "reason",
+          "invite_id",
+          "supplier_name",
+          "approval_status",
+          "subject",
+          "created_at"
+        ],
+        "title": "MandateActivityItem",
+        "type": "object"
+      },
+      "MandateView": {
+        "properties": {
+          "approval_id": {
+            "format": "uuid",
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "approved_by": {
+            "format": "uuid",
+            "title": "Approved By",
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "deadline": {
+            "format": "date-time",
+            "title": "Deadline",
+            "type": "string"
+          },
+          "ended_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ended At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "max_messages_per_supplier_per_day": {
+            "title": "Max Messages Per Supplier Per Day",
+            "type": "integer"
+          },
+          "max_rounds": {
+            "title": "Max Rounds",
+            "type": "integer"
+          },
+          "paused_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paused At"
+          },
+          "rfq_id": {
+            "format": "uuid",
+            "title": "Rfq Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "active",
+              "paused",
+              "ended"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "suppliers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Suppliers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "rfq_id",
+          "status",
+          "approval_id",
+          "approved_by",
+          "deadline",
+          "max_rounds",
+          "max_messages_per_supplier_per_day",
+          "suppliers",
+          "created_at",
+          "paused_at",
+          "ended_at"
+        ],
+        "title": "MandateView",
+        "type": "object"
+      },
       "MeResponse": {
         "properties": {
           "allow_self_approval": {
@@ -4515,6 +4734,85 @@
           "lines"
         ],
         "title": "ProposalView",
+        "type": "object"
+      },
+      "ProposeMandateRequest": {
+        "additionalProperties": false,
+        "description": "POST /v1/rfqs/{id}/negotiation/mandate: build the mandate for approval.",
+        "properties": {
+          "deadline": {
+            "format": "date-time",
+            "title": "Deadline",
+            "type": "string"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/LineLimitsUpdate"
+            },
+            "maxItems": 500,
+            "title": "Lines",
+            "type": "array"
+          },
+          "max_messages_per_supplier_per_day": {
+            "default": 2,
+            "maximum": 5.0,
+            "minimum": 1.0,
+            "title": "Max Messages Per Supplier Per Day",
+            "type": "integer"
+          },
+          "max_rounds": {
+            "default": 3,
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Max Rounds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deadline"
+        ],
+        "title": "ProposeMandateRequest",
+        "type": "object"
+      },
+      "ProposedMandate": {
+        "properties": {
+          "approval_id": {
+            "format": "uuid",
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "deadline": {
+            "format": "date-time",
+            "title": "Deadline",
+            "type": "string"
+          },
+          "initial_emails": {
+            "title": "Initial Emails",
+            "type": "integer"
+          },
+          "lines": {
+            "title": "Lines",
+            "type": "integer"
+          },
+          "rfq_id": {
+            "format": "uuid",
+            "title": "Rfq Id",
+            "type": "string"
+          },
+          "suppliers": {
+            "title": "Suppliers",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rfq_id",
+          "approval_id",
+          "suppliers",
+          "lines",
+          "initial_emails",
+          "deadline"
+        ],
+        "title": "ProposedMandate",
         "type": "object"
       },
       "PurchaseOrderSummary": {
@@ -5961,6 +6259,125 @@
         "title": "SearchResults",
         "type": "object"
       },
+      "SectionReport": {
+        "properties": {
+          "columns": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Columns",
+            "type": "object"
+          },
+          "confidence": {
+            "title": "Confidence",
+            "type": "number"
+          },
+          "created": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "default": {},
+            "title": "Created",
+            "type": "object"
+          },
+          "errors": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "header_row": {
+            "title": "Header Row",
+            "type": "integer"
+          },
+          "missing_required": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Required",
+            "type": "array"
+          },
+          "question": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Question"
+          },
+          "rows_failed": {
+            "title": "Rows Failed",
+            "type": "integer"
+          },
+          "rows_ok": {
+            "title": "Rows Ok",
+            "type": "integer"
+          },
+          "rows_total": {
+            "title": "Rows Total",
+            "type": "integer"
+          },
+          "sheet": {
+            "title": "Sheet",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "rules",
+              "model"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "type": {
+            "anyOf": [
+              {
+                "enum": [
+                  "items",
+                  "bom",
+                  "inventory",
+                  "purchase_history",
+                  "production_plan"
+                ],
+                "type": "string"
+              },
+              {
+                "const": "supplier_contacts",
+                "type": "string"
+              }
+            ],
+            "title": "Type"
+          },
+          "updated": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "default": {},
+            "title": "Updated",
+            "type": "object"
+          }
+        },
+        "required": [
+          "sheet",
+          "type",
+          "source",
+          "header_row",
+          "columns",
+          "missing_required",
+          "rows_total",
+          "rows_ok",
+          "rows_failed",
+          "errors",
+          "confidence",
+          "question"
+        ],
+        "title": "SectionReport",
+        "type": "object"
+      },
       "SkippedSupplier": {
         "properties": {
           "name": {
@@ -7172,6 +7589,79 @@
         ],
         "title": "VariantRequest",
         "type": "object"
+      },
+      "WorkbookImportReport": {
+        "properties": {
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "problems": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Problems",
+            "type": "array"
+          },
+          "questions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Questions",
+            "type": "array"
+          },
+          "sections": {
+            "items": {
+              "$ref": "#/components/schemas/SectionReport"
+            },
+            "title": "Sections",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "imported",
+              "needs_confirmation",
+              "nothing_found"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "upload_id": {
+            "format": "uuid",
+            "title": "Upload Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_id",
+          "filename",
+          "status",
+          "sections",
+          "questions",
+          "problems"
+        ],
+        "title": "WorkbookImportReport",
+        "type": "object"
+      },
+      "WorkbookImportRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "confirmed": {
+            "default": false,
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "upload_id": {
+            "format": "uuid",
+            "title": "Upload Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "upload_id"
+        ],
+        "title": "WorkbookImportRequest",
+        "type": "object"
       }
     },
     "securitySchemes": {
@@ -8373,6 +8863,102 @@
           }
         ],
         "summary": "Products",
+        "tags": [
+          "purchasing"
+        ]
+      }
+    },
+    "/v1/data/workbook-imports": {
+      "post": {
+        "operationId": "import_any_workbook_v1_data_workbook_imports_post",
+        "parameters": [
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WorkbookImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkbookImportReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Import Any Workbook",
         "tags": [
           "purchasing"
         ]
@@ -13457,6 +14043,460 @@
           }
         ],
         "summary": "Close Negotiation",
+        "tags": [
+          "negotiation"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/negotiation/mandate": {
+      "get": {
+        "operationId": "mandate_activity_v1_rfqs__rfq_id__negotiation_mandate_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MandateActivity"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Mandate Activity",
+        "tags": [
+          "negotiation"
+        ]
+      },
+      "post": {
+        "description": "Render the initial emails and record one approval for the whole negotiation.",
+        "operationId": "propose_mandate_v1_rfqs__rfq_id__negotiation_mandate_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProposeMandateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposedMandate"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Gateway"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Propose Mandate",
+        "tags": [
+          "negotiation"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/negotiation/mandate/pause": {
+      "post": {
+        "description": "Stop automatic sends now. Pending emails wait for a person.",
+        "operationId": "pause_mandate_v1_rfqs__rfq_id__negotiation_mandate_pause_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MandateView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Pause Mandate",
+        "tags": [
+          "negotiation"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/negotiation/mandate/resume": {
+      "post": {
+        "operationId": "resume_mandate_v1_rfqs__rfq_id__negotiation_mandate_resume_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MandateView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Resume Mandate",
         "tags": [
           "negotiation"
         ]

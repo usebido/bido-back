@@ -660,6 +660,50 @@ class NegotiationMessage(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class NegotiationMandate(Base):
+    """What a person approved once for one RFQ's negotiation (migration 0019).
+
+    `terms` is the approved `ApproveMandateArgs` payload (suppliers, addresses,
+    limits, caps, initial emails); `args_hash` its hash. While `active`, the
+    worker approves in-bounds emails of this RFQ on the buyer's behalf.
+    """
+
+    __tablename__ = "negotiation_mandates"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    rfq_id: Mapped[UUID] = mapped_column(ForeignKey("rfqs.id", ondelete="CASCADE"))
+    approval_id: Mapped[UUID]
+    args_hash: Mapped[str] = mapped_column(Text)
+    requested_by: Mapped[UUID]
+    approved_by: Mapped[UUID]
+    sender_user_id: Mapped[UUID]
+    terms: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'active'"))
+    deadline: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    paused_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class MandateSend(Base):
+    """One approval a mandate decided on: auto-approved, or held for a person."""
+
+    __tablename__ = "mandate_sends"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    mandate_id: Mapped[UUID] = mapped_column(
+        ForeignKey("negotiation_mandates.id", ondelete="CASCADE")
+    )
+    approval_id: Mapped[UUID]
+    invite_id: Mapped[UUID | None]
+    tool: Mapped[str] = mapped_column(Text)
+    outcome: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 # --- Supplier compliance (migration 0011) -----------------------------------
 
 COMPLIANCE_SCOPES = ("supplier", "manufacturer", "line")

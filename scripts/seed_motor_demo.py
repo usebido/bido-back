@@ -41,7 +41,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 from bido_back.auth import Principal
 from bido_back.db import create_engine, tenant_session
 from bido_back.db.models import Contact, Membership, Supplier, SupplierContact, Tenant, User
-from bido_back.purchasing.importers import ImportType, read_table
+from bido_back.purchasing.importers import TableImportType, read_table
 from bido_back.purchasing.service import import_rows
 from bido_back.settings import get_settings
 
@@ -166,7 +166,7 @@ def _months_ago(today: date, months: int) -> date:
     return today - timedelta(days=30 * months + 3)
 
 
-def workbooks(today: date) -> dict[ImportType, list[list[object]]]:
+def workbooks(today: date) -> dict[TableImportType, list[list[object]]]:
     """The demo data as spreadsheet rows (Italian headers, like a real export)."""
     bom: list[list[object]] = [
         ["Prodotto", "Codice Articolo", "Descrizione", "Codice Produttore", "Produttore",
