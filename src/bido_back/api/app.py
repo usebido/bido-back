@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from bido_back.api.approvals import approvals_router
 from bido_back.api.compliance import compliance_router
 from bido_back.api.copilot import copilot_router
+from bido_back.api.cors import add_cors
 from bido_back.api.deps import ApiResources
 from bido_back.api.exports import exports_router
 from bido_back.api.followups import followups_router
@@ -83,4 +84,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         app.include_router(dev_router)
     instrument_fastapi(app)
+    # Last, so it is the outermost middleware: preflights are answered before
+    # tracing, routing or auth.
+    add_cors(app, resolved)
     return app
