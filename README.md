@@ -22,6 +22,7 @@ src/bido_back/
   worker/            SQS worker (`python -m bido_back.worker`)
   agents/            the agents adapter: Agno behind our own types and tools
   copilot/           the procurement copilot: chat agent, its tools, SSE stream
+  purchasing/        data imports (BOM, stock, purchase history, plan) and the purchase analysis
   db/                SQLAlchemy models, sessions, tenant-scoped transactions
   observability.py   OpenTelemetry tracing and Sentry; off when unset
 prompts/             versioned agent prompts (`<name>.v<N>.md`)
@@ -63,6 +64,13 @@ uv run python scripts/export_openapi.py  # then commit openapi.json if it change
 ```
 
 To start over with an empty database: `docker compose down -v && docker compose up -d db`.
+
+Demo data for the purchase analysis: `uv run python scripts/seed_motor_demo.py`
+creates the "Motori Demo S.p.A." tenant (an EV motor's BOM, stock, 12 months of
+purchase history, a production plan) through the same spreadsheet importer as
+`POST /v1/data/imports`; the workbooks are in `scripts/demo_data/`. Then, as
+`X-Dev-User: user_motori_buyer`, `POST /v1/analyses {"product": "motor"}` or ask
+the copilot "faz uma análise de motor".
 
 ## Tenancy and row-level security
 

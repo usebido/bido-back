@@ -20,6 +20,8 @@ EXPECTED_TOOLS = {
     "suggest_suppliers": "read",
     "get_rfq_template": "read",
     "update_rfq_template": "draft",
+    "run_purchase_analysis": "draft",
+    "create_rfq_from_analysis": "draft",
     "create_rfq": "draft",
     "invite_suppliers": "draft",
     "prepare_send": "draft",

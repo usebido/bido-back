@@ -24,6 +24,7 @@ import importlib
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import date
 from decimal import Decimal
 from typing import Final, cast
 from uuid import UUID, uuid4
@@ -266,6 +267,85 @@ async def create_rfq_from_text(
         detail = await _detail(session, rfq)
     logger.info("rfq created tenant=%s rfq=%s run=%s", principal.tenant_id, rfq.id, context.run_id)
     return RfqCreated.model_validate({**detail.model_dump(), "questions": draft.questions})
+
+
+@dataclass(frozen=True, slots=True)
+class NewRfqLine:
+    """A line for `create_draft_rfq`, when the lines come from code (an analysis)."""
+
+    description: str
+    quantity: Decimal
+    unit: str = "pcs"
+    mpn: str | None = None
+    manufacturer: str | None = None
+    category: LineCategory = "catalog"
+    need_by: date | None = None
+    qualification: str | None = None
+
+
+async def create_draft_rfq(
+    session: AsyncSession,
+    principal: Principal,
+    *,
+    title: str,
+    lines: Sequence[NewRfqLine],
+    source_text: str | None = None,
+    response_due: date | None = None,
+) -> tuple[Rfq, list[RfqLine]]:
+    """Store a draft RFQ with the given lines, in the caller's tenant session."""
+    rfq = Rfq(
+        tenant_id=principal.tenant_id,
+        ref=await _next_ref(session, principal.tenant_id),
+        title=title,
+        status="draft",
+        base_currency=BASE_CURRENCY,
+        response_due=response_due,
+        source_text=source_text,
+        created_by=principal.user_id,
+    )
+    session.add(rfq)
+    await session.flush()
+    rows: list[RfqLine] = []
+    for position, line in enumerate(lines, start=1):
+        row = RfqLine(
+            tenant_id=principal.tenant_id,
+            rfq_id=rfq.id,
+            position=position,
+            description=line.description,
+            mpn=line.mpn,
+            manufacturer=line.manufacturer,
+            category=line.category,
+            quantities=[quantity_json(line.quantity)],
+            unit=line.unit,
+            need_by=line.need_by,
+            qualification=line.qualification,
+        )
+        session.add(row)
+        rows.append(row)
+    await session.flush()
+    await session.refresh(rfq)
+    return rfq, rows
+
+
+async def add_draft_invite(
+    session: AsyncSession, principal: Principal, rfq: Rfq, supplier_id: UUID, contact_id: UUID
+) -> Invite:
+    """A draft invite in the caller's tenant session (no checks beyond the constraints)."""
+    invite = Invite(
+        tenant_id=principal.tenant_id,
+        rfq_id=rfq.id,
+        supplier_id=supplier_id,
+        contact_id=contact_id,
+        reply_token=_new_reply_token(),
+        status="draft",
+    )
+    session.add(invite)
+    await session.flush()
+    return invite
+
+
+async def rfq_detail(session: AsyncSession, rfq: Rfq) -> RfqDetail:
+    return await _detail(session, rfq)
 
 
 async def list_rfqs(db: Db, principal: Principal) -> list[RfqSummary]:
