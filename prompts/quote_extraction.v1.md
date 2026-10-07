@@ -49,6 +49,9 @@ extract. Extract only what the supplier actually quotes.
     1000 units, give the price per single unit and lower the confidence.
   - `unit`, `tooling_cost` (one-off tooling or NRE), `moq`, `lead_time_days`,
     `origin_country`.
+  - `qualification`: an automotive qualification the supplier states for this
+    offer (`AEC-Q200`, `AEC-Q100 Grade 1`), as written. Null when the supplier
+    does not state one; never infer it from the part number.
 - `missing_fields`: what the buyer asked for that the supplier did not give,
   from: `unit_price`, `currency`, `lead_time`, `validity`, `incoterm`,
   `freight`, `tooling`, `moq`, `origin_country`, `compliance_documents`,
@@ -70,7 +73,7 @@ Each value is an object with `value`, `source` and `confidence`.
 - `lead_time_days`: calendar days as an integer; convert weeks to days
   (6 weeks = 42).
 - `origin_country`: the ISO 3166-1 alpha-2 code (`DE`, `CN`).
-- text values (`payment_terms`, `unit`, `offered_mpn`): as written.
+- text values (`payment_terms`, `unit`, `offered_mpn`, `qualification`): as written.
 
 `source` says exactly where you read it:
 

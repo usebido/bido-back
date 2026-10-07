@@ -297,6 +297,17 @@
             ],
             "title": "Offered Mpn"
           },
+          "qualification": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qualification"
+          },
           "quantity": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Quantity",
@@ -306,6 +317,23 @@
             "format": "uuid",
             "title": "Rfq Line Id",
             "type": "string"
+          },
+          "rules": {
+            "items": {
+              "enum": [
+                "alternative_needs_approval",
+                "qualification_unconfirmed",
+                "unauthorized_source",
+                "authorization_unverified",
+                "late_for_need_by",
+                "moq_above_quantity",
+                "validity_expired",
+                "validity_ends_before_need_by"
+              ],
+              "type": "string"
+            },
+            "title": "Rules",
+            "type": "array"
           },
           "tier": {
             "title": "Tier",
@@ -426,6 +454,13 @@
             "title": "Lines",
             "type": "array"
           },
+          "recommendations": {
+            "items": {
+              "$ref": "#/components/schemas/Recommendation"
+            },
+            "title": "Recommendations",
+            "type": "array"
+          },
           "rfq_id": {
             "format": "uuid",
             "title": "Rfq Id",
@@ -484,9 +519,32 @@
             ],
             "title": "Mpn"
           },
+          "need_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need By"
+          },
           "position": {
             "title": "Position",
             "type": "integer"
+          },
+          "qualification": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qualification"
           },
           "quantities": {
             "items": {
@@ -842,6 +900,33 @@
           "detail"
         ],
         "title": "ErrorResponse",
+        "type": "object"
+      },
+      "ExcludedOffer": {
+        "properties": {
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invite_id",
+          "supplier_name",
+          "reasons"
+        ],
+        "title": "ExcludedOffer",
         "type": "object"
       },
       "FollowupMessageView": {
@@ -1479,6 +1564,133 @@
         "title": "RateUsed",
         "type": "object"
       },
+      "Recommendation": {
+        "properties": {
+          "effective_unit_price_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Unit Price Base"
+          },
+          "excluded": {
+            "items": {
+              "$ref": "#/components/schemas/ExcludedOffer"
+            },
+            "title": "Excluded",
+            "type": "array"
+          },
+          "invite_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invite Id"
+          },
+          "justification": {
+            "title": "Justification",
+            "type": "string"
+          },
+          "lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lead Time Days"
+          },
+          "line_total_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Total Base"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "reasons": {
+            "items": {
+              "enum": [
+                "lowest_effective_price",
+                "tie_broken_by_lead_time",
+                "only_eligible_offer",
+                "no_offer_meets_need_by",
+                "no_eligible_offer"
+              ],
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "rfq_line_id": {
+            "format": "uuid",
+            "title": "Rfq Line Id",
+            "type": "string"
+          },
+          "runner_up": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunnerUp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "supplier_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Name"
+          },
+          "tier": {
+            "title": "Tier",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rfq_line_id",
+          "tier",
+          "quantity",
+          "invite_id",
+          "supplier_name",
+          "effective_unit_price_base",
+          "line_total_base",
+          "lead_time_days",
+          "reasons",
+          "justification",
+          "runner_up",
+          "excluded"
+        ],
+        "title": "Recommendation",
+        "type": "object"
+      },
       "RfqCreated": {
         "properties": {
           "base_currency": {
@@ -1934,6 +2146,37 @@
         "title": "RfqSummary",
         "type": "object"
       },
+      "RunnerUp": {
+        "properties": {
+          "effective_unit_price_base": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Effective Unit Price Base",
+            "type": "string"
+          },
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          },
+          "price_delta_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Price Delta Pct",
+            "type": "string"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invite_id",
+          "supplier_name",
+          "effective_unit_price_base",
+          "price_delta_pct"
+        ],
+        "title": "RunnerUp",
+        "type": "object"
+      },
       "ScanView": {
         "properties": {
           "candidates": {
@@ -2110,6 +2353,23 @@
             "title": "Proposal Version",
             "type": "integer"
           },
+          "rules": {
+            "items": {
+              "enum": [
+                "alternative_needs_approval",
+                "qualification_unconfirmed",
+                "unauthorized_source",
+                "authorization_unverified",
+                "late_for_need_by",
+                "moq_above_quantity",
+                "validity_expired",
+                "validity_ends_before_need_by"
+              ],
+              "type": "string"
+            },
+            "title": "Rules",
+            "type": "array"
+          },
           "supplier_id": {
             "format": "uuid",
             "title": "Supplier Id",
@@ -2118,6 +2378,17 @@
           "supplier_name": {
             "title": "Supplier Name",
             "type": "string"
+          },
+          "supplier_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Type"
           },
           "totals": {
             "items": {
