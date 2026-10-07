@@ -7,13 +7,14 @@ OUTSIDE any transaction; their results are written afterwards.
 Preparing a send never sends. It first checks that the caller (the buyer)
 has a connected mailbox, since that is where the emails will go out from
 (`MailboxNotConnected` otherwise). Then, for each invite still in `draft`, it
-runs the email writer, makes sure the subject carries the `[RFQ-<n>]` marker,
-records an `ApprovalProposal` for the act tool `send_rfq_email`
-through `PostgresApprovalSink` (requested by the caller), and moves the invite
-to `pending_approval`. The proposal's run id and tool-call id are derived from
-the invite, so preparing the same invite twice (a retry, a concurrent click)
-records one approval: the second proposal hits the sink's uniqueness rule and
-the first one stands.
+runs the email writer (with the tenant's default RFQ template from
+onboarding as a style hint, when there is one), makes sure the subject
+carries the `[RFQ-<n>]` marker, records an `ApprovalProposal` for the act
+tool `send_rfq_email` through `PostgresApprovalSink` (requested by the
+caller), and moves the invite to `pending_approval`. The proposal's run id
+and tool-call id are derived from the invite, so preparing the same invite
+twice (a retry, a concurrent click) records one approval: the second proposal
+hits the sink's uniqueness rule and the first one stands.
 """
 
 import importlib
@@ -34,6 +35,7 @@ from bido_back.agents.catalog.contracts import (
     LineCategory,
     RfqEmailInput,
     RfqEmailLine,
+    RfqEmailTemplate,
     RfqIntakeInput,
 )
 from bido_back.agents.context import ToolContext
@@ -47,6 +49,7 @@ from bido_back.db.models import (
     Invite,
     Rfq,
     RfqLine,
+    RfqTemplate,
     Supplier,
     SupplierContact,
     Tenant,
@@ -357,6 +360,20 @@ async def _buyer_name(session: AsyncSession, user: User, company: str) -> str:
     return name or f"{company} purchasing"
 
 
+async def default_template(session: AsyncSession) -> RfqEmailTemplate | None:
+    """The tenant's default RFQ template (onboarding), as the email writer's style hint."""
+    row = await session.scalar(
+        select(RfqTemplate).where(RfqTemplate.is_default, RfqTemplate.status == "ready")
+    )
+    if row is None or row.greeting is None:
+        return None
+    return RfqEmailTemplate(
+        language=row.language or "pt",
+        greeting=row.greeting,
+        fields=[str(f) for f in row.fields],
+    )
+
+
 def with_marker(subject: str, rfq_ref: str) -> str:
     """The subject with the `[RFQ-<n>]` marker, added in front if the writer left it out."""
     marker = subject_marker(rfq_ref)
@@ -407,6 +424,7 @@ async def prepare_send(
         if tenant is None or user is None:
             raise NotFound("tenant or user not found")
         buyer_name = await _buyer_name(session, user, tenant.name)
+        template = await default_template(session)
 
     email_lines = [
         RfqEmailLine(
@@ -440,6 +458,7 @@ async def prepare_send(
                 supplier_language=supplier.language,
                 response_due=rfq.response_due,
                 lines=email_lines,
+                template=template,
             ),
             context,
         )

@@ -1,25 +1,35 @@
-"""The RFQ-flow agents (definitions.py) and their I/O contracts (contracts.py)."""
+"""The RFQ-flow and onboarding agents (definitions.py) and their I/O contracts (contracts.py)."""
 
 from bido_back.agents.catalog.definitions import (
     DEFAULT_MODEL,
     EXTRACTION_MODEL,
     QUOTE_EXTRACTION,
+    RFQ_CANDIDATE_CLASSIFIER,
     RFQ_EMAIL_WRITER,
     RFQ_INTAKE,
+    RFQ_TEMPLATE_BUILDER,
+    TEMPLATE_MODEL,
     quote_extraction,
+    rfq_candidate_classifier,
     rfq_email_problems,
     rfq_email_writer,
     rfq_intake,
+    rfq_template_builder,
 )
 
 __all__ = [
     "DEFAULT_MODEL",
     "EXTRACTION_MODEL",
     "QUOTE_EXTRACTION",
+    "RFQ_CANDIDATE_CLASSIFIER",
     "RFQ_EMAIL_WRITER",
     "RFQ_INTAKE",
+    "RFQ_TEMPLATE_BUILDER",
+    "TEMPLATE_MODEL",
     "quote_extraction",
+    "rfq_candidate_classifier",
     "rfq_email_problems",
     "rfq_email_writer",
     "rfq_intake",
+    "rfq_template_builder",
 ]

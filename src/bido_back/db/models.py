@@ -73,6 +73,8 @@ class Membership(Base):
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
     role: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # When the user finished onboarding in this tenant (migration 0007).
+    onboarded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AuditEvent(Base):
@@ -385,3 +387,100 @@ class MailboxConnection(Base):
     sync_state: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# --- Onboarding (migration 0007) --------------------------------------------
+
+TEMPLATE_SOURCES = ("search", "upload", "none")
+TEMPLATE_STATUSES = ("building", "ready", "failed")
+SCAN_STATUSES = ("running", "done", "failed")
+
+
+class RfqTemplate(Base):
+    """How the tenant's RFQ emails usually look. At most one default per tenant."""
+
+    __tablename__ = "rfq_templates"
+    __table_args__ = (
+        CheckConstraint(
+            "source IN ('search', 'upload', 'none')", name="rfq_templates_source_check"
+        ),
+        CheckConstraint(
+            "status IN ('building', 'ready', 'failed')", name="rfq_templates_status_check"
+        ),
+        CheckConstraint(
+            "status <> 'ready' OR greeting IS NOT NULL", name="rfq_templates_ready_check"
+        ),
+        CheckConstraint(
+            "NOT is_default OR status = 'ready'", name="rfq_templates_default_ready_check"
+        ),
+        Index(
+            "rfq_templates_one_default_idx",
+            "tenant_id",
+            unique=True,
+            postgresql_where=text("is_default"),
+        ),
+        Index("rfq_templates_tenant_id_created_at_idx", "tenant_id", "created_at"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    created_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    source: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'building'"))
+    # ISO 639-1 of the buyer's RFQs, e.g. "pt".
+    language: Mapped[str | None] = mapped_column(Text)
+    greeting: Mapped[str | None] = mapped_column(Text)
+    columns: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    footer: Mapped[str | None] = mapped_column(Text)
+    fields: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    # Ids only: {"scan_id": ..., "candidate_ids": [...]} or {"upload_ids": [...]}.
+    source_refs: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    is_default: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TemplateScan(Base):
+    """A one-off scan of the user's sent mail for old RFQs. Metadata only, never bodies."""
+
+    __tablename__ = "template_scans"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('running', 'done', 'failed')", name="template_scans_status_check"
+        ),
+        Index(
+            "template_scans_tenant_id_user_id_created_at_idx", "tenant_id", "user_id", "created_at"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    mailbox_connection_id: Mapped[UUID] = mapped_column(
+        ForeignKey("mailbox_connections.id", ondelete="CASCADE")
+    )
+    status: Mapped[str] = mapped_column(Text, server_default=text("'running'"))
+    checked: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    found: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    candidates: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    error: Mapped[str | None] = mapped_column(Text)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class TemplateUpload(Base):
+    """A file uploaded to learn the RFQ template from; the bytes are in blob storage."""
+
+    __tablename__ = "template_uploads"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    filename: Mapped[str] = mapped_column(Text)
+    content_type: Mapped[str] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    storage_key: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

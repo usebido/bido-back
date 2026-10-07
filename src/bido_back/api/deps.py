@@ -33,6 +33,7 @@ from bido_back.db import create_engine, create_sessionmaker
 from bido_back.rfqs.agents import RfqAgents, default_rfq_agents
 from bido_back.rfqs.mailbox import MailboxSenderFactory, mailbox_senders_for
 from bido_back.settings import Settings
+from bido_back.storage import BlobStorage, build_storage
 from bido_back.worker.jobs import JobQueue, SqsJobQueue
 
 DEV_USER_HEADER = "X-Dev-User"
@@ -51,6 +52,7 @@ class ApiResources:
         self._sessionmaker: async_sessionmaker[AsyncSession] | None = None
         self._jobs: JobQueue | None = None
         self._verifier: ClerkJwtVerifier | None = None
+        self._storage: BlobStorage | None = None
 
     @property
     def settings(self) -> Settings:
@@ -73,6 +75,11 @@ class ApiResources:
                 sqs=sqs_client(self._settings),
             )
         return self._jobs
+
+    def storage(self) -> BlobStorage:
+        if self._storage is None:
+            self._storage = build_storage(self._settings)
+        return self._storage
 
     def verifier(self) -> ClerkJwtVerifier | None:
         """The Clerk verifier, or None when Clerk is not configured (local/test)."""
@@ -104,6 +111,10 @@ def get_job_queue(request: Request) -> JobQueue:
         # Refused before anything is decided, so no approval is left without a job.
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "job queue not configured")
     return jobs
+
+
+def get_storage(request: Request) -> BlobStorage:
+    return _resources(request).storage()
 
 
 def get_rfq_agents() -> RfqAgents:

@@ -8,7 +8,9 @@ extracts, the exact text and its locator. So every chunk carries a marker:
 - Excel:      `[offer.xlsx Prices!C14] 0.45` for every non-empty cell, one sheet
               row per line;
 - CSV:        `[offer.csv C14] 0.45`, the same without a sheet;
-- plain text: `[notes.txt]` before the text.
+- plain text: `[notes.txt]` before the text;
+- Word:       `[rfq.docx]` before the text, one paragraph per line, table
+              rows rendered like PDF tables (cells joined by ` | `).
 
 Images and scanned PDFs (no text layer) are not read: they come back as a
 "needs vision" marker so the caller can list them (no OCR in the prototype).
@@ -25,6 +27,7 @@ import email.policy
 import io
 import logging
 import re
+import zipfile
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, time
@@ -32,10 +35,11 @@ from decimal import Decimal, InvalidOperation
 from html.parser import HTMLParser
 from pathlib import PurePath
 from typing import Literal, Protocol, cast
+from xml.etree import ElementTree
 
 logger = logging.getLogger(__name__)
 
-DocumentKind = Literal["pdf", "sheet", "csv", "text", "image", "unsupported"]
+DocumentKind = Literal["pdf", "sheet", "csv", "text", "docx", "image", "unsupported"]
 SkipReason = Literal["too_large", "unreadable", "unsupported_format"]
 
 
@@ -105,6 +109,8 @@ def extract_text(
                 return _csv(name, _decode(data), limits)
             case "text":
                 return _text(name, content_type, data, limits)
+            case "docx":
+                return _docx(name, data, limits)
             case "image":
                 return DocumentText(
                     filename=name,
@@ -138,6 +144,7 @@ _XLSX_TYPES = {
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.ms-excel.sheet.macroenabled.12",
 }
+_DOCX_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 _CSV_TYPES = {"text/csv", "application/csv", "text/comma-separated-values"}
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".tif", ".tiff", ".bmp", ".heic"}
 _TEXT_SUFFIXES = {".txt", ".text", ".md", ".htm", ".html", ".eml"}
@@ -153,6 +160,8 @@ def _detect(name: str, content_type: str, data: bytes) -> DocumentKind:
         return "sheet"
     if suffix == ".csv" or ctype in _CSV_TYPES:
         return "csv"
+    if suffix == ".docx" or ctype == _DOCX_TYPE:
+        return "docx"
     if suffix == ".pdf" or ctype in _PDF_TYPES:
         return "pdf"
     if suffix in _IMAGE_SUFFIXES or ctype.startswith("image/"):
@@ -513,3 +522,52 @@ def _email_body(data: bytes) -> str:
         if part.get_content_subtype() == "html":
             content = html_to_text(content)
     return f"Subject: {subject}\n{content}" if subject else content
+
+
+# --- Word (.docx) -----------------------------------------------------------------
+
+_W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+# The document part of a .docx is small XML; refuse a bomb before parsing it.
+_MAX_DOCX_XML_BYTES = 20 * 1024 * 1024
+
+
+def _docx(name: str, data: bytes, limits: Limits) -> DocumentText:
+    """Paragraph and table text of `word/document.xml` (no headers, footers, images)."""
+    with zipfile.ZipFile(io.BytesIO(data)) as archive:
+        info = archive.getinfo("word/document.xml")
+        if info.file_size > _MAX_DOCX_XML_BYTES:
+            return _skipped(name, "docx", "too_large", "document too large, not read")
+        # Expat (>= 2.4.1, bundled with Python 3.12) refuses entity-expansion
+        # bombs and ElementTree never fetches external entities or DTDs; the
+        # part's size is capped above.
+        root = ElementTree.fromstring(archive.read(info))  # noqa: S314
+    body = root.find(f"{_W}body")
+    lines: list[str] = [f"[{name}]"]
+    budget = _Budget(limits.max_chars)
+    truncated = False
+    for block in list(body) if body is not None else []:
+        if block.tag == f"{_W}p":
+            rendered = [_docx_text(block)]
+        elif block.tag == f"{_W}tbl":
+            rendered = _docx_table(block)
+        else:
+            continue
+        if not _take_all(lines, (line for line in rendered if line), budget):
+            truncated = True
+            break
+    if truncated:
+        lines.append(f"[{name}] truncated: the rest of the document was not read")
+    return DocumentText(filename=name, kind="docx", text="\n".join(lines), truncated=truncated)
+
+
+def _docx_text(element: ElementTree.Element) -> str:
+    return " ".join("".join(t.text or "" for t in element.iter(f"{_W}t")).split())
+
+
+def _docx_table(table: ElementTree.Element) -> list[str]:
+    rows: list[str] = []
+    for row in table.iter(f"{_W}tr"):
+        cells = [_docx_text(cell) for cell in row.iter(f"{_W}tc")]
+        if any(cells):
+            rows.append(" | ".join(cells))
+    return rows

@@ -6,3 +6,5 @@ FX_REFRESH = "fx.refresh"  # payload: {}
 # payload: {}. tenant_id = the all-zeros UUID for the scheduled every-tenant run
 # (EventBridge Scheduler), or a real tenant id to sync just that tenant.
 MAILBOX_SYNC = "mailbox.sync"
+TEMPLATE_SCAN = "template.scan"  # payload: {"scan_id": "<uuid>"}
+TEMPLATE_BUILD = "template.build"  # payload: {"template_id": "<uuid>"}
