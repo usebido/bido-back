@@ -7,6 +7,7 @@ Sentry) is exercised in a subprocess so it cannot leak into other tests.
 import json
 import subprocess
 import sys
+import tempfile
 from collections.abc import Iterator
 from typing import TYPE_CHECKING, Any, cast
 
@@ -56,6 +57,9 @@ def _run_isolated(script: str) -> str:
     """Run `script` in a fresh interpreter and return its last stdout line."""
     result = subprocess.run(  # noqa: S603 - fixed argv, our own interpreter
         [sys.executable, "-c", script],
+        # Not the repo root (the child must not read a developer's .env) and not
+        # tests/ (its `email` package would shadow the stdlib in the child).
+        cwd=tempfile.gettempdir(),
         capture_output=True,
         text=True,
         timeout=60,
@@ -244,7 +248,7 @@ def test_sentry_scrubber_keeps_ids_and_drops_content() -> None:
             "tenant_id": "6f1c0e9e-0000-4000-8000-000000000001",
             "run_id": "run-1",
             "job_type": "agent.run",
-            "model": "claude-sonnet",
+            "model": "gpt-6-luna",
             "input_tokens": 1200,
             "output_tokens": 300,
             "prompt": CONTENT,
@@ -287,7 +291,7 @@ def test_sentry_scrubber_keeps_ids_and_drops_content() -> None:
         "tenant_id": "6f1c0e9e-0000-4000-8000-000000000001",
         "run_id": "run-1",
         "job_type": "agent.run",
-        "model": "claude-sonnet",
+        "model": "gpt-6-luna",
         "input_tokens": 1200,
         "output_tokens": 300,
     }

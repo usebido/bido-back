@@ -42,6 +42,7 @@ GLOBAL_TABLES = frozenset(
     {
         "users",  # a person can belong to several tenants; access goes via memberships
         "alembic_version",  # migration bookkeeping; app role has no grants on it
+        "fx_rates",  # public reference data (daily ECB rates), no customer data
     }
 )
 

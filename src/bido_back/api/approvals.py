@@ -1,4 +1,7 @@
-"""`/v1/approvals`: a person decides on one recorded act proposal.
+"""`/v1/approvals`: the approval queue, and a person's decision on one act proposal.
+
+`GET /v1/approvals?status=pending` lists the tenant's approvals with, for
+`send_rfq_email`, the exact email (the stored, hashed arguments) to review.
 
 The body carries only the decision. Who decides comes from `get_principal`;
 what is decided is the payload already stored in `approvals`; everything is
@@ -9,7 +12,7 @@ action, and Agno's own continue endpoints are never exposed.
 from typing import Annotated, Literal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -24,6 +27,10 @@ from bido_back.approvals import (
     decide_approval,
 )
 from bido_back.auth import Principal
+from bido_back.followups.send import FOLLOWUP_REJECT_HOOKS
+from bido_back.rfqs.schemas import ApprovalQueueItem, ApprovalStatus
+from bido_back.rfqs.send import REJECT_HOOKS
+from bido_back.rfqs.service import list_approvals
 from bido_back.worker.jobs import JobQueue
 
 
@@ -49,6 +56,25 @@ _HTTP_STATUS: dict[type[ApprovalError], int] = {
 def approvals_router() -> APIRouter:
     router = APIRouter(prefix="/v1/approvals", tags=["approvals"])
 
+    @router.get(
+        "",
+        responses={
+            code: {"model": ErrorResponse}
+            for code in (
+                status.HTTP_400_BAD_REQUEST,
+                status.HTTP_401_UNAUTHORIZED,
+                status.HTTP_403_FORBIDDEN,
+            )
+        },
+    )
+    async def queue(  # pyright: ignore[reportUnusedFunction]
+        principal: Annotated[Principal, Depends(get_principal)],
+        db: Annotated[async_sessionmaker[AsyncSession], Depends(get_db)],
+        status_filter: Annotated[ApprovalStatus, Query(alias="status")] = "pending",
+    ) -> list[ApprovalQueueItem]:
+        """The approval queue, oldest first, with the email draft of each RFQ send."""
+        return await list_approvals(db, principal, status_filter)
+
     @router.post(
         "/{approval_id}/decision",
         responses={
@@ -70,7 +96,14 @@ def approvals_router() -> APIRouter:
         jobs: Annotated[JobQueue, Depends(get_job_queue)],
     ) -> DecisionResponse:
         try:
-            outcome = await decide_approval(db, principal, approval_id, body.decision, jobs=jobs)
+            outcome = await decide_approval(
+                db,
+                principal,
+                approval_id,
+                body.decision,
+                jobs=jobs,
+                on_reject={**REJECT_HOOKS, **FOLLOWUP_REJECT_HOOKS},
+            )
         except (
             ApprovalForbidden,
             ApprovalNotFound,

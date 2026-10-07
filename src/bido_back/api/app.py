@@ -11,12 +11,23 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Literal
 
-from fastapi import APIRouter, FastAPI, HTTPException, status
+from fastapi import FastAPI
 from pydantic import BaseModel
 
 from bido_back.api.approvals import approvals_router
+from bido_back.api.compliance import compliance_router
+from bido_back.api.copilot import copilot_router
 from bido_back.api.deps import ApiResources
-from bido_back.api.errors import ErrorResponse
+from bido_back.api.exports import exports_router
+from bido_back.api.followups import followups_router
+from bido_back.api.mailbox import mailbox_router
+from bido_back.api.me import me_router
+from bido_back.api.onboarding import onboarding_router
+from bido_back.api.proposals import proposals_router
+from bido_back.api.rfqs import rfqs_router
+from bido_back.api.search import search_router
+from bido_back.api.suppliers import suppliers_router
+from bido_back.api.templates import templates_router
 from bido_back.observability import init_observability, instrument_fastapi
 from bido_back.settings import Settings, get_settings
 
@@ -29,26 +40,6 @@ API_VERSION = "0.1.0"
 class HealthResponse(BaseModel):
     status: Literal["ok"]
     environment: str
-
-
-def _v1_router() -> APIRouter:
-    router = APIRouter(prefix="/v1", tags=["v1"])
-
-    @router.get(
-        "/me",
-        # Documented as 501 until auth lands; the real response model comes with it.
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        response_model=None,
-        responses={status.HTTP_501_NOT_IMPLEMENTED: {"model": ErrorResponse}},
-    )
-    async def get_me() -> None:
-        # TODO(auth): verify the Clerk JWT (signature, issuer, audience, expiry),
-        # resolve the user's tenant and roles from our database (never from
-        # token claims alone), and return them. Every /v1 route will depend on
-        # that resolution; no tenant, no request.
-        raise HTTPException(status.HTTP_501_NOT_IMPLEMENTED, "not implemented")
-
-    return router
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -73,7 +64,23 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # does not get healthy tasks killed by the load balancer.
         return HealthResponse(status="ok", environment=resolved.environment)
 
-    app.include_router(_v1_router())
+    app.include_router(me_router())
+    app.include_router(rfqs_router())
+    app.include_router(followups_router())
+    app.include_router(suppliers_router())
     app.include_router(approvals_router())
+    app.include_router(mailbox_router())
+    app.include_router(onboarding_router())
+    app.include_router(copilot_router())
+    app.include_router(templates_router())
+    app.include_router(compliance_router())
+    app.include_router(proposals_router())
+    app.include_router(search_router())
+    app.include_router(exports_router())
+    if resolved.environment == "local":
+        # Never mounted elsewhere (and every route refuses outside local too).
+        from bido_back.api.dev import dev_router
+
+        app.include_router(dev_router)
     instrument_fastapi(app)
     return app

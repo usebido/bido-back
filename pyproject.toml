@@ -12,7 +12,7 @@ dependencies = [
     "sqlalchemy[asyncio]>=2.0.30",
     "asyncpg>=0.29",
     "alembic>=1.13",
-    "anthropic>=0.40",
+    "openai>=3.26,<4",
     "boto3>=1.34",
     "agno==3.1.0",
     "sentry-sdk>=2.20",
@@ -22,6 +22,11 @@ dependencies = [
     "opentelemetry-instrumentation-sqlalchemy>=0.51b0",
     "opentelemetry-instrumentation-httpx>=0.51b0",
     "opentelemetry-instrumentation-botocore>=0.51b0",
+    "pdfplumber>=0.11",
+    "openpyxl>=3.1",
+    "pyjwt[crypto]>=2.9",
+    "httpx>=0.27",
+    "holidays>=0.60",
 ]
 
 [dependency-groups]

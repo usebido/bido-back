@@ -1,4 +1,4 @@
-"""The Agno adapter: the ONLY module that imports Agno (or the Anthropic model it wraps).
+"""The Agno adapter: the ONLY module that imports Agno (or the OpenAI model it wraps).
 
 Agno runs the agent loop, calls the model, executes tools, and keeps sessions
 and runs in Postgres. Everything that crosses this module's boundary is ours:
@@ -21,8 +21,11 @@ How our rules map onto Agno:
   `ApprovalRequested` and stop. If the proposed arguments do not validate,
   the error is fed back as the call's result and the run continues, so a
   person is never asked to approve an invalid payload.
-- The final answer uses Agno's `output_schema` (native structured output on
-  Claude) and is validated again with our output model.
+- The model is OpenAI's, through the Responses API, stateless: `store=False`,
+  so OpenAI keeps no conversation state, and each turn replays the full
+  context, including the encrypted reasoning items of earlier turns.
+- The final answer uses Agno's `output_schema` (native strict structured
+  output on OpenAI) and is validated again with our output model.
 - Every Agno user_id / session_id is namespaced by tenant (`agno_ids`).
 - Agno telemetry is off: `AGNO_TELEMETRY=false` is forced in the process
   environment (bido_back/agents/__init__.py, and again per run here, because
@@ -39,12 +42,13 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 
 from agno.agent import Agent
+from agno.db.base import SessionType
 from agno.db.postgres import AsyncPostgresDb, create_async_postgres_engine
 from agno.exceptions import redact_secrets
-from agno.models.anthropic import Claude
+from agno.models.openai.responses import OpenAIResponses
 from agno.run.agent import (
     ModelRequestStartedEvent,
     RunCancelledEvent,
@@ -60,6 +64,7 @@ from agno.run.agent import (
     ToolCallStartedEvent,
 )
 from agno.run.requirement import RunRequirement
+from agno.session.agent import AgentSession
 from agno.tools.function import Function, FunctionCall
 from pydantic import BaseModel, JsonValue, ValidationError
 from sqlalchemy.engine import URL, make_url
@@ -153,19 +158,92 @@ def _agno_db(url: str) -> AsyncPostgresDb:
     return AsyncPostgresDb(db_engine=engine, db_schema=AGNO_SCHEMA, create_schema=False)
 
 
+@dataclass(frozen=True, slots=True)
+class StoredRun:
+    """One stored run of a session, as plain data: what went in, what came out."""
+
+    run_id: str
+    created_at: int
+    status: str
+    # The run's input as given to `run()` (our input model's JSON), if stored.
+    input: str | None
+    # The final output: a JSON-able mapping, a string, or None.
+    output: dict[str, JsonValue] | str | None
+
+
+async def load_session_runs(
+    context: ToolContext, session: str, config: RunnerConfig
+) -> list[StoredRun] | None:
+    """The stored runs of `session` for the context's tenant AND user, oldest first.
+
+    None when run storage is not configured or the session does not exist for
+    this user. The ids are built exactly as for a run (`agno_ids`), and Agno
+    filters the read by the namespaced user id too, so another tenant's or
+    another user's session is never returned.
+    """
+    if not config.agno_database_url:
+        return None
+    ids = agno_ids(context, session)
+    found = await _agno_db(config.agno_database_url).get_session(
+        session_id=ids.session_id, session_type=SessionType.AGENT, user_id=ids.user_id
+    )
+    if not isinstance(found, AgentSession) or found.user_id != ids.user_id:
+        return None
+    runs: list[StoredRun] = []
+    for run in found.runs or []:
+        if not isinstance(run, RunOutput):
+            continue
+        content: object = run.content
+        output: dict[str, JsonValue] | str | None
+        if isinstance(content, BaseModel):
+            output = content.model_dump(mode="json")
+        elif isinstance(content, str):
+            output = content
+        elif isinstance(content, Mapping):
+            output = dict(cast(Mapping[str, JsonValue], content))
+        else:
+            output = None
+        raw_input = run.input.input_content_string() if run.input is not None else None
+        runs.append(
+            StoredRun(
+                run_id=run.run_id or "",
+                created_at=run.created_at,
+                status=str(run.status.value if hasattr(run.status, "value") else run.status),
+                input=raw_input or None,
+                output=output,
+            )
+        )
+    return sorted(runs, key=lambda r: r.created_at)
+
+
 # --- Model -----------------------------------------------------------------
 
 
-def build_model(definition: AgentDefinition[Any], config: RunnerConfig) -> Claude:
+class _ReasoningResponses(OpenAIResponses):
+    """OpenAIResponses for models that reason.
+
+    Agno recognizes reasoning models by id prefix (o3, o4-mini, gpt-5) and
+    otherwise drops the reasoning items between turns. Every model we run
+    reasons, so this is always true: with `store=False` Agno then asks for the
+    encrypted reasoning and replays it, which a reasoning model needs to
+    continue after a tool call.
+    """
+
+    def _using_reasoning_model(self) -> bool:
+        return True
+
+
+def build_model(definition: AgentDefinition[Any], config: RunnerConfig) -> OpenAIResponses:
     """The Agno model for a definition. Tests replace this to script responses."""
-    return Claude(
+    return _ReasoningResponses(
         id=definition.model,
-        max_tokens=definition.max_tokens,
-        thinking={"type": "adaptive", "display": "summarized"} if definition.thinking else None,
-        output_config={"effort": definition.effort} if definition.effort else None,
-        api_key=config.anthropic_api_key,
+        max_output_tokens=definition.max_tokens,
+        reasoning_effort=definition.effort,
+        reasoning_summary="auto" if definition.thinking else None,
+        store=False,
+        api_key=config.openai_api_key,
         timeout=config.model_timeout_s,
-        client_params={"max_retries": config.model_max_retries},
+        max_retries=config.model_max_retries,
     )
 
 

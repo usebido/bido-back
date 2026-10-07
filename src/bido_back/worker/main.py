@@ -28,6 +28,7 @@ import signal
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Literal, Protocol, cast
+from uuid import UUID
 
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -35,8 +36,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from bido_back.approvals.executor import APPROVAL_EXECUTE_JOB, ActToolRegistry, ApprovalExecutor
 from bido_back.db import create_engine
 from bido_back.observability import init_observability
-from bido_back.settings import get_settings
+from bido_back.settings import Settings, get_settings
 from bido_back.worker.envelope import Envelope
+from bido_back.worker.job_types import (
+    FOLLOWUPS_SWEEP,
+    FX_REFRESH,
+    MAILBOX_SYNC,
+    QUOTE_EXTRACT,
+    TEMPLATE_BUILD,
+    TEMPLATE_SCAN,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +89,71 @@ def build_registry(
     registry = HandlerRegistry()
     # The only place an approved `act` tool runs (see bido_back.approvals).
     registry.register(APPROVAL_EXECUTE_JOB, ApprovalExecutor(db, act_tools or ActToolRegistry()))
+    return registry
+
+
+def build_worker_registry(
+    settings: Settings, engine: AsyncEngine, *, sqs: "_SqsApi | None" = None
+) -> HandlerRegistry:
+    """Every job handler of the RFQ flow, wired from settings (the production registry)."""
+    from bido_back.agents.config import RunnerConfig
+    from bido_back.followups.agents import default_followup_writer
+    from bido_back.followups.jobs import FollowupSweepHandler
+    from bido_back.followups.send import register_followup_act_tools
+    from bido_back.fx.ecb import FxRefreshHandler
+    from bido_back.intake.consumer import build_inbound_service
+    from bido_back.mailbox import MailboxSyncDeps, MailboxSyncHandler, open_connection
+    from bido_back.onboarding.agents import default_onboarding_agents
+    from bido_back.onboarding.jobs import (
+        OnboardingJobDeps,
+        ScanMailbox,
+        TemplateBuildHandler,
+        TemplateScanHandler,
+    )
+    from bido_back.quotes.extract_job import quote_extract_handler
+    from bido_back.rfqs.mailbox import mailbox_senders_for
+    from bido_back.rfqs.send import RfqActDeps, register_act_tools
+    from bido_back.storage import build_storage
+
+    act_tools = ActToolRegistry()
+    act_deps = RfqActDeps(
+        db=engine,
+        email_domain=settings.email_domain,
+        mailbox_senders=mailbox_senders_for(settings),
+    )
+    register_act_tools(act_tools, act_deps)
+    register_followup_act_tools(act_tools, act_deps)
+    registry = build_registry(engine, act_tools)
+    storage = build_storage(settings)
+    runner_config = RunnerConfig.from_settings(settings)
+    registry.register(
+        FOLLOWUPS_SWEEP,
+        FollowupSweepHandler(db=engine, writer=default_followup_writer(runner_config)),
+    )
+    registry.register(
+        QUOTE_EXTRACT,
+        quote_extract_handler(db=engine, storage=storage, runner_config=runner_config),
+    )
+    registry.register(FX_REFRESH, FxRefreshHandler(engine))
+    inbound = build_inbound_service(settings, engine, sqs=sqs)
+    registry.register(
+        MAILBOX_SYNC,
+        MailboxSyncHandler(
+            MailboxSyncDeps(db=engine, ingest=inbound.ingest_for_invite, settings=settings)
+        ),
+    )
+
+    async def open_mailbox(tenant_id: UUID, connection_id: UUID) -> ScanMailbox:
+        return await open_connection(engine, tenant_id, connection_id, settings=settings)
+
+    onboarding = OnboardingJobDeps(
+        db=engine,
+        storage=storage,
+        agents=default_onboarding_agents(runner_config),
+        open_mailbox=open_mailbox,
+    )
+    registry.register(TEMPLATE_SCAN, TemplateScanHandler(onboarding))
+    registry.register(TEMPLATE_BUILD, TemplateBuildHandler(onboarding))
     return registry
 
 
@@ -291,6 +365,8 @@ class Worker:
 
 
 async def main() -> None:
+    from bido_back.intake.consumer import build_intake_consumer, sqs_client
+
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = get_settings()
     init_observability(settings, service="worker")
@@ -298,18 +374,32 @@ async def main() -> None:
         raise SystemExit("SQS_QUEUE_URL is not set")
 
     engine = create_engine(settings)
+    # One client for the jobs queue, honouring SQS_ENDPOINT_URL (ElasticMQ locally).
+    sqs = sqs_client(settings)
     worker = Worker(
         SqsQueueClient(
             settings.sqs_queue_url,
             region=settings.aws_region,
             parking_queue_url=settings.sqs_parking_queue_url,
+            sqs=sqs,
         ),
-        build_registry(engine),
+        build_worker_registry(settings, engine, sqs=sqs),
     )
+    # Raw inbound emails (SES -> S3 -> SQS); None when SQS_INTAKE_QUEUE_URL is unset.
+    intake = build_intake_consumer(settings, engine)
+
     loop = asyncio.get_running_loop()
+
+    def stop() -> None:
+        worker.request_stop()
+        if intake is not None:
+            intake.request_stop()
+
     for sig in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(sig, worker.request_stop)
+        loop.add_signal_handler(sig, stop)
     try:
-        await worker.run_forever()
+        await asyncio.gather(
+            worker.run_forever(), *([intake.run_forever()] if intake is not None else [])
+        )
     finally:
         await engine.dispose()

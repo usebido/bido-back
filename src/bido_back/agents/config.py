@@ -11,8 +11,8 @@ from bido_back.settings import Settings
 
 @dataclass(frozen=True, slots=True)
 class RunnerConfig:
-    # None lets the provider SDK read ANTHROPIC_API_KEY from the environment.
-    anthropic_api_key: str | None = field(default=None, repr=False)
+    # None lets the provider SDK read OPENAI_API_KEY from the environment.
+    openai_api_key: str | None = field(default=None, repr=False)
     # Where Agno keeps sessions and runs (schema `agno`, role bido_agno).
     # None = no run storage: each run stands alone (tests, evals).
     agno_database_url: str | None = field(default=None, repr=False)
@@ -24,6 +24,6 @@ class RunnerConfig:
     def from_settings(cls, settings: Settings) -> "RunnerConfig":
         url = settings.agno_database_url
         return cls(
-            anthropic_api_key=settings.anthropic_api_key,
+            openai_api_key=settings.openai_api_key,
             agno_database_url=str(url) if url is not None else None,
         )

@@ -34,9 +34,13 @@ htmlcov/
 
 # Editors and OS
 .idea/
-.vscode/
+.vscode/*
+!.vscode/tasks.json
 *.swp
 .DS_Store
 
 # Local scratch
 *.log
+
+# Local blob storage (STORAGE_LOCAL_DIR default)
+.data/

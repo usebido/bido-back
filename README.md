@@ -21,6 +21,7 @@ src/bido_back/
   api/               FastAPI app (`create_app` factory)
   worker/            SQS worker (`python -m bido_back.worker`)
   agents/            the agents adapter: Agno behind our own types and tools
+  copilot/           the procurement copilot: chat agent, its tools, SSE stream
   db/                SQLAlchemy models, sessions, tenant-scoped transactions
   observability.py   OpenTelemetry tracing and Sentry; off when unset
 prompts/             versioned agent prompts (`<name>.v<N>.md`)
@@ -86,9 +87,13 @@ To start over with an empty database: `docker compose down -v && docker compose 
 tool loop, sessions and memory. Bido keeps everything that commits: auth,
 tenants, approvals, the outbox, and the business endpoints.
 
+- **Models:** OpenAI, through the Responses API (`OPENAI_API_KEY`).
+  `gpt-6-luna` by default, `gpt-6.1-sol` for quote extraction; each agent's
+  model is set in `agents/catalog/definitions.py`. Requests are stateless
+  (`store=False`): OpenAI keeps no conversation state between turns.
 - **Pinned exactly** (`agno==<version>` in `pyproject.toml`). Upgrades are
   deliberate, in their own PR, after reading the changelog.
-- **Contained:** Agno and Anthropic types live only in
+- **Contained:** Agno and OpenAI types live only in
   `src/bido_back/agents/agno_adapter.py`. Everything else goes through `run()`
   and sees our own tool, run and event types, so replacing Agno stays a change
   to one module.
@@ -110,6 +115,20 @@ tenants, approvals, the outbox, and the business endpoints.
   are never resumed from client-supplied state (see the open upstream bug
   [agno-agi/agno#10589](https://github.com/agno-agi/agno/issues/10589)).
 - **Prompts are versioned files** in `prompts/`.
+
+## Scheduled jobs
+
+Long waits are database rows; nothing sleeps. EventBridge Scheduler puts two
+jobs on the jobs queue with the all-zeros tenant id (= every tenant):
+
+| Job | Every | What |
+|---|---|---|
+| `mailbox.sync` | 2 min | new messages in the RFQ threads of connected mailboxes |
+| `followups.sweep` | 15 min | chases due (business days, supplier holidays, auto-reply pauses), clarifications for offers with missing fields, cleanup of stale proposals |
+
+Every chase or clarification is proposed as a pending approval and sent only
+after a person approves it, in the RFQ's thread. Locally, trigger a sweep with
+`curl -X POST localhost:8080/dev/followups/sweep`.
 
 ## Observability
 

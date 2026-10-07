@@ -37,10 +37,9 @@ class AgentDefinition[OutT: BaseModel]:
     # Every model request counts as one turn, including the final-output turn.
     max_turns: int = 6
     max_tokens: int = 16_000
-    # Ask the model for summarized reasoning (rendered as ReasoningStep).
-    # Turn off only for models that do not support adaptive thinking.
+    # Ask the model for a summary of its reasoning (rendered as ReasoningStep).
     thinking: bool = True
-    # None = the model's own default effort.
+    # The model's reasoning effort. None = the model's own default.
     effort: Effort | None = None
     # How many earlier runs of the same session the model sees. 0 = none.
     # Needs run storage (agno_database_url); ignored without it.
