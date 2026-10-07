@@ -19,6 +19,7 @@ from bido_back.agents.catalog.contracts import (
     QuoteExtractionOutput,
     RfqCandidateClassifierOutput,
     RfqEmailInput,
+    RfqEmailLocalizeOutput,
     RfqEmailOutput,
     RfqIntakeOutput,
     RfqTemplateBuilderOutput,
@@ -49,13 +50,18 @@ def rfq_intake(model: str = DEFAULT_MODEL) -> AgentDefinition[RfqIntakeOutput]:
     )
 
 
-def rfq_email_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[RfqEmailOutput]:
+def rfq_email_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[RfqEmailLocalizeOutput]:
+    """v2: carries the buyer's template text into the supplier's language.
+
+    The RFQ email is rendered by code (`bido_back.templates.render`); v1 wrote
+    the whole email and is kept only as the released prompt it was.
+    """
     return AgentDefinition(
         name="rfq_email_writer",
-        prompt_file="rfq_email_writer.v1.md",
-        prompt_version=1,
+        prompt_file="rfq_email_writer.v2.md",
+        prompt_version=2,
         model=model,
-        output_model=RfqEmailOutput,
+        output_model=RfqEmailLocalizeOutput,
         max_turns=_MAX_TURNS,
         effort="low",
     )

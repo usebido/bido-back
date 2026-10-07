@@ -26,6 +26,8 @@ from bido_back.agents.catalog.contracts import (
     QuoteExtractionOutput,
     RfqEmailInput,
     RfqEmailLine,
+    RfqEmailLocalizeInput,
+    RfqEmailLocalizeOutput,
     RfqEmailOutput,
     RfqIntakeInput,
     RfqIntakeOutput,
@@ -186,17 +188,24 @@ async def test_rfq_intake_runs(script: Script) -> None:
     _check_request(request, RFQ_INTAKE, task)
 
 
-async def test_rfq_email_writer_runs(script: Script) -> None:
+async def test_rfq_email_writer_localizes_template_text(script: Script) -> None:
+    task = RfqEmailLocalizeInput(
+        source_language="pt",
+        target_language="de",
+        greeting="Prezados, solicitamos cotação para os itens abaixo.",
+        labels=["Item", "Qtd.", "Validade da proposta"],
+    )
     expected = {
-        "subject": "Anfrage RFQ-12: LDO regulators for BMS board",
-        "body": "Sehr geehrte Damen und Herren,\nbitte um Angebot (RFQ-12) für TPS7A4701RGWR.",
+        "greeting": "Sehr geehrte Damen und Herren, wir bitten um ein Angebot.",
+        "labels": ["Pos.", "Menge", "Gültigkeit des Angebots"],
     }
 
-    result, request = await _run_one(script, RFQ_EMAIL_WRITER, EMAIL_TASK, expected)
+    result, request = await _run_one(script, RFQ_EMAIL_WRITER, task, expected)
 
-    output = cast(RfqEmailOutput, result.output)
-    assert rfq_email_problems(EMAIL_TASK, output) == []
-    _check_request(request, RFQ_EMAIL_WRITER, EMAIL_TASK)
+    output = cast(RfqEmailLocalizeOutput, result.output)
+    assert output.labels == ["Pos.", "Menge", "Gültigkeit des Angebots"]
+    assert RFQ_EMAIL_WRITER.prompt_version == 2
+    _check_request(request, RFQ_EMAIL_WRITER, task)
 
 
 async def test_quote_extraction_runs(script: Script) -> None:

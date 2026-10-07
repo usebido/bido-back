@@ -91,6 +91,27 @@ class RfqEmailOutput(BaseModel):
     body: str = Field(description="Plain text. Must ask for every field listed in the prompt.")
 
 
+# --- rfq_email_writer (v2): the buyer's template text in the supplier's language --------
+#
+# The RFQ email itself is rendered by code (`bido_back.templates.render`). The
+# writer only carries the buyer's own words (greeting, column headings, footer
+# fields) into the supplier's language. Same-language sends never call it.
+
+
+class RfqEmailLocalizeInput(BaseModel):
+    source_language: str = Field(description="ISO 639-1 of the buyer's template, e.g. pt")
+    target_language: str = Field(description="ISO 639-1 of the supplier, e.g. de")
+    greeting: str = Field(description="The buyer's opening paragraph")
+    labels: list[str] = Field(description="Column headings and footer fields, in order")
+
+
+class RfqEmailLocalizeOutput(BaseModel):
+    greeting: str = Field(description="The opening paragraph in the target language")
+    labels: list[str] = Field(
+        description="The same labels in the target language: same count, same order"
+    )
+
+
 # --- quote_extraction: supplier reply (+ attachments) -> proposal -------------
 
 
