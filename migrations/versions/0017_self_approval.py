@@ -1,7 +1,7 @@
 """Self-approval by default; four-eyes becomes an opt-in tenant policy.
 
 Revision ID: 0017
-Revises: 0012
+Revises: 0015
 Create Date: 2026-10-07
 
 Until now the requester could never decide their own approval (database CHECK
@@ -24,9 +24,6 @@ a person, on the hashed payload, executed once. Only the four-eyes rule
   allowed when the decider is the requester.
 - A trigger refuses `self_approved = true` unless the approval's tenant has
   `allow_self_approval`, so the guarantee stays in the database.
-
-This branch was cut from 0012 in parallel with other migrations (0013-0016).
-When it merges after them, `down_revision` moves to the head at that time.
 """
 
 from collections.abc import Sequence
@@ -35,7 +32,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "0017"
-down_revision: str | Sequence[str] | None = "0012"
+down_revision: str | Sequence[str] | None = "0015"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

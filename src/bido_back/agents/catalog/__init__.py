@@ -1,6 +1,7 @@
 """The RFQ-flow and onboarding agents (definitions.py) and their I/O contracts (contracts.py)."""
 
 from bido_back.agents.catalog.definitions import (
+    AWARD_NOTICE_WRITER,
     DEFAULT_MODEL,
     EXTRACTION_MODEL,
     QUOTE_EXTRACTION,
@@ -8,19 +9,25 @@ from bido_back.agents.catalog.definitions import (
     RFQ_EMAIL_WRITER,
     RFQ_FOLLOWUP_WRITER,
     RFQ_INTAKE,
+    RFQ_NEGOTIATION_WRITER,
     RFQ_TEMPLATE_BUILDER,
     TEMPLATE_MODEL,
+    award_notice_problems,
+    award_notice_writer,
     followup_email_problems,
+    negotiation_email_problems,
     quote_extraction,
     rfq_candidate_classifier,
     rfq_email_problems,
     rfq_email_writer,
     rfq_followup_writer,
     rfq_intake,
+    rfq_negotiation_writer,
     rfq_template_builder,
 )
 
 __all__ = [
+    "AWARD_NOTICE_WRITER",
     "DEFAULT_MODEL",
     "EXTRACTION_MODEL",
     "QUOTE_EXTRACTION",
@@ -28,14 +35,19 @@ __all__ = [
     "RFQ_EMAIL_WRITER",
     "RFQ_FOLLOWUP_WRITER",
     "RFQ_INTAKE",
+    "RFQ_NEGOTIATION_WRITER",
     "RFQ_TEMPLATE_BUILDER",
     "TEMPLATE_MODEL",
+    "award_notice_problems",
+    "award_notice_writer",
     "followup_email_problems",
+    "negotiation_email_problems",
     "quote_extraction",
     "rfq_candidate_classifier",
     "rfq_email_problems",
     "rfq_email_writer",
     "rfq_followup_writer",
     "rfq_intake",
+    "rfq_negotiation_writer",
     "rfq_template_builder",
 ]

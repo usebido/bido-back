@@ -11,3 +11,6 @@ TEMPLATE_BUILD = "template.build"  # payload: {"template_id": "<uuid>"}
 FOLLOWUPS_SWEEP = (
     "followups.sweep"  # payload: {}. tenant_id = all-zeros for every tenant (scheduled)
 )
+NEGOTIATION_SWEEP = (
+    "negotiation.sweep"  # payload: {}. tenant_id = all-zeros for every tenant (scheduled)
+)

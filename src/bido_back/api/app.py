@@ -15,6 +15,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from bido_back.api.approvals import approvals_router
+from bido_back.api.awards import awards_router
 from bido_back.api.compliance import compliance_router
 from bido_back.api.copilot import copilot_router
 from bido_back.api.cors import add_cors
@@ -23,8 +24,10 @@ from bido_back.api.exports import exports_router
 from bido_back.api.followups import followups_router
 from bido_back.api.mailbox import mailbox_router
 from bido_back.api.me import me_router
+from bido_back.api.negotiation import negotiation_router
 from bido_back.api.onboarding import onboarding_router
 from bido_back.api.proposals import proposals_router
+from bido_back.api.purchasing import purchasing_router
 from bido_back.api.rfqs import rfqs_router
 from bido_back.api.search import search_router
 from bido_back.api.suppliers import suppliers_router
@@ -68,6 +71,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(me_router())
     app.include_router(rfqs_router())
     app.include_router(followups_router())
+    app.include_router(negotiation_router())
     app.include_router(suppliers_router())
     app.include_router(approvals_router())
     app.include_router(mailbox_router())
@@ -78,6 +82,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(proposals_router())
     app.include_router(search_router())
     app.include_router(exports_router())
+    app.include_router(purchasing_router())
+    app.include_router(awards_router())
     if resolved.environment == "local":
         # Never mounted elsewhere (and every route refuses outside local too).
         from bido_back.api.dev import dev_router

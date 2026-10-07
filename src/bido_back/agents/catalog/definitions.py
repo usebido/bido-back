@@ -13,11 +13,16 @@ extraction, which uses `EXTRACTION_MODEL`.
 """
 
 import re
+from decimal import Decimal
 from typing import Final
 
 from bido_back.agents.catalog.contracts import (
+    AwardNoticeInput,
+    AwardNoticeOutput,
     FollowupEmailInput,
     FollowupEmailOutput,
+    NegotiationEmailInput,
+    NegotiationEmailOutput,
     QuoteExtractionOutput,
     RfqCandidateClassifierOutput,
     RfqEmailInput,
@@ -121,12 +126,44 @@ def rfq_followup_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[FollowupE
     )
 
 
+def rfq_negotiation_writer(
+    model: str = DEFAULT_MODEL,
+) -> AgentDefinition[NegotiationEmailOutput]:
+    return AgentDefinition(
+        name="rfq_negotiation_writer",
+        prompt_file="rfq_negotiation_writer.v1.md",
+        prompt_version=1,
+        model=model,
+        output_model=NegotiationEmailOutput,
+        max_turns=_MAX_TURNS,
+        thinking=False,
+        effort="low",
+    )
+
+
 RFQ_INTAKE: Final = rfq_intake()
 RFQ_EMAIL_WRITER: Final = rfq_email_writer()
 QUOTE_EXTRACTION: Final = quote_extraction()
 RFQ_CANDIDATE_CLASSIFIER: Final = rfq_candidate_classifier()
 RFQ_TEMPLATE_BUILDER: Final = rfq_template_builder()
 RFQ_FOLLOWUP_WRITER: Final = rfq_followup_writer()
+RFQ_NEGOTIATION_WRITER: Final = rfq_negotiation_writer()
+
+
+def award_notice_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[AwardNoticeOutput]:
+    return AgentDefinition(
+        name="award_notice_writer",
+        prompt_file="award_notice_writer.v1.md",
+        prompt_version=1,
+        model=model,
+        output_model=AwardNoticeOutput,
+        max_turns=_MAX_TURNS,
+        thinking=False,
+        effort="low",
+    )
+
+
+AWARD_NOTICE_WRITER: Final = award_notice_writer()
 
 
 # --- Deterministic checks on the RFQ email draft ---------------------------------
@@ -173,5 +210,87 @@ def followup_email_problems(task: FollowupEmailInput, draft: FollowupEmailOutput
     if _PRICE.search(body):
         problems.append("price_mentioned")
     if len(body) > _MAX_FOLLOWUP_CHARS:
+        problems.append("too_long")
+    return problems
+
+
+# --- Deterministic checks on a negotiation draft ---------------------------------------
+
+_MAX_NEGOTIATION_CHARS: Final = 5000
+_NUMBER = re.compile(r"\d+(?:[.,\s']\d{3})*(?:[.,]\d+)?")
+_PRICED_NUMBER = re.compile(
+    r"(?:[€$£¥]|\b(?:EUR|USD|GBP|CHF|CNY|JPY|RMB)\b)\s?(\d[\d.,\s']*\d|\d)"
+    r"|(\d[\d.,\s']*\d|\d)\s?(?:[€$£¥]|\b(?:EUR|USD|GBP|CHF|CNY|JPY|RMB)\b)",
+    re.IGNORECASE,
+)
+
+
+def _readings(text: str) -> set[Decimal]:
+    """Every value a written number may stand for (either decimal separator)."""
+    raw = text.strip().replace(" ", "").replace("'", "")
+    values: set[Decimal] = set()
+    for decimal_sep, group_sep in ((".", ","), (",", ".")):
+        candidate = raw.replace(group_sep, "").replace(decimal_sep, ".")
+        if candidate.count(".") > 1:
+            continue
+        try:
+            values.add(Decimal(candidate).normalize())
+        except ArithmeticError:
+            continue
+    return values
+
+
+def negotiation_email_problems(
+    task: NegotiationEmailInput, draft: NegotiationEmailOutput
+) -> list[str]:
+    """What is wrong with a counter-offer or BAFO draft, as codes. Empty means it may go
+    to approval.
+
+    Code decided the numbers; this checks the model kept them: the RFQ
+    reference is in the body, every target price appears, and every amount
+    next to a currency is one of the prices in the task (ours or the
+    supplier's own). It stays short.
+    """
+    problems: list[str] = []
+    body = draft.body.strip()
+    if not body:
+        return ["empty"]
+    if task.rfq_ref not in body:
+        problems.append("rfq_ref_missing_in_body")
+    written: set[Decimal] = set()
+    for match in _NUMBER.finditer(body):
+        written |= _readings(match.group(0))
+    allowed: set[Decimal] = set()
+    for line in task.lines:
+        for value in (line.offered_unit_price, line.target_unit_price):
+            if value is not None:
+                allowed.add(value.normalize())
+        if line.target_unit_price is not None and line.target_unit_price.normalize() not in written:
+            problems.append(f"target_missing:{line.position}")
+    for match in _PRICED_NUMBER.finditer(body):
+        amount = match.group(1) or match.group(2)
+        if amount is not None and not (_readings(amount) & allowed):
+            problems.append("unknown_amount")
+            break
+    if len(body) > _MAX_NEGOTIATION_CHARS:
+        problems.append("too_long")
+    return problems
+
+
+_MAX_NOTICE_CHARS: Final = 2000
+
+
+def award_notice_problems(task: AwardNoticeInput, draft: AwardNoticeOutput) -> list[str]:
+    """What is wrong with a "not selected" draft, as codes. Empty means it may go to
+    approval: the RFQ reference is in the body, no prices, and it stays short."""
+    problems: list[str] = []
+    body = draft.body.strip()
+    if not body:
+        problems.append("empty")
+    if task.rfq_ref not in body:
+        problems.append("rfq_ref_missing_in_body")
+    if _PRICE.search(body):
+        problems.append("price_mentioned")
+    if len(body) > _MAX_NOTICE_CHARS:
         problems.append("too_long")
     return problems

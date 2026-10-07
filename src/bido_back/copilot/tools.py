@@ -6,17 +6,24 @@ from the model's arguments, and works in that tenant's RLS-scoped session.
 - `read` tools answer questions: RFQs and their status, who responded, what is
   missing, proposals, the comparison, quoted price history, supplier
   suggestions, the RFQ template.
-- `draft` tools change only drafts or the tenant's own settings: create an RFQ
-  (draft), invite suppliers (draft invites), update the RFQ template, and
-  prepare sends. Preparing a send does NOT send: it records one pending
-  approval per email (`rfqs.service.prepare_send`), which a person decides on
-  (by default the buyer themself; a second person in four-eyes tenants); the
-  worker sends only after that.
+- `draft` tools change only drafts or the tenant's own settings: run a
+  purchase analysis (stored, from the imported BOM, stock and purchase
+  history), create an RFQ (draft, from text or from an analysis), invite
+  suppliers (draft invites), update the RFQ template, prepare sends, and
+  propose counter-offers. None of them sends anything: each records one
+  pending approval per email (`rfqs.service.prepare_send`,
+  `negotiation.service.evaluate_rfq`), which a person decides on (by default
+  the buyer themself; a second person in four-eyes tenants); the worker sends
+  only after that. The prices in a counter-offer are decided by the
+  negotiation strategy, never by this model.
+- `prepare_award` asks for approval to award an RFQ (`awards.service`); the
+  award and its purchase orders exist only after a person approves it (the
+  buyer by default; a second person in four-eyes tenants).
 
 There is no `act` tool here on purpose: the only thing the copilot can make
 happen outside Bido is an email, and that already goes through the approval
-guard via `prepare_send`, with the email written by the vetted writer agent
-rather than by this model.
+guard, with the email written by a vetted writer agent rather than by this
+model.
 """
 
 import logging
@@ -33,11 +40,17 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from bido_back.agents.context import ToolContext
 from bido_back.agents.tools import AnyTool, Tool, ToolError
 from bido_back.auth import Principal
+from bido_back.awards import service as award_service
+from bido_back.awards.schemas import AwardLine, AwardRequest, AwardSelection, PurchaseOrderSummary
 from bido_back.comparison.loader import load_comparison
 from bido_back.copilot import queries
 from bido_back.db import tenant_session
 from bido_back.db.models import Invite, Rfq, RfqLine, RfqTemplate
+from bido_back.negotiation import service as negotiation_service
+from bido_back.negotiation.agents import NegotiationWriter, default_negotiation_writer
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
+from bido_back.purchasing import service as purchasing_service
+from bido_back.purchasing.schemas import AnalysisRequest, RfqFromAnalysisRequest
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.errors import Duplicate, MailboxNotConfigured, MailboxNotConnected, RfqError
@@ -52,6 +65,7 @@ Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
 MAX_LIST: Final = 20
 MAX_TEMPLATE_ITEMS: Final = 16
+MAX_ANALYSIS_SUPPLIERS: Final = 4
 RfqStatus = Literal["draft", "open", "closed", "cancelled"]
 
 
@@ -62,6 +76,8 @@ class CopilotToolDeps:
     mailboxes: MailboxSenderFactory
     # Text of this message's attachments, for create_rfq. Empty without any.
     attachments_text: str = ""
+    # Writes counter-offers for propose_counteroffers; None = the default agent.
+    negotiation_writer: NegotiationWriter | None = None
     today: Callable[[], date] = lambda: datetime.now(UTC).date()
 
 
@@ -352,7 +368,186 @@ class PrepareSendOut(BaseModel):
     note: str
 
 
+class NegotiationLineOut(BaseModel):
+    position: int
+    decision: str
+    offered_unit_price: Decimal | None
+    ask_unit_price: Decimal | None
+    lead_time_days: int | None
+
+
+class NegotiationSupplierOut(BaseModel):
+    supplier_name: str
+    status: str
+    rounds_used: int
+    lines: list[NegotiationLineOut]
+
+
+class NegotiationStatusOut(BaseModel):
+    ref: str
+    status: str
+    deadline: datetime | None
+    max_rounds: int
+    base_currency: str
+    suppliers: list[NegotiationSupplierOut]
+    note: str
+
+
+class ProposeCounteroffersOut(BaseModel):
+    ref: str
+    proposed: int
+    approval_ids: list[UUID]
+    note: str
+
+
+# --- Award and purchase orders -------------------------------------------------------------
+
+
+class AwardChoice(BaseModel):
+    line_position: int = Field(description="The RFQ line's position (1, 2, ...)")
+    supplier: str = Field(description="The supplier's name, as in get_comparison")
+    tier: int = Field(default=0, description="Quantity tier index; 0 = the first quantity")
+
+
+class PrepareAwardIn(BaseModel):
+    rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
+    choices: list[AwardChoice] = Field(
+        default_factory=list[AwardChoice],
+        description="Only when the buyer picks suppliers; empty = the recommendation",
+    )
+    reason: str | None = Field(
+        default=None, description="Why, when the choice differs from the recommendation"
+    )
+
+
+class AwardedLineItem(BaseModel):
+    position: int
+    description: str
+    supplier_name: str
+    quantity: Decimal
+    unit: str
+    unit_price: Decimal
+    currency: str
+
+
+class PoItem(BaseModel):
+    ref: str
+    rfq_ref: str
+    status: str
+    supplier_name: str
+    total: Decimal
+    currency: str
+
+
+class AwardStatusOut(BaseModel):
+    ref: str
+    state: Literal["none", "pending_approval", "awarded"]
+    differs_from_recommendation: bool | None
+    reason: str | None
+    lines: list[AwardedLineItem]
+    purchase_orders: list[PoItem]
+
+
+class PrepareAwardOut(BaseModel):
+    ref: str
+    approval_id: UUID
+    differs_from_recommendation: bool
+    lines: list[AwardedLineItem]
+    note: str
+
+
+class ListOpenPosIn(BaseModel):
+    include_sent: bool = Field(default=False, description="Also list POs already sent")
+
+
+class ListOpenPosOut(BaseModel):
+    purchase_orders: list[PoItem]
+
+
 # --- Handlers ------------------------------------------------------------------------------
+
+
+# --- run_purchase_analysis / create_rfq_from_analysis ---------------------------------------
+
+
+class PurchaseAnalysisIn(BaseModel):
+    product: str = Field(
+        min_length=1,
+        max_length=200,
+        description="The product to build, as named in the BOM (e.g. 'Motor EV-120' or 'motor')",
+    )
+    quantity: int | None = Field(
+        default=None,
+        ge=1,
+        le=1_000_000,
+        description="Units to build; omit to use the production plan from today on",
+    )
+    safety_stock_pct: int = Field(default=0, ge=0, le=100, description="Extra % to buy")
+
+
+class AnalysisSupplierItem(BaseModel):
+    supplier_id: UUID
+    name: str
+    type: str
+    last_price: Decimal
+    last_ordered_at: date
+    avg_price: Decimal
+    on_time_rate: Decimal | None
+    quality_rate: Decimal | None
+    suggested: bool
+
+
+class AnalysisFlagItem(BaseModel):
+    code: str
+    supplier: str | None = None
+    value: Decimal | None = None
+
+
+class AnalysisLineItem(BaseModel):
+    part_number: str
+    description: str
+    mpn: str | None
+    unit: str
+    required: Decimal
+    on_hand: Decimal
+    on_order: Decimal
+    to_buy: Decimal
+    need_by: date | None
+    currency: str | None
+    last_price: Decimal | None
+    avg_price: Decimal | None
+    trend_pct: Decimal | None
+    target_price: Decimal | None
+    max_price: Decimal | None
+    suppliers: list[AnalysisSupplierItem]
+    flags: list[AnalysisFlagItem]
+
+
+class PurchaseAnalysisOut(BaseModel):
+    analysis_id: UUID
+    product: str
+    quantity: Decimal
+    need_by: date | None
+    items: int
+    items_to_buy: int
+    currency: str | None
+    total_at_target: Decimal | None
+    total_at_last_price: Decimal | None
+    lines: list[AnalysisLineItem]
+
+
+class RfqFromAnalysisIn(BaseModel):
+    analysis_id: UUID = Field(description="The analysis_id returned by run_purchase_analysis")
+
+
+class RfqFromAnalysisOut(BaseModel):
+    id: UUID
+    ref: str
+    title: str
+    status: str
+    lines: list[LineItem]
+    invited_suppliers: list[str]
+    skipped_suppliers: list[str]
 
 
 def _line_item(line: RfqLine) -> LineItem:
@@ -392,6 +587,32 @@ def _template_out(row: RfqTemplate | None) -> TemplateOut:
         columns=[str(c) for c in row.columns],
         footer=row.footer,
         fields=[str(f) for f in row.fields],
+    )
+
+
+def _awarded_items(lines: list[AwardLine]) -> list[AwardedLineItem]:
+    return [
+        AwardedLineItem(
+            position=line.position,
+            description=line.description,
+            supplier_name=line.supplier_name,
+            quantity=Decimal(line.quantity),
+            unit=line.unit,
+            unit_price=Decimal(line.unit_price),
+            currency=line.currency,
+        )
+        for line in lines
+    ]
+
+
+def _po_item(po: PurchaseOrderSummary) -> PoItem:
+    return PoItem(
+        ref=po.ref,
+        rfq_ref=po.rfq_ref,
+        status=po.status,
+        supplier_name=po.supplier_name,
+        total=po.total,
+        currency=po.currency,
     )
 
 
@@ -722,6 +943,244 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             ),
         )
 
+    async def run_purchase_analysis(
+        ctx: ToolContext, args: PurchaseAnalysisIn
+    ) -> PurchaseAnalysisOut:
+        principal = _principal(ctx)
+        try:
+            view = await purchasing_service.create_analysis(
+                db,
+                principal,
+                AnalysisRequest(
+                    product=args.product,
+                    quantity=Decimal(args.quantity) if args.quantity is not None else None,
+                    safety_stock_pct=Decimal(args.safety_stock_pct),
+                ),
+                today=deps.today(),
+            )
+        except purchasing_service.PurchasingError as exc:
+            raise ToolError(str(exc)) from None
+        return PurchaseAnalysisOut(
+            analysis_id=view.id,
+            product=view.product,
+            quantity=view.quantity,
+            need_by=view.need_by,
+            items=view.summary.items,
+            items_to_buy=view.summary.items_to_buy,
+            currency=view.summary.currency,
+            total_at_target=view.summary.total_at_target,
+            total_at_last_price=view.summary.total_at_last_price,
+            lines=[
+                AnalysisLineItem(
+                    part_number=line.part_number,
+                    description=line.description,
+                    mpn=line.mpn,
+                    unit=line.unit,
+                    required=line.required,
+                    on_hand=line.on_hand,
+                    on_order=line.on_order,
+                    to_buy=line.to_buy,
+                    need_by=line.need_by,
+                    currency=line.currency,
+                    last_price=line.last_price,
+                    avg_price=line.avg_price,
+                    trend_pct=line.trend_pct,
+                    target_price=line.target_price,
+                    max_price=line.max_price,
+                    suppliers=[
+                        AnalysisSupplierItem(
+                            supplier_id=s.supplier_id,
+                            name=s.name,
+                            type=s.type,
+                            last_price=s.last_price,
+                            last_ordered_at=s.last_ordered_at,
+                            avg_price=s.avg_price,
+                            on_time_rate=s.on_time_rate,
+                            quality_rate=s.quality_rate,
+                            suggested=s.suggested,
+                        )
+                        for s in line.suppliers[:MAX_ANALYSIS_SUPPLIERS]
+                    ],
+                    flags=[
+                        AnalysisFlagItem(code=f.code, supplier=f.supplier, value=f.value)
+                        for f in line.flags
+                    ],
+                )
+                for line in view.lines
+            ],
+        )
+
+    async def create_rfq_from_analysis(
+        ctx: ToolContext, args: RfqFromAnalysisIn
+    ) -> RfqFromAnalysisOut:
+        principal = _principal(ctx)
+        try:
+            created = await purchasing_service.create_rfq_from_analysis(
+                db, principal, args.analysis_id, RfqFromAnalysisRequest()
+            )
+        except purchasing_service.PurchasingError as exc:
+            raise ToolError(str(exc)) from None
+        rfq = created.rfq
+        return RfqFromAnalysisOut(
+            id=rfq.id,
+            ref=rfq.ref,
+            title=rfq.title,
+            status=rfq.status,
+            lines=[
+                LineItem(
+                    position=line.position,
+                    description=line.description,
+                    mpn=line.mpn,
+                    quantities=list(line.quantities),
+                    unit=line.unit,
+                    need_by=line.need_by,
+                )
+                for line in rfq.lines
+            ],
+            invited_suppliers=[s.name for s in created.invited],
+            skipped_suppliers=[f"{s.name} ({s.reason})" for s in created.skipped],
+        )
+
+    async def get_negotiation_status(ctx: ToolContext, args: RfqRef) -> NegotiationStatusOut:
+        principal = _principal(ctx)
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+            positions = {line.id: line.position for line in await queries.lines(session, rfq.id)}
+        try:
+            view = await negotiation_service.get_negotiation(db, principal, rfq.id)
+        except RfqError as exc:
+            raise _service_error(exc) from None
+        notes = {
+            "not_started": "No negotiation yet: the buyer sets a deadline and line targets first.",
+            "open": "Negotiating.",
+            "ready_to_close": "Every line has an offer within target: it can be closed now.",
+            "closed": "Closed: the outcome is the best eligible offer per line.",
+        }
+        return NegotiationStatusOut(
+            ref=rfq.ref,
+            status=view.status,
+            deadline=view.settings.deadline,
+            max_rounds=view.settings.max_rounds,
+            base_currency=view.settings.base_currency,
+            suppliers=[
+                NegotiationSupplierOut(
+                    supplier_name=invite.supplier_name,
+                    status=invite.status,
+                    rounds_used=invite.rounds_used,
+                    lines=[
+                        NegotiationLineOut(
+                            position=positions.get(line.rfq_line_id, 0),
+                            decision=line.decision,
+                            offered_unit_price=line.offered_unit_price_base,
+                            ask_unit_price=line.ask_unit_price,
+                            lead_time_days=line.lead_time_days,
+                        )
+                        for line in invite.lines
+                    ],
+                )
+                for invite in view.invites
+            ],
+            note=notes[view.status],
+        )
+
+    async def propose_counteroffers(ctx: ToolContext, args: RfqRef) -> ProposeCounteroffersOut:
+        _principal(ctx)
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+            status = rfq.negotiation_status
+        if status not in ("open", "ready_to_close"):
+            raise ToolError(
+                f"{rfq.ref}: the negotiation is {status.replace('_', ' ')}; it must be open"
+            )
+        result = await negotiation_service.evaluate_rfq(
+            db,
+            ctx.tenant_id,
+            rfq.id,
+            writer=deps.negotiation_writer or default_negotiation_writer(),
+            force=True,
+        )
+        return ProposeCounteroffersOut(
+            ref=rfq.ref,
+            proposed=result.proposed,
+            approval_ids=list(result.approval_ids),
+            note=(
+                "Nothing was sent. Each counter-offer waits for approval by an approver "
+                "other than the requester; it is sent only after that."
+            ),
+        )
+
+    async def get_award_status(ctx: ToolContext, args: RfqRef) -> AwardStatusOut:
+        principal = _principal(ctx)
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+        view = await award_service.get_award(db, principal, rfq.id)
+        return AwardStatusOut(
+            ref=view.rfq_ref,
+            state=view.state,
+            differs_from_recommendation=view.differs_from_recommendation,
+            reason=view.reason,
+            lines=_awarded_items(view.lines),
+            purchase_orders=[_po_item(po) for po in view.purchase_orders],
+        )
+
+    async def list_open_pos(ctx: ToolContext, args: ListOpenPosIn) -> ListOpenPosOut:
+        principal = _principal(ctx)
+        orders = await award_service.list_purchase_orders(db, principal)
+        return ListOpenPosOut(
+            purchase_orders=[
+                _po_item(po) for po in orders if args.include_sent or po.status != "sent"
+            ][:MAX_LIST]
+        )
+
+    async def prepare_award(ctx: ToolContext, args: PrepareAwardIn) -> PrepareAwardOut:
+        principal = _principal(ctx)
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+        selections: list[AwardSelection] = []
+        if args.choices:
+            comparison = await load_comparison(db, principal, rfq.id, deps.today())
+            lines = {line.position: line for line in comparison.lines}
+            for choice in args.choices:
+                line = lines.get(choice.line_position)
+                if line is None:
+                    raise ToolError(f"{rfq.ref} has no line {choice.line_position}")
+                wanted = choice.supplier.strip().casefold()
+                matches = [
+                    column
+                    for column in comparison.suppliers
+                    if column.supplier_name.casefold() == wanted
+                ]
+                if len(matches) != 1:
+                    raise ToolError(
+                        f"no single supplier named {choice.supplier!r} has a proposal on {rfq.ref}"
+                    )
+                selections.append(
+                    AwardSelection(
+                        rfq_line_id=line.id, tier=choice.tier, invite_id=matches[0].invite_id
+                    )
+                )
+        try:
+            requested = await award_service.request_award(
+                db,
+                principal,
+                rfq.id,
+                AwardRequest(lines=selections, reason=args.reason),
+                deps.today(),
+            )
+        except RfqError as exc:
+            raise _service_error(exc) from None
+        return PrepareAwardOut(
+            ref=rfq.ref,
+            approval_id=requested.approval_id,
+            differs_from_recommendation=requested.differs_from_recommendation,
+            lines=_awarded_items(requested.lines),
+            note=(
+                "Nothing was awarded yet. The award must be approved first (by the buyer, "
+                "or a second person if the company requires one); then the purchase "
+                "orders are created as drafts."
+            ),
+        )
+
     rfq_ref_hint = " Takes the RFQ's reference (RFQ-12) or id."
     return (
         Tool(
@@ -811,6 +1270,29 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             artifact_kind="rfq_template",
         ),
         Tool(
+            "run_purchase_analysis",
+            "Analyse what to buy to build a product: per part, how much is needed (BOM x "
+            "units - stock - open orders), how much to buy, the suppliers who sold it with "
+            "their last and average PURCHASE prices, on-time and quality rates, and a target "
+            "and maximum price. Saves the analysis (no email, no RFQ).",
+            PurchaseAnalysisIn,
+            PurchaseAnalysisOut,
+            "draft",
+            run_purchase_analysis,
+            artifact_kind="purchase_analysis",
+        ),
+        Tool(
+            "create_rfq_from_analysis",
+            "Create a DRAFT RFQ from a purchase analysis: the parts to buy with their "
+            "quantities and need-by dates, and the suggested suppliers as DRAFT invites. "
+            "Nothing is sent.",
+            RfqFromAnalysisIn,
+            RfqFromAnalysisOut,
+            "draft",
+            create_rfq_from_analysis,
+            artifact_kind="rfq_draft",
+        ),
+        Tool(
             "create_rfq",
             "Create a DRAFT RFQ from a description of what to buy (and the attached "
             "files). Nothing is sent.",
@@ -837,6 +1319,54 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             PrepareSendOut,
             "draft",
             prepare_send,
+            artifact_kind="approvals",
+        ),
+        Tool(
+            "get_negotiation_status",
+            "Where an RFQ's negotiation stands: deadline, each supplier's rounds and how "
+            "its latest offer compares to the buyer's targets." + rfq_ref_hint,
+            RfqRef,
+            NegotiationStatusOut,
+            "read",
+            get_negotiation_status,
+        ),
+        Tool(
+            "propose_counteroffers",
+            "Propose counter-offers (or best-and-final requests) to the suppliers whose "
+            "latest offer is above target. The prices asked are decided by rules, not by "
+            "you. Nothing is sent: each email waits for approval." + rfq_ref_hint,
+            RfqRef,
+            ProposeCounteroffersOut,
+            "draft",
+            propose_counteroffers,
+            artifact_kind="approvals",
+        ),
+        Tool(
+            "get_award_status",
+            "Whether an RFQ is awarded or waiting for award approval, the awarded "
+            "lines and the purchase orders." + rfq_ref_hint,
+            RfqRef,
+            AwardStatusOut,
+            "read",
+            get_award_status,
+        ),
+        Tool(
+            "list_open_pos",
+            "Purchase orders not sent yet (drafts and those waiting for approval).",
+            ListOpenPosIn,
+            ListOpenPosOut,
+            "read",
+            list_open_pos,
+        ),
+        Tool(
+            "prepare_award",
+            "Ask for approval to award an RFQ: the recommendation, or the suppliers the "
+            "buyer chose (then a reason is required). Nothing is awarded until the "
+            "award is approved." + rfq_ref_hint,
+            PrepareAwardIn,
+            PrepareAwardOut,
+            "draft",
+            prepare_award,
             artifact_kind="approvals",
         ),
     )
