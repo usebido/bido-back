@@ -287,7 +287,12 @@ async def principal_for_org(
 
 
 async def link_org(db: async_sessionmaker[AsyncSession], tenant_id: UUID, org_id: str) -> None:
-    """Link an existing tenant to a Clerk organization (operator scripts)."""
+    """Link an existing tenant to a Clerk organization (operator scripts).
+
+    `db` must be the MIGRATION role: the app role cannot UPDATE tenants
+    (migration 0017), so a request can never re-link a company to another
+    organization. Only operator scripts and tests call this.
+    """
     async with tenant_session(db, tenant_id) as session:
         tenant = await session.get(Tenant, tenant_id)
         if tenant is None:

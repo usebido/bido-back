@@ -137,10 +137,12 @@ tenants, approvals, the outbox, and the business endpoints.
   every Agno user and session id is namespaced by tenant.
 - **Approvals are ours:** a tool that sends, accepts or pays is an `act` tool,
   registered with Agno's `external_execution` so Agno can never run it. The run
-  stops with a proposal, stored as a `pending` row in our `approvals` table. An
-  approver decides through `POST /v1/approvals/{id}/decision`; the guard checks
-  tenant, role, requester ≠ approver and the payload hash, and the worker
-  executes the action once. AgentOS endpoints are not mounted, and paused runs
+  stops with a proposal, stored as a `pending` row in our `approvals` table. A
+  person decides through `POST /v1/approvals/{id}/decision`; the guard checks
+  tenant, who may decide and the payload hash, and the worker executes the
+  action once. By default the buyer who asked approves what the AI prepared
+  (`self_approved`); four-eyes (requester ≠ approver) is an opt-in tenant
+  policy (`tenants.allow_self_approval = false`). AgentOS endpoints are not mounted, and paused runs
   are never resumed from client-supplied state (see the open upstream bug
   [agno-agi/agno#10589](https://github.com/agno-agi/agno/issues/10589)).
 - **Prompts are versioned files** in `prompts/`.

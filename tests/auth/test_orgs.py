@@ -15,6 +15,7 @@ import pytest
 import pytest_asyncio
 from fastapi import FastAPI
 from sqlalchemy import delete, select, text
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.api.deps import ApiResources
@@ -140,6 +141,8 @@ async def test_first_login_creates_the_company_and_the_membership(
         user = await session.get(User, first.user_id)
     assert tenant is not None and tenant.name == "Acme Motors S.p.A."
     assert tenant.clerk_org_id == org_id
+    # A provisioned company gets the default policy: the buyer approves their own.
+    assert tenant.allow_self_approval is True
     assert user is not None and user.email == "a@acme.test"
     assert await _audit_actions(app_engine, first.tenant_id) == [
         "membership.provisioned",
@@ -165,7 +168,7 @@ async def test_company_name_falls_back_to_the_slug_and_email_to_empty(
 
 @pytest.mark.db
 async def test_without_auto_provision_only_linked_organizations_get_in(
-    app_engine: AsyncEngine, created: Created
+    app_engine: AsyncEngine, migrator_engine: AsyncEngine, created: Created
 ) -> None:
     db = _db(app_engine)
     org_id, user_id = created.org(), created.user()
@@ -178,7 +181,7 @@ async def test_without_auto_provision_only_linked_organizations_get_in(
     created.tenant_ids.append(tenant_id)
     async with tenant_session(db, tenant_id) as session:
         session.add(Tenant(id=tenant_id, name="Linked S.p.A."))
-    await link_org(db, tenant_id, org_id)
+    await link_org(_db(migrator_engine), tenant_id, org_id)
 
     principal = await principal_for_org(db, _session(user_id, org_id), CLOSED, NoClerkDirectory())
     assert principal.tenant_id == tenant_id
@@ -187,21 +190,29 @@ async def test_without_auto_provision_only_linked_organizations_get_in(
 
 @pytest.mark.db
 async def test_link_org_refuses_a_tenant_linked_elsewhere(
-    app_engine: AsyncEngine, created: Created
+    app_engine: AsyncEngine, migrator_engine: AsyncEngine, created: Created
 ) -> None:
     db = _db(app_engine)
+    operator = _db(migrator_engine)
     tenant_id = uuid4()
     created.tenant_ids.append(tenant_id)
     async with tenant_session(db, tenant_id) as session:
         session.add(Tenant(id=tenant_id, name="Once"))
     first = created.org()
-    await link_org(db, tenant_id, first)
-    await link_org(db, tenant_id, first)  # idempotent
+    await link_org(operator, tenant_id, first)
+    await link_org(operator, tenant_id, first)  # idempotent
 
     with pytest.raises(LookupError, match="another organization"):
-        await link_org(db, tenant_id, created.org())
+        await link_org(operator, tenant_id, created.org())
     with pytest.raises(LookupError, match="not found"):
-        await link_org(db, uuid4(), created.org())
+        await link_org(operator, uuid4(), created.org())
+    # The app role can never write a link, even to an unlinked company.
+    unlinked = uuid4()
+    created.tenant_ids.append(unlinked)
+    async with tenant_session(db, unlinked) as session:
+        session.add(Tenant(id=unlinked, name="Unlinked"))
+    with pytest.raises(ProgrammingError, match="permission denied"):
+        await link_org(db, unlinked, created.org())
 
 
 @pytest.mark.db
@@ -396,6 +407,7 @@ async def test_me_over_http_with_v1_and_v2_org_claims(
     assert no_org.json() == {"detail": "select an organization"}
     assert v2.status_code == 200, v2.text
     assert v2.json()["clerk_org_id"] == org_id
+    assert v2.json()["allow_self_approval"] is True
     assert v2.json()["role"] == "owner"
     assert v1.status_code == 200
     assert v1.json()["tenant_id"] == v2.json()["tenant_id"]

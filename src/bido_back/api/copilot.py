@@ -21,8 +21,9 @@
     changes) with their output.
 
   Runner events also carry `run_id` and an increasing `seq`. Nothing the
-  copilot does sends an email: preparing a send creates approvals that an
-  approver other than the requester decides on in `/v1/approvals`.
+  copilot does sends an email: preparing a send creates approvals that a
+  person decides on in `/v1/approvals` (the buyer by default; a second
+  person in four-eyes tenants).
 * `GET /v1/copilot/conversations/{id}`: the caller's own conversation so far.
 """
 

@@ -4,19 +4,25 @@ Nothing a client sends counts as approval except a call to `decide_approval`
 by an authenticated principal. The decision is made in ONE transaction in the
 principal's tenant, checking, in order:
 
-1. the principal is a member of the tenant with role `approver` or `owner`
-   (read from `memberships` now, never from the token; the row is share-locked
-   so a concurrent demotion cannot slip in between check and decision) -> 403;
+1. the principal is a member of the tenant (read from `memberships` now, never
+   from the token; the row is share-locked so a concurrent demotion cannot
+   slip in between check and decision) -> 403;
 2. the approval exists in that tenant (forced RLS: another tenant's id is
    simply not found) and is locked `FOR UPDATE` -> 404;
-3. the principal is not the requester (also a database CHECK) -> 403;
+3. who may decide:
+   - the requester themself, when the tenant allows self-approval (the
+     default: the AI prepared the act for this buyer, who reviews it);
+   - otherwise a member with role `approver` or `owner` who is not the
+     requester (four-eyes tenants: `allow_self_approval = false`) -> 403.
+   The database enforces the same rule (CHECK + trigger, migration 0017);
 4. it is still `pending`, so a decision is made exactly once and a replayed
    request changes nothing -> 409;
 5. its stored args still hash to the proposed `args_hash` -> 409, nothing is
    decided, and an `approval.integrity_failed` audit event is kept.
 
-Then the status, `decided_by` and `decided_at` are set and an audit event is
-written (ids and hash only, never the args), in the same transaction. On a
+Then the status, `decided_by`, `decided_at` and `self_approved` are set and an
+audit event is written (ids, hash and the self-approval mark only, never the
+args), in the same transaction. On a
 rejection, the tool's `RejectHook` (if the caller passes one for that tool)
 runs in that transaction too, so the feature can release what the proposal
 held (e.g. an RFQ invite goes back to `draft`).
@@ -51,7 +57,7 @@ from bido_back.approvals.executor import approval_execute_envelope
 from bido_back.approvals.integrity import payload_matches
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
-from bido_back.db.models import Approval, Membership
+from bido_back.db.models import Approval, Membership, Tenant
 from bido_back.worker.jobs import JobQueue
 
 logger = logging.getLogger(__name__)
@@ -100,16 +106,25 @@ async def decide_approval(
             )
             .with_for_update(read=True)
         )
-        if role not in APPROVER_ROLES:
-            raise ApprovalForbidden("the approver or owner role is required")
+        if role is None:
+            raise ApprovalForbidden("only a member of the tenant can decide approvals")
 
         approval = await session.scalar(
             select(Approval).where(Approval.id == approval_id).with_for_update()
         )
         if approval is None or approval.tenant_id != principal.tenant_id:
             raise ApprovalNotFound(f"approval {approval_id} not found")
-        if approval.requested_by == principal.user_id:
-            raise ApprovalForbidden("the requester cannot decide their own approval")
+        self_approval = approval.requested_by == principal.user_id
+        if self_approval:
+            allowed = await session.scalar(
+                select(Tenant.allow_self_approval).where(Tenant.id == principal.tenant_id)
+            )
+            if not allowed:
+                raise ApprovalForbidden(
+                    "this company requires a second person: the requester cannot decide"
+                )
+        elif role not in APPROVER_ROLES:
+            raise ApprovalForbidden("the approver or owner role is required")
         if approval.status != "pending":
             raise ApprovalNotPending(f"approval {approval_id} is {approval.status}")
 
@@ -121,6 +136,7 @@ async def decide_approval(
             approval.status = status
             approval.decided_by = principal.user_id
             approval.decided_at = datetime.now(UTC)
+            approval.self_approved = self_approval
             session.add(approval_audit(approval, f"approval.{status}", principal.user_id))
             hook = (on_reject or {}).get(approval.tool) if status == "rejected" else None
             if hook is not None:
@@ -132,11 +148,12 @@ async def decide_approval(
         raise ApprovalIntegrityError(f"approval {approval_id}: args do not match hash")
 
     logger.info(
-        "approval %s %s tenant=%s by=%s",
+        "approval %s %s tenant=%s by=%s self_approved=%s",
         approval_id,
         status,
         principal.tenant_id,
         principal.user_id,
+        self_approval,
     )
     if status == "approved":
         try:

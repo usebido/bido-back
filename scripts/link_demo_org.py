@@ -13,8 +13,10 @@ in the company (Clerk admins as owners), whether or not AUTH_AUTO_PROVISION
 is on; that setting only decides whether UNlinked organizations may create a
 company on first login.
 
-Runs with ENVIRONMENT=local or dev (refuses prd). Uses DATABASE_URL, the app
-role, through tenant-scoped transactions like the api. Idempotent: linking
+Runs with ENVIRONMENT=local or dev (refuses prd). Creates companies with
+DATABASE_URL (the app role, through tenant-scoped transactions like the api)
+and writes the link with MIGRATION_DATABASE_URL: the app role cannot UPDATE
+tenants (migration 0017). Idempotent: linking
 the same organization to the same tenant again changes nothing; an
 organization already linked to another tenant is refused.
 """
@@ -26,6 +28,7 @@ from uuid import UUID, uuid4
 
 from seed_motor_demo import TENANT_ID as MOTOR_DEMO_TENANT_ID
 from seed_motor_demo import seed as seed_motor_demo
+from sqlalchemy.ext.asyncio import create_async_engine
 
 from bido_back.db import create_engine, create_sessionmaker, tenant_session
 from bido_back.db.models import Tenant
@@ -54,8 +57,12 @@ async def main() -> int:
         print("link_demo_org.py runs only with ENVIRONMENT=local or dev", file=sys.stderr)
         return 1
 
+    if settings.migration_database_url is None:
+        print("MIGRATION_DATABASE_URL is required to write the link", file=sys.stderr)
+        return 1
     engine = create_engine(settings)
     db = create_sessionmaker(engine)
+    migrator = create_async_engine(str(settings.migration_database_url))
     try:
         if args.with_motor_demo:
             await seed_motor_demo(engine)
@@ -71,12 +78,13 @@ async def main() -> int:
         if linked is not None and linked != tenant_id:
             print(f"{org_id} is already linked to tenant {linked}", file=sys.stderr)
             return 1
-        await link_org(db, tenant_id, org_id)
+        await link_org(create_sessionmaker(migrator), tenant_id, org_id)
     except LookupError as exc:
         print(str(exc), file=sys.stderr)
         return 1
     finally:
         await engine.dispose()
+        await migrator.dispose()
 
     print(f"linked    {org_id} -> tenant {tenant_id}")
     print("next      members of that organization sign in on the frontend; the first")

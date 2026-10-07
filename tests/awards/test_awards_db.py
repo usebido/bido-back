@@ -7,7 +7,7 @@ from typing import Any, cast
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.catalog.contracts import AwardNoticeInput, AwardNoticeOutput
@@ -34,6 +34,7 @@ from bido_back.db.models import (
     Proposal,
     ProposalLine,
     Rfq,
+    Tenant,
 )
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs import suppliers
@@ -194,7 +195,30 @@ async def world(app_engine: AsyncEngine, award_rows: People) -> World:
     return await World(app_engine, award_rows).setup()
 
 
-async def test_the_recommendation_is_awarded_after_approval(world: World) -> None:
+async def _four_eyes(migrator_engine: AsyncEngine, tenant_id: UUID) -> None:
+    # The app role cannot UPDATE tenants: the policy is set by the migrator.
+    async with tenant_session(migrator_engine, tenant_id) as session:
+        await session.execute(
+            update(Tenant).where(Tenant.id == tenant_id).values(allow_self_approval=False)
+        )
+
+
+async def test_the_buyer_can_approve_their_own_award_by_default(world: World) -> None:
+    requested = await service.request_award(
+        world.engine, buyer(world.people), world.rfq.id, AwardRequest(), TODAY
+    )
+    await decide_approval(
+        world.engine, buyer(world.people), requested.approval_id, "approve", jobs=world.jobs
+    )
+    pending = await service.get_award(world.engine, buyer(world.people), world.rfq.id)
+    assert pending.approval_id == requested.approval_id
+
+
+async def test_the_recommendation_is_awarded_after_approval(
+    world: World, migrator_engine: AsyncEngine
+) -> None:
+    # A four-eyes company: the requester cannot approve their own award.
+    await _four_eyes(migrator_engine, world.people.tenant)
     line1, line2 = world.rfq.lines
     requested = await service.request_award(
         world.engine, buyer(world.people), world.rfq.id, AwardRequest(), TODAY

@@ -60,7 +60,7 @@ def awards_router() -> APIRouter:
     async def request_award(  # pyright: ignore[reportUnusedFunction]
         rfq_id: UUID, body: AwardRequest, principal: CurrentPrincipal, db: Db
     ) -> AwardRequested:
-        """Propose the award: one approval; an approver other than the caller decides."""
+        """Propose the award: one approval, decided by a person (the buyer by default)."""
         try:
             return await service.request_award(
                 db, principal, rfq_id, body, datetime.now(UTC).date()
