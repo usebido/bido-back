@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.tools import ToolError
 from bido_back.db import tenant_session
-from bido_back.db.models import Approval, Invite
+from bido_back.db.models import Approval, Invite, RfqTemplate, RfqTemplateVersion
 from bido_back.rfqs.send import SEND_RFQ_EMAIL
 from tests.approvals.conftest import People
 
@@ -181,3 +181,29 @@ async def test_template_tools(app_engine: AsyncEngine, copilot_rows: People) -> 
     assert after.template_id == updated.template_id and after.fields  # from the standard set
     with pytest.raises(ToolError):
         await tools.call(ctx, "update_rfq_template")
+
+
+async def test_template_edits_are_new_versions(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    tools = make_tools(app_engine)
+    ctx = context_of(buyer_of(copilot_rows))
+
+    first = await tools.call(ctx, "update_rfq_template", footer_fields=["Frete"])
+    second = await tools.call(ctx, "update_rfq_template", footer_fields=["Frete", "Validade"])
+
+    assert second.template_id == first.template_id
+    async with tenant_session(app_engine, copilot_rows.tenant) as session:
+        template = await session.get(RfqTemplate, first.template_id)
+        versions = (
+            await session.scalars(
+                select(RfqTemplateVersion.version)
+                .where(RfqTemplateVersion.template_id == first.template_id)
+                .order_by(RfqTemplateVersion.version)
+            )
+        ).all()
+    assert template is not None
+    # The standard template is created as v1, then each copilot edit is a new
+    # version; every version, the current one included, stays as a snapshot.
+    assert template.version == 3
+    assert versions == [1, 2, 3]
