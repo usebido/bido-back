@@ -227,6 +227,15 @@ class Rfq(Base):
     followup_first_after_days: Mapped[int] = mapped_column(Integer, server_default=text("2"))
     followup_every_days: Mapped[int] = mapped_column(Integer, server_default=text("2"))
     followup_max_chases: Mapped[int] = mapped_column(Integer, server_default=text("3"))
+    # The supplier negotiation (migration 0013): not_started, open,
+    # ready_to_close, closed.
+    negotiation_status: Mapped[str] = mapped_column(Text, server_default=text("'not_started'"))
+    negotiation_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    negotiation_max_rounds: Mapped[int] = mapped_column(Integer, server_default=text("3"))
+    negotiation_early_close: Mapped[bool] = mapped_column(Boolean, server_default=true())
+    negotiation_ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    negotiation_closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    negotiation_outcome: Mapped[list[Any] | None] = mapped_column(JSONB)
 
 
 class RfqLine(Base):
@@ -247,6 +256,10 @@ class RfqLine(Base):
     incoterm: Mapped[str | None] = mapped_column(Text)
     delivery_location: Mapped[str | None] = mapped_column(Text)
     qualification: Mapped[str | None] = mapped_column(Text)
+    # The buyer's negotiation limits, in the RFQ's base currency (migration 0013).
+    target_unit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    max_unit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    max_lead_time_days: Mapped[int | None] = mapped_column(Integer)
 
 
 class Invite(Base):
@@ -274,6 +287,12 @@ class Invite(Base):
     )
     # No chase before this (an auto-reply / out of office; migration 0008).
     followups_paused_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Where this supplier stands in the negotiation, and the offer (proposal
+    # version) last evaluated (migration 0013).
+    negotiation_status: Mapped[str] = mapped_column(Text, server_default=text("'open'"))
+    negotiation_evaluated_proposal_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("proposals.id", ondelete="SET NULL")
+    )
 
 
 class Message(Base):
@@ -594,6 +613,31 @@ class FollowupMessage(Base):
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class NegotiationMessage(Base):
+    """A counter-offer or best-and-final request Bido proposed (migration 0013).
+
+    The id is derived from (invite, round). `terms` holds the numbers asked
+    for; the approved text lives in the approval's args and, once sent, in
+    `messages`.
+    """
+
+    __tablename__ = "negotiation_messages"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    invite_id: Mapped[UUID] = mapped_column(ForeignKey("invites.id", ondelete="CASCADE"))
+    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("proposals.id", ondelete="CASCADE"))
+    round: Mapped[int] = mapped_column(Integer)
+    action: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'proposed'"))
+    approval_id: Mapped[UUID | None] = mapped_column(ForeignKey("approvals.id"))
+    terms: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    message_id_header: Mapped[str | None] = mapped_column(Text)
+    canceled_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 # --- Supplier compliance (migration 0011) -----------------------------------
 
 COMPLIANCE_SCOPES = ("supplier", "manufacturer", "line")
@@ -674,7 +718,197 @@ class SupplierComplianceDocument(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-# --- Award and purchase orders (migration 0015) -------------------------------
+# --- Purchase analysis (migration 0014) ----------------------------------------------
+
+AMOUNT = Numeric(18, 6)
+
+
+class Item(Base):
+    """A part the company buys, by its internal part number."""
+
+    __tablename__ = "items"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "part_number", name="items_tenant_part_number_key"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    part_number: Mapped[str] = mapped_column(Text)
+    description: Mapped[str] = mapped_column(Text)
+    mpn: Mapped[str | None] = mapped_column(Text)
+    manufacturer: Mapped[str | None] = mapped_column(Text)
+    category: Mapped[str | None] = mapped_column(Text)
+    unit: Mapped[str] = mapped_column(Text, server_default=text("'pcs'"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class BomLine(Base):
+    """How much of one item goes into one unit of a product."""
+
+    __tablename__ = "bom_lines"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "product", "item_id", name="bom_lines_product_item_key"),
+        CheckConstraint("qty_per_unit > 0", name="bom_lines_qty_check"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    product: Mapped[str] = mapped_column(Text)
+    item_id: Mapped[UUID] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"))
+    qty_per_unit: Mapped[Decimal] = mapped_column(AMOUNT)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class InventoryRow(Base):
+    """On hand and on order for one item at one location."""
+
+    __tablename__ = "inventory"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "item_id", "location", name="inventory_item_location_key"),
+        CheckConstraint("on_hand >= 0 AND on_order >= 0", name="inventory_quantities_check"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    item_id: Mapped[UUID] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"))
+    location: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    on_hand: Mapped[Decimal] = mapped_column(AMOUNT, server_default=text("0"))
+    on_order: Mapped[Decimal] = mapped_column(AMOUNT, server_default=text("0"))
+    as_of: Mapped[date | None] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PurchaseOrder(Base):
+    """A past purchase order (imported history), one supplier and currency."""
+
+    __tablename__ = "purchase_orders"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "supplier_id", "po_number", name="purchase_orders_number_key"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    po_number: Mapped[str] = mapped_column(Text)
+    supplier_id: Mapped[UUID] = mapped_column(ForeignKey("suppliers.id", ondelete="CASCADE"))
+    currency: Mapped[str] = mapped_column(Text, server_default=text("'EUR'"))
+    ordered_at: Mapped[date] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PoLine(Base):
+    """One item of a purchase order, with what was promised and what arrived."""
+
+    __tablename__ = "po_lines"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "purchase_order_id", "line_no", name="po_lines_line_key"),
+        CheckConstraint("quantity > 0", name="po_lines_quantity_check"),
+        CheckConstraint("unit_price >= 0", name="po_lines_price_check"),
+        CheckConstraint(
+            "rejected_qty >= 0 AND (received_qty IS NULL OR received_qty >= 0)",
+            name="po_lines_received_check",
+        ),
+        Index("po_lines_tenant_item_idx", "tenant_id", "item_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    purchase_order_id: Mapped[UUID] = mapped_column(
+        ForeignKey("purchase_orders.id", ondelete="CASCADE")
+    )
+    line_no: Mapped[int] = mapped_column(Integer)
+    item_id: Mapped[UUID] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"))
+    quantity: Mapped[Decimal] = mapped_column(AMOUNT)
+    unit_price: Mapped[Decimal] = mapped_column(AMOUNT)
+    promised_at: Mapped[date | None] = mapped_column(Date)
+    received_at: Mapped[date | None] = mapped_column(Date)
+    received_qty: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    rejected_qty: Mapped[Decimal] = mapped_column(AMOUNT, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class ProductionPlanRow(Base):
+    """Units of a product needed by a date."""
+
+    __tablename__ = "production_plan"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "product", "need_by", name="production_plan_product_date_key"
+        ),
+        CheckConstraint("quantity > 0", name="production_plan_quantity_check"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    product: Mapped[str] = mapped_column(Text)
+    quantity: Mapped[Decimal] = mapped_column(AMOUNT)
+    need_by: Mapped[date] = mapped_column(Date)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class Analysis(Base):
+    """One run of the purchase analysis for a product and quantity."""
+
+    __tablename__ = "analyses"
+    __table_args__ = (CheckConstraint("quantity > 0", name="analyses_quantity_check"),)
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    product: Mapped[str] = mapped_column(Text)
+    quantity: Mapped[Decimal] = mapped_column(AMOUNT)
+    need_by: Mapped[date | None] = mapped_column(Date)
+    params: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    summary: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    created_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    rfq_id: Mapped[UUID | None] = mapped_column(ForeignKey("rfqs.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class AnalysisLine(Base):
+    """The analysis result for one item: how much to buy, from whom, at what price.
+
+    `rfq_line_id` links the RFQ line created from it; `target_price` and
+    `max_price` (in `currency`) are what the negotiation aims at and accepts.
+    """
+
+    __tablename__ = "analysis_lines"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "analysis_id", "position", name="analysis_lines_pos_key"),
+        Index(
+            "analysis_lines_rfq_line_idx",
+            "tenant_id",
+            "rfq_line_id",
+            postgresql_where=text("rfq_line_id IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    analysis_id: Mapped[UUID] = mapped_column(ForeignKey("analyses.id", ondelete="CASCADE"))
+    item_id: Mapped[UUID] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"))
+    position: Mapped[int] = mapped_column(Integer)
+    required: Mapped[Decimal] = mapped_column(AMOUNT)
+    on_hand: Mapped[Decimal] = mapped_column(AMOUNT)
+    on_order: Mapped[Decimal] = mapped_column(AMOUNT)
+    to_buy: Mapped[Decimal] = mapped_column(AMOUNT)
+    unit: Mapped[str] = mapped_column(Text)
+    need_by: Mapped[date | None] = mapped_column(Date)
+    currency: Mapped[str | None] = mapped_column(Text)
+    last_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    avg_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    min_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    trend_pct: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    target_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    max_price: Mapped[Decimal | None] = mapped_column(AMOUNT)
+    suppliers: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    flags: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    rfq_line_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("rfq_lines.id", ondelete="SET NULL")
+    )
+
+
+# --- Award and issued purchase orders (migration 0015) -------------------------------
 
 PURCHASE_ORDER_STATUSES = ("draft", "pending_approval", "sent")
 AWARD_NOTICE_STATUSES = ("proposed", "sent", "rejected", "canceled")
@@ -698,10 +932,13 @@ class Award(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class PurchaseOrder(Base):
-    """One purchase order per awarded supplier, numbered PO-<n> per tenant."""
+class IssuedPurchaseOrder(Base):
+    """A purchase order Bido issues: one per awarded supplier, numbered PO-<n> per tenant.
 
-    __tablename__ = "purchase_orders"
+    Not the imported purchase history (`PurchaseOrder`, migration 0014).
+    """
+
+    __tablename__ = "issued_purchase_orders"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
@@ -721,13 +958,13 @@ class PurchaseOrder(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class PurchaseOrderLine(Base):
-    __tablename__ = "purchase_order_lines"
+class IssuedPurchaseOrderLine(Base):
+    __tablename__ = "issued_purchase_order_lines"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
     purchase_order_id: Mapped[UUID] = mapped_column(
-        ForeignKey("purchase_orders.id", ondelete="CASCADE")
+        ForeignKey("issued_purchase_orders.id", ondelete="CASCADE")
     )
     position: Mapped[int] = mapped_column(Integer)
     rfq_line_id: Mapped[UUID | None] = mapped_column(ForeignKey("rfq_lines.id"))

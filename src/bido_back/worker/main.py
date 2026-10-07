@@ -42,6 +42,7 @@ from bido_back.worker.job_types import (
     FOLLOWUPS_SWEEP,
     FX_REFRESH,
     MAILBOX_SYNC,
+    NEGOTIATION_SWEEP,
     QUOTE_EXTRACT,
     TEMPLATE_BUILD,
     TEMPLATE_SCAN,
@@ -104,6 +105,9 @@ def build_worker_registry(
     from bido_back.fx.ecb import FxRefreshHandler
     from bido_back.intake.consumer import build_inbound_service
     from bido_back.mailbox import MailboxSyncDeps, MailboxSyncHandler, open_connection
+    from bido_back.negotiation.agents import default_negotiation_writer
+    from bido_back.negotiation.jobs import NegotiationSweepHandler
+    from bido_back.negotiation.send import register_negotiation_act_tools
     from bido_back.onboarding.agents import default_onboarding_agents
     from bido_back.onboarding.jobs import (
         OnboardingJobDeps,
@@ -124,6 +128,7 @@ def build_worker_registry(
     )
     register_act_tools(act_tools, act_deps)
     register_followup_act_tools(act_tools, act_deps)
+    register_negotiation_act_tools(act_tools, act_deps)
     register_award_act_tools(act_tools, act_deps)
     registry = build_registry(engine, act_tools)
     storage = build_storage(settings)
@@ -131,6 +136,10 @@ def build_worker_registry(
     registry.register(
         FOLLOWUPS_SWEEP,
         FollowupSweepHandler(db=engine, writer=default_followup_writer(runner_config)),
+    )
+    registry.register(
+        NEGOTIATION_SWEEP,
+        NegotiationSweepHandler(db=engine, writer=default_negotiation_writer(runner_config)),
     )
     registry.register(
         QUOTE_EXTRACT,

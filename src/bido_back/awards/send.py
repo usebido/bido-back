@@ -56,10 +56,10 @@ from bido_back.db.models import (
     Award,
     AwardNotice,
     Invite,
+    IssuedPurchaseOrder,
+    IssuedPurchaseOrderLine,
     Proposal,
     ProposalLine,
-    PurchaseOrder,
-    PurchaseOrderLine,
     Rfq,
 )
 from bido_back.email.addresses import make_message_id
@@ -165,7 +165,7 @@ class _AwardRfq:
             for invite_id, lines in by_invite.items():
                 proposal = await session.get(Proposal, lines[0].proposal_id)
                 po_lines = [
-                    PurchaseOrderLine(
+                    IssuedPurchaseOrderLine(
                         tenant_id=ctx.tenant_id,
                         position=line.position,
                         rfq_line_id=line.rfq_line_id,
@@ -181,7 +181,7 @@ class _AwardRfq:
                     )
                     for line in lines
                 ]
-                po = PurchaseOrder(
+                po = IssuedPurchaseOrder(
                     tenant_id=ctx.tenant_id,
                     award_id=award.id,
                     rfq_id=rfq.id,
@@ -220,7 +220,10 @@ class _AwardRfq:
             )
             await session.flush()
         logger.info(
-            "awarded rfq %s tenant=%s purchase_orders=%d", args.rfq_id, ctx.tenant_id, len(po_ids)
+            "awarded rfq %s tenant=%s purchase_orders=%d",
+            args.rfq_id,
+            ctx.tenant_id,
+            len(po_ids),
         )
         return AwardRfqResult(
             rfq_id=args.rfq_id, outcome="awarded", award_id=award.id, purchase_order_ids=po_ids
@@ -246,8 +249,8 @@ class _SendPurchaseOrder:
             return claim
         async with tenant_session(self._deps.db, ctx.tenant_id) as session:
             po = await session.scalar(
-                select(PurchaseOrder)
-                .where(PurchaseOrder.id == args.purchase_order_id)
+                select(IssuedPurchaseOrder)
+                .where(IssuedPurchaseOrder.id == args.purchase_order_id)
                 .with_for_update()
             )
             if po is None:
@@ -304,8 +307,8 @@ class _SendPurchaseOrder:
     ) -> _Claim | ThreadEmailResult:
         async with tenant_session(self._deps.db, ctx.tenant_id) as session:
             po = await session.scalar(
-                select(PurchaseOrder)
-                .where(PurchaseOrder.id == args.purchase_order_id)
+                select(IssuedPurchaseOrder)
+                .where(IssuedPurchaseOrder.id == args.purchase_order_id)
                 .with_for_update()
             )
             if po is None or po.invite_id != args.invite_id:
@@ -460,10 +463,10 @@ async def release_rejected_po_send(session: AsyncSession, approval: Approval) ->
     """A rejected PO send is not sent; the PO goes back to `draft`."""
     args = SendPurchaseOrderArgs.model_validate(approval.args)
     await session.execute(
-        update(PurchaseOrder)
+        update(IssuedPurchaseOrder)
         .where(
-            PurchaseOrder.id == args.purchase_order_id,
-            PurchaseOrder.status == "pending_approval",
+            IssuedPurchaseOrder.id == args.purchase_order_id,
+            IssuedPurchaseOrder.status == "pending_approval",
         )
         .values(status="draft")
     )

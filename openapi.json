@@ -1,6 +1,433 @@
 {
   "components": {
     "schemas": {
+      "AnalysisLineView": {
+        "properties": {
+          "avg_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Price"
+          },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "flags": {
+            "items": {
+              "$ref": "#/components/schemas/FlagView"
+            },
+            "title": "Flags",
+            "type": "array"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "item_id": {
+            "format": "uuid",
+            "title": "Item Id",
+            "type": "string"
+          },
+          "last_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Price"
+          },
+          "manufacturer": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Manufacturer"
+          },
+          "max_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Price"
+          },
+          "min_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Price"
+          },
+          "mpn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mpn"
+          },
+          "need_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need By"
+          },
+          "on_hand": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "On Hand",
+            "type": "string"
+          },
+          "on_order": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "On Order",
+            "type": "string"
+          },
+          "part_number": {
+            "title": "Part Number",
+            "type": "string"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "required": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Required",
+            "type": "string"
+          },
+          "rfq_line_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rfq Line Id"
+          },
+          "suppliers": {
+            "items": {
+              "$ref": "#/components/schemas/SupplierStatView"
+            },
+            "title": "Suppliers",
+            "type": "array"
+          },
+          "target_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Price"
+          },
+          "to_buy": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "To Buy",
+            "type": "string"
+          },
+          "trend_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trend Pct"
+          },
+          "unit": {
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "position",
+          "item_id",
+          "part_number",
+          "description",
+          "mpn",
+          "manufacturer",
+          "unit",
+          "required",
+          "on_hand",
+          "on_order",
+          "to_buy",
+          "need_by",
+          "currency",
+          "last_price",
+          "avg_price",
+          "min_price",
+          "trend_pct",
+          "target_price",
+          "max_price",
+          "suppliers",
+          "flags",
+          "rfq_line_id"
+        ],
+        "title": "AnalysisLineView",
+        "type": "object"
+      },
+      "AnalysisRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "lookback_days": {
+            "default": 365,
+            "maximum": 1095.0,
+            "minimum": 30.0,
+            "title": "Lookback Days",
+            "type": "integer"
+          },
+          "need_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need By"
+          },
+          "product": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Product",
+            "type": "string"
+          },
+          "quantity": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quantity"
+          },
+          "safety_stock_pct": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "0",
+            "title": "Safety Stock Pct"
+          }
+        },
+        "required": [
+          "product"
+        ],
+        "title": "AnalysisRequest",
+        "type": "object"
+      },
+      "AnalysisSummary": {
+        "properties": {
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
+          "flagged_items": {
+            "title": "Flagged Items",
+            "type": "integer"
+          },
+          "items": {
+            "title": "Items",
+            "type": "integer"
+          },
+          "items_to_buy": {
+            "title": "Items To Buy",
+            "type": "integer"
+          },
+          "total_at_last_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total At Last Price"
+          },
+          "total_at_target": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Total At Target"
+          }
+        },
+        "required": [
+          "items",
+          "items_to_buy",
+          "currency",
+          "total_at_target",
+          "total_at_last_price",
+          "flagged_items"
+        ],
+        "title": "AnalysisSummary",
+        "type": "object"
+      },
+      "AnalysisView": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/AnalysisLineView"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
+          "lookback_days": {
+            "title": "Lookback Days",
+            "type": "integer"
+          },
+          "need_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need By"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "rfq_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rfq Id"
+          },
+          "safety_stock_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Safety Stock Pct",
+            "type": "string"
+          },
+          "summary": {
+            "$ref": "#/components/schemas/AnalysisSummary"
+          }
+        },
+        "required": [
+          "id",
+          "product",
+          "quantity",
+          "need_by",
+          "safety_stock_pct",
+          "lookback_days",
+          "summary",
+          "lines",
+          "rfq_id",
+          "created_at"
+        ],
+        "title": "AnalysisView",
+        "type": "object"
+      },
       "ApprovalQueueItem": {
         "properties": {
           "award": {
@@ -34,6 +461,16 @@
             "format": "uuid",
             "title": "Id",
             "type": "string"
+          },
+          "negotiation_email": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NegotiationEmailDraft"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "requested_by": {
             "format": "uuid",
@@ -1845,6 +2282,42 @@
         "title": "FieldCorrectionView",
         "type": "object"
       },
+      "FlagView": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "supplier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "FlagView",
+        "type": "object"
+      },
       "FollowupMessageView": {
         "properties": {
           "approval_id": {
@@ -2143,6 +2616,183 @@
         "title": "HealthResponse",
         "type": "object"
       },
+      "ImportReport": {
+        "properties": {
+          "columns": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "title": "Columns",
+            "type": "object"
+          },
+          "created": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Created",
+            "type": "object"
+          },
+          "dry_run": {
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "errors": {
+            "items": {
+              "$ref": "#/components/schemas/ImportRowError"
+            },
+            "title": "Errors",
+            "type": "array"
+          },
+          "missing_required": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Missing Required",
+            "type": "array"
+          },
+          "rows_failed": {
+            "title": "Rows Failed",
+            "type": "integer"
+          },
+          "rows_imported": {
+            "title": "Rows Imported",
+            "type": "integer"
+          },
+          "rows_total": {
+            "title": "Rows Total",
+            "type": "integer"
+          },
+          "type": {
+            "enum": [
+              "items",
+              "bom",
+              "inventory",
+              "purchase_history",
+              "production_plan"
+            ],
+            "title": "Type",
+            "type": "string"
+          },
+          "unknown_columns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unknown Columns",
+            "type": "array"
+          },
+          "updated": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Updated",
+            "type": "object"
+          }
+        },
+        "required": [
+          "type",
+          "dry_run",
+          "rows_total",
+          "rows_imported",
+          "rows_failed",
+          "columns",
+          "missing_required",
+          "unknown_columns",
+          "errors",
+          "created",
+          "updated"
+        ],
+        "title": "ImportReport",
+        "type": "object"
+      },
+      "ImportRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "decimal_separator": {
+            "anyOf": [
+              {
+                "enum": [
+                  ",",
+                  "."
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decimal Separator"
+          },
+          "dry_run": {
+            "default": false,
+            "title": "Dry Run",
+            "type": "boolean"
+          },
+          "sheet": {
+            "anyOf": [
+              {
+                "maxLength": 100,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sheet"
+          },
+          "type": {
+            "enum": [
+              "items",
+              "bom",
+              "inventory",
+              "purchase_history",
+              "production_plan"
+            ],
+            "title": "Type",
+            "type": "string"
+          },
+          "upload_id": {
+            "format": "uuid",
+            "title": "Upload Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "type",
+          "upload_id"
+        ],
+        "title": "ImportRequest",
+        "type": "object"
+      },
+      "ImportRowError": {
+        "properties": {
+          "field": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "row": {
+            "title": "Row",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "row",
+          "field",
+          "message"
+        ],
+        "title": "ImportRowError",
+        "type": "object"
+      },
       "InviteFollowups": {
         "properties": {
           "chase_state": {
@@ -2232,6 +2882,89 @@
         "title": "InviteFollowups",
         "type": "object"
       },
+      "InviteNegotiation": {
+        "properties": {
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          },
+          "invite_status": {
+            "title": "Invite Status",
+            "type": "string"
+          },
+          "latest_proposal_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Proposal Id"
+          },
+          "latest_proposal_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Proposal Version"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/LineDecisionView"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/NegotiationMessageView"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "rounds_used": {
+            "title": "Rounds Used",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "countered",
+              "bafo_requested",
+              "accepted",
+              "rejected",
+              "closed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invite_id",
+          "supplier_name",
+          "invite_status",
+          "status",
+          "rounds_used",
+          "latest_proposal_id",
+          "latest_proposal_version",
+          "lines",
+          "messages"
+        ],
+        "title": "InviteNegotiation",
+        "type": "object"
+      },
       "InviteView": {
         "properties": {
           "contact_id": {
@@ -2299,6 +3032,129 @@
           "responded_at"
         ],
         "title": "InviteView",
+        "type": "object"
+      },
+      "InvitedSupplier": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "supplier_id": {
+            "format": "uuid",
+            "title": "Supplier Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "supplier_id",
+          "name"
+        ],
+        "title": "InvitedSupplier",
+        "type": "object"
+      },
+      "IssuedPurchaseOrderLineView": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lead Time Days"
+          },
+          "line_total": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Line Total",
+            "type": "string"
+          },
+          "mpn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mpn"
+          },
+          "need_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need By"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "proposal_line_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposal Line Id"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "rfq_line_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rfq Line Id"
+          },
+          "unit": {
+            "title": "Unit",
+            "type": "string"
+          },
+          "unit_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Unit Price",
+            "type": "string"
+          }
+        },
+        "required": [
+          "position",
+          "rfq_line_id",
+          "proposal_line_id",
+          "description",
+          "mpn",
+          "quantity",
+          "unit",
+          "unit_price",
+          "line_total",
+          "need_by",
+          "lead_time_days"
+        ],
+        "title": "IssuedPurchaseOrderLineView",
         "type": "object"
       },
       "JsonValue": {},
@@ -2479,6 +3335,216 @@
         "title": "LineCorrectionRequest",
         "type": "object"
       },
+      "LineDecisionView": {
+        "properties": {
+          "ask_lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ask Lead Time Days"
+          },
+          "ask_unit_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ask Unit Price"
+          },
+          "decision": {
+            "enum": [
+              "no_offer",
+              "blocked",
+              "accept",
+              "above_max",
+              "counter"
+            ],
+            "title": "Decision",
+            "type": "string"
+          },
+          "lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lead Time Days"
+          },
+          "offered_unit_price_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offered Unit Price Base"
+          },
+          "rfq_line_id": {
+            "format": "uuid",
+            "title": "Rfq Line Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rfq_line_id",
+          "decision",
+          "offered_unit_price_base",
+          "ask_unit_price",
+          "lead_time_days",
+          "ask_lead_time_days"
+        ],
+        "title": "LineDecisionView",
+        "type": "object"
+      },
+      "LineLimitsUpdate": {
+        "additionalProperties": false,
+        "properties": {
+          "max_lead_time_days": {
+            "anyOf": [
+              {
+                "maximum": 3650.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Lead Time Days"
+          },
+          "max_unit_price": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Unit Price"
+          },
+          "rfq_line_id": {
+            "format": "uuid",
+            "title": "Rfq Line Id",
+            "type": "string"
+          },
+          "target_unit_price": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Unit Price"
+          }
+        },
+        "required": [
+          "rfq_line_id"
+        ],
+        "title": "LineLimitsUpdate",
+        "type": "object"
+      },
+      "LineLimitsView": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "max_lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Lead Time Days"
+          },
+          "max_unit_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Unit Price"
+          },
+          "mpn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Mpn"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "rfq_line_id": {
+            "format": "uuid",
+            "title": "Rfq Line Id",
+            "type": "string"
+          },
+          "target_unit_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Unit Price"
+          }
+        },
+        "required": [
+          "rfq_line_id",
+          "position",
+          "description",
+          "mpn",
+          "target_unit_price",
+          "max_unit_price",
+          "max_lead_time_days"
+        ],
+        "title": "LineLimitsView",
+        "type": "object"
+      },
       "MailboxConnectionResponse": {
         "properties": {
           "created_at": {
@@ -2616,6 +3682,277 @@
         "title": "MeResponse",
         "type": "object"
       },
+      "NegotiationEmailDraft": {
+        "description": "The exact counter-offer or best-and-final email an approver approves.",
+        "properties": {
+          "action": {
+            "enum": [
+              "counter",
+              "bafo"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "body": {
+            "title": "Body",
+            "type": "string"
+          },
+          "cc": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Cc",
+            "type": "array"
+          },
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          },
+          "rfq_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rfq Id"
+          },
+          "rfq_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rfq Ref"
+          },
+          "round": {
+            "title": "Round",
+            "type": "integer"
+          },
+          "sender_user_id": {
+            "format": "uuid",
+            "title": "Sender User Id",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          },
+          "supplier_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Name"
+          },
+          "to": {
+            "items": {
+              "type": "string"
+            },
+            "title": "To",
+            "type": "array"
+          }
+        },
+        "required": [
+          "action",
+          "round",
+          "invite_id",
+          "rfq_id",
+          "rfq_ref",
+          "supplier_name",
+          "sender_user_id",
+          "to",
+          "cc",
+          "subject",
+          "body"
+        ],
+        "title": "NegotiationEmailDraft",
+        "type": "object"
+      },
+      "NegotiationMessageView": {
+        "properties": {
+          "action": {
+            "enum": [
+              "counter",
+              "bafo"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "approval_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Id"
+          },
+          "canceled_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Canceled Reason"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "proposal_id": {
+            "format": "uuid",
+            "title": "Proposal Id",
+            "type": "string"
+          },
+          "round": {
+            "title": "Round",
+            "type": "integer"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          },
+          "status": {
+            "enum": [
+              "proposed",
+              "sent",
+              "canceled",
+              "rejected"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "round",
+          "action",
+          "status",
+          "approval_id",
+          "proposal_id",
+          "canceled_reason",
+          "created_at",
+          "sent_at"
+        ],
+        "title": "NegotiationMessageView",
+        "type": "object"
+      },
+      "NegotiationSettings": {
+        "properties": {
+          "base_currency": {
+            "title": "Base Currency",
+            "type": "string"
+          },
+          "deadline": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline"
+          },
+          "early_close": {
+            "title": "Early Close",
+            "type": "boolean"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/LineLimitsView"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
+          "max_rounds": {
+            "title": "Max Rounds",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "deadline",
+          "max_rounds",
+          "early_close",
+          "base_currency",
+          "lines"
+        ],
+        "title": "NegotiationSettings",
+        "type": "object"
+      },
+      "NegotiationSettingsUpdate": {
+        "additionalProperties": false,
+        "description": "PUT: replaces the settings given. Lines not listed keep their limits; a line\nlisted has all three limits replaced. Saving opens the negotiation.",
+        "properties": {
+          "deadline": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deadline"
+          },
+          "early_close": {
+            "default": true,
+            "title": "Early Close",
+            "type": "boolean"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/LineLimitsUpdate"
+            },
+            "maxItems": 500,
+            "title": "Lines",
+            "type": "array"
+          },
+          "max_rounds": {
+            "default": 3,
+            "maximum": 10.0,
+            "minimum": 1.0,
+            "title": "Max Rounds",
+            "type": "integer"
+          }
+        },
+        "title": "NegotiationSettingsUpdate",
+        "type": "object"
+      },
       "NoticeProposed": {
         "properties": {
           "approval_id": {
@@ -2715,6 +4052,98 @@
         "title": "OnboardingState",
         "type": "object"
       },
+      "OutcomeLine": {
+        "properties": {
+          "effective_unit_price_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Unit Price Base"
+          },
+          "invite_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invite Id"
+          },
+          "justification": {
+            "title": "Justification",
+            "type": "string"
+          },
+          "lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lead Time Days"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "rfq_line_id": {
+            "format": "uuid",
+            "title": "Rfq Line Id",
+            "type": "string"
+          },
+          "supplier_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Name"
+          },
+          "tier": {
+            "title": "Tier",
+            "type": "integer"
+          },
+          "within_target": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Within Target"
+          }
+        },
+        "required": [
+          "rfq_line_id",
+          "tier",
+          "quantity",
+          "invite_id",
+          "supplier_name",
+          "effective_unit_price_base",
+          "lead_time_days",
+          "within_target",
+          "justification"
+        ],
+        "title": "OutcomeLine",
+        "type": "object"
+      },
       "PrepareSendResponse": {
         "properties": {
           "approvals": {
@@ -2756,6 +4185,50 @@
           "approval_id"
         ],
         "title": "PreparedInvite",
+        "type": "object"
+      },
+      "ProductView": {
+        "properties": {
+          "bom_items": {
+            "title": "Bom Items",
+            "type": "integer"
+          },
+          "next_need_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Need By"
+          },
+          "planned_quantity": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planned Quantity"
+          },
+          "product": {
+            "title": "Product",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product",
+          "bom_items",
+          "planned_quantity",
+          "next_need_by"
+        ],
+        "title": "ProductView",
         "type": "object"
       },
       "ProposalLineView": {
@@ -3028,110 +4501,6 @@
         "title": "ProposalView",
         "type": "object"
       },
-      "PurchaseOrderLineView": {
-        "properties": {
-          "description": {
-            "title": "Description",
-            "type": "string"
-          },
-          "lead_time_days": {
-            "anyOf": [
-              {
-                "type": "integer"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Lead Time Days"
-          },
-          "line_total": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Line Total",
-            "type": "string"
-          },
-          "mpn": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Mpn"
-          },
-          "need_by": {
-            "anyOf": [
-              {
-                "format": "date",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Need By"
-          },
-          "position": {
-            "title": "Position",
-            "type": "integer"
-          },
-          "proposal_line_id": {
-            "anyOf": [
-              {
-                "format": "uuid",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Proposal Line Id"
-          },
-          "quantity": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Quantity",
-            "type": "string"
-          },
-          "rfq_line_id": {
-            "anyOf": [
-              {
-                "format": "uuid",
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "title": "Rfq Line Id"
-          },
-          "unit": {
-            "title": "Unit",
-            "type": "string"
-          },
-          "unit_price": {
-            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
-            "title": "Unit Price",
-            "type": "string"
-          }
-        },
-        "required": [
-          "position",
-          "rfq_line_id",
-          "proposal_line_id",
-          "description",
-          "mpn",
-          "quantity",
-          "unit",
-          "unit_price",
-          "line_total",
-          "need_by",
-          "lead_time_days"
-        ],
-        "title": "PurchaseOrderLineView",
-        "type": "object"
-      },
       "PurchaseOrderSummary": {
         "properties": {
           "created_at": {
@@ -3241,7 +4610,7 @@
           },
           "lines": {
             "items": {
-              "$ref": "#/components/schemas/PurchaseOrderLineView"
+              "$ref": "#/components/schemas/IssuedPurchaseOrderLineView"
             },
             "title": "Lines",
             "type": "array"
@@ -4040,6 +5409,78 @@
         "title": "RfqFollowups",
         "type": "object"
       },
+      "RfqFromAnalysis": {
+        "properties": {
+          "analysis_id": {
+            "format": "uuid",
+            "title": "Analysis Id",
+            "type": "string"
+          },
+          "invited": {
+            "items": {
+              "$ref": "#/components/schemas/InvitedSupplier"
+            },
+            "title": "Invited",
+            "type": "array"
+          },
+          "rfq": {
+            "$ref": "#/components/schemas/RfqDetail"
+          },
+          "skipped": {
+            "items": {
+              "$ref": "#/components/schemas/SkippedSupplier"
+            },
+            "title": "Skipped",
+            "type": "array"
+          }
+        },
+        "required": [
+          "analysis_id",
+          "rfq",
+          "invited",
+          "skipped"
+        ],
+        "title": "RfqFromAnalysis",
+        "type": "object"
+      },
+      "RfqFromAnalysisRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "max_suppliers_per_line": {
+            "default": 3,
+            "maximum": 3.0,
+            "minimum": 1.0,
+            "title": "Max Suppliers Per Line",
+            "type": "integer"
+          },
+          "response_due": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Due"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "title": "RfqFromAnalysisRequest",
+        "type": "object"
+      },
       "RfqLineView": {
         "properties": {
           "category": {
@@ -4160,6 +5601,84 @@
           "qualification"
         ],
         "title": "RfqLineView",
+        "type": "object"
+      },
+      "RfqNegotiation": {
+        "properties": {
+          "closed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Closed At"
+          },
+          "invites": {
+            "items": {
+              "$ref": "#/components/schemas/InviteNegotiation"
+            },
+            "title": "Invites",
+            "type": "array"
+          },
+          "outcome": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/OutcomeLine"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Outcome"
+          },
+          "ready_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ready At"
+          },
+          "rfq_id": {
+            "format": "uuid",
+            "title": "Rfq Id",
+            "type": "string"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/NegotiationSettings"
+          },
+          "status": {
+            "enum": [
+              "not_started",
+              "open",
+              "ready_to_close",
+              "closed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rfq_id",
+          "status",
+          "settings",
+          "ready_at",
+          "closed_at",
+          "invites",
+          "outcome"
+        ],
+        "title": "RfqNegotiation",
         "type": "object"
       },
       "RfqSummary": {
@@ -4424,6 +5943,30 @@
           "items"
         ],
         "title": "SearchResults",
+        "type": "object"
+      },
+      "SkippedSupplier": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "supplier_id": {
+            "format": "uuid",
+            "title": "Supplier Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "supplier_id",
+          "name",
+          "reason"
+        ],
+        "title": "SkippedSupplier",
         "type": "object"
       },
       "StartScanRequest": {
@@ -4691,6 +6234,96 @@
           "blocking"
         ],
         "title": "SupplierComplianceSummary",
+        "type": "object"
+      },
+      "SupplierStatView": {
+        "properties": {
+          "avg_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Avg Price",
+            "type": "string"
+          },
+          "last_ordered_at": {
+            "format": "date",
+            "title": "Last Ordered At",
+            "type": "string"
+          },
+          "last_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Last Price",
+            "type": "string"
+          },
+          "min_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Min Price",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "on_time_rate": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "On Time Rate"
+          },
+          "orders": {
+            "title": "Orders",
+            "type": "integer"
+          },
+          "quality_rate": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quality Rate"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "suggested": {
+            "title": "Suggested",
+            "type": "boolean"
+          },
+          "supplier_id": {
+            "format": "uuid",
+            "title": "Supplier Id",
+            "type": "string"
+          },
+          "type": {
+            "title": "Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "supplier_id",
+          "name",
+          "type",
+          "orders",
+          "quantity",
+          "last_price",
+          "last_ordered_at",
+          "avg_price",
+          "min_price",
+          "on_time_rate",
+          "quality_rate",
+          "suggested"
+        ],
+        "title": "SupplierStatView",
         "type": "object"
       },
       "SupplierView": {
@@ -5560,6 +7193,351 @@
         ]
       }
     },
+    "/v1/analyses": {
+      "post": {
+        "operationId": "create_analysis_v1_analyses_post",
+        "parameters": [
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnalysisRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalysisView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Analysis",
+        "tags": [
+          "purchasing"
+        ]
+      }
+    },
+    "/v1/analyses/{analysis_id}": {
+      "get": {
+        "operationId": "get_analysis_v1_analyses__analysis_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "analysis_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Analysis Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnalysisView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Analysis",
+        "tags": [
+          "purchasing"
+        ]
+      }
+    },
+    "/v1/analyses/{analysis_id}/rfq": {
+      "post": {
+        "operationId": "rfq_from_analysis_v1_analyses__analysis_id__rfq_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "analysis_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Analysis Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/RfqFromAnalysisRequest"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "title": "Request"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RfqFromAnalysis"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Rfq From Analysis",
+        "tags": [
+          "purchasing"
+        ]
+      }
+    },
     "/v1/approvals": {
       "get": {
         "description": "The approval queue, oldest first, with the email draft of each RFQ send.",
@@ -6185,6 +8163,202 @@
         "summary": "Post Message",
         "tags": [
           "copilot"
+        ]
+      }
+    },
+    "/v1/data/imports": {
+      "post": {
+        "operationId": "import_data_v1_data_imports_post",
+        "parameters": [
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImportRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImportReport"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Import Data",
+        "tags": [
+          "purchasing"
+        ]
+      }
+    },
+    "/v1/data/products": {
+      "get": {
+        "operationId": "products_v1_data_products_get",
+        "parameters": [
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/ProductView"
+                  },
+                  "title": "Response Products V1 Data Products Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Products",
+        "tags": [
+          "purchasing"
         ]
       }
     },
@@ -10933,6 +13107,342 @@
         "summary": "Update Line",
         "tags": [
           "rfqs"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/negotiation": {
+      "get": {
+        "operationId": "get_negotiation_v1_rfqs__rfq_id__negotiation_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RfqNegotiation"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Negotiation",
+        "tags": [
+          "negotiation"
+        ]
+      },
+      "put": {
+        "operationId": "put_negotiation_v1_rfqs__rfq_id__negotiation_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NegotiationSettingsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RfqNegotiation"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Put Negotiation",
+        "tags": [
+          "negotiation"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/negotiation/close": {
+      "post": {
+        "operationId": "close_negotiation_v1_rfqs__rfq_id__negotiation_close_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RfqNegotiation"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Close Negotiation",
+        "tags": [
+          "negotiation"
         ]
       }
     },

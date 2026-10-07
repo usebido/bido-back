@@ -1,0 +1,192 @@
+"""The purchase analysis math, with hand-computed (golden) numbers. No database."""
+
+from datetime import date
+from decimal import Decimal
+from uuid import UUID, uuid4
+
+from bido_back.purchasing.analysis import (
+    AnalysisResult,
+    BomEntry,
+    ItemInfo,
+    LineResult,
+    Params,
+    Purchase,
+    Stock,
+    analyze,
+    round_up_quantity,
+)
+
+TODAY = date(2026, 10, 7)
+S1, S2, S3 = uuid4(), uuid4(), uuid4()
+
+
+def item(part: str, unit: str = "pcs") -> ItemInfo:
+    return ItemInfo(
+        id=uuid4(),
+        part_number=part,
+        description=f"Part {part}",
+        mpn=None,
+        manufacturer=None,
+        category=None,
+        unit=unit,
+    )
+
+
+BEARING = item("A-6205")
+COPPER = item("B-CU", unit="kg")
+HOUSING = item("C-HOUS")
+
+
+def buy(
+    it: ItemInfo,
+    supplier: tuple[UUID, str, str],
+    ordered: date,
+    qty: str,
+    price: str,
+    *,
+    promised: date | None = None,
+    received: date | None = None,
+    rejected: str = "0",
+    currency: str = "EUR",
+) -> Purchase:
+    supplier_id, name, kind = supplier
+    return Purchase(
+        item_id=it.id,
+        supplier_id=supplier_id,
+        supplier_name=name,
+        supplier_type=kind,
+        currency=currency,
+        ordered_at=ordered,
+        quantity=Decimal(qty),
+        unit_price=Decimal(price),
+        promised_at=promised,
+        received_at=received,
+        received_qty=Decimal(qty) if received else None,
+        rejected_qty=Decimal(rejected),
+    )
+
+
+DIST = (S1, "Cuscinetti Precisione S.r.l.", "distributor")
+BROKER = (S2, "Global Parts Brokers Ltd", "reseller")
+FOUNDRY = (S3, "Fonderia Veneta S.p.A.", "manufacturer")
+
+PURCHASES = [
+    buy(BEARING, DIST, date(2026, 1, 10), "100", "2.00",
+        promised=date(2026, 1, 20), received=date(2026, 1, 25)),
+    buy(BEARING, DIST, date(2026, 8, 1), "200", "2.20",
+        promised=date(2026, 8, 15), received=date(2026, 8, 14), rejected="10"),
+    buy(BEARING, BROKER, date(2026, 9, 20), "50", "1.80",
+        promised=date(2026, 10, 1), received=date(2026, 9, 30)),
+    buy(HOUSING, FOUNDRY, date(2025, 9, 1), "10", "25.00"),  # outside the 365-day window
+    buy(HOUSING, FOUNDRY, date(2025, 11, 1), "5", "33.00", currency="USD"),
+    buy(HOUSING, FOUNDRY, date(2025, 12, 1), "10", "30.00"),
+]  # fmt: skip
+
+BOM = [
+    BomEntry(BEARING, Decimal(2)),
+    BomEntry(COPPER, Decimal("1.25")),
+    BomEntry(HOUSING, Decimal(1)),
+]
+STOCK = {
+    BEARING.id: Stock(on_hand=Decimal(50), on_order=Decimal(30)),
+    COPPER.id: Stock(on_hand=Decimal("30.5")),
+    HOUSING.id: Stock(on_hand=Decimal(150)),
+}
+
+
+def run(params: Params | None = None) -> AnalysisResult:
+    return analyze(
+        product="Motor X",
+        quantity=Decimal(100),
+        need_by=date(2026, 11, 15),
+        bom=BOM,
+        stock=STOCK,
+        purchases=PURCHASES,
+        today=TODAY,
+        params=params,
+    )
+
+
+def codes(line: LineResult) -> list[tuple[str, str | None]]:
+    return [(f.code, f.supplier) for f in line.flags]
+
+
+def test_quantities_to_buy() -> None:
+    bearing, copper, housing = run().lines
+
+    assert (bearing.required, bearing.to_buy) == (Decimal(200), Decimal(120))
+    # kg are not discrete: rounded up to 3 decimals, not to a whole unit.
+    assert (copper.required, copper.to_buy) == (Decimal("125.00"), Decimal("94.500"))
+    assert (housing.required, housing.to_buy) == (Decimal(100), Decimal(0))
+
+
+def test_safety_stock_is_added_before_stock_is_subtracted() -> None:
+    bearing = run(Params(safety_stock_pct=Decimal(10))).lines[0]
+
+    assert bearing.to_buy == Decimal(140)  # 200 * 1.1 - 50 - 30
+
+
+def test_prices_trend_and_targets() -> None:
+    bearing = run().lines[0]
+
+    assert bearing.currency == "EUR"
+    assert bearing.last_price == Decimal("1.8000")  # the broker's, the most recent
+    assert bearing.avg_price == Decimal("2.0857")  # 730 / 350
+    assert bearing.min_price == Decimal("1.8000")
+    assert bearing.trend_pct == Decimal("6.00")  # 2.12 in the last 90 days vs 2.00 before
+    assert bearing.target_price == Decimal("1.8000")  # min(last, avg)
+    assert bearing.max_price == Decimal("2.1900")  # max(last, avg) * 1.05
+
+
+def test_supplier_stats_and_ranking() -> None:
+    bearing = run().lines[0]
+    regular, broker = bearing.suppliers
+
+    assert regular.name == "Cuscinetti Precisione S.r.l."
+    assert (regular.orders, regular.quantity) == (2, Decimal(300))
+    assert (regular.last_price, regular.avg_price) == (Decimal("2.2000"), Decimal("2.1333"))
+    assert regular.on_time_rate == Decimal("0.5000")  # late in January, on time in August
+    assert regular.quality_rate == Decimal("0.9667")  # 10 of 300 rejected
+    assert regular.suggested is True
+    # Brokers rank last and are not suggested while a regular supplier exists.
+    assert broker.name == "Global Parts Brokers Ltd"
+    assert broker.suggested is False
+    assert [s.name for s in bearing.suggested] == ["Cuscinetti Precisione S.r.l."]
+
+
+def test_flags() -> None:
+    bearing, copper, housing = run().lines
+
+    assert codes(bearing) == [
+        ("price_up", None),
+        ("supplier_late", "Cuscinetti Precisione S.r.l."),
+        ("quality_issue", "Cuscinetti Precisione S.r.l."),
+        ("broker_source", "Global Parts Brokers Ltd"),
+    ]
+    assert codes(copper) == [("no_history", None)]
+    assert copper.last_price is None and copper.target_price is None
+    assert codes(housing) == [
+        ("covered_by_stock", None),
+        ("mixed_currency", None),
+        ("single_source", "Fonderia Veneta S.p.A."),
+    ]
+    # Only the EUR purchase inside the window counts.
+    assert (housing.last_price, housing.avg_price) == (Decimal("30.0000"), Decimal("30.0000"))
+    assert housing.trend_pct is None
+    assert housing.max_price == Decimal("31.5000")
+
+
+def test_summary() -> None:
+    summary = run().summary
+
+    assert (summary.items, summary.items_to_buy, summary.flagged_items) == (3, 2, 3)
+    assert summary.currency == "EUR"
+    assert summary.total_at_target == Decimal("216.00")  # 120 bearings at 1.80
+    assert summary.total_at_last_price == Decimal("216.00")
+
+
+def test_round_up_quantity() -> None:
+    assert round_up_quantity(Decimal("10.01"), "pcs") == Decimal(11)
+    assert round_up_quantity(Decimal("10.0001"), "kg") == Decimal("10.001")
+    assert round_up_quantity(Decimal("-3"), "pcs") == Decimal(0)
+    assert round_up_quantity(Decimal(7), "Pz") == Decimal(7)

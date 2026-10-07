@@ -29,10 +29,10 @@ from bido_back.db.models import (
     AuditEvent,
     Award,
     AwardNotice,
+    IssuedPurchaseOrder,
     Message,
     Proposal,
     ProposalLine,
-    PurchaseOrder,
     Rfq,
 )
 from bido_back.rfqs import service as rfq_service
@@ -178,13 +178,13 @@ class World:
         await self.approve(requested.approval_id)
         return requested.approval_id
 
-    async def orders(self) -> list[PurchaseOrder]:
+    async def orders(self) -> list[IssuedPurchaseOrder]:
         async with tenant_session(self.engine, self.people.tenant) as session:
             return list(
                 await session.scalars(
-                    select(PurchaseOrder)
-                    .where(PurchaseOrder.rfq_id == self.rfq.id)
-                    .order_by(PurchaseOrder.number)
+                    select(IssuedPurchaseOrder)
+                    .where(IssuedPurchaseOrder.rfq_id == self.rfq.id)
+                    .order_by(IssuedPurchaseOrder.number)
                 )
             )
 

@@ -1,7 +1,7 @@
 """Award and purchase orders: the end of the RFQ journey.
 
 Revision ID: 0015
-Revises: 0012
+Revises: 0014
 Create Date: 2026-10-07
 
 Parallel branches (negotiation 0013, purchase analysis 0014, supplier
@@ -17,13 +17,13 @@ who is not the requester approves, and the worker executes it once
 copied from the approval's hashed args. `differs_from_recommendation` and
 `reason` record why the buyer did not take the recommended offer.
 
-`purchase_orders`: one per awarded supplier, numbered per tenant (`number`,
+`issued_purchase_orders`: one per awarded supplier, numbered per tenant (`number`,
 `ref` = `PO-<number>`). `status`: `draft` until a send is requested,
 `pending_approval` while it waits, `sent` once the worker sent it in the
 invite's thread (`message_id_header` is claimed before sending and reused on
 a retry). A rejected send goes back to `draft`.
 
-`purchase_order_lines`: the ordered quantity and price per line, with
+`issued_purchase_order_lines`: the ordered quantity and price per line, with
 references to the RFQ line and the proposal line it came from.
 
 `award_notices`: the polite "not selected" email to a supplier that did not
@@ -41,12 +41,12 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0015"
-down_revision: str | Sequence[str] | None = "0012"
+down_revision: str | Sequence[str] | None = "0014"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 CURRENT_TENANT = "(select NULLIF(current_setting('app.tenant_id', true), '')::uuid)"
-TABLES = ("awards", "purchase_orders", "purchase_order_lines", "award_notices")
+TABLES = ("awards", "issued_purchase_orders", "issued_purchase_order_lines", "award_notices")
 
 
 def _uuid_pk() -> sa.Column[object]:
@@ -105,7 +105,7 @@ def upgrade() -> None:
     )
 
     op.create_table(
-        "purchase_orders",
+        "issued_purchase_orders",
         _uuid_pk(),
         _tenant(),
         _fk("award_id", "awards.id", cascade=True),
@@ -122,23 +122,28 @@ def upgrade() -> None:
         sa.Column("message_id_header", sa.Text(), nullable=True),
         sa.Column("sent_at", sa.DateTime(timezone=True), nullable=True),
         _created_at(),
-        sa.UniqueConstraint("tenant_id", "number", name="purchase_orders_tenant_id_number_key"),
-        sa.UniqueConstraint("tenant_id", "ref", name="purchase_orders_tenant_id_ref_key"),
-        sa.UniqueConstraint("award_id", "invite_id", name="purchase_orders_award_id_invite_id_key"),
-        sa.CheckConstraint(
-            "status IN ('draft', 'pending_approval', 'sent')", name="purchase_orders_status_check"
+        sa.UniqueConstraint(
+            "tenant_id", "number", name="issued_purchase_orders_tenant_id_number_key"
         ),
-        sa.CheckConstraint("number > 0", name="purchase_orders_number_check"),
+        sa.UniqueConstraint("tenant_id", "ref", name="issued_purchase_orders_tenant_id_ref_key"),
+        sa.UniqueConstraint(
+            "award_id", "invite_id", name="issued_purchase_orders_award_id_invite_id_key"
+        ),
         sa.CheckConstraint(
-            "(status = 'sent') = (sent_at IS NOT NULL)", name="purchase_orders_sent_check"
+            "status IN ('draft', 'pending_approval', 'sent')",
+            name="issued_purchase_orders_status_check",
+        ),
+        sa.CheckConstraint("number > 0", name="issued_purchase_orders_number_check"),
+        sa.CheckConstraint(
+            "(status = 'sent') = (sent_at IS NOT NULL)", name="issued_purchase_orders_sent_check"
         ),
     )
 
     op.create_table(
-        "purchase_order_lines",
+        "issued_purchase_order_lines",
         _uuid_pk(),
         _tenant(),
-        _fk("purchase_order_id", "purchase_orders.id", cascade=True),
+        _fk("purchase_order_id", "issued_purchase_orders.id", cascade=True),
         sa.Column("position", sa.Integer(), nullable=False),
         _fk("rfq_line_id", "rfq_lines.id", nullable=True),
         _fk("proposal_line_id", "proposal_lines.id", nullable=True),
@@ -151,10 +156,10 @@ def upgrade() -> None:
         sa.Column("need_by", sa.Date(), nullable=True),
         sa.Column("lead_time_days", sa.Integer(), nullable=True),
         sa.UniqueConstraint(
-            "purchase_order_id", "position", name="purchase_order_lines_po_position_key"
+            "purchase_order_id", "position", name="issued_purchase_order_lines_po_position_key"
         ),
-        sa.CheckConstraint("quantity > 0", name="purchase_order_lines_quantity_check"),
-        sa.CheckConstraint("unit_price >= 0", name="purchase_order_lines_price_check"),
+        sa.CheckConstraint("quantity > 0", name="issued_purchase_order_lines_quantity_check"),
+        sa.CheckConstraint("unit_price >= 0", name="issued_purchase_order_lines_price_check"),
     )
 
     op.create_table(

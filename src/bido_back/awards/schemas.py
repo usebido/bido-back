@@ -106,7 +106,7 @@ class ThreadEmailResult(BaseModel):
 # --- Views ---------------------------------------------------------------------------
 
 
-class PurchaseOrderLineView(BaseModel):
+class IssuedPurchaseOrderLineView(BaseModel):
     position: int
     rfq_line_id: UUID | None
     proposal_line_id: UUID | None
@@ -137,7 +137,7 @@ class PurchaseOrderView(BaseModel):
     sent_at: datetime | None
     # The pending send approval, while one waits.
     send_approval_id: UUID | None = None
-    lines: list[PurchaseOrderLineView]
+    lines: list[IssuedPurchaseOrderLineView]
 
 
 class PurchaseOrderSummary(BaseModel):

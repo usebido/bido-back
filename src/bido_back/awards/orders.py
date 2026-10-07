@@ -7,7 +7,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bido_back.awards.render import PoDocument, PoLine
-from bido_back.db.models import PurchaseOrder, PurchaseOrderLine, Rfq, Supplier, Tenant
+from bido_back.db.models import IssuedPurchaseOrder, IssuedPurchaseOrderLine, Rfq, Supplier, Tenant
 from bido_back.rfqs.errors import NotFound
 
 
@@ -17,7 +17,7 @@ async def next_po_number(session: AsyncSession, tenant_id: UUID) -> int:
         text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
         {"key": f"po_number:{tenant_id}"},
     )
-    highest = await session.scalar(select(func.max(PurchaseOrder.number)))
+    highest = await session.scalar(select(func.max(IssuedPurchaseOrder.number)))
     return (highest or 0) + 1
 
 
@@ -25,17 +25,17 @@ def po_ref(number: int) -> str:
     return f"PO-{number}"
 
 
-async def po_lines(session: AsyncSession, po_id: UUID) -> list[PurchaseOrderLine]:
+async def po_lines(session: AsyncSession, po_id: UUID) -> list[IssuedPurchaseOrderLine]:
     return list(
         await session.scalars(
-            select(PurchaseOrderLine)
-            .where(PurchaseOrderLine.purchase_order_id == po_id)
-            .order_by(PurchaseOrderLine.position)
+            select(IssuedPurchaseOrderLine)
+            .where(IssuedPurchaseOrderLine.purchase_order_id == po_id)
+            .order_by(IssuedPurchaseOrderLine.position)
         )
     )
 
 
-async def po_document(session: AsyncSession, po: PurchaseOrder) -> PoDocument:
+async def po_document(session: AsyncSession, po: IssuedPurchaseOrder) -> PoDocument:
     rfq = await session.get(Rfq, po.rfq_id)
     supplier = await session.get(Supplier, po.supplier_id)
     tenant = await session.get(Tenant, po.tenant_id)

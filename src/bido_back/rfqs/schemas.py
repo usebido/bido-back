@@ -191,6 +191,22 @@ class RfqEmailDraft(BaseModel):
     body: str
 
 
+class NegotiationEmailDraft(BaseModel):
+    """The exact counter-offer or best-and-final email an approver approves."""
+
+    action: Literal["counter", "bafo"]
+    round: int
+    invite_id: UUID
+    rfq_id: UUID | None
+    rfq_ref: str | None
+    supplier_name: str | None
+    sender_user_id: UUID
+    to: list[str]
+    cc: list[str]
+    subject: str
+    body: str
+
+
 class ApprovalQueueItem(BaseModel):
     id: UUID
     tool: str
@@ -201,6 +217,8 @@ class ApprovalQueueItem(BaseModel):
     decided_at: datetime | None
     # Set for `send_rfq_email` and `send_followup_email`; other tools show only their name.
     rfq_email: RfqEmailDraft | None
+    # Set for `send_negotiation_email`: a counter-offer or best-and-final request.
+    negotiation_email: NegotiationEmailDraft | None = None
     # Set for `award_rfq`: the exact lines, suppliers and prices to award.
     award: AwardApprovalView | None = None
     # Set for `send_purchase_order` and `send_award_notice`: the exact email.

@@ -52,9 +52,9 @@ from bido_back.awards.schemas import (
     AwardRequested,
     AwardRfqArgs,
     AwardView,
+    IssuedPurchaseOrderLineView,
     NoticeProposed,
     NoticesRequested,
-    PurchaseOrderLineView,
     PurchaseOrderStatus,
     PurchaseOrderSummary,
     PurchaseOrderView,
@@ -80,7 +80,7 @@ from bido_back.db.models import (
     Award,
     AwardNotice,
     Invite,
-    PurchaseOrder,
+    IssuedPurchaseOrder,
     Rfq,
     Supplier,
     Tenant,
@@ -227,11 +227,11 @@ async def _summaries(
     session: AsyncSession, where: ColumnElement[bool]
 ) -> list[PurchaseOrderSummary]:
     rows = await session.execute(
-        select(PurchaseOrder, Rfq.ref, Supplier.name)
-        .join(Rfq, Rfq.id == PurchaseOrder.rfq_id)
-        .join(Supplier, Supplier.id == PurchaseOrder.supplier_id)
+        select(IssuedPurchaseOrder, Rfq.ref, Supplier.name)
+        .join(Rfq, Rfq.id == IssuedPurchaseOrder.rfq_id)
+        .join(Supplier, Supplier.id == IssuedPurchaseOrder.supplier_id)
         .where(where)
-        .order_by(PurchaseOrder.number)
+        .order_by(IssuedPurchaseOrder.number)
     )
     return [
         PurchaseOrderSummary(
@@ -266,7 +266,7 @@ async def get_award(db: Db, principal: Principal, rfq_id: UUID) -> AwardView:
                 differs_from_recommendation=award.differs_from_recommendation,
                 reason=award.reason,
                 lines=[AwardLine.model_validate(line) for line in award.lines],
-                purchase_orders=await _summaries(session, PurchaseOrder.award_id == award.id),
+                purchase_orders=await _summaries(session, IssuedPurchaseOrder.award_id == award.id),
             )
         pending = await _open_approval(session, AWARD_RFQ, award_proposal_ids(rfq_id)[1])
         if pending is None:
@@ -417,12 +417,14 @@ async def list_purchase_orders(
     db: Db, principal: Principal, status: PurchaseOrderStatus | None = None
 ) -> list[PurchaseOrderSummary]:
     async with tenant_session(db, principal.tenant_id) as session:
-        where = PurchaseOrder.status == status if status else PurchaseOrder.id.is_not(None)
+        where = (
+            IssuedPurchaseOrder.status == status if status else IssuedPurchaseOrder.id.is_not(None)
+        )
         return await _summaries(session, where)
 
 
-async def _po(session: AsyncSession, po_id: UUID, *, lock: bool = False) -> PurchaseOrder:
-    query = select(PurchaseOrder).where(PurchaseOrder.id == po_id)
+async def _po(session: AsyncSession, po_id: UUID, *, lock: bool = False) -> IssuedPurchaseOrder:
+    query = select(IssuedPurchaseOrder).where(IssuedPurchaseOrder.id == po_id)
     po = await session.scalar(query.with_for_update() if lock else query)
     if po is None:
         raise NotFound(f"purchase order {po_id} not found")
@@ -454,7 +456,7 @@ async def get_purchase_order(db: Db, principal: Principal, po_id: UUID) -> Purch
             sent_at=po.sent_at,
             send_approval_id=pending.id if pending is not None else None,
             lines=[
-                PurchaseOrderLineView(
+                IssuedPurchaseOrderLineView(
                     position=line.position,
                     rfq_line_id=line.rfq_line_id,
                     proposal_line_id=line.proposal_line_id,
