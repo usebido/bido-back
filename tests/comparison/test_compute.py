@@ -269,3 +269,33 @@ def test_lines_without_a_quote_make_totals_incomplete() -> None:
         2,
         False,
     )
+
+
+def test_corrected_values_are_marked_and_never_low_confidence() -> None:
+    line = requested(1000)
+    line_id = uuid4()
+    q = quote(
+        brk(
+            line.id,
+            "1",
+            "0.10",
+            id=line_id,
+            fields={
+                "unit_price": FieldInfo(confidence=0.4, needs_review=True, corrected=True),
+                "lead_time_days": FieldInfo(confidence=0.5),
+            },
+        ),
+        fields={"currency": FieldInfo(confidence=0.3, corrected=True)},
+    )
+
+    result = compute_comparison(
+        rfq_id=uuid4(), base_currency="EUR", lines=[line], quotes=[q], rates=RATES, today=TODAY
+    )
+    [column] = result.suppliers
+    [cell] = column.cells
+
+    assert cell.proposal_line_id == line_id
+    assert cell.corrected_fields == ["unit_price"]
+    assert cell.low_confidence_fields == ["lead_time_days"]
+    assert column.corrected_fields == ["currency"]
+    assert "low_confidence" not in column.flags

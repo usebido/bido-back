@@ -1,7 +1,7 @@
 """RFQ templates: versions, variants per item category, and the version each RFQ used.
 
 Revision ID: 0012
-Revises: 0007
+Revises: 0011
 Create Date: 2026-10-07
 
 `rfq_templates.version`: the template's current version. Its content (greeting,
@@ -36,7 +36,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0012"
-down_revision: str | Sequence[str] | None = "0007"
+down_revision: str | Sequence[str] | None = "0011"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

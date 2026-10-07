@@ -59,6 +59,7 @@ from bido_back.db.models import (
     Tenant,
     User,
 )
+from bido_back.followups.send import SEND_FOLLOWUP_EMAIL, SendFollowupEmailArgs
 from bido_back.onboarding.standard import TemplateContent
 from bido_back.rfqs.agents import EmailWriterAgent, IntakeAgent
 from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound
@@ -66,6 +67,7 @@ from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.schemas import (
     ApprovalQueueItem,
     ApprovalStatus,
+    EmailKind,
     InviteStatus,
     InviteView,
     PreparedInvite,
@@ -358,7 +360,7 @@ async def add_invite(
 # --- Preparing the send ---------------------------------------------------------------
 
 
-async def _buyer_name(session: AsyncSession, user: User, company: str) -> str:
+async def buyer_display_name(session: AsyncSession, user: User, company: str) -> str:
     """The buyer's name from their `buyer` contact (matched by email), else the company."""
     name = await session.scalar(
         select(Contact.name)
@@ -430,7 +432,7 @@ async def _send_context(session: AsyncSession, principal: Principal, rfq: Rfq) -
         rfq=rfq,
         lines=lines,
         template=await resolve_for_rfq(session, rfq, lines),
-        buyer_name=await _buyer_name(session, user, tenant.name),
+        buyer_name=await buyer_display_name(session, user, tenant.name),
         buyer_company=tenant.name,
     )
 
@@ -633,14 +635,17 @@ async def list_approvals(
                 .limit(_QUEUE_LIMIT)
             )
         )
-        drafts: dict[UUID, SendRfqEmailArgs] = {}
+        drafts: dict[UUID, tuple[SendRfqEmailArgs | SendFollowupEmailArgs, EmailKind]] = {}
         for approval in approvals:
-            if approval.tool == SEND_RFQ_EMAIL:
-                try:
-                    drafts[approval.id] = SendRfqEmailArgs.model_validate(approval.args)
-                except ValueError:
-                    logger.error("approval %s has args that do not validate", approval.id)
-        invite_ids = {args.invite_id for args in drafts.values()}
+            try:
+                if approval.tool == SEND_RFQ_EMAIL:
+                    drafts[approval.id] = (SendRfqEmailArgs.model_validate(approval.args), "rfq")
+                elif approval.tool == SEND_FOLLOWUP_EMAIL:
+                    followup = SendFollowupEmailArgs.model_validate(approval.args)
+                    drafts[approval.id] = (followup, followup.kind)
+            except ValueError:
+                logger.error("approval %s has args that do not validate", approval.id)
+        invite_ids = {args.invite_id for args, _ in drafts.values()}
         context: dict[UUID, tuple[UUID, str, str]] = {}
         if invite_ids:
             rows = await session.execute(
@@ -654,10 +659,12 @@ async def list_approvals(
     items: list[ApprovalQueueItem] = []
     for approval in approvals:
         email: RfqEmailDraft | None = None
-        args = drafts.get(approval.id)
-        if args is not None:
+        draft = drafts.get(approval.id)
+        if draft is not None:
+            args, kind = draft
             rfq_id, ref, supplier_name = context.get(args.invite_id, (None, None, None))
             email = RfqEmailDraft(
+                kind=kind,
                 invite_id=args.invite_id,
                 sender_user_id=args.sender_user_id,
                 rfq_id=rfq_id,

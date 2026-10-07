@@ -16,6 +16,8 @@ import re
 from typing import Final
 
 from bido_back.agents.catalog.contracts import (
+    FollowupEmailInput,
+    FollowupEmailOutput,
     QuoteExtractionOutput,
     RfqCandidateClassifierOutput,
     RfqEmailInput,
@@ -106,11 +108,25 @@ def rfq_template_builder(model: str = TEMPLATE_MODEL) -> AgentDefinition[RfqTemp
     )
 
 
+def rfq_followup_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[FollowupEmailOutput]:
+    return AgentDefinition(
+        name="rfq_followup_writer",
+        prompt_file="rfq_followup_writer.v1.md",
+        prompt_version=1,
+        model=model,
+        output_model=FollowupEmailOutput,
+        max_turns=_MAX_TURNS,
+        thinking=False,
+        effort="low",
+    )
+
+
 RFQ_INTAKE: Final = rfq_intake()
 RFQ_EMAIL_WRITER: Final = rfq_email_writer()
 QUOTE_EXTRACTION: Final = quote_extraction()
 RFQ_CANDIDATE_CLASSIFIER: Final = rfq_candidate_classifier()
 RFQ_TEMPLATE_BUILDER: Final = rfq_template_builder()
+RFQ_FOLLOWUP_WRITER: Final = rfq_followup_writer()
 
 
 # --- Deterministic checks on the RFQ email draft ---------------------------------
@@ -139,4 +155,23 @@ def rfq_email_problems(task: RfqEmailInput, draft: RfqEmailOutput) -> list[str]:
             problems.append(f"mpn_missing:{line.position}")
     if _PRICE.search(draft.subject) or _PRICE.search(draft.body):
         problems.append("price_mentioned")
+    return problems
+
+
+_MAX_FOLLOWUP_CHARS: Final = 4000
+
+
+def followup_email_problems(task: FollowupEmailInput, draft: FollowupEmailOutput) -> list[str]:
+    """What is wrong with a chase or clarification draft, as codes. Empty means it may go
+    to approval: the RFQ reference is in the body, no prices, and it stays short."""
+    problems: list[str] = []
+    body = draft.body.strip()
+    if not body:
+        problems.append("empty")
+    if task.rfq_ref not in body:
+        problems.append("rfq_ref_missing_in_body")
+    if _PRICE.search(body):
+        problems.append("price_mentioned")
+    if len(body) > _MAX_FOLLOWUP_CHARS:
+        problems.append("too_long")
     return problems
