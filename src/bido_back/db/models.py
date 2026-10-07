@@ -215,6 +215,12 @@ class Rfq(Base):
     source_text: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # The template version its emails were rendered from, set at the first send.
+    # template_version 0 without a template_id: Bido's standard template.
+    template_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("rfq_templates.id", ondelete="SET NULL")
+    )
+    template_version: Mapped[int | None] = mapped_column(Integer)
 
 
 class RfqLine(Base):
@@ -413,9 +419,16 @@ class RfqTemplate(Base):
         CheckConstraint(
             "NOT is_default OR status = 'ready'", name="rfq_templates_default_ready_check"
         ),
+        CheckConstraint(
+            "category IS NULL OR category IN ('catalog', 'drawing', 'cell', 'material')",
+            name="rfq_templates_category_check",
+        ),
+        CheckConstraint("version >= 1", name="rfq_templates_version_check"),
+        # One default per tenant and item category (NULL = the general template).
         Index(
             "rfq_templates_one_default_idx",
             "tenant_id",
+            text("(coalesce(category, ''))"),
             unique=True,
             postgresql_where=text("is_default"),
         ),
@@ -436,10 +449,36 @@ class RfqTemplate(Base):
     # Ids only: {"scan_id": ..., "candidate_ids": [...]} or {"upload_ids": [...]}.
     source_refs: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     is_default: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    # A variant for one item category; None is the general template.
+    category: Mapped[str | None] = mapped_column(Text)
+    # The current version; its content is the row's own columns.
+    version: Mapped[int] = mapped_column(Integer, server_default=text("1"))
     error: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RfqTemplateVersion(Base):
+    """An immutable snapshot of one version of an RFQ template (the app cannot UPDATE it)."""
+
+    __tablename__ = "rfq_template_versions"
+    __table_args__ = (
+        UniqueConstraint("template_id", "version", name="rfq_template_versions_version_key"),
+        CheckConstraint("version >= 1", name="rfq_template_versions_version_check"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    template_id: Mapped[UUID] = mapped_column(ForeignKey("rfq_templates.id", ondelete="CASCADE"))
+    version: Mapped[int] = mapped_column(Integer)
+    language: Mapped[str] = mapped_column(Text)
+    greeting: Mapped[str] = mapped_column(Text)
+    columns: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    footer_fields: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    fields: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    created_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class TemplateScan(Base):
