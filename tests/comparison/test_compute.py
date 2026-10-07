@@ -299,3 +299,104 @@ def test_corrected_values_are_marked_and_never_low_confidence() -> None:
     assert cell.low_confidence_fields == ["lead_time_days"]
     assert column.corrected_fields == ["currency"]
     assert "low_confidence" not in column.flags
+
+
+def _line_without_mpn() -> RequestedLine:
+    return RequestedLine(
+        id=uuid4(),
+        position=1,
+        description="Copper wire",
+        mpn=None,
+        unit="pcs",
+        quantities=(D(100),),
+    )
+
+
+def test_unrequested_part_number_never_makes_an_offer_doubtful() -> None:
+    line = _line_without_mpn()
+    q = quote(
+        brk(
+            line.id,
+            "1",
+            "0.10",
+            offered_mpn="CU-0.8",
+            needs_review=True,
+            review_issues=(),
+            fields={
+                "offered_mpn": FieldInfo(confidence=0.4, needs_review=True),
+                "unit_price": FieldInfo(confidence=0.95),
+            },
+        )
+    )
+
+    [column] = compute_comparison(
+        rfq_id=uuid4(), base_currency="EUR", lines=[line], quotes=[q], rates=RATES, today=TODAY
+    ).suppliers
+    [cell] = column.cells
+    assert "needs_review" not in cell.flags and "low_confidence" not in cell.flags
+    assert cell.low_confidence_fields == []
+    assert cell.line_total_base == D("10.00")
+
+
+def test_other_doubts_still_count_when_no_part_number_was_requested() -> None:
+    line = _line_without_mpn()
+    doubtful_price = brk(
+        line.id,
+        "1",
+        "0.10",
+        needs_review=True,
+        review_issues=(),
+        fields={
+            "offered_mpn": FieldInfo(confidence=0.4, needs_review=True),
+            "unit_price": FieldInfo(confidence=0.5, needs_review=True),
+        },
+    )
+    line_issue = brk(
+        line.id,
+        "1",
+        "0.10",
+        needs_review=True,
+        review_issues=("currency_unverified",),
+        fields={"offered_mpn": FieldInfo(confidence=0.4, needs_review=True)},
+    )
+    unknown_issues = brk(
+        line.id,
+        "1",
+        "0.10",
+        needs_review=True,
+        fields={"offered_mpn": FieldInfo(confidence=0.4, needs_review=True)},
+    )
+
+    for offer, low in ((doubtful_price, ["unit_price"]), (line_issue, []), (unknown_issues, [])):
+        [column] = compute_comparison(
+            rfq_id=uuid4(),
+            base_currency="EUR",
+            lines=[line],
+            quotes=[quote(offer)],
+            rates=RATES,
+            today=TODAY,
+        ).suppliers
+        [cell] = column.cells
+        assert "needs_review" in cell.flags
+        assert cell.low_confidence_fields == low
+
+
+def test_requested_part_number_keeps_its_confidence_check() -> None:
+    line = requested(100)
+    q = quote(
+        brk(
+            line.id,
+            "1",
+            "0.10",
+            needs_review=True,
+            review_issues=(),
+            fields={"offered_mpn": FieldInfo(confidence=0.4, needs_review=True)},
+        )
+    )
+
+    [column] = compute_comparison(
+        rfq_id=uuid4(), base_currency="EUR", lines=[line], quotes=[q], rates=RATES, today=TODAY
+    ).suppliers
+    [cell] = column.cells
+    assert {"needs_review", "low_confidence"} <= set(cell.flags)
+    assert cell.low_confidence_fields == ["offered_mpn"]
