@@ -2,9 +2,11 @@
 
 `get_principal` is the only way a route learns who is calling: it verifies
 the Clerk session JWT (`Authorization: Bearer ...`), or, in local dev mode
-only, the `X-Dev-User` header, and resolves the tenant and role from our
-memberships (see `bido_back.auth`). Nothing about the tenant is taken from the
-token; `X-Tenant-Id` only selects among the caller's own memberships.
+only, the `X-Dev-User` header, and resolves the tenant and role (see
+`bido_back.auth` and `bido_back.orgs`). With a Clerk token the tenant is the
+company linked to the token's active organization, created on first login
+when allowed; `X-Tenant-Id` is ignored. In dev mode `X-Tenant-Id` only selects
+among the caller's own memberships.
 
 The database, the job queue and the JWT verifier are built lazily, on the
 first request that needs them, so building the app (OpenAPI export, health
@@ -23,14 +25,18 @@ from bido_back.auth import (
     AuthenticationFailed,
     ClerkJwtVerifier,
     NotAMember,
+    OrganizationNotEnabled,
+    OrganizationRequired,
     Principal,
     TenantSelectionRequired,
+    VerifiedSession,
     check_auth_settings,
     dev_mode_enabled,
     resolve_principal,
 )
 from bido_back.awards.agents import NoticeWriter, default_notice_writer
 from bido_back.db import create_engine, create_sessionmaker
+from bido_back.orgs import ClerkDirectory, OrgPolicy, clerk_directory_for, principal_for_org
 from bido_back.rfqs.agents import RfqAgents, default_rfq_agents
 from bido_back.rfqs.mailbox import MailboxSenderFactory, mailbox_senders_for
 from bido_back.settings import Settings
@@ -54,6 +60,8 @@ class ApiResources:
         self._jobs: JobQueue | None = None
         self._verifier: ClerkJwtVerifier | None = None
         self._storage: BlobStorage | None = None
+        self.org_policy = OrgPolicy.from_settings(settings)
+        self.clerk_directory: ClerkDirectory = clerk_directory_for(settings)
 
     @property
     def settings(self) -> Settings:
@@ -146,12 +154,16 @@ async def get_principal(
         str | None,
         Header(
             alias="X-Tenant-Id",
-            description="Required only for users with memberships in several tenants.",
+            description=(
+                "Dev mode only: picks the tenant for users with several memberships. "
+                "Ignored with a Clerk token (the active organization decides)."
+            ),
         ),
     ] = None,
 ) -> Principal:
     resources = _resources(request)
     clerk_user_id: str | None = None
+    verified: VerifiedSession | None = None
 
     # Read from the raw headers, not declared: dev mode is not part of the contract.
     dev_user = request.headers.get(DEV_USER_HEADER)
@@ -173,14 +185,22 @@ async def get_principal(
                 status.HTTP_503_SERVICE_UNAVAILABLE, "authentication is not configured"
             )
         try:
-            clerk_user_id = await verifier.verify(credentials.credentials)
+            verified = await verifier.verify(credentials.credentials)
         except AuthenticationFailed as exc:
             raise _unauthorized(str(exc)) from None
 
     # The database is reached only after the credentials passed.
     try:
+        if verified is not None:
+            if verified.org is None:
+                raise OrganizationRequired("select an organization")
+            return await principal_for_org(
+                resources.sessionmaker(), verified, resources.org_policy, resources.clerk_directory
+            )
+        if clerk_user_id is None:
+            raise _unauthorized("missing credentials")
         return await resolve_principal(resources.sessionmaker(), clerk_user_id, x_tenant_id)
-    except NotAMember as exc:
+    except (NotAMember, OrganizationRequired, OrganizationNotEnabled) as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from None
     except TenantSelectionRequired as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None

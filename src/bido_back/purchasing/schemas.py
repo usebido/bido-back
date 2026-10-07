@@ -7,7 +7,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from bido_back.purchasing.importers import ImportType
+from bido_back.purchasing.importers import TableImportType
 from bido_back.rfqs.schemas import RfqDetail
 
 
@@ -19,7 +19,7 @@ class _Strict(BaseModel):
 
 
 class ImportRequest(_Strict):
-    type: ImportType
+    type: TableImportType
     # A file uploaded with POST /v1/onboarding/uploads (.xlsx or .csv).
     upload_id: UUID
     # Check the file and report what would be imported, without writing.
@@ -37,7 +37,7 @@ class ImportRowError(BaseModel):
 
 
 class ImportReport(BaseModel):
-    type: ImportType
+    type: TableImportType
     dry_run: bool
     rows_total: int
     rows_imported: int

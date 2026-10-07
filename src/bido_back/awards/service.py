@@ -1,8 +1,8 @@
 """Award an RFQ, propose "not selected" notices, and send purchase orders. Nothing here sends.
 
 Every step that commits or reaches a supplier is an `act` recorded as a
-pending approval (`bido_back.awards.send`); an approver who is not the
-requester decides, and the worker executes it once.
+pending approval (`bido_back.awards.send`); a person decides (the buyer by
+default; a second person in four-eyes tenants), and the worker executes it once.
 
 - `request_award`: builds the awarded lines from the comparison (the
   recommendation unless the buyer picks another supplier, in which case a
@@ -136,7 +136,7 @@ async def _open_approval(session: AsyncSession, tool: str, call_id: str) -> Appr
 async def request_award(
     db: Db, principal: Principal, rfq_id: UUID, body: AwardRequest, today: date
 ) -> AwardRequested:
-    """Propose the award of an open RFQ; an approver who is not the caller decides."""
+    """Propose the award of an open RFQ; a person decides (the buyer by default)."""
     call_id = award_proposal_ids(rfq_id)[1]
     async with tenant_session(db, principal.tenant_id) as session:
         rfq = await session.get(Rfq, rfq_id)

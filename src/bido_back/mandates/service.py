@@ -309,6 +309,9 @@ async def _mark_auto_approved(
     approval.status = "approved"
     approval.decided_by = mandate.approved_by
     approval.decided_at = now
+    # The buyer approved their own mandate (self-approval tenants): the emails it
+    # covers are self-approved too, which the database only allows for them.
+    approval.self_approved = mandate.approved_by == approval.requested_by
     session.add(approval_audit(approval, "approval.approved_by_mandate", mandate.approved_by))
     session.add(
         MandateSend(

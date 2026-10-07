@@ -44,10 +44,25 @@ class Base(DeclarativeBase):
 
 class Tenant(Base):
     __tablename__ = "tenants"
+    __table_args__ = (
+        UniqueConstraint("clerk_org_id", name="tenants_clerk_org_id_key"),
+        CheckConstraint(
+            "clerk_org_id IS NULL OR length(clerk_org_id) BETWEEN 1 AND 255",
+            name="tenants_clerk_org_id_check",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
     name: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # The requester may decide their own approvals: the buyer approves what the
+    # AI prepared for them (default). False = four-eyes policy, the decider must
+    # be someone else (migration 0017). Set at creation; the app role cannot
+    # UPDATE tenants.
+    allow_self_approval: Mapped[bool] = mapped_column(server_default=text("true"))
+    # The Clerk organization this company is (migration 0018); NULL for tenants
+    # created before organizations were used, e.g. the seeded dev tenants.
+    clerk_org_id: Mapped[str | None] = mapped_column(Text)
 
 
 class User(Base):
@@ -98,7 +113,10 @@ class Approval(Base):
     `args_hash` is the SHA-256 hex of the canonical-JSON `args`; the executor
     recomputes it and refuses on mismatch. The app role may INSERT and SELECT,
     may UPDATE only status/decided_by/decided_at/executed_at, and may never
-    DELETE. The requester can never be the approver (database CHECK).
+    DELETE. The requester may decide their own approval when the tenant has
+    `allow_self_approval` (the default), and then `self_approved` is set
+    (database CHECK and trigger, migration 0017); in a four-eyes tenant the
+    decider must be someone else.
     """
 
     __tablename__ = "approvals"
@@ -115,8 +133,10 @@ class Approval(Base):
             name="approvals_status_check",
         ),
         CheckConstraint(
-            "decided_by IS NULL OR decided_by <> requested_by",
-            name="approvals_not_self_approved_check",
+            "decided_by IS NULL"
+            " OR (self_approved AND decided_by = requested_by)"
+            " OR (NOT self_approved AND decided_by <> requested_by)",
+            name="approvals_self_approval_check",
         ),
         CheckConstraint(
             "(status IN ('approved', 'rejected', 'executed')"
@@ -145,6 +165,8 @@ class Approval(Base):
     decided_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     executed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The requester decided their own approval (tenant allow_self_approval).
+    self_approved: Mapped[bool] = mapped_column(server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -14,7 +14,7 @@ from bido_back.db import tenant_session
 from bido_back.db.models import AnalysisLine, Invite, Item, PoLine, RfqLine
 from bido_back.onboarding import service as onboarding
 from bido_back.purchasing import service
-from bido_back.purchasing.importers import ImportType
+from bido_back.purchasing.importers import TableImportType
 from bido_back.purchasing.schemas import (
     AnalysisRequest,
     ImportRequest,
@@ -71,7 +71,7 @@ async def load(
     engine: AsyncEngine,
     storage: FakeStorage,
     who: Principal,
-    kind: ImportType,
+    kind: TableImportType,
     rows: Sequence[Sequence[object]],
 ) -> service.ImportReport:
     upload = await onboarding.store_upload(
@@ -89,7 +89,7 @@ async def load(
 
 async def seed(engine: AsyncEngine, who: Principal) -> None:
     storage = FakeStorage()
-    files: list[tuple[ImportType, Sequence[Sequence[object]]]] = [
+    files: list[tuple[TableImportType, Sequence[Sequence[object]]]] = [
         ("bom", BOM),
         ("inventory", STOCK),
         ("purchase_history", HISTORY),

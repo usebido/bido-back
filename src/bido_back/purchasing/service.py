@@ -53,8 +53,8 @@ from bido_back.db.models import (
 from bido_back.purchasing import analysis as calc
 from bido_back.purchasing.importers import (
     ImportFileError,
-    ImportType,
     ParsedTable,
+    TableImportType,
     parse_rows,
     read_table,
 )
@@ -154,7 +154,7 @@ async def run_import(
 async def import_rows(
     db: Db,
     principal: Principal,
-    import_type: ImportType,
+    import_type: TableImportType,
     raw_rows: Sequence[Sequence[object]],
     *,
     dry_run: bool = False,
@@ -182,7 +182,7 @@ async def import_rows(
 
 
 def _report(
-    import_type: ImportType, dry_run: bool, table: ParsedTable, counts: _Counts
+    import_type: TableImportType, dry_run: bool, table: ParsedTable, counts: _Counts
 ) -> ImportReport:
     failed = table.total_rows - len(table.rows)
     return ImportReport(

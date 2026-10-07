@@ -15,7 +15,7 @@ from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.db import tenant_session
-from bido_back.db.models import Approval, Membership, User
+from bido_back.db.models import Approval, Membership, Tenant, User
 
 from .conftest import TwoTenants
 
@@ -129,22 +129,69 @@ async def test_approval_lifecycle_by_another_member(
     assert status == "executed"
 
 
-async def test_requester_cannot_approve_own_request(
+def _decided(tenant_id: UUID, requester: UUID, decider: UUID, *, self_approved: bool) -> Approval:
+    return _approval(
+        tenant_id,
+        requester,
+        status="approved",
+        decided_by=decider,
+        decided_at=datetime.now(UTC),
+        self_approved=self_approved,
+    )
+
+
+async def test_requester_decision_must_be_marked_self_approved(
     app_engine: AsyncEngine, two_tenants: TwoTenants
 ) -> None:
     a = two_tenants.a
-    with pytest.raises(IntegrityError, match="approvals_not_self_approved_check"):
+    with pytest.raises(IntegrityError, match="approvals_self_approval_check"):
         async with tenant_session(app_engine, a.tenant_id) as session:
-            session.add(
-                _approval(
-                    a.tenant_id,
-                    a.user_id,
-                    status="approved",
-                    decided_by=a.user_id,
-                    decided_at=datetime.now(UTC),
-                )
-            )
+            session.add(_decided(a.tenant_id, a.user_id, a.user_id, self_approved=False))
             await session.flush()
+
+
+async def test_self_approved_mark_requires_the_requester(
+    app_engine: AsyncEngine, two_tenants: TwoTenants, approvers: Approvers
+) -> None:
+    a = two_tenants.a
+    with pytest.raises(IntegrityError, match="approvals_self_approval_check"):
+        async with tenant_session(app_engine, a.tenant_id) as session:
+            session.add(_decided(a.tenant_id, a.user_id, approvers.a, self_approved=True))
+            await session.flush()
+
+
+async def test_self_approval_is_allowed_by_default(
+    app_engine: AsyncEngine, two_tenants: TwoTenants
+) -> None:
+    a = two_tenants.a
+    async with tenant_session(app_engine, a.tenant_id) as session:
+        session.add(_decided(a.tenant_id, a.user_id, a.user_id, self_approved=True))
+        await session.flush()
+
+
+async def test_four_eyes_tenant_refuses_self_approval_in_the_database(
+    app_engine: AsyncEngine, migrator_engine: AsyncEngine, two_tenants: TwoTenants
+) -> None:
+    a = two_tenants.a
+    async with tenant_session(migrator_engine, a.tenant_id) as session:
+        await session.execute(
+            update(Tenant).where(Tenant.id == a.tenant_id).values(allow_self_approval=False)
+        )
+    with pytest.raises(DBAPIError, match="approvals_self_approval_tenant_check|self-approval"):
+        async with tenant_session(app_engine, a.tenant_id) as session:
+            session.add(_decided(a.tenant_id, a.user_id, a.user_id, self_approved=True))
+            await session.flush()
+
+
+async def test_app_role_cannot_change_the_tenant_policy(
+    app_engine: AsyncEngine, two_tenants: TwoTenants
+) -> None:
+    a = two_tenants.a
+    with pytest.raises(DBAPIError, match="permission denied"):
+        async with tenant_session(app_engine, a.tenant_id) as session:
+            await session.execute(
+                update(Tenant).where(Tenant.id == a.tenant_id).values(allow_self_approval=False)
+            )
 
 
 @pytest.mark.parametrize(

@@ -34,9 +34,9 @@ from typing import Final, Literal, Protocol, cast
 
 from bido_back.quotes.parsing import DecimalSeparator, parse_decimal
 
-ImportType = Literal[
-    "items", "bom", "inventory", "purchase_history", "production_plan", "supplier_contacts"
-]
+# What POST /v1/data/imports accepts (unchanged contract); workbooks add contacts.
+TableImportType = Literal["items", "bom", "inventory", "purchase_history", "production_plan"]
+ImportType = TableImportType | Literal["supplier_contacts"]
 FieldKind = Literal["text", "number", "date", "bool", "int"]
 
 MAX_ROWS: Final = 20_000

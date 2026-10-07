@@ -81,14 +81,31 @@ no duplicate side effects are the properties every change must preserve.
   with `external_execution`, so Agno can never run it: the run stops with an
   `ApprovalRequested` proposal, recorded as a `pending` row in our `approvals`
   table.
-- **Only our guard turns a proposal into an action.** An approver decides
-  through `POST /v1/approvals/{id}/decision`; the guard checks the tenant, that
-  the decider is an approver or owner and not the requester, and that the
-  stored payload still matches its hash. Execution then happens once, in the
+- **Only our guard turns a proposal into an action.** A person decides every
+  outbound action through `POST /v1/approvals/{id}/decision`. The guard checks
+  the tenant, who may decide, and that the stored payload still matches its
+  hash. By default the buyer who asked may approve what the AI prepared for
+  them (`tenants.allow_self_approval`, recorded as `self_approved`); four-eyes
+  (an approver or owner who is not the requester) is an opt-in tenant policy,
+  enforced by the guard and by the database. Execution then happens once, in the
   worker, keyed by the approval id. Never mount Agno's AgentOS endpoints or
   resume a paused run from client-supplied state (see the open upstream bug
   [agno-agi/agno#10589](https://github.com/agno-agi/agno/issues/10589)). Agno's
   own `agno_approvals` table is never an authority.
+- **A negotiation mandate is one approval for many emails.** Outbound actions
+  need human approval either one by one, or through an approved
+  `approve_negotiation_mandate` (`bido_back.mandates`): the person approves the
+  suppliers, their addresses, per-line target and maximum, the deadline, the
+  round and daily caps and the exact initial emails. After that the worker
+  approves the RFQ's chases, clarifications and counter-offers on their behalf
+  only when code verifies each one is inside those bounds (mandated address, no
+  copies, prices within the maximum, no accepting or ordering language, caps
+  respected, limits unchanged); anything else is held for a person. Every
+  automatic approval still goes through the executor once, is audited with the
+  mandate id, and stops at once when the mandate is paused. Awards and purchase
+  orders are never covered by a mandate. Never widen what a mandate may approve
+  without a code check behind it, and never let the buyer's maximum price or
+  another supplier's name or price reach a writer agent's input.
 - **Side effects go through the outbox** with a unique idempotency key, written
   in the same transaction as the state change. Workers and providers redeliver;
   handlers must be idempotent.

@@ -308,3 +308,19 @@ async def test_a_rejected_mandate_releases_its_emails(world: MandateWorld) -> No
     assert world.mailboxes.sender.sent == []
     # Proposed again from scratch.
     assert await world.propose() != approval_id
+
+
+async def test_the_buyer_can_approve_their_own_mandate(world: MandateWorld) -> None:
+    approval_id = await world.propose()
+    world.jobs.jobs.clear()
+    await decide_approval(
+        world.engine, buyer(world.people), approval_id, "approve", jobs=world.jobs
+    )
+    await world.run_jobs()
+
+    assert len(world.mailboxes.sender.sent) == 2
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        initial = list(
+            await session.scalars(select(Approval).where(Approval.tool == SEND_RFQ_EMAIL))
+        )
+    assert {(a.status, a.self_approved) for a in initial} == {("executed", True)}

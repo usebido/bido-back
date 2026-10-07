@@ -201,6 +201,7 @@ async def test_rfq_flow_over_http(api: Api, rfq_rows: People) -> None:
     assert me.status_code == 200
     assert me.json()["user_id"] == str(rfq_rows.approver)
     assert me.json()["role"] == "approver"
+    assert me.json()["allow_self_approval"] is True
 
     # Another tenant sees nothing.
     api.principal = Principal(tenant_id=rfq_rows.other_tenant, user_id=rfq_rows.other_approver)

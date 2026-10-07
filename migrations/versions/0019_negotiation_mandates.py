@@ -1,7 +1,7 @@
 """Negotiation mandates: one approval, then automatic sends within its bounds.
 
 Revision ID: 0019
-Revises: 0015
+Revises: 0018
 Create Date: 2026-10-07
 
 `negotiation_mandates`: what a person approved once, for one RFQ, by
@@ -21,8 +21,10 @@ pending for a person, with the reason). Ids and reasons only.
 
 Both tables have `tenant_id`, forced RLS and the tenant policy.
 
-This branch was cut from 0015 in parallel with 0016-0018. When it merges
-after them, `down_revision` moves to the head at that time.
+Follows 0018 (Clerk organizations). Automatic approvals follow the same
+self-approval rule as people: when the mandate's approver is the requesting
+buyer (tenants that allow self-approval, the default), they are recorded as
+self-approved.
 """
 
 from collections.abc import Sequence
@@ -32,7 +34,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0019"
-down_revision: str | Sequence[str] | None = "0015"
+down_revision: str | Sequence[str] | None = "0018"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

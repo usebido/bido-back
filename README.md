@@ -72,6 +72,27 @@ purchase history, a production plan) through the same spreadsheet importer as
 `X-Dev-User: user_motori_buyer`, `POST /v1/analyses {"product": "motor"}` or ask
 the copilot "faz uma análise de motor".
 
+## Sign-in: Clerk organizations are companies
+
+- The frontend signs users in with Clerk and every session has an active
+  organization. The api verifies the session token and treats that
+  organization as the company: `tenants.clerk_org_id` links the two.
+- First request of a member of a **linked** organization: their membership is
+  created (Clerk admins become owners, everyone else members; a role is never
+  lowered). An **unlinked** organization gets a new company only with
+  `AUTH_AUTO_PROVISION=true`; otherwise it is refused (403 "organization not
+  enabled"). `CLERK_ALLOWED_ORG_IDS` restricts both. A token without an
+  organization is refused (403 "select an organization").
+- Link an organization ahead of time (local or dev):
+  `uv run python scripts/link_demo_org.py --clerk-org-id org_... --with-motor-demo`
+  (or `--tenant-id <uuid>`, or `--name "<company>"` for a new empty one).
+- Clerk dashboard: organizations enabled and required for sessions; sign-up
+  restricted (invitations or allowlist) outside dev; optionally a session token
+  claim `"email": "{{user.primary_email_address}}"`, or set `CLERK_SECRET_KEY`
+  so provisioning can read the e-mail and the organization's name.
+- Locally, `AUTH_DEV_MODE=true` still accepts `X-Dev-User: <clerk_user_id>` for
+  the seeded users, with `X-Tenant-Id` to pick among several memberships.
+
 ## Tenancy and row-level security
 
 - Every tenant-owned table has a `tenant_id` column and, in the same migration,
@@ -116,27 +137,43 @@ tenants, approvals, the outbox, and the business endpoints.
   every Agno user and session id is namespaced by tenant.
 - **Approvals are ours:** a tool that sends, accepts or pays is an `act` tool,
   registered with Agno's `external_execution` so Agno can never run it. The run
-  stops with a proposal, stored as a `pending` row in our `approvals` table. An
-  approver decides through `POST /v1/approvals/{id}/decision`; the guard checks
-  tenant, role, requester ≠ approver and the payload hash, and the worker
-  executes the action once. AgentOS endpoints are not mounted, and paused runs
+  stops with a proposal, stored as a `pending` row in our `approvals` table. A
+  person decides through `POST /v1/approvals/{id}/decision`; the guard checks
+  tenant, who may decide and the payload hash, and the worker executes the
+  action once. By default the buyer who asked approves what the AI prepared
+  (`self_approved`); four-eyes (requester ≠ approver) is an opt-in tenant
+  policy (`tenants.allow_self_approval = false`). AgentOS endpoints are not mounted, and paused runs
   are never resumed from client-supplied state (see the open upstream bug
   [agno-agi/agno#10589](https://github.com/agno-agi/agno/issues/10589)).
 - **Prompts are versioned files** in `prompts/`.
 
 ## Scheduled jobs
 
-Long waits are database rows; nothing sleeps. EventBridge Scheduler puts two
+Long waits are database rows; nothing sleeps. EventBridge Scheduler puts these
 jobs on the jobs queue with the all-zeros tenant id (= every tenant):
 
 | Job | Every | What |
 |---|---|---|
 | `mailbox.sync` | 2 min | new messages in the RFQ threads of connected mailboxes |
 | `followups.sweep` | 15 min | chases due (business days, supplier holidays, auto-reply pauses), clarifications for offers with missing fields, cleanup of stale proposals |
+| `negotiation.sweep` | 15 min | counter-offers and best-and-final requests, early close, closing at the deadline |
 
-Every chase or clarification is proposed as a pending approval and sent only
-after a person approves it, in the RFQ's thread. Locally, trigger a sweep with
-`curl -X POST localhost:8080/dev/followups/sweep`.
+Every chase, clarification or counter-offer is proposed as a pending approval
+and sent in the RFQ's thread once approved. Under an approved negotiation
+mandate (`POST /v1/rfqs/{id}/negotiation/mandate`), the sweeps also approve the
+in-bounds ones on the buyer's behalf right away; out-of-bounds drafts are held
+for a person, and `POST .../negotiation/mandate/pause` stops it all. Locally,
+trigger a sweep with `curl -X POST localhost:8080/dev/followups/sweep`.
+
+## Spreadsheets
+
+Buyers send what they have. `POST /v1/data/workbook-imports` (and the
+copilot's `import_spreadsheet`) reads every sheet of an `.xlsx` or a `.csv`:
+rules find the header row and columns (Portuguese, English, Italian), the
+`sheet_mapper` agent proposes a mapping for sheets the rules cannot read, and
+code validates every value. When unsure it answers `needs_confirmation` with
+questions and writes nothing until confirmed. Supplier emails next to supplier
+names become supplier contacts.
 
 ## Observability
 
@@ -190,7 +227,8 @@ Until the variables below exist, the job logs a notice and does nothing.
 
 - **Production deploy:** a `prd` environment and promotion of the same image
   come with `bido-infra/b2b/prd`.
-- **Authentication and authorization** for the api.
+- **Staff (cross-tenant) access** and roles managed from the app (roles come
+  from Clerk on first sign-in and from the database).
 - **Product features:** this is the scaffold that features build on.
 
 See [AGENTS.md](AGENTS.md) for the rules every change must follow.
