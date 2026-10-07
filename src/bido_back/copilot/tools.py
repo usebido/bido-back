@@ -1,0 +1,840 @@
+"""The copilot's tools: typed functions over our services, bound to one request.
+
+Every tool reads the tenant and the user from the run's `ToolContext`, never
+from the model's arguments, and works in that tenant's RLS-scoped session.
+
+- `read` tools answer questions: RFQs and their status, who responded, what is
+  missing, proposals, the comparison, quoted price history, supplier
+  suggestions, the RFQ template.
+- `draft` tools change only drafts or the tenant's own settings: create an RFQ
+  (draft), invite suppliers (draft invites), update the RFQ template, and
+  prepare sends. Preparing a send does NOT send: it records one pending
+  approval per email (`rfqs.service.prepare_send`), which an approver who is
+  not the requester decides on; the worker sends only after that.
+
+There is no `act` tool here on purpose: the only thing the copilot can make
+happen outside Bido is an email, and that already goes through the approval
+guard via `prepare_send`, with the email written by the vetted writer agent
+rather than by this model.
+"""
+
+import logging
+from collections.abc import Callable
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from typing import Final, Literal
+from uuid import UUID
+
+from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from bido_back.agents.context import ToolContext
+from bido_back.agents.tools import AnyTool, Tool, ToolError
+from bido_back.auth import Principal
+from bido_back.comparison.loader import load_comparison
+from bido_back.copilot import queries
+from bido_back.db import tenant_session
+from bido_back.db.models import Invite, Rfq, RfqLine, RfqTemplate
+from bido_back.onboarding.standard import STANDARD_TEMPLATE
+from bido_back.rfqs import service as rfq_service
+from bido_back.rfqs.agents import RfqAgents
+from bido_back.rfqs.errors import Duplicate, MailboxNotConfigured, MailboxNotConnected, RfqError
+from bido_back.rfqs.mailbox import MailboxSenderFactory
+from bido_back.templates import service as template_service
+from bido_back.templates.schemas import TemplateEdit
+from bido_back.templates.service import RequiredFieldsRemoved
+
+logger = logging.getLogger(__name__)
+
+Db = AsyncEngine | async_sessionmaker[AsyncSession]
+
+MAX_LIST: Final = 20
+MAX_TEMPLATE_ITEMS: Final = 16
+RfqStatus = Literal["draft", "open", "closed", "cancelled"]
+
+
+@dataclass(frozen=True, slots=True)
+class CopilotToolDeps:
+    db: Db
+    agents: RfqAgents
+    mailboxes: MailboxSenderFactory
+    # Text of this message's attachments, for create_rfq. Empty without any.
+    attachments_text: str = ""
+    today: Callable[[], date] = lambda: datetime.now(UTC).date()
+
+
+def _principal(ctx: ToolContext) -> Principal:
+    if ctx.user_id is None:
+        raise ToolError("the copilot needs a signed-in user")
+    return Principal(tenant_id=ctx.tenant_id, user_id=ctx.user_id)
+
+
+async def _rfq(session: AsyncSession, reference: str) -> Rfq:
+    rfq = await queries.find_rfq(session, reference)
+    if rfq is None:
+        raise ToolError(f"no RFQ {reference!r}; use list_rfqs to find it")
+    return rfq
+
+
+def _service_error(exc: RfqError) -> ToolError:
+    if isinstance(exc, MailboxNotConnected):
+        return ToolError("the buyer has not connected a mailbox; emails are sent from it")
+    if isinstance(exc, MailboxNotConfigured):
+        return ToolError("sending from a mailbox is not set up on this server yet")
+    return ToolError(str(exc))
+
+
+class RfqRef(BaseModel):
+    rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
+
+
+# --- list_rfqs ---------------------------------------------------------------------------
+
+
+class ListRfqsIn(BaseModel):
+    status: RfqStatus | None = Field(default=None, description="Only RFQs in this status")
+    limit: int = Field(default=10, ge=1, le=MAX_LIST)
+
+
+class RfqItem(BaseModel):
+    id: UUID
+    ref: str
+    title: str
+    status: str
+    created_at: datetime
+    response_due: date | None
+
+
+class ListRfqsOut(BaseModel):
+    rfqs: list[RfqItem]
+
+
+# --- get_rfq_status / who_responded -------------------------------------------------------
+
+
+class LineItem(BaseModel):
+    position: int
+    description: str
+    mpn: str | None
+    quantities: list[Decimal]
+    unit: str
+    need_by: date | None
+
+
+class InviteItem(BaseModel):
+    supplier_id: UUID
+    supplier_name: str
+    status: str
+    sent_at: datetime | None
+    responded_at: datetime | None
+
+
+class RfqStatusOut(BaseModel):
+    id: UUID
+    ref: str
+    title: str
+    status: str
+    response_due: date | None
+    lines: list[LineItem]
+    invites: list[InviteItem]
+    invites_by_status: dict[str, int]
+
+
+class WhoRespondedOut(BaseModel):
+    ref: str
+    responded: list[InviteItem]
+    not_responded: list[InviteItem]
+
+
+# --- what_is_missing ---------------------------------------------------------------------
+
+
+class SupplierGap(BaseModel):
+    supplier_name: str
+    missing_fields: list[str]
+    lines_needing_review: int
+
+
+class WhatIsMissingOut(BaseModel):
+    ref: str
+    awaiting_suppliers: list[InviteItem]
+    lines_without_quote: list[LineItem]
+    proposal_gaps: list[SupplierGap]
+
+
+# --- list_proposals ----------------------------------------------------------------------
+
+
+class ProposalLineItem(BaseModel):
+    rfq_line_position: int | None
+    offered_mpn: str | None
+    is_alternative: bool
+    min_quantity: Decimal | None
+    unit_price: Decimal | None
+    unit: str | None
+    tooling_cost: Decimal | None
+    moq: Decimal | None
+    lead_time_days: int | None
+    needs_review: bool
+
+
+class ProposalItem(BaseModel):
+    supplier_name: str
+    version: int
+    received_at: datetime
+    currency: str | None
+    valid_until: date | None
+    incoterm: str | None
+    payment_terms: str | None
+    missing_fields: list[str]
+    lines: list[ProposalLineItem]
+
+
+class ListProposalsOut(BaseModel):
+    ref: str
+    proposals: list[ProposalItem]
+
+
+# --- get_comparison ----------------------------------------------------------------------
+
+
+class TierTotalItem(BaseModel):
+    tier: int
+    total: Decimal | None
+    complete: bool
+
+
+class ComparisonSupplier(BaseModel):
+    supplier_name: str
+    currency: str | None
+    valid_until: date | None
+    incoterm: str | None
+    max_lead_time_days: int | None
+    flags: list[str]
+    low_confidence_fields: list[str]
+    totals: list[TierTotalItem]
+
+
+class CheapestTier(BaseModel):
+    tier: int
+    supplier_name: str
+    total: Decimal
+
+
+class ComparisonOut(BaseModel):
+    ref: str
+    base_currency: str
+    computed_on: date
+    suppliers: list[ComparisonSupplier]
+    cheapest_complete_by_tier: list[CheapestTier]
+    awaiting: list[str]
+
+
+# --- price_history / suggest_suppliers ------------------------------------------------------
+
+
+class PriceHistoryIn(BaseModel):
+    mpn: str = Field(min_length=2, description="Manufacturer part number")
+    limit: int = Field(default=10, ge=1, le=MAX_LIST)
+
+
+class PricePointItem(BaseModel):
+    rfq_ref: str
+    supplier_name: str
+    quoted_at: datetime
+    offered_mpn: str | None
+    min_quantity: Decimal | None
+    unit_price: Decimal
+    currency: str | None
+    unit: str | None
+    lead_time_days: int | None
+
+
+class PriceHistoryOut(BaseModel):
+    mpn: str
+    # Quoted prices: Bido does not record purchase orders yet.
+    points: list[PricePointItem]
+
+
+class SuggestSuppliersIn(BaseModel):
+    mpn: str | None = Field(default=None, description="Part number to find past suppliers for")
+    category: str | None = Field(default=None, description="Line category, e.g. catalog")
+    limit: int = Field(default=5, ge=1, le=MAX_LIST)
+
+
+class SupplierSuggestion(BaseModel):
+    supplier_id: UUID
+    name: str
+    type: str
+    country: str | None
+    invited: int
+    responded: int
+    last_response: datetime | None
+
+
+class SuggestSuppliersOut(BaseModel):
+    # False: nothing matched the part or category, these are all suppliers.
+    matched_history: bool
+    suppliers: list[SupplierSuggestion]
+
+
+# --- templates ---------------------------------------------------------------------------
+
+
+class NoArgs(BaseModel):
+    pass
+
+
+class TemplateOut(BaseModel):
+    exists: bool
+    template_id: UUID | None = None
+    language: str | None = None
+    greeting: str | None = None
+    columns: list[str] = Field(default_factory=list[str])
+    footer: str | None = None
+    fields: list[str] = Field(default_factory=list[str])
+
+
+class UpdateTemplateIn(BaseModel):
+    greeting: str | None = Field(default=None, max_length=500)
+    columns: list[str] | None = Field(default=None, max_length=MAX_TEMPLATE_ITEMS)
+    footer_fields: list[str] | None = Field(default=None, max_length=MAX_TEMPLATE_ITEMS)
+    fields: list[str] | None = Field(default=None, max_length=MAX_TEMPLATE_ITEMS)
+
+
+# --- create_rfq / invite_suppliers / prepare_send ------------------------------------------
+
+
+class CreateRfqIn(BaseModel):
+    text: str = Field(
+        min_length=1, max_length=8_000, description="What to quote: items, quantities, dates"
+    )
+    include_attachments: bool = Field(
+        default=True, description="Also read the files attached to this message"
+    )
+
+
+class CreateRfqOut(BaseModel):
+    id: UUID
+    ref: str
+    title: str
+    status: str
+    lines: list[LineItem]
+    questions: list[str]
+
+
+class InviteSuppliersIn(BaseModel):
+    rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
+    supplier_ids: list[UUID] = Field(min_length=1, max_length=10)
+
+
+class InviteResult(BaseModel):
+    supplier_id: UUID
+    ok: bool
+    detail: str
+
+
+class InviteSuppliersOut(BaseModel):
+    ref: str
+    results: list[InviteResult]
+
+
+class PreparedApproval(BaseModel):
+    invite_id: UUID
+    approval_id: UUID
+
+
+class PrepareSendOut(BaseModel):
+    ref: str
+    approvals: list[PreparedApproval]
+    note: str
+
+
+# --- Handlers ------------------------------------------------------------------------------
+
+
+def _line_item(line: RfqLine) -> LineItem:
+    return LineItem(
+        position=line.position,
+        description=line.description,
+        mpn=line.mpn,
+        quantities=rfq_service.quantities_from_json(line.quantities),
+        unit=line.unit,
+        need_by=line.need_by,
+    )
+
+
+def _invite_items(rows: list[tuple[Invite, str]]) -> list[InviteItem]:
+    items: list[InviteItem] = []
+    for invite, name in rows:
+        items.append(
+            InviteItem(
+                supplier_id=invite.supplier_id,
+                supplier_name=name,
+                status=invite.status,
+                sent_at=invite.sent_at,
+                responded_at=invite.responded_at,
+            )
+        )
+    return items
+
+
+def _template_out(row: RfqTemplate | None) -> TemplateOut:
+    if row is None:
+        return TemplateOut(exists=False)
+    return TemplateOut(
+        exists=True,
+        template_id=row.id,
+        language=row.language,
+        greeting=row.greeting,
+        columns=[str(c) for c in row.columns],
+        footer=row.footer,
+        fields=[str(f) for f in row.fields],
+    )
+
+
+def _clean(items: list[str]) -> list[str]:
+    return [item.strip()[:120] for item in items if item.strip()][:MAX_TEMPLATE_ITEMS]
+
+
+def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
+    db = deps.db
+
+    async def list_rfqs(ctx: ToolContext, args: ListRfqsIn) -> ListRfqsOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rows = await queries.rfqs(session, args.status, args.limit)
+        return ListRfqsOut(
+            rfqs=[
+                RfqItem(
+                    id=r.id,
+                    ref=r.ref,
+                    title=r.title,
+                    status=r.status,
+                    created_at=r.created_at,
+                    response_due=r.response_due,
+                )
+                for r in rows
+            ]
+        )
+
+    async def get_rfq_status(ctx: ToolContext, args: RfqRef) -> RfqStatusOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+            lines = await queries.lines(session, rfq.id)
+            invites = _invite_items(await queries.invites(session, rfq.id))
+        return RfqStatusOut(
+            id=rfq.id,
+            ref=rfq.ref,
+            title=rfq.title,
+            status=rfq.status,
+            response_due=rfq.response_due,
+            lines=[_line_item(line) for line in lines],
+            invites=invites,
+            invites_by_status=queries.count_by([i.status for i in invites]),
+        )
+
+    async def who_responded(ctx: ToolContext, args: RfqRef) -> WhoRespondedOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+            invites = _invite_items(await queries.invites(session, rfq.id))
+        return WhoRespondedOut(
+            ref=rfq.ref,
+            responded=[i for i in invites if i.status == "responded"],
+            not_responded=[i for i in invites if i.status != "responded"],
+        )
+
+    async def what_is_missing(ctx: ToolContext, args: RfqRef) -> WhatIsMissingOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+            lines = await queries.lines(session, rfq.id)
+            invites = _invite_items(await queries.invites(session, rfq.id))
+            proposals = await queries.latest_proposals(session, rfq.id)
+        quoted = {
+            line.rfq_line_id
+            for item in proposals
+            for line, _ in item.lines
+            if line.unit_price is not None and line.rfq_line_id is not None
+        }
+        return WhatIsMissingOut(
+            ref=rfq.ref,
+            awaiting_suppliers=[i for i in invites if i.status in queries.AWAITING_STATUSES],
+            lines_without_quote=[_line_item(line) for line in lines if line.id not in quoted],
+            proposal_gaps=[
+                SupplierGap(
+                    supplier_name=item.supplier_name,
+                    missing_fields=queries.missing_fields(item.proposal),
+                    lines_needing_review=sum(1 for line, _ in item.lines if line.needs_review),
+                )
+                for item in proposals
+                if queries.missing_fields(item.proposal)
+                or any(line.needs_review for line, _ in item.lines)
+            ],
+        )
+
+    async def list_proposals(ctx: ToolContext, args: RfqRef) -> ListProposalsOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+            proposals = await queries.latest_proposals(session, rfq.id)
+        return ListProposalsOut(
+            ref=rfq.ref,
+            proposals=[
+                ProposalItem(
+                    supplier_name=item.supplier_name,
+                    version=item.proposal.version,
+                    received_at=item.proposal.created_at,
+                    currency=item.proposal.currency,
+                    valid_until=item.proposal.valid_until,
+                    incoterm=item.proposal.incoterm,
+                    payment_terms=item.proposal.payment_terms,
+                    missing_fields=queries.missing_fields(item.proposal),
+                    lines=[
+                        ProposalLineItem(
+                            rfq_line_position=position,
+                            offered_mpn=line.offered_mpn,
+                            is_alternative=line.is_alternative,
+                            min_quantity=line.min_quantity,
+                            unit_price=line.unit_price,
+                            unit=line.unit,
+                            tooling_cost=line.tooling_cost,
+                            moq=line.moq,
+                            lead_time_days=line.lead_time_days,
+                            needs_review=line.needs_review,
+                        )
+                        for line, position in item.lines
+                    ],
+                )
+                for item in proposals
+            ],
+        )
+
+    async def get_comparison(ctx: ToolContext, args: RfqRef) -> ComparisonOut:
+        principal = _principal(ctx)
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+        try:
+            comparison = await load_comparison(db, principal, rfq.id, deps.today())
+        except RfqError as exc:
+            raise _service_error(exc) from None
+        cheapest: dict[int, CheapestTier] = {}
+        for column in comparison.suppliers:
+            for total in column.totals:
+                if not total.complete or total.total_base is None:
+                    continue
+                best = cheapest.get(total.tier)
+                if best is None or total.total_base < best.total:
+                    cheapest[total.tier] = CheapestTier(
+                        tier=total.tier, supplier_name=column.supplier_name, total=total.total_base
+                    )
+        return ComparisonOut(
+            ref=rfq.ref,
+            base_currency=comparison.base_currency,
+            computed_on=comparison.computed_on,
+            suppliers=[
+                ComparisonSupplier(
+                    supplier_name=column.supplier_name,
+                    currency=column.currency,
+                    valid_until=column.valid_until,
+                    incoterm=column.incoterm,
+                    max_lead_time_days=column.max_lead_time_days,
+                    flags=[str(f) for f in column.flags],
+                    low_confidence_fields=column.low_confidence_fields,
+                    totals=[
+                        TierTotalItem(tier=t.tier, total=t.total_base, complete=t.complete)
+                        for t in column.totals
+                    ],
+                )
+                for column in comparison.suppliers
+            ],
+            cheapest_complete_by_tier=[cheapest[tier] for tier in sorted(cheapest)],
+            awaiting=[a.supplier_name for a in comparison.awaiting],
+        )
+
+    async def price_history(ctx: ToolContext, args: PriceHistoryIn) -> PriceHistoryOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            points = await queries.price_history(session, args.mpn, args.limit)
+        return PriceHistoryOut(
+            mpn=args.mpn,
+            points=[
+                PricePointItem(
+                    rfq_ref=p.rfq_ref,
+                    supplier_name=p.supplier_name,
+                    quoted_at=p.quoted_at,
+                    offered_mpn=p.offered_mpn,
+                    min_quantity=p.min_quantity,
+                    unit_price=p.unit_price,
+                    currency=p.currency,
+                    unit=p.unit,
+                    lead_time_days=p.lead_time_days,
+                )
+                for p in points
+            ],
+        )
+
+    async def suggest_suppliers(ctx: ToolContext, args: SuggestSuppliersIn) -> SuggestSuppliersOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            records, matched = await queries.supplier_records(
+                session, mpn=args.mpn, category=args.category
+            )
+        return SuggestSuppliersOut(
+            matched_history=matched,
+            suppliers=[
+                SupplierSuggestion(
+                    supplier_id=r.supplier.id,
+                    name=r.supplier.name,
+                    type=r.supplier.type,
+                    country=r.supplier.country,
+                    invited=r.invited,
+                    responded=r.responded,
+                    last_response=r.last_response,
+                )
+                for r in records[: args.limit]
+            ],
+        )
+
+    async def get_rfq_template(ctx: ToolContext, args: NoArgs) -> TemplateOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            return _template_out(await queries.default_template(session))
+
+    async def update_rfq_template(ctx: ToolContext, args: UpdateTemplateIn) -> TemplateOut:
+        principal = _principal(ctx)
+        if args.model_dump(exclude_none=True) == {}:
+            raise ToolError("nothing to change: give a greeting, columns, footer_fields or fields")
+        async with tenant_session(db, ctx.tenant_id) as session:
+            row = await queries.default_template(session)
+            if row is None:
+                # Start from Bido's standard template; the change below is its version 2.
+                row = RfqTemplate(
+                    tenant_id=principal.tenant_id,
+                    created_by=principal.user_id,
+                    source="none",
+                    status="ready",
+                    language=STANDARD_TEMPLATE.language,
+                    greeting=STANDARD_TEMPLATE.greeting,
+                    columns=list(STANDARD_TEMPLATE.columns),
+                    footer=STANDARD_TEMPLATE.footer,
+                    fields=list(STANDARD_TEMPLATE.fields),
+                    source_refs={},
+                    is_default=True,
+                )
+                session.add(row)
+                await session.flush()
+            template_id = row.id
+            current = template_service.row_content(row)
+        greeting = (args.greeting or "").strip() or current.greeting
+        edit = TemplateEdit(
+            language=current.language,
+            greeting=greeting,
+            columns=_clean(args.columns) if args.columns is not None else current.columns,
+            footer_fields=(
+                _clean(args.footer_fields)
+                if args.footer_fields is not None
+                else current.footer_fields
+            ),
+            fields=_clean(args.fields) if args.fields is not None else current.fields,
+        )
+        # Versions are immutable: the edit is saved as the template's next version.
+        try:
+            await template_service.edit_template(db, principal, template_id, edit)
+        except RequiredFieldsRemoved as exc:
+            raise ToolError(str(exc)) from exc
+        async with tenant_session(db, ctx.tenant_id) as session:
+            updated = await queries.default_template(session)
+        logger.info("copilot updated template tenant=%s template=%s", ctx.tenant_id, template_id)
+        return _template_out(updated)
+
+    async def create_rfq(ctx: ToolContext, args: CreateRfqIn) -> CreateRfqOut:
+        principal = _principal(ctx)
+        text = args.text
+        if args.include_attachments and deps.attachments_text:
+            text = f"{text}\n\n{deps.attachments_text}"
+        try:
+            created = await rfq_service.create_rfq_from_text(
+                db, principal, text, deps.agents.intake
+            )
+        except RfqError as exc:
+            raise _service_error(exc) from None
+        return CreateRfqOut(
+            id=created.id,
+            ref=created.ref,
+            title=created.title,
+            status=created.status,
+            lines=[
+                LineItem(
+                    position=line.position,
+                    description=line.description,
+                    mpn=line.mpn,
+                    quantities=list(line.quantities),
+                    unit=line.unit,
+                    need_by=line.need_by,
+                )
+                for line in created.lines
+            ],
+            questions=list(created.questions),
+        )
+
+    async def invite_suppliers(ctx: ToolContext, args: InviteSuppliersIn) -> InviteSuppliersOut:
+        principal = _principal(ctx)
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+            contacts = await queries.first_contacts(session, list(args.supplier_ids))
+        results: list[InviteResult] = []
+        for supplier_id in dict.fromkeys(args.supplier_ids):
+            contact_id = contacts.get(supplier_id)
+            if contact_id is None:
+                results.append(
+                    InviteResult(
+                        supplier_id=supplier_id, ok=False, detail="no contact with an email"
+                    )
+                )
+                continue
+            try:
+                await rfq_service.add_invite(db, principal, rfq.id, supplier_id, contact_id)
+            except Duplicate:
+                results.append(InviteResult(supplier_id=supplier_id, ok=True, detail="already"))
+                continue
+            except RfqError as exc:
+                results.append(InviteResult(supplier_id=supplier_id, ok=False, detail=str(exc)))
+                continue
+            results.append(InviteResult(supplier_id=supplier_id, ok=True, detail="invited"))
+        return InviteSuppliersOut(ref=rfq.ref, results=results)
+
+    async def prepare_send(ctx: ToolContext, args: RfqRef) -> PrepareSendOut:
+        principal = _principal(ctx)
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+        try:
+            prepared = await rfq_service.prepare_send(
+                db, principal, rfq.id, deps.agents.email_writer, deps.mailboxes
+            )
+        except RfqError as exc:
+            raise _service_error(exc) from None
+        return PrepareSendOut(
+            ref=rfq.ref,
+            approvals=[
+                PreparedApproval(invite_id=p.invite_id, approval_id=p.approval_id)
+                for p in prepared.approvals
+            ],
+            note=(
+                "Nothing was sent. Each email waits for approval by an approver other "
+                "than the requester; it is sent only after that."
+            ),
+        )
+
+    rfq_ref_hint = " Takes the RFQ's reference (RFQ-12) or id."
+    return (
+        Tool(
+            "list_rfqs",
+            "List the company's RFQs, newest first.",
+            ListRfqsIn,
+            ListRfqsOut,
+            "read",
+            list_rfqs,
+        ),
+        Tool(
+            "get_rfq_status",
+            "An RFQ's lines and its invited suppliers with their status." + rfq_ref_hint,
+            RfqRef,
+            RfqStatusOut,
+            "read",
+            get_rfq_status,
+        ),
+        Tool(
+            "who_responded",
+            "Which invited suppliers responded to an RFQ and which did not." + rfq_ref_hint,
+            RfqRef,
+            WhoRespondedOut,
+            "read",
+            who_responded,
+        ),
+        Tool(
+            "what_is_missing",
+            "What an RFQ still needs: suppliers who have not answered, lines nobody "
+            "priced, and proposals with missing or unverified fields." + rfq_ref_hint,
+            RfqRef,
+            WhatIsMissingOut,
+            "read",
+            what_is_missing,
+        ),
+        Tool(
+            "list_proposals",
+            "The latest proposal of each supplier for an RFQ, line by line." + rfq_ref_hint,
+            RfqRef,
+            ListProposalsOut,
+            "read",
+            list_proposals,
+        ),
+        Tool(
+            "get_comparison",
+            "Side-by-side comparison of an RFQ's proposals in the base currency, with "
+            "totals per quantity tier and the cheapest complete offer." + rfq_ref_hint,
+            RfqRef,
+            ComparisonOut,
+            "read",
+            get_comparison,
+            artifact_kind="comparison",
+        ),
+        Tool(
+            "price_history",
+            "Unit prices suppliers QUOTED for a part number in past RFQs, newest first. "
+            "These are quotes, not purchase prices.",
+            PriceHistoryIn,
+            PriceHistoryOut,
+            "read",
+            price_history,
+        ),
+        Tool(
+            "suggest_suppliers",
+            "Suppliers to invite, ranked by how often they were invited and responded "
+            "for the same part number or category.",
+            SuggestSuppliersIn,
+            SuggestSuppliersOut,
+            "read",
+            suggest_suppliers,
+        ),
+        Tool(
+            "get_rfq_template",
+            "The company's default RFQ template (greeting, item columns, fields asked for).",
+            NoArgs,
+            TemplateOut,
+            "read",
+            get_rfq_template,
+        ),
+        Tool(
+            "update_rfq_template",
+            "Change the company's default RFQ template. Only the given parts change.",
+            UpdateTemplateIn,
+            TemplateOut,
+            "draft",
+            update_rfq_template,
+            artifact_kind="rfq_template",
+        ),
+        Tool(
+            "create_rfq",
+            "Create a DRAFT RFQ from a description of what to buy (and the attached "
+            "files). Nothing is sent.",
+            CreateRfqIn,
+            CreateRfqOut,
+            "draft",
+            create_rfq,
+            artifact_kind="rfq_draft",
+        ),
+        Tool(
+            "invite_suppliers",
+            "Add suppliers to a draft or open RFQ as DRAFT invites. Nothing is sent.",
+            InviteSuppliersIn,
+            InviteSuppliersOut,
+            "draft",
+            invite_suppliers,
+        ),
+        Tool(
+            "prepare_send",
+            "Write the RFQ email for every draft invite and ask for approval. Nothing is "
+            "sent: an approver (not the requester) must approve each email first." + rfq_ref_hint,
+            RfqRef,
+            PrepareSendOut,
+            "draft",
+            prepare_send,
+            artifact_kind="approvals",
+        ),
+    )

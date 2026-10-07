@@ -21,6 +21,7 @@ src/bido_back/
   api/               FastAPI app (`create_app` factory)
   worker/            SQS worker (`python -m bido_back.worker`)
   agents/            the agents adapter: Agno behind our own types and tools
+  copilot/           the procurement copilot: chat agent, its tools, SSE stream
   db/                SQLAlchemy models, sessions, tenant-scoped transactions
   observability.py   OpenTelemetry tracing and Sentry; off when unset
 prompts/             versioned agent prompts (`<name>.v<N>.md`)

@@ -42,9 +42,10 @@ import os
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, cast
 
 from agno.agent import Agent
+from agno.db.base import SessionType
 from agno.db.postgres import AsyncPostgresDb, create_async_postgres_engine
 from agno.exceptions import redact_secrets
 from agno.models.openai.responses import OpenAIResponses
@@ -63,6 +64,7 @@ from agno.run.agent import (
     ToolCallStartedEvent,
 )
 from agno.run.requirement import RunRequirement
+from agno.session.agent import AgentSession
 from agno.tools.function import Function, FunctionCall
 from pydantic import BaseModel, JsonValue, ValidationError
 from sqlalchemy.engine import URL, make_url
@@ -154,6 +156,64 @@ def _agno_db(url: str) -> AsyncPostgresDb:
     # Agno creates its own tables inside that schema on first use.
     engine = create_async_postgres_engine(agno_db_url(url))
     return AsyncPostgresDb(db_engine=engine, db_schema=AGNO_SCHEMA, create_schema=False)
+
+
+@dataclass(frozen=True, slots=True)
+class StoredRun:
+    """One stored run of a session, as plain data: what went in, what came out."""
+
+    run_id: str
+    created_at: int
+    status: str
+    # The run's input as given to `run()` (our input model's JSON), if stored.
+    input: str | None
+    # The final output: a JSON-able mapping, a string, or None.
+    output: dict[str, JsonValue] | str | None
+
+
+async def load_session_runs(
+    context: ToolContext, session: str, config: RunnerConfig
+) -> list[StoredRun] | None:
+    """The stored runs of `session` for the context's tenant AND user, oldest first.
+
+    None when run storage is not configured or the session does not exist for
+    this user. The ids are built exactly as for a run (`agno_ids`), and Agno
+    filters the read by the namespaced user id too, so another tenant's or
+    another user's session is never returned.
+    """
+    if not config.agno_database_url:
+        return None
+    ids = agno_ids(context, session)
+    found = await _agno_db(config.agno_database_url).get_session(
+        session_id=ids.session_id, session_type=SessionType.AGENT, user_id=ids.user_id
+    )
+    if not isinstance(found, AgentSession) or found.user_id != ids.user_id:
+        return None
+    runs: list[StoredRun] = []
+    for run in found.runs or []:
+        if not isinstance(run, RunOutput):
+            continue
+        content: object = run.content
+        output: dict[str, JsonValue] | str | None
+        if isinstance(content, BaseModel):
+            output = content.model_dump(mode="json")
+        elif isinstance(content, str):
+            output = content
+        elif isinstance(content, Mapping):
+            output = dict(cast(Mapping[str, JsonValue], content))
+        else:
+            output = None
+        raw_input = run.input.input_content_string() if run.input is not None else None
+        runs.append(
+            StoredRun(
+                run_id=run.run_id or "",
+                created_at=run.created_at,
+                status=str(run.status.value if hasattr(run.status, "value") else run.status),
+                input=raw_input or None,
+                output=output,
+            )
+        )
+    return sorted(runs, key=lambda r: r.created_at)
 
 
 # --- Model -----------------------------------------------------------------
