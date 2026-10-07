@@ -77,6 +77,16 @@ class Settings(BaseSettings):
     clerk_jwks_url: str | None = None
     clerk_authorized_parties: list[str] = []
     auth_dev_mode: bool = False
+    # A Clerk organization is a company (tenant). A signed-in member of an
+    # organization that is already linked to a tenant always gets a membership
+    # there; `auth_auto_provision` also creates the tenant on the first login
+    # of an organization nobody linked yet. `clerk_allowed_org_ids`, when set,
+    # restricts both to those organizations.
+    auth_auto_provision: bool = False
+    clerk_allowed_org_ids: list[str] = []
+    # Optional: Clerk Backend API key, used only when provisioning, to read the
+    # organization's display name and the user's e-mail (fail-soft without it).
+    clerk_secret_key: str | None = Field(default=None, repr=False)
 
     # CORS: the browser origins allowed to call the api (the frontend runs on
     # another origin, e.g. Vercel). Exact origins, plus an optional regex for

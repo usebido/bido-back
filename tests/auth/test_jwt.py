@@ -14,12 +14,15 @@ from bido_back.auth import (
     AuthConfigError,
     AuthenticationFailed,
     ClerkJwtVerifier,
+    ClerkOrg,
     MembershipRow,
     NotAMember,
     TenantSelectionRequired,
     check_auth_settings,
     choose_membership,
     dev_mode_enabled,
+    membership_role_for,
+    org_from_claims,
 )
 from bido_back.settings import Settings
 
@@ -76,8 +79,8 @@ async def test_valid_token_returns_the_clerk_user_id(keys: Keys) -> None:
     jwks = FakeJwks(keys)
     v = verifier(jwks)
 
-    assert await v.verify(keys.token()) == "user_abc"
-    assert await v.verify(keys.token(sub="user_other")) == "user_other"
+    assert (await v.verify(keys.token())).user_id == "user_abc"
+    assert (await v.verify(keys.token(sub="user_other"))).user_id == "user_other"
     assert jwks.calls == 1  # cached
 
 
@@ -127,16 +130,55 @@ async def test_unknown_kid_refetches_once_per_cooldown(keys: Keys) -> None:
     rotated = Keys()
     jwks = FakeJwks(keys)
     v = verifier(jwks, refetch_cooldown_s=0.0)
-    assert await v.verify(keys.token()) == "user_abc"
+    assert (await v.verify(keys.token())).user_id == "user_abc"
 
     jwks.keys.append(rotated)  # Clerk rotated its keys
-    assert await v.verify(rotated.token()) == "user_abc"
+    assert (await v.verify(rotated.token())).user_id == "user_abc"
     assert jwks.calls == 2
 
     cooling = verifier(FakeJwks(keys), refetch_cooldown_s=3600.0)
     await cooling.verify(keys.token())
     with pytest.raises(AuthenticationFailed, match="unknown signing key"):
         await cooling.verify(Keys().token())
+
+
+async def test_organization_and_email_claims(keys: Keys) -> None:
+    v = verifier(FakeJwks(keys))
+
+    v2 = await v.verify(keys.token(v=2, o={"id": "org_1", "rol": "admin", "slg": "acme"}))
+    v1 = await v.verify(
+        keys.token(org_id="org_1", org_role="org:member", org_slug="acme", email="g@acme.test")
+    )
+    none = await v.verify(keys.token())
+
+    assert v2.org == ClerkOrg(id="org_1", role="admin", slug="acme")
+    assert v1.org == ClerkOrg(id="org_1", role="org:member", slug="acme")
+    assert v1.email == "g@acme.test"
+    assert none.org is None and none.email is None
+
+
+def test_org_claims_are_validated() -> None:
+    assert org_from_claims({"o": {"id": ""}}) is None
+    assert org_from_claims({"o": "org_1"}) is None
+    assert org_from_claims({"org_id": 42}) is None
+    assert org_from_claims({"org_id": "x" * 256}) is None
+    # v2 wins over leftover v1 claims.
+    assert org_from_claims({"o": {"id": "org_2"}, "org_id": "org_1"}) == ClerkOrg(id="org_2")
+
+
+@pytest.mark.parametrize(
+    ("clerk_role", "ours"),
+    [
+        ("org:admin", "owner"),
+        ("admin", "owner"),
+        ("org:member", "member"),
+        ("member", "member"),
+        ("org:buyer", "member"),
+        (None, "member"),
+    ],
+)
+def test_membership_role_for(clerk_role: str | None, ours: str) -> None:
+    assert membership_role_for(clerk_role) == ours
 
 
 def _settings(**values: object) -> Settings:

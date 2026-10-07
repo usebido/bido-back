@@ -24,6 +24,8 @@ class MeResponse(BaseModel):
     tenant_id: UUID
     tenant_name: str
     role: Role | None
+    # The Clerk organization this company is; null for tenants not linked to one.
+    clerk_org_id: str | None = None
 
 
 def me_router() -> APIRouter:
@@ -45,6 +47,7 @@ def me_router() -> APIRouter:
             tenant_id=tenant.id,
             tenant_name=tenant.name,
             role=principal.role,
+            clerk_org_id=tenant.clerk_org_id,
         )
 
     return router

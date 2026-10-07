@@ -44,10 +44,20 @@ class Base(DeclarativeBase):
 
 class Tenant(Base):
     __tablename__ = "tenants"
+    __table_args__ = (
+        UniqueConstraint("clerk_org_id", name="tenants_clerk_org_id_key"),
+        CheckConstraint(
+            "clerk_org_id IS NULL OR length(clerk_org_id) BETWEEN 1 AND 255",
+            name="tenants_clerk_org_id_check",
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
     name: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # The Clerk organization this company is (migration 0018); NULL for tenants
+    # created before organizations were used, e.g. the seeded dev tenants.
+    clerk_org_id: Mapped[str | None] = mapped_column(Text)
 
 
 class User(Base):
