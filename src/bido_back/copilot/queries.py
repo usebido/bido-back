@@ -238,7 +238,12 @@ async def first_contacts(session: AsyncSession, supplier_ids: list[UUID]) -> dic
 
 async def default_template(session: AsyncSession) -> RfqTemplate | None:
     return await session.scalar(
-        select(RfqTemplate).where(RfqTemplate.is_default, RfqTemplate.status == "ready")
+        # The general default: category variants have their own defaults (#11).
+        select(RfqTemplate).where(
+            RfqTemplate.is_default,
+            RfqTemplate.category.is_(None),
+            RfqTemplate.status == "ready",
+        )
     )
 
 

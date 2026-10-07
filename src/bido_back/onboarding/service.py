@@ -163,7 +163,10 @@ async def get_state(db: Db, principal: Principal) -> OnboardingState:
             select(Membership.onboarded_at).where(Membership.user_id == principal.user_id)
         )
         connection = await _active_connection(session, principal)
-        template = await session.scalar(select(RfqTemplate).where(RfqTemplate.is_default))
+        # The general default; category variants have their own defaults.
+        template = await session.scalar(
+            select(RfqTemplate).where(RfqTemplate.is_default, RfqTemplate.category.is_(None))
+        )
         return OnboardingState(
             onboarded_at=onboarded_at,
             mailbox=(
@@ -390,7 +393,7 @@ async def get_template(db: Db, principal: Principal, template_id: UUID) -> Templ
 
 
 async def use_template(db: Db, principal: Principal, template_id: UUID) -> TemplateView:
-    """Make a ready template the tenant's default (the previous default stops being one)."""
+    """Make a ready template the default for its category (the previous default stops being one)."""
     async with tenant_session(db, principal.tenant_id) as session:
         row = await session.scalar(
             select(RfqTemplate).where(RfqTemplate.id == template_id).with_for_update()
@@ -402,7 +405,11 @@ async def use_template(db: Db, principal: Principal, template_id: UUID) -> Templ
         if not row.is_default:
             await session.execute(
                 update(RfqTemplate)
-                .where(RfqTemplate.is_default, RfqTemplate.id != template_id)
+                .where(
+                    RfqTemplate.is_default,
+                    RfqTemplate.id != template_id,
+                    RfqTemplate.category.is_not_distinct_from(row.category),
+                )
                 .values(is_default=False, updated_at=func.now())
             )
             # The partial unique index must see the old default gone first.

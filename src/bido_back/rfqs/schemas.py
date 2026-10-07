@@ -170,9 +170,14 @@ class PrepareSendResponse(BaseModel):
 ApprovalStatus = Literal["pending", "approved", "rejected", "executed", "expired"]
 
 
+EmailKind = Literal["rfq", "chase", "clarification"]
+
+
 class RfqEmailDraft(BaseModel):
     """The exact email an approver approves (the stored, hashed arguments)."""
 
+    # The RFQ email itself, a reminder (chase) or a clarification question.
+    kind: EmailKind = "rfq"
     invite_id: UUID
     rfq_id: UUID | None
     rfq_ref: str | None
@@ -193,5 +198,5 @@ class ApprovalQueueItem(BaseModel):
     requested_by_me: bool
     created_at: datetime
     decided_at: datetime | None
-    # Set for `send_rfq_email`; other tools show only their name for now.
+    # Set for `send_rfq_email` and `send_followup_email`; other tools show only their name.
     rfq_email: RfqEmailDraft | None

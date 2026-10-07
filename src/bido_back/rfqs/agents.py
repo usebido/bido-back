@@ -21,8 +21,8 @@ from typing import cast
 from pydantic import BaseModel
 
 from bido_back.agents.catalog.contracts import (
-    RfqEmailInput,
-    RfqEmailOutput,
+    RfqEmailLocalizeInput,
+    RfqEmailLocalizeOutput,
     RfqIntakeInput,
     RfqIntakeOutput,
 )
@@ -35,7 +35,9 @@ logger = logging.getLogger(__name__)
 DEFINITIONS_MODULE = "bido_back.agents.catalog.definitions"
 
 IntakeAgent = Callable[[RfqIntakeInput, ToolContext], Awaitable[RfqIntakeOutput]]
-EmailWriterAgent = Callable[[RfqEmailInput, ToolContext], Awaitable[RfqEmailOutput]]
+# The email writer carries the buyer's template text into the supplier's
+# language; the RFQ email itself is rendered by code (`bido_back.templates`).
+EmailWriterAgent = Callable[[RfqEmailLocalizeInput, ToolContext], Awaitable[RfqEmailLocalizeOutput]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,8 +74,10 @@ async def run_intake(input: RfqIntakeInput, context: ToolContext) -> RfqIntakeOu
     return await _run("RFQ_INTAKE", RfqIntakeOutput, input, context)
 
 
-async def run_email_writer(input: RfqEmailInput, context: ToolContext) -> RfqEmailOutput:
-    return await _run("RFQ_EMAIL_WRITER", RfqEmailOutput, input, context)
+async def run_email_writer(
+    input: RfqEmailLocalizeInput, context: ToolContext
+) -> RfqEmailLocalizeOutput:
+    return await _run("RFQ_EMAIL_WRITER", RfqEmailLocalizeOutput, input, context)
 
 
 def default_rfq_agents() -> RfqAgents:

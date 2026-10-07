@@ -18,6 +18,7 @@ from bido_back.api.errors import ErrorResponse
 from bido_back.auth import Principal
 from bido_back.comparison.compute import Comparison
 from bido_back.comparison.loader import load_comparison
+from bido_back.compliance import service as compliance_service
 from bido_back.rfqs import service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.errors import (
@@ -41,6 +42,7 @@ from bido_back.rfqs.schemas import (
     RfqSummary,
     UpdateLineRequest,
 )
+from bido_back.templates.schemas import RfqEmailPreview
 
 Db = Annotated[async_sessionmaker[AsyncSession], Depends(get_db)]
 CurrentPrincipal = Annotated[Principal, Depends(get_principal)]
@@ -142,6 +144,27 @@ def rfqs_router() -> APIRouter:
         except RfqError as exc:
             raise rfq_http_error(exc) from None
 
+    @router.get(
+        "/{rfq_id}/invites/{invite_id}/preview",
+        responses=error_responses(
+            status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT, status.HTTP_502_BAD_GATEWAY
+        ),
+    )
+    async def preview_email(  # pyright: ignore[reportUnusedFunction]
+        rfq_id: UUID,
+        invite_id: UUID,
+        principal: CurrentPrincipal,
+        db: Db,
+        agents: Annotated[RfqAgents, Depends(get_rfq_agents)],
+    ) -> RfqEmailPreview:
+        """The email this invite would get, rendered from the RFQ's template. Sends nothing."""
+        try:
+            return await service.preview_email(
+                db, principal, rfq_id, invite_id, agents.email_writer
+            )
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
+
     @router.post(
         "/{rfq_id}/send",
         responses=error_responses(
@@ -155,7 +178,7 @@ def rfqs_router() -> APIRouter:
         agents: Annotated[RfqAgents, Depends(get_rfq_agents)],
         mailboxes: Annotated[MailboxSenderFactory, Depends(get_mailbox_senders)],
     ) -> PrepareSendResponse:
-        """Draft each invite's email and queue it for approval. Sends nothing."""
+        """Render each invite's email and queue it for approval. Sends nothing."""
         try:
             return await service.prepare_send(db, principal, rfq_id, agents.email_writer, mailboxes)
         except RfqError as exc:
@@ -165,9 +188,12 @@ def rfqs_router() -> APIRouter:
     async def comparison(  # pyright: ignore[reportUnusedFunction]
         rfq_id: UUID, principal: CurrentPrincipal, db: Db
     ) -> Comparison:
+        today = datetime.now(UTC).date()
         try:
-            return await load_comparison(db, principal, rfq_id, datetime.now(UTC).date())
+            result = await load_comparison(db, principal, rfq_id, today)
         except RfqError as exc:
             raise rfq_http_error(exc) from None
+        result.compliance = await compliance_service.rfq_summary(db, principal, rfq_id, today)
+        return result
 
     return router

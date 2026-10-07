@@ -8,3 +8,6 @@ FX_REFRESH = "fx.refresh"  # payload: {}
 MAILBOX_SYNC = "mailbox.sync"
 TEMPLATE_SCAN = "template.scan"  # payload: {"scan_id": "<uuid>"}
 TEMPLATE_BUILD = "template.build"  # payload: {"template_id": "<uuid>"}
+FOLLOWUPS_SWEEP = (
+    "followups.sweep"  # payload: {}. tenant_id = all-zeros for every tenant (scheduled)
+)

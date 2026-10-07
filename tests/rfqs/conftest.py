@@ -20,8 +20,8 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from bido_back.agents.catalog.contracts import (
-    RfqEmailInput,
-    RfqEmailOutput,
+    RfqEmailLocalizeInput,
+    RfqEmailLocalizeOutput,
     RfqIntakeInput,
     RfqIntakeOutput,
     RfqLineDraft,
@@ -31,12 +31,15 @@ from bido_back.db import tenant_session
 from bido_back.db.models import (
     Attachment,
     Contact,
+    FollowupMessage,
     Invite,
     Message,
     Proposal,
     ProposalLine,
     Rfq,
     RfqLine,
+    RfqTemplate,
+    RfqTemplateVersion,
     Supplier,
     SupplierContact,
     User,
@@ -81,17 +84,18 @@ class FakeIntake:
 
 
 class FakeWriter:
-    """Writes a deterministic email; leaves out the subject marker on purpose."""
+    """Translates by tagging: "Olá" into de is "<de> Olá". Records every task."""
 
     def __init__(self) -> None:
-        self.calls: list[RfqEmailInput] = []
+        self.calls: list[RfqEmailLocalizeInput] = []
 
-    async def __call__(self, input: RfqEmailInput, context: ToolContext) -> RfqEmailOutput:
+    async def __call__(
+        self, input: RfqEmailLocalizeInput, context: ToolContext
+    ) -> RfqEmailLocalizeOutput:
         self.calls.append(input)
-        lines = "\n".join(f"{line.position}. {line.description}" for line in input.lines)
-        return RfqEmailOutput(
-            subject=f"Request for quotation: {input.rfq_title}",
-            body=f"Dear {input.supplier_name},\n\nplease quote:\n{lines}\n\n{input.buyer_name}",
+        tag = f"<{input.target_language}>"
+        return RfqEmailLocalizeOutput(
+            greeting=f"{tag} {input.greeting}", labels=[f"{tag} {label}" for label in input.labels]
         )
 
 
@@ -136,6 +140,7 @@ async def rfq_rows(migrator_engine: AsyncEngine, people: People) -> AsyncIterato
     for tenant_id in (people.tenant, people.other_tenant):
         async with tenant_session(migrator_engine, tenant_id) as session:
             for model in (
+                FollowupMessage,
                 ProposalLine,
                 Proposal,
                 Attachment,
@@ -143,6 +148,8 @@ async def rfq_rows(migrator_engine: AsyncEngine, people: People) -> AsyncIterato
                 Invite,
                 RfqLine,
                 Rfq,
+                RfqTemplateVersion,
+                RfqTemplate,
                 SupplierContact,
                 Supplier,
                 Contact,

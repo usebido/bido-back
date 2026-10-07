@@ -29,6 +29,7 @@ from sqlalchemy import (
     false,
     func,
     text,
+    true,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -215,6 +216,17 @@ class Rfq(Base):
     source_text: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # The template version its emails were rendered from, set at the first send.
+    # template_version 0 without a template_id: Bido's standard template.
+    template_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("rfq_templates.id", ondelete="SET NULL")
+    )
+    template_version: Mapped[int | None] = mapped_column(Integer)
+    # The chase schedule, in business days (migration 0008).
+    followups_enabled: Mapped[bool] = mapped_column(Boolean, server_default=true())
+    followup_first_after_days: Mapped[int] = mapped_column(Integer, server_default=text("2"))
+    followup_every_days: Mapped[int] = mapped_column(Integer, server_default=text("2"))
+    followup_max_chases: Mapped[int] = mapped_column(Integer, server_default=text("3"))
 
 
 class RfqLine(Base):
@@ -260,6 +272,8 @@ class Invite(Base):
     mailbox_connection_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("mailbox_connections.id", ondelete="SET NULL")
     )
+    # No chase before this (an auto-reply / out of office; migration 0008).
+    followups_paused_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Message(Base):
@@ -331,6 +345,44 @@ class ProposalLine(Base):
     # Per-field provenance, same shape as Proposal.fields.
     fields: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     needs_review: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+CORRECTION_ACTIONS = ("corrected", "confirmed")
+
+
+class FieldCorrection(Base):
+    """A user's correction (or confirmation) of one extracted value (migration 0010).
+
+    `proposal_line_id` is NULL for a proposal header field. `old_provenance` is
+    the extraction's record of the old value; the proposal tables hold the
+    effective value. Append-only: these rows are the extraction's eval set.
+    """
+
+    __tablename__ = "field_corrections"
+    __table_args__ = (
+        CheckConstraint(
+            "action IN ('corrected', 'confirmed')", name="field_corrections_action_check"
+        ),
+        Index("field_corrections_proposal_idx", "tenant_id", "proposal_id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    proposal_id: Mapped[UUID] = mapped_column(ForeignKey("proposals.id", ondelete="CASCADE"))
+    proposal_line_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("proposal_lines.id", ondelete="CASCADE")
+    )
+    field: Mapped[str] = mapped_column(Text)
+    action: Mapped[str] = mapped_column(Text)
+    # JSON of the column value (decimals and dates as strings); SQL NULL when empty.
+    old_value: Mapped[Any] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    new_value: Mapped[Any] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    old_provenance: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, server_default=text("'{}'::jsonb")
+    )
+    reason: Mapped[str | None] = mapped_column(Text)
+    corrected_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -413,9 +465,16 @@ class RfqTemplate(Base):
         CheckConstraint(
             "NOT is_default OR status = 'ready'", name="rfq_templates_default_ready_check"
         ),
+        CheckConstraint(
+            "category IS NULL OR category IN ('catalog', 'drawing', 'cell', 'material')",
+            name="rfq_templates_category_check",
+        ),
+        CheckConstraint("version >= 1", name="rfq_templates_version_check"),
+        # One default per tenant and item category (NULL = the general template).
         Index(
             "rfq_templates_one_default_idx",
             "tenant_id",
+            text("(coalesce(category, ''))"),
             unique=True,
             postgresql_where=text("is_default"),
         ),
@@ -436,10 +495,36 @@ class RfqTemplate(Base):
     # Ids only: {"scan_id": ..., "candidate_ids": [...]} or {"upload_ids": [...]}.
     source_refs: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     is_default: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    # A variant for one item category; None is the general template.
+    category: Mapped[str | None] = mapped_column(Text)
+    # The current version; its content is the row's own columns.
+    version: Mapped[int] = mapped_column(Integer, server_default=text("1"))
     error: Mapped[str | None] = mapped_column(Text)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class RfqTemplateVersion(Base):
+    """An immutable snapshot of one version of an RFQ template (the app cannot UPDATE it)."""
+
+    __tablename__ = "rfq_template_versions"
+    __table_args__ = (
+        UniqueConstraint("template_id", "version", name="rfq_template_versions_version_key"),
+        CheckConstraint("version >= 1", name="rfq_template_versions_version_check"),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    template_id: Mapped[UUID] = mapped_column(ForeignKey("rfq_templates.id", ondelete="CASCADE"))
+    version: Mapped[int] = mapped_column(Integer)
+    language: Mapped[str] = mapped_column(Text)
+    greeting: Mapped[str] = mapped_column(Text)
+    columns: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    footer_fields: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    fields: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    created_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class TemplateScan(Base):
@@ -483,4 +568,107 @@ class TemplateUpload(Base):
     content_type: Mapped[str] = mapped_column(Text)
     size_bytes: Mapped[int] = mapped_column(Integer)
     storage_key: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FollowupMessage(Base):
+    """A chase or clarification email Bido proposed for an invite (migration 0008).
+
+    The id is derived from (invite, kind, sequence). The approved text lives in
+    the approval's args; once sent, in `messages`.
+    """
+
+    __tablename__ = "followup_messages"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    invite_id: Mapped[UUID] = mapped_column(ForeignKey("invites.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(Text)
+    sequence: Mapped[int] = mapped_column(Integer)
+    proposal_id: Mapped[UUID | None] = mapped_column(ForeignKey("proposals.id", ondelete="CASCADE"))
+    status: Mapped[str] = mapped_column(Text, server_default=text("'proposed'"))
+    approval_id: Mapped[UUID | None] = mapped_column(ForeignKey("approvals.id"))
+    message_id_header: Mapped[str | None] = mapped_column(Text)
+    canceled_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# --- Supplier compliance (migration 0011) -----------------------------------
+
+COMPLIANCE_SCOPES = ("supplier", "manufacturer", "line")
+
+
+class ComplianceRequirement(Base):
+    """One document the tenant expects from suppliers. No rows = Bido's default set."""
+
+    __tablename__ = "compliance_requirements"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "code", name="compliance_requirements_tenant_code_key"),
+        CheckConstraint(
+            "scope IN ('supplier', 'manufacturer', 'line')",
+            name="compliance_requirements_scope_check",
+        ),
+        CheckConstraint(
+            "(scope = 'line') = (line_keyword IS NOT NULL)",
+            name="compliance_requirements_line_keyword_check",
+        ),
+        CheckConstraint(
+            "validity_months IS NULL OR validity_months BETWEEN 1 AND 120",
+            name="compliance_requirements_validity_check",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    code: Mapped[str] = mapped_column(Text)
+    name: Mapped[str] = mapped_column(Text)
+    scope: Mapped[str] = mapped_column(Text)
+    # Required for scope "line": the RFQ line's qualification must mention it.
+    line_keyword: Mapped[str | None] = mapped_column(Text)
+    # Lower-case filename fragments that mark a candidate attachment.
+    keywords: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    validity_months: Mapped[int | None] = mapped_column(Integer)
+    blocking: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    position: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SupplierComplianceDocument(Base):
+    """A document a person confirmed for one requirement of one supplier (and line)."""
+
+    __tablename__ = "supplier_compliance_documents"
+    __table_args__ = (
+        CheckConstraint(
+            "attachment_id IS NOT NULL OR url IS NOT NULL",
+            name="supplier_compliance_documents_evidence_check",
+        ),
+        CheckConstraint(
+            "url IS NULL OR url ~ '^https://'", name="supplier_compliance_documents_url_check"
+        ),
+        CheckConstraint(
+            "expires_on IS NULL OR issued_on IS NULL OR expires_on >= issued_on",
+            name="supplier_compliance_documents_dates_check",
+        ),
+        Index(
+            "supplier_compliance_documents_tenant_supplier_idx",
+            "tenant_id",
+            "supplier_id",
+            "requirement_code",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    supplier_id: Mapped[UUID] = mapped_column(ForeignKey("suppliers.id", ondelete="CASCADE"))
+    requirement_code: Mapped[str] = mapped_column(Text)
+    rfq_line_id: Mapped[UUID | None] = mapped_column(ForeignKey("rfq_lines.id", ondelete="CASCADE"))
+    attachment_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("attachments.id", ondelete="CASCADE")
+    )
+    url: Mapped[str | None] = mapped_column(Text)
+    issued_on: Mapped[date | None] = mapped_column(Date)
+    expires_on: Mapped[date | None] = mapped_column(Date)
+    recorded_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

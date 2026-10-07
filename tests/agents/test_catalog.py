@@ -16,6 +16,7 @@ from bido_back.agents.catalog import (
     QUOTE_EXTRACTION,
     RFQ_CANDIDATE_CLASSIFIER,
     RFQ_EMAIL_WRITER,
+    RFQ_FOLLOWUP_WRITER,
     RFQ_INTAKE,
     RFQ_TEMPLATE_BUILDER,
     quote_extraction,
@@ -26,6 +27,8 @@ from bido_back.agents.catalog.contracts import (
     QuoteExtractionOutput,
     RfqEmailInput,
     RfqEmailLine,
+    RfqEmailLocalizeInput,
+    RfqEmailLocalizeOutput,
     RfqEmailOutput,
     RfqIntakeInput,
     RfqIntakeOutput,
@@ -45,6 +48,7 @@ AGENTS: list[AgentDefinition[Any]] = [
     QUOTE_EXTRACTION,
     RFQ_CANDIDATE_CLASSIFIER,
     RFQ_TEMPLATE_BUILDER,
+    RFQ_FOLLOWUP_WRITER,
 ]
 
 
@@ -112,6 +116,21 @@ def test_output_schema_has_no_regex_lookarounds(agent: AgentDefinition[Any]) -> 
     schema = json.dumps(agent.output_model.model_json_schema())
 
     assert "(?" not in schema
+
+
+@pytest.mark.parametrize("agent", AGENTS, ids=lambda a: a.name)
+def test_output_schema_refs_have_no_sibling_keywords(agent: AgentDefinition[Any]) -> None:
+    # OpenAI's strict structured output rejects {"$ref": ..., "description": ...}.
+    def walk(node: object) -> list[str]:
+        if isinstance(node, dict):
+            fields = cast(dict[str, object], node)
+            bad = [str(fields)] if "$ref" in fields and len(fields) > 1 else []
+            return bad + [b for value in fields.values() for b in walk(value)]
+        if isinstance(node, list):
+            return [b for value in cast(list[object], node) for b in walk(value)]
+        return []
+
+    assert walk(agent.output_model.model_json_schema()) == []
 
 
 def test_models() -> None:
@@ -186,17 +205,24 @@ async def test_rfq_intake_runs(script: Script) -> None:
     _check_request(request, RFQ_INTAKE, task)
 
 
-async def test_rfq_email_writer_runs(script: Script) -> None:
+async def test_rfq_email_writer_localizes_template_text(script: Script) -> None:
+    task = RfqEmailLocalizeInput(
+        source_language="pt",
+        target_language="de",
+        greeting="Prezados, solicitamos cotação para os itens abaixo.",
+        labels=["Item", "Qtd.", "Validade da proposta"],
+    )
     expected = {
-        "subject": "Anfrage RFQ-12: LDO regulators for BMS board",
-        "body": "Sehr geehrte Damen und Herren,\nbitte um Angebot (RFQ-12) für TPS7A4701RGWR.",
+        "greeting": "Sehr geehrte Damen und Herren, wir bitten um ein Angebot.",
+        "labels": ["Pos.", "Menge", "Gültigkeit des Angebots"],
     }
 
-    result, request = await _run_one(script, RFQ_EMAIL_WRITER, EMAIL_TASK, expected)
+    result, request = await _run_one(script, RFQ_EMAIL_WRITER, task, expected)
 
-    output = cast(RfqEmailOutput, result.output)
-    assert rfq_email_problems(EMAIL_TASK, output) == []
-    _check_request(request, RFQ_EMAIL_WRITER, EMAIL_TASK)
+    output = cast(RfqEmailLocalizeOutput, result.output)
+    assert output.labels == ["Pos.", "Menge", "Gültigkeit des Angebots"]
+    assert RFQ_EMAIL_WRITER.prompt_version == 2
+    _check_request(request, RFQ_EMAIL_WRITER, task)
 
 
 async def test_quote_extraction_runs(script: Script) -> None:
@@ -226,6 +252,7 @@ async def test_quote_extraction_runs(script: Script) -> None:
                 "moq": _NONE,
                 "lead_time_days": _NONE,
                 "origin_country": _NONE,
+                "qualification": _NONE,
             }
         ],
         "missing_fields": ["lead_time", "validity"],

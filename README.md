@@ -116,6 +116,20 @@ tenants, approvals, the outbox, and the business endpoints.
   [agno-agi/agno#10589](https://github.com/agno-agi/agno/issues/10589)).
 - **Prompts are versioned files** in `prompts/`.
 
+## Scheduled jobs
+
+Long waits are database rows; nothing sleeps. EventBridge Scheduler puts two
+jobs on the jobs queue with the all-zeros tenant id (= every tenant):
+
+| Job | Every | What |
+|---|---|---|
+| `mailbox.sync` | 2 min | new messages in the RFQ threads of connected mailboxes |
+| `followups.sweep` | 15 min | chases due (business days, supplier holidays, auto-reply pauses), clarifications for offers with missing fields, cleanup of stale proposals |
+
+Every chase or clarification is proposed as a pending approval and sent only
+after a person approves it, in the RFQ's thread. Locally, trigger a sweep with
+`curl -X POST localhost:8080/dev/followups/sweep`.
+
 ## Observability
 
 - **Traces:** OpenTelemetry, exported over OTLP/HTTP to

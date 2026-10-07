@@ -41,6 +41,9 @@ from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.errors import Duplicate, MailboxNotConfigured, MailboxNotConnected, RfqError
 from bido_back.rfqs.mailbox import MailboxSenderFactory
+from bido_back.templates import service as template_service
+from bido_back.templates.schemas import TemplateEdit
+from bido_back.templates.service import RequiredFieldsRemoved
 
 logger = logging.getLogger(__name__)
 
@@ -600,7 +603,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         async with tenant_session(db, ctx.tenant_id) as session:
             row = await queries.default_template(session)
             if row is None:
-                # Start from Bido's standard template, then apply the change.
+                # Start from Bido's standard template; the change below is its version 2.
                 row = RfqTemplate(
                     tenant_id=principal.tenant_id,
                     created_by=principal.user_id,
@@ -615,18 +618,30 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                     is_default=True,
                 )
                 session.add(row)
-            if args.greeting is not None and args.greeting.strip():
-                row.greeting = args.greeting.strip()
-            if args.columns is not None:
-                row.columns = _clean(args.columns)
-            if args.footer_fields is not None:
-                row.footer = " · ".join(_clean(args.footer_fields))
-            if args.fields is not None:
-                row.fields = _clean(args.fields)
-            row.updated_at = datetime.now(UTC)
-            await session.flush()
-            logger.info("copilot updated template tenant=%s template=%s", ctx.tenant_id, row.id)
-            return _template_out(row)
+                await session.flush()
+            template_id = row.id
+            current = template_service.row_content(row)
+        greeting = (args.greeting or "").strip() or current.greeting
+        edit = TemplateEdit(
+            language=current.language,
+            greeting=greeting,
+            columns=_clean(args.columns) if args.columns is not None else current.columns,
+            footer_fields=(
+                _clean(args.footer_fields)
+                if args.footer_fields is not None
+                else current.footer_fields
+            ),
+            fields=_clean(args.fields) if args.fields is not None else current.fields,
+        )
+        # Versions are immutable: the edit is saved as the template's next version.
+        try:
+            await template_service.edit_template(db, principal, template_id, edit)
+        except RequiredFieldsRemoved as exc:
+            raise ToolError(str(exc)) from exc
+        async with tenant_session(db, ctx.tenant_id) as session:
+            updated = await queries.default_template(session)
+        logger.info("copilot updated template tenant=%s template=%s", ctx.tenant_id, template_id)
+        return _template_out(updated)
 
     async def create_rfq(ctx: ToolContext, args: CreateRfqIn) -> CreateRfqOut:
         principal = _principal(ctx)

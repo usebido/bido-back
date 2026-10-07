@@ -91,6 +91,27 @@ class RfqEmailOutput(BaseModel):
     body: str = Field(description="Plain text. Must ask for every field listed in the prompt.")
 
 
+# --- rfq_email_writer (v2): the buyer's template text in the supplier's language --------
+#
+# The RFQ email itself is rendered by code (`bido_back.templates.render`). The
+# writer only carries the buyer's own words (greeting, column headings, footer
+# fields) into the supplier's language. Same-language sends never call it.
+
+
+class RfqEmailLocalizeInput(BaseModel):
+    source_language: str = Field(description="ISO 639-1 of the buyer's template, e.g. pt")
+    target_language: str = Field(description="ISO 639-1 of the supplier, e.g. de")
+    greeting: str = Field(description="The buyer's opening paragraph")
+    labels: list[str] = Field(description="Column headings and footer fields, in order")
+
+
+class RfqEmailLocalizeOutput(BaseModel):
+    greeting: str = Field(description="The opening paragraph in the target language")
+    labels: list[str] = Field(
+        description="The same labels in the target language: same count, same order"
+    )
+
+
 # --- quote_extraction: supplier reply (+ attachments) -> proposal -------------
 
 
@@ -124,6 +145,9 @@ class ProposalLineDraft(BaseModel):
     moq: ExtractedValue
     lead_time_days: ExtractedValue
     origin_country: ExtractedValue
+    # The automotive qualification the supplier states for this offer, e.g. AEC-Q200.
+    # No Field(description=...): next to a $ref, OpenAI's strict schema rejects it.
+    qualification: ExtractedValue
 
 
 class QuoteExtractionInput(BaseModel):
@@ -196,3 +220,36 @@ class RfqTemplateBuilderOutput(BaseModel):
     columns: list[str] = Field(description="Item table headings, at most 8")
     footer_fields: list[str] = Field(description="Commercial terms asked for after the items")
     fields: list[str] = Field(description="Every field the buyer asks for")
+
+
+# --- rfq_followup_writer: a chase or a clarification question, in the thread ----
+
+FollowupKind = Literal["chase", "clarification"]
+FollowupField = Literal["currency", "valid_until", "unit_price", "quantity", "lead_time"]
+
+
+class FollowupItem(BaseModel):
+    """One thing the clarification email asks the supplier for."""
+
+    position: int | None = Field(description="RFQ line position; null for the whole offer")
+    line: str | None = Field(description="The line's description and MPN, as requested")
+    field: FollowupField
+    problem: Literal["missing", "unclear"]
+
+
+class FollowupEmailInput(BaseModel):
+    kind: FollowupKind
+    rfq_ref: str
+    rfq_title: str
+    buyer_company: str
+    buyer_name: str
+    supplier_name: str
+    supplier_language: str = Field(description="ISO 639-1, e.g. de, en, fr, pt")
+    chase_number: int = Field(description="1 for the first reminder; 0 for a clarification")
+    original_sent_on: date | None = None
+    response_due: date | None = None
+    open_items: list[FollowupItem] = Field(default_factory=list[FollowupItem])
+
+
+class FollowupEmailOutput(BaseModel):
+    body: str = Field(description="Plain text. The subject is set by code (Re: the RFQ email).")
