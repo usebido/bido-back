@@ -3,7 +3,8 @@
 Reads, in one `tenant_session`: the RFQ and its lines, its invites with the
 supplier names, the LATEST proposal version per invite and its lines, and
 the ECB rates in effect today (per currency, the latest `rate_date` on or
-before today; `fx_rates` is global reference data, not tenant-owned).
+before today; `fx_rates` is global reference data, not tenant-owned). Then
+applies the sector rules and recommendations (`bido_back.comparison.rules`).
 """
 
 from collections.abc import Mapping
@@ -27,11 +28,24 @@ from bido_back.comparison.compute import (
     SupplierQuote,
     compute_comparison,
 )
+from bido_back.comparison.rules import apply_rules
 from bido_back.db import tenant_session
 from bido_back.db.models import FxRate, Invite, Proposal, ProposalLine, Rfq, RfqLine, Supplier
 from bido_back.rfqs.errors import NotFound
 
 Db = AsyncEngine | async_sessionmaker[AsyncSession]
+
+
+def parsed_text(raw: Mapping[str, object], name: str) -> str | None:
+    """A grounded text value from the provenance jsonb, or None when unusable."""
+    entry = raw.get(name)
+    if not isinstance(entry, dict):
+        return None
+    values = cast(dict[str, object], entry)
+    parsed = values.get("parsed")
+    if not isinstance(parsed, str) or values.get("needs_review") is True:
+        return None
+    return parsed
 
 
 def field_infos(raw: Mapping[str, object]) -> dict[str, FieldInfo]:
@@ -80,6 +94,8 @@ async def load_comparison(db: Db, principal: Principal, rfq_id: UUID, today: dat
                 unit=line.unit,
                 quantities=tuple(Decimal(str(q)) for q in line.quantities),
                 incoterm=line.incoterm,
+                need_by=line.need_by,
+                qualification=line.qualification,
             )
             for line in await session.scalars(
                 select(RfqLine).where(RfqLine.rfq_id == rfq_id).order_by(RfqLine.position)
@@ -88,7 +104,7 @@ async def load_comparison(db: Db, principal: Principal, rfq_id: UUID, today: dat
         invites = list(
             (
                 await session.execute(
-                    select(Invite, Supplier.name)
+                    select(Invite, Supplier.name, Supplier.type)
                     .join(Supplier, Supplier.id == Invite.supplier_id)
                     .where(Invite.rfq_id == rfq_id)
                     .order_by(Invite.created_at, Invite.id)
@@ -124,7 +140,7 @@ async def load_comparison(db: Db, principal: Principal, rfq_id: UUID, today: dat
 
     quotes: list[SupplierQuote] = []
     awaiting: list[AwaitingSupplier] = []
-    for invite, supplier_name in invites:
+    for invite, supplier_name, supplier_type in invites:
         proposal = proposals.get(invite.id)
         if proposal is None:
             awaiting.append(
@@ -147,6 +163,7 @@ async def load_comparison(db: Db, principal: Principal, rfq_id: UUID, today: dat
                 valid_until=proposal.valid_until,
                 incoterm=proposal.incoterm,
                 fields=field_infos(proposal.fields),
+                supplier_type=supplier_type,
                 lines=tuple(
                     QuotedLine(
                         id=pl.id,
@@ -161,12 +178,13 @@ async def load_comparison(db: Db, principal: Principal, rfq_id: UUID, today: dat
                         lead_time_days=pl.lead_time_days,
                         needs_review=pl.needs_review,
                         fields=field_infos(pl.fields),
+                        qualification=parsed_text(pl.fields, "qualification"),
                     )
                     for pl in proposal_lines[proposal.id]
                 ),
             )
         )
-    return compute_comparison(
+    comparison = compute_comparison(
         rfq_id=rfq.id,
         base_currency=rfq.base_currency,
         lines=lines,
@@ -175,3 +193,4 @@ async def load_comparison(db: Db, principal: Principal, rfq_id: UUID, today: dat
         today=today,
         awaiting=awaiting,
     )
+    return apply_rules(comparison, lines, today)

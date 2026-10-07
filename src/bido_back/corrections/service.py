@@ -49,6 +49,7 @@ from bido_back.rfqs.errors import InvalidState, NotFound
 Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
 _REVIEW: Final = "_review"
+_PROVENANCE_ONLY: Final = frozenset({"qualification"})
 # Columns that cannot be cleared.
 _REQUIRED: Final = frozenset({"is_alternative"})
 _PRICED: Final = ("unit_price", "tooling_cost")
@@ -167,9 +168,11 @@ async def _record(
     request: LineCorrectionRequest | HeaderCorrectionRequest,
 ) -> None:
     """Append the correction, write the value, mark the field corrected."""
-    old: object = getattr(row, name)
     entry = fields.get(name)
     old_provenance = cast(dict[str, Any], entry) if isinstance(entry, dict) else {}
+    # Most fields are columns; a few (qualification) live only in the provenance.
+    is_column = name not in _PROVENANCE_ONLY
+    old: object = getattr(row, name) if is_column else old_provenance.get("parsed")
     correction = FieldCorrection(
         tenant_id=principal.tenant_id,
         proposal_id=proposal_id,
@@ -184,7 +187,8 @@ async def _record(
     )
     session.add(correction)
     await session.flush()
-    setattr(row, name, new)
+    if is_column:
+        setattr(row, name, new)
     fields[name] = {
         **old_provenance,
         "value": _json(new),

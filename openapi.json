@@ -316,6 +316,17 @@
             ],
             "title": "Proposal Line Id"
           },
+          "qualification": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qualification"
+          },
           "quantity": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Quantity",
@@ -325,6 +336,23 @@
             "format": "uuid",
             "title": "Rfq Line Id",
             "type": "string"
+          },
+          "rules": {
+            "items": {
+              "enum": [
+                "alternative_needs_approval",
+                "qualification_unconfirmed",
+                "unauthorized_source",
+                "authorization_unverified",
+                "late_for_need_by",
+                "moq_above_quantity",
+                "validity_expired",
+                "validity_ends_before_need_by"
+              ],
+              "type": "string"
+            },
+            "title": "Rules",
+            "type": "array"
           },
           "tier": {
             "title": "Tier",
@@ -445,6 +473,13 @@
             "title": "Lines",
             "type": "array"
           },
+          "recommendations": {
+            "items": {
+              "$ref": "#/components/schemas/Recommendation"
+            },
+            "title": "Recommendations",
+            "type": "array"
+          },
           "rfq_id": {
             "format": "uuid",
             "title": "Rfq Id",
@@ -503,9 +538,32 @@
             ],
             "title": "Mpn"
           },
+          "need_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need By"
+          },
           "position": {
             "title": "Position",
             "type": "integer"
+          },
+          "qualification": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qualification"
           },
           "quantities": {
             "items": {
@@ -863,6 +921,33 @@
         "title": "ErrorResponse",
         "type": "object"
       },
+      "ExcludedOffer": {
+        "properties": {
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invite_id",
+          "supplier_name",
+          "reasons"
+        ],
+        "title": "ExcludedOffer",
+        "type": "object"
+      },
       "FieldCorrectionView": {
         "properties": {
           "action": {
@@ -949,6 +1034,203 @@
           "created_at"
         ],
         "title": "FieldCorrectionView",
+        "type": "object"
+      },
+      "FollowupMessageView": {
+        "properties": {
+          "approval_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Id"
+          },
+          "canceled_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Canceled Reason"
+          },
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "chase",
+              "clarification"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          },
+          "sequence": {
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "proposed",
+              "sent",
+              "canceled",
+              "rejected"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "sequence",
+          "status",
+          "approval_id",
+          "canceled_reason",
+          "created_at",
+          "sent_at"
+        ],
+        "title": "FollowupMessageView",
+        "type": "object"
+      },
+      "FollowupSettings": {
+        "description": "The RFQ's chase schedule, in business days (weekends and supplier holidays skipped).",
+        "properties": {
+          "enabled": {
+            "title": "Enabled",
+            "type": "boolean"
+          },
+          "every_business_days": {
+            "description": "Then one chase every this many business days",
+            "title": "Every Business Days",
+            "type": "integer"
+          },
+          "first_after_business_days": {
+            "description": "First chase this many business days after the RFQ email",
+            "title": "First After Business Days",
+            "type": "integer"
+          },
+          "max_chases": {
+            "title": "Max Chases",
+            "type": "integer"
+          },
+          "response_due": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Due"
+          }
+        },
+        "required": [
+          "enabled",
+          "first_after_business_days",
+          "every_business_days",
+          "max_chases",
+          "response_due"
+        ],
+        "title": "FollowupSettings",
+        "type": "object"
+      },
+      "FollowupSettingsUpdate": {
+        "additionalProperties": false,
+        "description": "Only the fields sent are changed.",
+        "properties": {
+          "enabled": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Enabled"
+          },
+          "every_business_days": {
+            "anyOf": [
+              {
+                "maximum": 30.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Every Business Days"
+          },
+          "first_after_business_days": {
+            "anyOf": [
+              {
+                "maximum": 30.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First After Business Days"
+          },
+          "max_chases": {
+            "anyOf": [
+              {
+                "maximum": 10.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Chases"
+          },
+          "response_due": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Due"
+          }
+        },
+        "title": "FollowupSettingsUpdate",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -1050,6 +1332,95 @@
           "environment"
         ],
         "title": "HealthResponse",
+        "type": "object"
+      },
+      "InviteFollowups": {
+        "properties": {
+          "chase_state": {
+            "enum": [
+              "scheduled",
+              "awaiting_approval",
+              "paused",
+              "done",
+              "disabled",
+              "not_applicable"
+            ],
+            "title": "Chase State",
+            "type": "string"
+          },
+          "chases_used": {
+            "title": "Chases Used",
+            "type": "integer"
+          },
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          },
+          "invite_status": {
+            "title": "Invite Status",
+            "type": "string"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/FollowupMessageView"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "next_chase_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Chase At"
+          },
+          "paused_until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Paused Until"
+          },
+          "sent_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sent At"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invite_id",
+          "supplier_name",
+          "invite_status",
+          "sent_at",
+          "chase_state",
+          "next_chase_at",
+          "paused_until",
+          "chases_used",
+          "messages"
+        ],
+        "title": "InviteFollowups",
         "type": "object"
       },
       "InviteView": {
@@ -1207,6 +1578,20 @@
               }
             ],
             "title": "Origin Country"
+          },
+          "qualification": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Qualification the supplier states, e.g. AEC-Q200",
+            "title": "Qualification"
           },
           "reason": {
             "anyOf": [
@@ -1803,6 +2188,133 @@
         "title": "RateUsed",
         "type": "object"
       },
+      "Recommendation": {
+        "properties": {
+          "effective_unit_price_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Unit Price Base"
+          },
+          "excluded": {
+            "items": {
+              "$ref": "#/components/schemas/ExcludedOffer"
+            },
+            "title": "Excluded",
+            "type": "array"
+          },
+          "invite_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invite Id"
+          },
+          "justification": {
+            "title": "Justification",
+            "type": "string"
+          },
+          "lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lead Time Days"
+          },
+          "line_total_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Total Base"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "reasons": {
+            "items": {
+              "enum": [
+                "lowest_effective_price",
+                "tie_broken_by_lead_time",
+                "only_eligible_offer",
+                "no_offer_meets_need_by",
+                "no_eligible_offer"
+              ],
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "rfq_line_id": {
+            "format": "uuid",
+            "title": "Rfq Line Id",
+            "type": "string"
+          },
+          "runner_up": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RunnerUp"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "supplier_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Name"
+          },
+          "tier": {
+            "title": "Tier",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "rfq_line_id",
+          "tier",
+          "quantity",
+          "invite_id",
+          "supplier_name",
+          "effective_unit_price_base",
+          "line_total_base",
+          "lead_time_days",
+          "reasons",
+          "justification",
+          "runner_up",
+          "excluded"
+        ],
+        "title": "Recommendation",
+        "type": "object"
+      },
       "RfqCreated": {
         "properties": {
           "base_currency": {
@@ -1981,6 +2493,16 @@
             "title": "Invite Id",
             "type": "string"
           },
+          "kind": {
+            "default": "rfq",
+            "enum": [
+              "rfq",
+              "chase",
+              "clarification"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
           "rfq_id": {
             "anyOf": [
               {
@@ -2044,6 +2566,32 @@
           "body"
         ],
         "title": "RfqEmailDraft",
+        "type": "object"
+      },
+      "RfqFollowups": {
+        "properties": {
+          "invites": {
+            "items": {
+              "$ref": "#/components/schemas/InviteFollowups"
+            },
+            "title": "Invites",
+            "type": "array"
+          },
+          "rfq_id": {
+            "format": "uuid",
+            "title": "Rfq Id",
+            "type": "string"
+          },
+          "settings": {
+            "$ref": "#/components/schemas/FollowupSettings"
+          }
+        },
+        "required": [
+          "rfq_id",
+          "settings",
+          "invites"
+        ],
+        "title": "RfqFollowups",
         "type": "object"
       },
       "RfqLineView": {
@@ -2220,6 +2768,37 @@
           "created_at"
         ],
         "title": "RfqSummary",
+        "type": "object"
+      },
+      "RunnerUp": {
+        "properties": {
+          "effective_unit_price_base": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Effective Unit Price Base",
+            "type": "string"
+          },
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          },
+          "price_delta_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Price Delta Pct",
+            "type": "string"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invite_id",
+          "supplier_name",
+          "effective_unit_price_base",
+          "price_delta_pct"
+        ],
+        "title": "RunnerUp",
         "type": "object"
       },
       "ScanView": {
@@ -2519,6 +3098,23 @@
             "title": "Proposal Version",
             "type": "integer"
           },
+          "rules": {
+            "items": {
+              "enum": [
+                "alternative_needs_approval",
+                "qualification_unconfirmed",
+                "unauthorized_source",
+                "authorization_unverified",
+                "late_for_need_by",
+                "moq_above_quantity",
+                "validity_expired",
+                "validity_ends_before_need_by"
+              ],
+              "type": "string"
+            },
+            "title": "Rules",
+            "type": "array"
+          },
           "supplier_id": {
             "format": "uuid",
             "title": "Supplier Id",
@@ -2527,6 +3123,17 @@
           "supplier_name": {
             "title": "Supplier Name",
             "type": "string"
+          },
+          "supplier_type": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Type"
           },
           "totals": {
             "items": {
@@ -5815,6 +6422,226 @@
         "summary": "Export Comparison",
         "tags": [
           "exports"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/followups": {
+      "get": {
+        "operationId": "get_followups_v1_rfqs__rfq_id__followups_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RfqFollowups"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Followups",
+        "tags": [
+          "followups"
+        ]
+      },
+      "patch": {
+        "operationId": "update_followups_v1_rfqs__rfq_id__followups_patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FollowupSettingsUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RfqFollowups"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Update Followups",
+        "tags": [
+          "followups"
         ]
       }
     },

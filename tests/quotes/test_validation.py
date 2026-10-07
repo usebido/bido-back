@@ -72,6 +72,7 @@ def line(**overrides: object) -> ProposalLineDraft:
         "moq": NONE,
         "lead_time_days": ev("42", "Lieferzeit: 6 Wochen"),
         "origin_country": ev("CN", "Ursprungsland: China"),
+        "qualification": NONE,
     }
     fields.update(overrides)
     return ProposalLineDraft.model_validate(fields)

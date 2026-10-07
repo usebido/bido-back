@@ -27,6 +27,7 @@ from bido_back.approvals import (
     decide_approval,
 )
 from bido_back.auth import Principal
+from bido_back.followups.send import FOLLOWUP_REJECT_HOOKS
 from bido_back.rfqs.schemas import ApprovalQueueItem, ApprovalStatus
 from bido_back.rfqs.send import REJECT_HOOKS
 from bido_back.rfqs.service import list_approvals
@@ -96,7 +97,12 @@ def approvals_router() -> APIRouter:
     ) -> DecisionResponse:
         try:
             outcome = await decide_approval(
-                db, principal, approval_id, body.decision, jobs=jobs, on_reject=REJECT_HOOKS
+                db,
+                principal,
+                approval_id,
+                body.decision,
+                jobs=jobs,
+                on_reject={**REJECT_HOOKS, **FOLLOWUP_REJECT_HOOKS},
             )
         except (
             ApprovalForbidden,

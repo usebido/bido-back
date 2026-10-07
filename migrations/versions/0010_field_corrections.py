@@ -1,7 +1,7 @@
 """Field corrections: what a person changed (or confirmed) in an extracted quote.
 
 Revision ID: 0010
-Revises: 0007
+Revises: 0008
 Create Date: 2026-10-07
 
 `field_corrections`: one row per field a user corrected or confirmed on a
@@ -24,7 +24,7 @@ from alembic import op
 from sqlalchemy.dialects import postgresql
 
 revision: str = "0010"
-down_revision: str | Sequence[str] | None = "0007"
+down_revision: str | Sequence[str] | None = "0008"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

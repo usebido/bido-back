@@ -29,6 +29,7 @@ from sqlalchemy import (
     false,
     func,
     text,
+    true,
 )
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -215,6 +216,11 @@ class Rfq(Base):
     source_text: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # The chase schedule, in business days (migration 0008).
+    followups_enabled: Mapped[bool] = mapped_column(Boolean, server_default=true())
+    followup_first_after_days: Mapped[int] = mapped_column(Integer, server_default=text("2"))
+    followup_every_days: Mapped[int] = mapped_column(Integer, server_default=text("2"))
+    followup_max_chases: Mapped[int] = mapped_column(Integer, server_default=text("3"))
 
 
 class RfqLine(Base):
@@ -260,6 +266,8 @@ class Invite(Base):
     mailbox_connection_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("mailbox_connections.id", ondelete="SET NULL")
     )
+    # No chase before this (an auto-reply / out of office; migration 0008).
+    followups_paused_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Message(Base):
@@ -522,3 +530,26 @@ class TemplateUpload(Base):
     size_bytes: Mapped[int] = mapped_column(Integer)
     storage_key: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class FollowupMessage(Base):
+    """A chase or clarification email Bido proposed for an invite (migration 0008).
+
+    The id is derived from (invite, kind, sequence). The approved text lives in
+    the approval's args; once sent, in `messages`.
+    """
+
+    __tablename__ = "followup_messages"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    invite_id: Mapped[UUID] = mapped_column(ForeignKey("invites.id", ondelete="CASCADE"))
+    kind: Mapped[str] = mapped_column(Text)
+    sequence: Mapped[int] = mapped_column(Integer)
+    proposal_id: Mapped[UUID | None] = mapped_column(ForeignKey("proposals.id", ondelete="CASCADE"))
+    status: Mapped[str] = mapped_column(Text, server_default=text("'proposed'"))
+    approval_id: Mapped[UUID | None] = mapped_column(ForeignKey("approvals.id"))
+    message_id_header: Mapped[str | None] = mapped_column(Text)
+    canceled_reason: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

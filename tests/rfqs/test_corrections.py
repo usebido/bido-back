@@ -176,6 +176,34 @@ async def test_correcting_the_currency_clears_the_lines_currency_doubt(
     assert "needs_review" not in column.flags
 
 
+async def test_correcting_the_stated_qualification_lives_in_the_provenance(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    principal = buyer(rfq_rows)
+    quoted = await quoted_rfq(app_engine, principal)
+
+    corrected = await service.correct_line(
+        app_engine,
+        principal,
+        quoted.proposal_id,
+        quoted.line_id,
+        LineCorrectionRequest(qualification="AEC-Q200", reason="datasheet confirms it"),
+    )
+
+    assert "qualification" in corrected.corrected_fields
+    [row] = await service.list_corrections(app_engine, principal, quoted.proposal_id)
+    assert (row.field, row.action, row.old_value, row.new_value) == (
+        "qualification",
+        "corrected",
+        None,
+        "AEC-Q200",
+    )
+    comparison = await load_comparison(app_engine, principal, quoted.rfq.id, TODAY)
+    cell = next(c for c in comparison.suppliers[0].cells if c.tier == 0)
+    assert cell.qualification == "AEC-Q200"
+    assert "qualification" in cell.corrected_fields
+
+
 async def test_clearing_and_refusals(app_engine: AsyncEngine, rfq_rows: People) -> None:
     principal = buyer(rfq_rows)
     quoted = await quoted_rfq(app_engine, principal)

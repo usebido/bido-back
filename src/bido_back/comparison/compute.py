@@ -26,6 +26,9 @@ A value a person corrected or confirmed (`bido_back.corrections`) is shown as
 corrected, listed in `corrected_fields`, and never counts as low confidence.
 Supplier totals per tier sum what could be priced and say whether that is
 every requested line (`complete`).
+
+Sector rules (`rules` on cells and suppliers) and the per-line recommendation
+are added on top by `bido_back.comparison.rules`.
 """
 
 from collections.abc import Mapping, Sequence
@@ -88,6 +91,9 @@ class RequestedLine:
     unit: str
     quantities: tuple[Decimal, ...]
     incoterm: str | None = None
+    need_by: date | None = None
+    # Required qualification as the buyer wrote it, e.g. "AEC-Q200".
+    qualification: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +111,8 @@ class QuotedLine:
     lead_time_days: int | None = None
     needs_review: bool = False
     fields: Mapping[str, FieldInfo] = field(default_factory=dict[str, FieldInfo])
+    # Qualification the supplier states for this offer (grounded text), if any.
+    qualification: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +127,8 @@ class SupplierQuote:
     incoterm: str | None
     lines: tuple[QuotedLine, ...]
     fields: Mapping[str, FieldInfo] = field(default_factory=dict[str, FieldInfo])
+    # suppliers.type: authorized_distributor, distributor, reseller, manufacturer...
+    supplier_type: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,6 +140,19 @@ class Rate:
 
 # --- Outputs -------------------------------------------------------------------------
 
+# Sector rules (see `bido_back.comparison.rules`). Kept apart from `Flag` so
+# the API adds a field instead of growing an existing enum.
+RuleFlag = Literal[
+    "alternative_needs_approval",
+    "qualification_unconfirmed",
+    "unauthorized_source",
+    "authorization_unverified",
+    "late_for_need_by",
+    "moq_above_quantity",
+    "validity_expired",
+    "validity_ends_before_need_by",
+]
+
 
 class ComparisonLine(BaseModel):
     id: UUID
@@ -139,6 +162,8 @@ class ComparisonLine(BaseModel):
     unit: str
     quantities: list[Decimal]
     incoterm: str | None
+    need_by: date | None = None
+    qualification: str | None = None
 
 
 class Cell(BaseModel):
@@ -163,6 +188,8 @@ class Cell(BaseModel):
     low_confidence_fields: list[str]
     proposal_line_id: UUID | None = None
     corrected_fields: list[str] = Field(default_factory=list[str])
+    qualification: str | None = None
+    rules: list[RuleFlag] = Field(default_factory=list[RuleFlag])
 
 
 class TierTotal(BaseModel):
@@ -188,6 +215,8 @@ class SupplierColumn(BaseModel):
     max_lead_time_days: int | None
     cells: list[Cell]
     totals: list[TierTotal]
+    supplier_type: str | None = None
+    rules: list[RuleFlag] = Field(default_factory=list[RuleFlag])
 
 
 class AwaitingSupplier(BaseModel):
@@ -203,6 +232,47 @@ class RateUsed(BaseModel):
     rate_date: date
 
 
+ReasonCode = Literal[
+    "lowest_effective_price",
+    "tie_broken_by_lead_time",
+    "only_eligible_offer",
+    "no_offer_meets_need_by",
+    "no_eligible_offer",
+]
+
+
+class ExcludedOffer(BaseModel):
+    invite_id: UUID
+    supplier_name: str
+    # Blocking flags and rules, e.g. "alternative_needs_approval", "low_confidence".
+    reasons: list[str]
+
+
+class RunnerUp(BaseModel):
+    invite_id: UUID
+    supplier_name: str
+    effective_unit_price_base: Decimal
+    # How much more expensive than the winner, in percent.
+    price_delta_pct: Decimal
+
+
+class Recommendation(BaseModel):
+    rfq_line_id: UUID
+    tier: int
+    quantity: Decimal
+    # None when no offer can be recommended (see `excluded`).
+    invite_id: UUID | None
+    supplier_name: str | None
+    effective_unit_price_base: Decimal | None
+    line_total_base: Decimal | None
+    lead_time_days: int | None
+    reasons: list[ReasonCode]
+    # One sentence built from the numbers above, in English; never model output.
+    justification: str
+    runner_up: RunnerUp | None
+    excluded: list[ExcludedOffer]
+
+
 class Comparison(BaseModel):
     rfq_id: UUID
     base_currency: str
@@ -211,6 +281,7 @@ class Comparison(BaseModel):
     suppliers: list[SupplierColumn]
     awaiting: list[AwaitingSupplier]
     fx_rates: list[RateUsed]
+    recommendations: list[Recommendation] = Field(default_factory=list[Recommendation])
 
 
 # --- Pure helpers ----------------------------------------------------------------------
@@ -319,6 +390,7 @@ _CORRECTABLE_LINE_FIELDS: Final = (
     "moq",
     "lead_time_days",
     "origin_country",
+    "qualification",
 )
 _CORRECTABLE_PROPOSAL_FIELDS: Final = (*_PROPOSAL_FIELDS, "payment_terms")
 
@@ -445,6 +517,7 @@ def compute_cell(
         low_confidence_fields=low,
         proposal_line_id=chosen.id,
         corrected_fields=_corrected(chosen.fields, _CORRECTABLE_LINE_FIELDS),
+        qualification=chosen.qualification,
     )
 
 
@@ -505,6 +578,7 @@ def compute_supplier(
         max_lead_time_days=max(lead_times) if lead_times else None,
         cells=cells,
         totals=totals,
+        supplier_type=quote.supplier_type,
     )
 
 
@@ -539,6 +613,8 @@ def compute_comparison(
                 unit=line.unit,
                 quantities=list(line.quantities),
                 incoterm=line.incoterm,
+                need_by=line.need_by,
+                qualification=line.qualification,
             )
             for line in ordered
         ],

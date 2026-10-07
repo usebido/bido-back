@@ -77,6 +77,7 @@ LINE_FIELDS: Final[Mapping[str, FieldKind]] = {
     "moq": "quantity",
     "lead_time_days": "days",
     "origin_country": "country",
+    "qualification": "text",
 }
 
 type Parsed = Decimal | int | date | str

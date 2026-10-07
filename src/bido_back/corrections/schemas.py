@@ -56,6 +56,9 @@ class LineCorrectionRequest(_Correction):
     moq: Quantity | None = None
     lead_time_days: Annotated[int, Field(ge=0, le=3650)] | None = None
     origin_country: Annotated[str, StringConstraints(pattern=r"^[A-Z]{2}$")] | None = None
+    qualification: ShortText | None = Field(
+        default=None, description="Qualification the supplier states, e.g. AEC-Q200"
+    )
 
 
 class HeaderCorrectionRequest(_Correction):
