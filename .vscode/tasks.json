@@ -15,9 +15,9 @@
   "tasks": [
     {
       "label": "dev: services up",
-      "detail": "Postgres, Mailpit and ElasticMQ in docker compose",
+      "detail": "Creates .env from .env.example if missing; Postgres, Mailpit and ElasticMQ in docker compose",
       "type": "shell",
-      "command": "docker compose up -d --wait db mailpit elasticmq",
+      "command": "(test -f .env || (cp .env.example .env && echo 'created .env from .env.example')) && docker compose up -d --wait db mailpit elasticmq",
       "problemMatcher": []
     },
     {
