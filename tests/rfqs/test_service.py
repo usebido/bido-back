@@ -4,7 +4,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.context import ToolContext
@@ -43,6 +43,8 @@ from bido_back.rfqs.send import (
     register_act_tools,
     send_proposal_ids,
 )
+from bido_back.templates import service as templates_service
+from bido_back.templates.schemas import TemplateEdit
 from tests.approvals.conftest import FakeJobQueue, People
 
 from .conftest import FakeIntake, FakeMailboxes, FakeWriter, user_email
@@ -179,19 +181,45 @@ async def test_prepare_send_records_pending_approvals_with_the_exact_email(
     assert approval is not None and invite is not None
     assert approval.status == "pending" and approval.tool == SEND_RFQ_EMAIL
     assert approval.requested_by == rfq_rows.owner
+    preview = await service.preview_email(
+        app_engine, buyer(rfq_rows), rfq.id, invite_id, FakeWriter()
+    )
     assert approval.args == {
         "invite_id": str(invite_id),
         "sender_user_id": str(rfq_rows.owner),
         "to": [to],
         "cc": [],
-        "subject": f"[{rfq.ref}] Request for quotation: {rfq.title}",
-        "body": (
-            "Dear Rhein,\n\nplease quote:\n1. MLCC 100nF 50V X7R 0603\n"
-            "2. Board-to-board connector 40 pin\n\n"
-            f"{(await _tenant_name(app_engine, rfq_rows.tenant))} purchasing"
-        ),
+        # The supplier writes German; no template yet, so Bido's standard one.
+        "subject": f"[{rfq.ref}] Angebotsanfrage: {rfq.title}",
+        "body": preview.text,  # the preview is exactly what goes to approval
     }
+    body = preview.text
+    company = await _tenant_name(app_engine, rfq_rows.tenant)
+    assert body.startswith("<de> Olá, gostaríamos de receber a cotação")  # localized greeting
+    assert f"Unsere Referenz: {rfq.ref}." in body
+    assert "GRM188R71H104KA93D" in body and "4000 / 10000" in body
+    assert "Board-to-board connector 40 pin" in body
+    assert "Incoterm" in body and "DAP" in body
+    # The standard footer, localized, then the required questions it does not cover.
+    for ask in (
+        "- <de> Validade da proposta",
+        "- <de> Condição de pagamento",
+        "- Verpackungseinheit",
+        "- RoHS- und REACH-Erklärungen",
+        "- Lieferzeit",
+        "- Mindestbestellmenge (MOQ)",
+    ):
+        assert ask in body
+    assert "Gültigkeit des Angebots" not in body  # covered by "Validade da proposta"
+    assert "Bitte senden Sie Ihr Angebot bis 01.11.2026." in body
+    assert body.endswith(f"{company} purchasing\n{company}\n")
+    assert preview.template_id is None and preview.template_version == 0
+    assert "<table" in preview.html and "GRM188R71H104KA93D" in preview.html
     assert invite.status == "pending_approval"
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        pinned = await session.get(Rfq, rfq.id)
+    assert pinned is not None
+    assert (pinned.template_id, pinned.template_version) == (None, 0)
     assert mailboxes.calls == [(rfq_rows.tenant, rfq_rows.owner)]
 
     # Preparing again proposes nothing new.
@@ -214,47 +242,91 @@ async def _tenant_name(engine: AsyncEngine, tenant_id: UUID) -> str:
     return tenant.name
 
 
-async def test_prepare_send_follows_the_tenants_default_template(
+async def test_prepare_send_renders_the_tenants_default_template_and_pins_its_version(
     app_engine: AsyncEngine, migrator_engine: AsyncEngine, rfq_rows: People
 ) -> None:
     principal = buyer(rfq_rows)
     rfq = await make_rfq(app_engine, principal)
     supplier = await make_supplier(app_engine, principal, "Rhein")
+    other = await make_supplier(app_engine, principal, "Lyon")
     await service.add_invite(app_engine, principal, rfq.id, supplier.id, supplier.contacts[0].id)
     async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        default = RfqTemplate(
+            tenant_id=rfq_rows.tenant,
+            source="search",
+            status="ready",
+            language="de",
+            greeting="Sehr geehrte Damen und Herren, bitte bieten Sie an:",
+            columns=["Pos.", "Bezeichnung", "Menge", "Stückpreis"],
+            footer="Lieferzeit · Gültigkeit",
+            fields=["Menge", "Lieferzeit"],
+            is_default=True,
+        )
         session.add_all(
             [
-                RfqTemplate(
-                    tenant_id=rfq_rows.tenant,
-                    source="search",
-                    status="ready",
-                    language="pt",
-                    greeting="Prezados, segue solicitação de cotação.",
-                    fields=["Item", "Frete"],
-                    is_default=True,
-                ),
+                default,
                 # Not the default: ignored.
                 RfqTemplate(
                     tenant_id=rfq_rows.tenant, source="none", status="ready", greeting="Olá"
                 ),
             ]
         )
+        await session.flush()
+        default_id = default.id
     writer = FakeWriter()
     try:
         await service.prepare_send(app_engine, principal, rfq.id, writer, FakeMailboxes())
+        # The template changes after the first send...
+        await service.add_invite(app_engine, principal, rfq.id, other.id, other.contacts[0].id)
+        await templates_service.edit_template(
+            app_engine,
+            principal,
+            default_id,
+            TemplateEdit(
+                language="de",
+                greeting="Changed later",
+                columns=["Pos.", "Bezeichnung", "Menge", "Stückpreis"],
+                footer_fields=["Lieferzeit", "Gültigkeit"],
+                fields=["Menge", "Lieferzeit"],
+            ),
+        )
+        result = await service.prepare_send(app_engine, principal, rfq.id, writer, FakeMailboxes())
+        async with tenant_session(app_engine, rfq_rows.tenant) as session:
+            pinned = await session.get(Rfq, rfq.id)
+            approvals = list(
+                await session.scalars(
+                    select(Approval).where(
+                        Approval.id.in_([p.approval_id for p in result.approvals])
+                    )
+                )
+            )
     finally:
         async with tenant_session(migrator_engine, rfq_rows.tenant) as session:
+            await session.execute(update(Rfq).values(template_id=None))
             await session.execute(
                 delete(RfqTemplate).where(RfqTemplate.tenant_id == rfq_rows.tenant)
             )
 
-    [task] = writer.calls
-    assert task.template is not None
-    assert task.template.model_dump() == {
-        "language": "pt",
-        "greeting": "Prezados, segue solicitação de cotação.",
-        "fields": ["Item", "Frete"],
-    }
+    # Same language (de): the buyer's own words, no model call.
+    assert writer.calls == []
+    assert pinned is not None and (pinned.template_id, pinned.template_version) == (default_id, 1)
+    [approval] = approvals
+    body = str(approval.args["body"])
+    # ...to version 2, but the RFQ is pinned: the second email still uses version 1.
+    assert body.startswith("Sehr geehrte Damen und Herren, bitte bieten Sie an:")
+    header = next(line for line in body.splitlines() if line.startswith("Pos."))
+    assert [h.strip() for h in header.split("|")] == [
+        "Pos.",
+        "Bezeichnung",
+        "Menge",
+        "Stückpreis",  # the supplier fills it
+        "MPN",
+        "Hersteller",
+        "Einheit",
+        "Incoterm",  # only one line has it, so per line rather than under the table
+    ]
+    assert "- Lieferzeit\n- Gültigkeit\n" in body
+    assert "Gültigkeit des Angebots" not in body  # "Gültigkeit" covers it
 
 
 async def test_prepare_send_without_a_mailbox_fails_before_any_draft(

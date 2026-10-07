@@ -26,6 +26,7 @@ from bido_back.api.proposals import proposals_router
 from bido_back.api.rfqs import rfqs_router
 from bido_back.api.search import search_router
 from bido_back.api.suppliers import suppliers_router
+from bido_back.api.templates import templates_router
 from bido_back.observability import init_observability, instrument_fastapi
 from bido_back.settings import Settings, get_settings
 
@@ -69,6 +70,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(approvals_router())
     app.include_router(mailbox_router())
     app.include_router(onboarding_router())
+    app.include_router(templates_router())
     app.include_router(compliance_router())
     app.include_router(proposals_router())
     app.include_router(search_router())
