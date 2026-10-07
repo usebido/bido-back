@@ -81,10 +81,13 @@ no duplicate side effects are the properties every change must preserve.
   with `external_execution`, so Agno can never run it: the run stops with an
   `ApprovalRequested` proposal, recorded as a `pending` row in our `approvals`
   table.
-- **Only our guard turns a proposal into an action.** An approver decides
-  through `POST /v1/approvals/{id}/decision`; the guard checks the tenant, that
-  the decider is an approver or owner and not the requester, and that the
-  stored payload still matches its hash. Execution then happens once, in the
+- **Only our guard turns a proposal into an action.** A person decides every
+  outbound action through `POST /v1/approvals/{id}/decision`. The guard checks
+  the tenant, who may decide, and that the stored payload still matches its
+  hash. By default the buyer who asked may approve what the AI prepared for
+  them (`tenants.allow_self_approval`, recorded as `self_approved`); four-eyes
+  (an approver or owner who is not the requester) is an opt-in tenant policy,
+  enforced by the guard and by the database. Execution then happens once, in the
   worker, keyed by the approval id. Never mount Agno's AgentOS endpoints or
   resume a paused run from client-supplied state (see the open upstream bug
   [agno-agi/agno#10589](https://github.com/agno-agi/agno/issues/10589)). Agno's

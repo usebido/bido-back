@@ -1,10 +1,14 @@
-"""decide_approval: only an authorized approver decides, once, on an unchanged payload."""
+"""decide_approval: only an authorized person decides, once, on an unchanged payload.
+
+By default the requester may decide their own request (the AI prepared it for
+them); a four-eyes tenant requires an approver or owner who is not the requester.
+"""
 
 import asyncio
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.approvals import (
@@ -22,7 +26,7 @@ from bido_back.approvals import (
 )
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
-from bido_back.db.models import AuditEvent
+from bido_back.db.models import Approval, AuditEvent, Tenant
 
 from .conftest import (
     PAY_ARGS,
@@ -62,20 +66,87 @@ async def test_member_cannot_approve(app_engine: AsyncEngine, people: People) ->
     assert jobs.jobs == []
 
 
-async def test_requester_cannot_approve_own_request(
+async def _four_eyes(migrator_engine: AsyncEngine, tenant_id: UUID) -> None:
+    # The app role cannot UPDATE tenants: the policy is set by the migrator.
+    async with tenant_session(migrator_engine, tenant_id) as session:
+        await session.execute(
+            update(Tenant).where(Tenant.id == tenant_id).values(allow_self_approval=False)
+        )
+
+
+async def _self_approved_marks(
+    engine: AsyncEngine, tenant_id: UUID, approval_id: UUID
+) -> tuple[bool, list[bool]]:
+    async with tenant_session(engine, tenant_id) as session:
+        row = await session.scalar(select(Approval).where(Approval.id == approval_id))
+        assert row is not None
+        events = (
+            await session.scalars(
+                select(AuditEvent).where(
+                    AuditEvent.action.in_(("approval.approved", "approval.rejected")),
+                    AuditEvent.payload["approval_id"].astext == str(approval_id),
+                )
+            )
+        ).all()
+        return row.self_approved, [bool(e.payload["self_approved"]) for e in events]
+
+
+@pytest.mark.parametrize("requester", ["approver", "member"])
+async def test_requester_may_decide_own_request_by_default(
+    app_engine: AsyncEngine, people: People, requester: str
+) -> None:
+    # The AI prepared the act for this buyer; the buyer reviews and approves it,
+    # whatever their role. Hash check and execute-once are unchanged.
+    user: UUID = getattr(people, requester)
+    approval_id = await propose(app_engine, people.tenant, user)
+    jobs = FakeJobQueue()
+
+    outcome = await decide_approval(
+        app_engine, as_user(people, user), approval_id, "approve", jobs=jobs
+    )
+
+    assert outcome == DecisionOutcome(approval_id=approval_id, status="approved")
+    approval = await load(app_engine, people.tenant, approval_id)
+    assert (approval.status, approval.decided_by) == ("approved", user)
+    assert await _self_approved_marks(app_engine, people.tenant, approval_id) == (True, [True])
+    assert [j.idempotency_key for j in jobs.jobs] == [f"approval:{approval_id}"]
+
+
+async def test_deciding_someone_elses_request_is_not_self_approved(
     app_engine: AsyncEngine, people: People
 ) -> None:
-    # The requester holds the approver role: only the self-approval rule stops them.
+    approval_id = await propose(app_engine, people.tenant, people.owner)
+
+    await decide_approval(
+        app_engine, as_user(people, people.approver), approval_id, "reject", jobs=FakeJobQueue()
+    )
+
+    assert await _self_approved_marks(app_engine, people.tenant, approval_id) == (False, [False])
+
+
+async def test_four_eyes_tenant_forbids_deciding_own_request(
+    app_engine: AsyncEngine, migrator_engine: AsyncEngine, people: People
+) -> None:
+    await _four_eyes(migrator_engine, people.tenant)
+    # The requester holds the approver role: only the four-eyes policy stops them.
     approval_id = await propose(app_engine, people.tenant, people.approver)
     jobs = FakeJobQueue()
 
-    with pytest.raises(ApprovalForbidden, match="requester"):
-        await decide_approval(
-            app_engine, as_user(people, people.approver), approval_id, "approve", jobs=jobs
-        )
+    for decision in ("approve", "reject"):
+        with pytest.raises(ApprovalForbidden, match="second person"):
+            await decide_approval(
+                app_engine, as_user(people, people.approver), approval_id, decision, jobs=jobs
+            )
 
     await assert_untouched(app_engine, people, approval_id)
     assert jobs.jobs == []
+
+    # Someone else with the approver role still can.
+    outcome = await decide_approval(
+        app_engine, as_user(people, people.second_approver), approval_id, "approve", jobs=jobs
+    )
+    assert outcome.status == "approved"
+    assert await _self_approved_marks(app_engine, people.tenant, approval_id) == (False, [False])
 
 
 async def test_approver_of_another_tenant_gets_not_found(
@@ -171,6 +242,7 @@ async def test_approve_enqueues_and_the_worker_executes_exactly_once(
         "approval_id": str(approval_id),
         "tool": "pay_supplier",
         "args_hash": approval.args_hash,
+        "self_approved": False,
     }
 
     assert len(jobs.jobs) == 1

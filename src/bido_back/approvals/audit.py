@@ -1,4 +1,8 @@
-"""Audit events for approvals: ids and the hash only, never the arguments."""
+"""Audit events for approvals: ids, the hash and the self-approval mark only.
+
+Never the arguments. `self_approved` is true when the requester decided their
+own approval (tenants that allow self-approval, the default).
+"""
 
 from uuid import UUID
 
@@ -14,5 +18,7 @@ def approval_audit(approval: Approval, action: str, actor: UUID | None) -> Audit
             "approval_id": str(approval.id),
             "tool": approval.tool,
             "args_hash": approval.args_hash,
+            # None until flushed (server default): not a self-approval.
+            "self_approved": bool(approval.self_approved),
         },
     )

@@ -12,11 +12,13 @@ from the model's arguments, and works in that tenant's RLS-scoped session.
   suppliers (draft invites), update the RFQ template, prepare sends, and
   propose counter-offers. None of them sends anything: each records one
   pending approval per email (`rfqs.service.prepare_send`,
-  `negotiation.service.evaluate_rfq`), which an approver who is not the
-  requester decides on; the worker sends only after that. The prices in a
-  counter-offer are decided by the negotiation strategy, never by this model.
+  `negotiation.service.evaluate_rfq`), which a person decides on (by default
+  the buyer themself; a second person in four-eyes tenants); the worker sends
+  only after that. The prices in a counter-offer are decided by the
+  negotiation strategy, never by this model.
 - `prepare_award` asks for approval to award an RFQ (`awards.service`); the
-  award and its purchase orders exist only after an approver executes it.
+  award and its purchase orders exist only after a person approves it (the
+  buyer by default; a second person in four-eyes tenants).
 
 There is no `act` tool here on purpose: the only thing the copilot can make
 happen outside Bido is an email, and that already goes through the approval
@@ -1173,8 +1175,9 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             differs_from_recommendation=requested.differs_from_recommendation,
             lines=_awarded_items(requested.lines),
             note=(
-                "Nothing was awarded yet. An approver other than the buyer must approve "
-                "the award; then the purchase orders are created as drafts."
+                "Nothing was awarded yet. The award must be approved first (by the buyer, "
+                "or a second person if the company requires one); then the purchase "
+                "orders are created as drafts."
             ),
         )
 
@@ -1310,7 +1313,8 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         Tool(
             "prepare_send",
             "Write the RFQ email for every draft invite and ask for approval. Nothing is "
-            "sent: an approver (not the requester) must approve each email first." + rfq_ref_hint,
+            "sent: the buyer (or, if the company requires it, a second person) must approve "
+            "each email first." + rfq_ref_hint,
             RfqRef,
             PrepareSendOut,
             "draft",
@@ -1357,8 +1361,8 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         Tool(
             "prepare_award",
             "Ask for approval to award an RFQ: the recommendation, or the suppliers the "
-            "buyer chose (then a reason is required). Nothing is awarded until an "
-            "approver (not the requester) approves." + rfq_ref_hint,
+            "buyer chose (then a reason is required). Nothing is awarded until the "
+            "award is approved." + rfq_ref_hint,
             PrepareAwardIn,
             PrepareAwardOut,
             "draft",

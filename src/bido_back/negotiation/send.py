@@ -1,7 +1,8 @@
 """The `send_negotiation_email` act tool: send one approved counter-offer or BAFO.
 
 Never offered to a model. The negotiation sweep (`bido_back.negotiation.service`)
-records a proposal for it; an approver who is not the requester approves; the
+records a proposal for it; a person approves it (the buyer by default, a
+second person in four-eyes tenants: the approvals guard decides); the
 worker's `ApprovalExecutor` runs this handler once, with the APPROVED arguments.
 
 It goes out from the connected mailbox of the buyer who sent the RFQ email

@@ -1,9 +1,9 @@
 """The award's act tools: `award_rfq`, `send_purchase_order`, `send_award_notice`.
 
-None of them is offered to a model. The award service records a proposal; an
-approver (not the requester, with the approver or owner role: the guard
-checks both) approves; the worker's `ApprovalExecutor` runs the handler once,
-with the APPROVED arguments.
+None of them is offered to a model. The award service records a proposal; a
+person approves it (the buyer by default; in four-eyes tenants an approver or
+owner who is not the requester: the guard checks it); the worker's
+`ApprovalExecutor` runs the handler once, with the APPROVED arguments.
 
 `award_rfq` writes the award and one purchase order per awarded supplier
 (`PO-<n>`, numbered per tenant), and closes the RFQ. It refuses to award an

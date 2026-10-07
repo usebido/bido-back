@@ -3637,6 +3637,10 @@
       },
       "MeResponse": {
         "properties": {
+          "allow_self_approval": {
+            "title": "Allow Self Approval",
+            "type": "boolean"
+          },
           "email": {
             "title": "Email",
             "type": "string"
@@ -3677,7 +3681,8 @@
           "email",
           "tenant_id",
           "tenant_name",
-          "role"
+          "role",
+          "allow_self_approval"
         ],
         "title": "MeResponse",
         "type": "object"
@@ -12016,7 +12021,7 @@
         ]
       },
       "post": {
-        "description": "Propose the award: one approval; an approver other than the caller decides.",
+        "description": "Propose the award: one approval, decided by a person (the buyer by default).",
         "operationId": "request_award_v1_rfqs__rfq_id__award_post",
         "parameters": [
           {

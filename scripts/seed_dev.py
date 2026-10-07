@@ -1,4 +1,4 @@
-"""Seed a local development tenant: two users, two suppliers with contacts.
+"""Seed local development tenants: users, and suppliers with contacts.
 
     uv run python scripts/seed_dev.py
 
@@ -7,10 +7,16 @@ role, through tenant_session, like the api). Idempotent: re-running finds the
 same tenant, users and suppliers instead of adding new ones.
 
 Creates:
-  * tenant "Dev Procurement GmbH" (fixed id, so re-runs find it);
+  * tenant "Dev Procurement GmbH" (fixed id, so re-runs find it), with the
+    default approval policy: a user may approve what they requested
+    (`allow_self_approval`);
   * user `user_dev_buyer` (role member) and `user_dev_approver` (role approver),
     each with a `buyer` contact carrying their name;
-  * two suppliers, each with one contact (example.test addresses).
+  * two suppliers, each with one contact (example.test addresses);
+  * tenant "Dev Four-Eyes AG" with `allow_self_approval = false` (the
+    opt-in four-eyes policy) and its own two users, `user_fe_buyer` (member)
+    and `user_fe_approver` (approver). Separate users, because a user with
+    two memberships must send X-Tenant-Id on every request.
 
 Then prints the X-Dev-User values. With AUTH_DEV_MODE=true and
 ENVIRONMENT=local the api accepts `X-Dev-User: <clerk_user_id>`. With
@@ -31,6 +37,12 @@ from bido_back.settings import get_settings
 
 TENANT_ID = UUID("00000000-0000-4000-8000-00000000d001")
 TENANT_NAME = "Dev Procurement GmbH"
+FOUR_EYES_TENANT_ID = UUID("00000000-0000-4000-8000-00000000d002")
+FOUR_EYES_TENANT_NAME = "Dev Four-Eyes AG"
+FOUR_EYES_USERS = (
+    ("user_fe_buyer", "buyer@dev-four-eyes.example.test", "Lena Buyer", "member"),
+    ("user_fe_approver", "approver@dev-four-eyes.example.test", "Paul Approver", "approver"),
+)
 USERS = (
     # clerk_user_id, email, name, role
     ("user_dev_buyer", "buyer@dev-procurement.example.test", "Anna Buyer", "member"),
@@ -60,7 +72,12 @@ SUPPLIERS = (
 
 
 async def _user(
-    session: AsyncSession, clerk_user_id: str, email: str, name: str, role: str
+    session: AsyncSession,
+    tenant_id: UUID,
+    clerk_user_id: str,
+    email: str,
+    name: str,
+    role: str,
 ) -> UUID:
     user = await session.scalar(select(User).where(User.clerk_user_id == clerk_user_id))
     if user is None:
@@ -68,15 +85,15 @@ async def _user(
         session.add(user)
         await session.flush()
     membership = await session.scalar(
-        select(Membership).where(Membership.tenant_id == TENANT_ID, Membership.user_id == user.id)
+        select(Membership).where(Membership.tenant_id == tenant_id, Membership.user_id == user.id)
     )
     if membership is None:
-        session.add(Membership(tenant_id=TENANT_ID, user_id=user.id, role=role))
+        session.add(Membership(tenant_id=tenant_id, user_id=user.id, role=role))
     contact = await session.scalar(
         select(Contact).where(Contact.kind == "buyer", Contact.email == email)
     )
     if contact is None:
-        session.add(Contact(tenant_id=TENANT_ID, kind="buyer", name=name, email=email))
+        session.add(Contact(tenant_id=tenant_id, kind="buyer", name=name, email=email))
     await session.flush()
     return user.id
 
@@ -126,8 +143,21 @@ async def main() -> int:
             if await session.get(Tenant, TENANT_ID) is None:
                 session.add(Tenant(id=TENANT_ID, name=TENANT_NAME))
                 await session.flush()
-            users = [await _user(session, *user) for user in USERS]
+            users = [await _user(session, TENANT_ID, *user) for user in USERS]
             suppliers = [await _supplier(session, *supplier) for supplier in SUPPLIERS]
+        async with tenant_session(engine, FOUR_EYES_TENANT_ID) as session:
+            if await session.get(Tenant, FOUR_EYES_TENANT_ID) is None:
+                session.add(
+                    Tenant(
+                        id=FOUR_EYES_TENANT_ID,
+                        name=FOUR_EYES_TENANT_NAME,
+                        allow_self_approval=False,
+                    )
+                )
+                await session.flush()
+            fe_users = [
+                await _user(session, FOUR_EYES_TENANT_ID, *user) for user in FOUR_EYES_USERS
+            ]
     finally:
         await engine.dispose()
 
@@ -136,6 +166,9 @@ async def main() -> int:
         print(f"user      {user_id}  {role:<8}  X-Dev-User: {clerk_id}")
     for (name, *_), supplier_id in zip(SUPPLIERS, suppliers, strict=True):
         print(f"supplier  {supplier_id}  {name}")
+    print(f"tenant    {FOUR_EYES_TENANT_ID}  {FOUR_EYES_TENANT_NAME}  (four-eyes)")
+    for (clerk_id, _, _, role), user_id in zip(FOUR_EYES_USERS, fe_users, strict=True):
+        print(f"user      {user_id}  {role:<8}  X-Dev-User: {clerk_id}")
     if not settings.auth_dev_mode:
         print("note: set AUTH_DEV_MODE=true to use the X-Dev-User header")
     return 0
