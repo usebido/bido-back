@@ -12,6 +12,7 @@ checks) never touches Postgres, AWS or Clerk. Unsafe auth configuration (dev
 mode outside `ENVIRONMENT=local`) is refused when the app is built.
 """
 
+from collections.abc import Callable
 from typing import Annotated
 
 from fastapi import Header, HTTPException, Request, Security, status
@@ -33,6 +34,7 @@ from bido_back.db import create_engine, create_sessionmaker
 from bido_back.rfqs.agents import RfqAgents, default_rfq_agents
 from bido_back.rfqs.mailbox import MailboxSenderFactory, mailbox_senders_for
 from bido_back.settings import Settings
+from bido_back.simulator.sender import ReplyScheduler, sqs_reply_schedulers
 from bido_back.storage import BlobStorage, build_storage
 from bido_back.worker.jobs import JobQueue, SqsJobQueue
 
@@ -125,6 +127,11 @@ def get_rfq_agents() -> RfqAgents:
 def get_mailbox_senders(request: Request) -> MailboxSenderFactory:
     """How to get a buyer's sender (`EMAIL_TRANSPORT`, see rfqs.mailbox); tests override it."""
     return mailbox_senders_for(_resources(request).settings)
+
+
+def get_reply_schedulers(request: Request) -> Callable[[], ReplyScheduler]:
+    """How the sandbox api schedules a simulated answer (SQS); tests override it."""
+    return sqs_reply_schedulers(_resources(request).settings)
 
 
 def _unauthorized(detail: str) -> HTTPException:

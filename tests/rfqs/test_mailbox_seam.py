@@ -11,7 +11,7 @@ from bido_back import mailbox
 from bido_back.api.rfqs import rfq_http_error
 from bido_back.email.smtp import SmtpEmailSender
 from bido_back.rfqs.errors import MailboxNotConfigured, MailboxNotConnected
-from bido_back.rfqs.mailbox import default_mailbox_sender, mailbox_senders_for
+from bido_back.rfqs.mailbox import default_mailbox_sender, mailbox_senders_for, transport_senders
 from bido_back.settings import Settings
 
 UNUSED_SESSION = cast(AsyncSession, object())
@@ -23,7 +23,7 @@ def settings(**overrides: object) -> Settings:
 
 
 async def test_smtp_transport_sends_every_rfq_email_through_mailpit_locally() -> None:
-    factory = mailbox_senders_for(settings(environment="local", email_transport="smtp"))
+    factory = transport_senders(settings(environment="local", email_transport="smtp"))
 
     sender = await factory(UNUSED_SESSION, uuid4(), uuid4())
 
@@ -41,6 +41,12 @@ def test_non_mailbox_transports_are_refused_outside_local_and_test(
 
 def test_mailbox_is_the_default_transport() -> None:
     assert mailbox_senders_for(settings(environment="prd")) is default_mailbox_sender
+
+
+def test_outside_prd_sandbox_tenants_get_the_simulator() -> None:
+    # The sandbox wrapper (bido_back.simulator.sender) sits in front of the transport.
+    assert mailbox_senders_for(settings(environment="dev")) is not default_mailbox_sender
+    assert transport_senders(settings(environment="dev")) is default_mailbox_sender
 
 
 @pytest.mark.parametrize(

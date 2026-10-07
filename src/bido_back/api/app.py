@@ -78,6 +78,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(proposals_router())
     app.include_router(search_router())
     app.include_router(exports_router())
+    if resolved.environment != "prd":
+        # The supplier simulator's controls; every endpoint 404s for a real tenant.
+        from bido_back.api.sandbox import sandbox_router
+
+        app.include_router(sandbox_router())
     if resolved.environment == "local":
         # Never mounted elsewhere (and every route refuses outside local too).
         from bido_back.api.dev import dev_router

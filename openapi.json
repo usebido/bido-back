@@ -2257,6 +2257,343 @@
         "title": "OnboardingState",
         "type": "object"
       },
+      "OutboundView": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "due_at": {
+            "format": "date-time",
+            "title": "Due At",
+            "type": "string"
+          },
+          "error": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Error"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "invite_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invite Id"
+          },
+          "replied_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replied At"
+          },
+          "round": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Round"
+          },
+          "stance": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stance"
+          },
+          "status": {
+            "title": "Status",
+            "type": "string"
+          },
+          "subject": {
+            "title": "Subject",
+            "type": "string"
+          },
+          "to": {
+            "items": {
+              "type": "string"
+            },
+            "title": "To",
+            "type": "array"
+          }
+        },
+        "required": [
+          "id",
+          "invite_id",
+          "subject",
+          "to",
+          "status",
+          "due_at",
+          "created_at",
+          "replied_at",
+          "round",
+          "stance",
+          "error"
+        ],
+        "title": "OutboundView",
+        "type": "object"
+      },
+      "Persona-Input": {
+        "description": "A persona as the simulator and the api see it.",
+        "properties": {
+          "behaviors": {
+            "default": [],
+            "items": {
+              "enum": [
+                "tough_negotiator",
+                "cheap_but_late",
+                "reseller",
+                "slow_responder",
+                "declines_some_lines",
+                "offers_alternatives",
+                "noisy"
+              ],
+              "type": "string"
+            },
+            "title": "Behaviors",
+            "type": "array"
+          },
+          "language": {
+            "default": "en",
+            "enum": [
+              "it",
+              "de",
+              "en",
+              "fr",
+              "pt"
+            ],
+            "title": "Language",
+            "type": "string"
+          },
+          "lead_time_days": {
+            "default": 28,
+            "maximum": 730.0,
+            "minimum": 1.0,
+            "title": "Lead Time Days",
+            "type": "integer"
+          },
+          "moq": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Moq"
+          },
+          "portfolio": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Portfolio",
+            "type": "array"
+          },
+          "price_anchor": {
+            "anyOf": [
+              {
+                "exclusiveMinimum": 0.0,
+                "maximum": 10.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              }
+            ],
+            "default": "1.0",
+            "title": "Price Anchor"
+          },
+          "quote_format": {
+            "default": "xlsx",
+            "enum": [
+              "xlsx",
+              "pdf",
+              "body"
+            ],
+            "title": "Quote Format",
+            "type": "string"
+          },
+          "reference_prices": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                  "type": "string"
+                }
+              ]
+            },
+            "title": "Reference Prices",
+            "type": "object"
+          },
+          "response_delay_minutes": {
+            "default": 0,
+            "maximum": 1440.0,
+            "minimum": 0.0,
+            "title": "Response Delay Minutes",
+            "type": "integer"
+          }
+        },
+        "title": "Persona",
+        "type": "object"
+      },
+      "Persona-Output": {
+        "description": "A persona as the simulator and the api see it.",
+        "properties": {
+          "behaviors": {
+            "default": [],
+            "items": {
+              "enum": [
+                "tough_negotiator",
+                "cheap_but_late",
+                "reseller",
+                "slow_responder",
+                "declines_some_lines",
+                "offers_alternatives",
+                "noisy"
+              ],
+              "type": "string"
+            },
+            "title": "Behaviors",
+            "type": "array"
+          },
+          "language": {
+            "default": "en",
+            "enum": [
+              "it",
+              "de",
+              "en",
+              "fr",
+              "pt"
+            ],
+            "title": "Language",
+            "type": "string"
+          },
+          "lead_time_days": {
+            "default": 28,
+            "maximum": 730.0,
+            "minimum": 1.0,
+            "title": "Lead Time Days",
+            "type": "integer"
+          },
+          "moq": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Moq"
+          },
+          "portfolio": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Portfolio",
+            "type": "array"
+          },
+          "price_anchor": {
+            "default": "1.0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Price Anchor",
+            "type": "string"
+          },
+          "quote_format": {
+            "default": "xlsx",
+            "enum": [
+              "xlsx",
+              "pdf",
+              "body"
+            ],
+            "title": "Quote Format",
+            "type": "string"
+          },
+          "reference_prices": {
+            "additionalProperties": {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            "title": "Reference Prices",
+            "type": "object"
+          },
+          "response_delay_minutes": {
+            "default": 0,
+            "maximum": 1440.0,
+            "minimum": 0.0,
+            "title": "Response Delay Minutes",
+            "type": "integer"
+          }
+        },
+        "title": "Persona",
+        "type": "object"
+      },
+      "PersonaView": {
+        "properties": {
+          "persona": {
+            "$ref": "#/components/schemas/Persona-Output"
+          },
+          "supplier_id": {
+            "format": "uuid",
+            "title": "Supplier Id",
+            "type": "string"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "supplier_id",
+          "supplier_name",
+          "persona"
+        ],
+        "title": "PersonaView",
+        "type": "object"
+      },
       "PrepareSendResponse": {
         "properties": {
           "approvals": {
@@ -2931,6 +3268,24 @@
           "requirements"
         ],
         "title": "RequirementsView",
+        "type": "object"
+      },
+      "ResetResult": {
+        "properties": {
+          "cancelled": {
+            "title": "Cancelled",
+            "type": "integer"
+          },
+          "personas_restored": {
+            "title": "Personas Restored",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "cancelled",
+          "personas_restored"
+        ],
+        "title": "ResetResult",
         "type": "object"
       },
       "RfqCreated": {
@@ -9368,6 +9723,551 @@
         "summary": "Prepare Send",
         "tags": [
           "rfqs"
+        ]
+      }
+    },
+    "/v1/sandbox/outbound": {
+      "get": {
+        "operationId": "list_outbound_v1_sandbox_outbound_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "invite_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Invite Id"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/OutboundView"
+                  },
+                  "title": "Response List Outbound V1 Sandbox Outbound Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Outbound",
+        "tags": [
+          "sandbox"
+        ]
+      }
+    },
+    "/v1/sandbox/outbound/{outbound_id}/reply-now": {
+      "post": {
+        "operationId": "reply_now_v1_sandbox_outbound__outbound_id__reply_now_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "outbound_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Outbound Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutboundView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reply Now",
+        "tags": [
+          "sandbox"
+        ]
+      }
+    },
+    "/v1/sandbox/personas": {
+      "get": {
+        "operationId": "list_personas_v1_sandbox_personas_get",
+        "parameters": [
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PersonaView"
+                  },
+                  "title": "Response List Personas V1 Sandbox Personas Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Personas",
+        "tags": [
+          "sandbox"
+        ]
+      }
+    },
+    "/v1/sandbox/personas/{supplier_id}": {
+      "put": {
+        "operationId": "put_persona_v1_sandbox_personas__supplier_id__put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "supplier_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Supplier Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Persona-Input"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PersonaView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Put Persona",
+        "tags": [
+          "sandbox"
+        ]
+      }
+    },
+    "/v1/sandbox/reset": {
+      "post": {
+        "operationId": "reset_v1_sandbox_reset_post",
+        "parameters": [
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResetResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reset",
+        "tags": [
+          "sandbox"
         ]
       }
     },

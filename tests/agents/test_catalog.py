@@ -37,6 +37,7 @@ from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
 from bido_back.agents.definition import PROMPTS_DIR, AgentDefinition
 from bido_back.agents.runner import Completed, Failed, run_to_completion
+from bido_back.simulator.agent import SUPPLIER_PERSONA
 from tests.agents.test_runner import Script, final, script
 
 __all__ = ["script"]
@@ -49,6 +50,7 @@ AGENTS: list[AgentDefinition[Any]] = [
     RFQ_CANDIDATE_CLASSIFIER,
     RFQ_TEMPLATE_BUILDER,
     RFQ_FOLLOWUP_WRITER,
+    SUPPLIER_PERSONA,
 ]
 
 

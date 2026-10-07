@@ -48,6 +48,9 @@ class Tenant(Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
     name: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # Outbound email goes to the supplier simulator, never out (migration 0016).
+    # Set at creation by a seed script; the app role cannot update it.
+    sandbox: Mapped[bool] = mapped_column(Boolean, server_default=false())
 
 
 class User(Base):
@@ -672,3 +675,54 @@ class SupplierComplianceDocument(Base):
     expires_on: Mapped[date | None] = mapped_column(Date)
     recorded_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SupplierPersona(Base):
+    """How a simulated supplier of a sandbox tenant behaves (migration 0016)."""
+
+    __tablename__ = "supplier_personas"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    supplier_id: Mapped[UUID] = mapped_column(ForeignKey("suppliers.id", ondelete="CASCADE"))
+    language: Mapped[str] = mapped_column(Text, server_default=text("'en'"))
+    behaviors: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    price_anchor: Mapped[Decimal] = mapped_column(Numeric(6, 3), server_default=text("1.0"))
+    # Reference unit price (base currency) by lower-case keyword of a line.
+    reference_prices: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, server_default=text("'{}'::jsonb")
+    )
+    # Lower-case keywords of what it sells; empty = everything.
+    portfolio: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    lead_time_days: Mapped[int] = mapped_column(Integer, server_default=text("28"))
+    moq: Mapped[Decimal | None] = mapped_column(Numeric(18, 4))
+    response_delay_minutes: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    quote_format: Mapped[str] = mapped_column(Text, server_default=text("'xlsx'"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SandboxOutbound(Base):
+    """An email a sandbox tenant sent, waiting for (or answered by) the simulator."""
+
+    __tablename__ = "sandbox_outbound"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    invite_id: Mapped[UUID | None] = mapped_column(ForeignKey("invites.id", ondelete="CASCADE"))
+    message_id: Mapped[str] = mapped_column(Text)
+    in_reply_to: Mapped[str | None] = mapped_column(Text)
+    references: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    from_name: Mapped[str] = mapped_column(Text)
+    from_address: Mapped[str] = mapped_column(Text)
+    to_addresses: Mapped[list[Any]] = mapped_column(JSONB)
+    subject: Mapped[str] = mapped_column(Text)
+    body_text: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'pending'"))
+    due_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # The simulated supplier's answer to this email (prices per line), if any.
+    offer: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    reply_message_id: Mapped[str | None] = mapped_column(Text)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    replied_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

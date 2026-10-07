@@ -43,6 +43,7 @@ from bido_back.worker.job_types import (
     FX_REFRESH,
     MAILBOX_SYNC,
     QUOTE_EXTRACT,
+    SIMULATOR_REPLY,
     TEMPLATE_BUILD,
     TEMPLATE_SCAN,
 )
@@ -154,6 +155,23 @@ def build_worker_registry(
     )
     registry.register(TEMPLATE_SCAN, TemplateScanHandler(onboarding))
     registry.register(TEMPLATE_BUILD, TemplateBuildHandler(onboarding))
+    if settings.environment != "prd":
+        # Simulated suppliers answering sandbox tenants (bido_back.simulator).
+        from bido_back.simulator.agent import default_persona_writer
+        from bido_back.simulator.jobs import SimulatorDeps, SimulatorReplyHandler
+        from bido_back.simulator.sender import sqs_reply_schedulers
+
+        registry.register(
+            SIMULATOR_REPLY,
+            SimulatorReplyHandler(
+                SimulatorDeps(
+                    db=engine,
+                    ingest=inbound.ingest_for_invite,
+                    writer=default_persona_writer(runner_config),
+                    schedulers=sqs_reply_schedulers(settings),
+                )
+            ),
+        )
     return registry
 
 

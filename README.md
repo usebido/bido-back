@@ -130,6 +130,31 @@ Every chase or clarification is proposed as a pending approval and sent only
 after a person approves it, in the RFQ's thread. Locally, trigger a sweep with
 `curl -X POST localhost:8080/dev/followups/sweep`.
 
+## Supplier simulator (sandbox tenants)
+
+A sandbox tenant is a demo or test company whose email never leaves Bido.
+Outside prd, the sender factory (`bido_back.rfqs.mailbox.mailbox_senders_for`)
+routes every outbound email of a sandbox tenant (RFQs, chases, clarification
+questions, negotiation messages) to the supplier simulator instead of a
+mailbox. A `simulator.reply` job then answers as the supplier's persona, and the
+reply goes through the normal intake path, so extraction, comparison,
+follow-ups and negotiation run exactly as with real suppliers.
+
+- **Personas** (`supplier_personas`): language, behaviors (tough negotiator,
+  cheap but late, reseller, slow responder, declines some lines, offers
+  alternatives, noisy emails), price anchor, portfolio, lead time, MOQ, response
+  delay, and quote format (xlsx, pdf or prices in the body).
+- **Code decides every number** (`simulator/offers.py`); the `supplier_persona`
+  agent only writes the prose, and a template fallback keeps the simulation
+  running when the model fails.
+- **Demo tenant:** `uv run python scripts/seed_sandbox.py` seeds "Motori Demo
+  S.p.A." with eight EV-motor suppliers. It is the same tenant as
+  `scripts/seed_motor_demo.py`; run them in either order. Add real Clerk users
+  with `--member CLERK_USER_ID:EMAIL:ROLE`.
+- **Controls:** `/v1/sandbox` (personas, the simulated outbox, reply-now,
+  reset), 404 for any tenant that is not a sandbox. Only a seed script can make
+  a tenant a sandbox; the app role cannot update `tenants.sandbox`.
+
 ## Observability
 
 - **Traces:** OpenTelemetry, exported over OTLP/HTTP to

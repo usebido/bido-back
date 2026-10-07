@@ -11,3 +11,5 @@ TEMPLATE_BUILD = "template.build"  # payload: {"template_id": "<uuid>"}
 FOLLOWUPS_SWEEP = (
     "followups.sweep"  # payload: {}. tenant_id = all-zeros for every tenant (scheduled)
 )
+# payload: {"outbound_id": "<uuid>"}. A simulated supplier answers a sandbox email.
+SIMULATOR_REPLY = "simulator.reply"

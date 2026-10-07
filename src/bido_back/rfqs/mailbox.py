@@ -15,6 +15,8 @@ it.
 `mailbox_senders_for(settings)` picks the factory from `EMAIL_TRANSPORT`:
 "mailbox" is the product behavior; "smtp" / "ses" send every RFQ email through
 that one transport instead (Mailpit locally), refused outside local and test.
+Outside prd, either is wrapped by `bido_back.simulator.sandbox_aware`: a
+sandbox tenant's email goes to the supplier simulator, never out.
 
 The session passed in is the caller's tenant-scoped session; the sender may
 use it (token refresh, storing the provider thread id), so the caller keeps
@@ -50,6 +52,16 @@ async def default_mailbox_sender(
 
 def mailbox_senders_for(settings: Settings) -> MailboxSenderFactory:
     """The sender factory for `settings.email_transport` (see the module docstring)."""
+    factory = transport_senders(settings)
+    if settings.environment == "prd":
+        return factory
+    from bido_back.simulator.sender import sandbox_aware, sqs_reply_schedulers
+
+    return sandbox_aware(factory, sqs_reply_schedulers(settings))
+
+
+def transport_senders(settings: Settings) -> MailboxSenderFactory:
+    """The factory for `EMAIL_TRANSPORT` alone, without the sandbox wrapper."""
     if settings.email_transport == "mailbox":
         return default_mailbox_sender
     if settings.environment not in _NON_MAILBOX_ENVIRONMENTS:
