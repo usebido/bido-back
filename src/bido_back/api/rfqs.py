@@ -18,6 +18,7 @@ from bido_back.api.errors import ErrorResponse
 from bido_back.auth import Principal
 from bido_back.comparison.compute import Comparison
 from bido_back.comparison.loader import load_comparison
+from bido_back.compliance import service as compliance_service
 from bido_back.rfqs import service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.errors import (
@@ -165,9 +166,12 @@ def rfqs_router() -> APIRouter:
     async def comparison(  # pyright: ignore[reportUnusedFunction]
         rfq_id: UUID, principal: CurrentPrincipal, db: Db
     ) -> Comparison:
+        today = datetime.now(UTC).date()
         try:
-            return await load_comparison(db, principal, rfq_id, datetime.now(UTC).date())
+            result = await load_comparison(db, principal, rfq_id, today)
         except RfqError as exc:
             raise rfq_http_error(exc) from None
+        result.compliance = await compliance_service.rfq_summary(db, principal, rfq_id, today)
+        return result
 
     return router

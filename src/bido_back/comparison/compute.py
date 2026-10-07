@@ -40,6 +40,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from bido_back.compliance.schemas import SupplierComplianceSummary
+
 EUR: Final = "EUR"
 # Same threshold as the quote extraction's review rule.
 LOW_CONFIDENCE: Final = 0.8
@@ -281,6 +283,10 @@ class Comparison(BaseModel):
     suppliers: list[SupplierColumn]
     awaiting: list[AwaitingSupplier]
     fx_rates: list[RateUsed]
+    # Per invited supplier, filled by the API from bido_back.compliance.
+    compliance: list[SupplierComplianceSummary] = Field(
+        default_factory=list[SupplierComplianceSummary]
+    )
     recommendations: list[Recommendation] = Field(default_factory=list[Recommendation])
 
 

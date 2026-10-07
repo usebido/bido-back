@@ -553,3 +553,83 @@ class FollowupMessage(Base):
     canceled_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# --- Supplier compliance (migration 0011) -----------------------------------
+
+COMPLIANCE_SCOPES = ("supplier", "manufacturer", "line")
+
+
+class ComplianceRequirement(Base):
+    """One document the tenant expects from suppliers. No rows = Bido's default set."""
+
+    __tablename__ = "compliance_requirements"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "code", name="compliance_requirements_tenant_code_key"),
+        CheckConstraint(
+            "scope IN ('supplier', 'manufacturer', 'line')",
+            name="compliance_requirements_scope_check",
+        ),
+        CheckConstraint(
+            "(scope = 'line') = (line_keyword IS NOT NULL)",
+            name="compliance_requirements_line_keyword_check",
+        ),
+        CheckConstraint(
+            "validity_months IS NULL OR validity_months BETWEEN 1 AND 120",
+            name="compliance_requirements_validity_check",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    code: Mapped[str] = mapped_column(Text)
+    name: Mapped[str] = mapped_column(Text)
+    scope: Mapped[str] = mapped_column(Text)
+    # Required for scope "line": the RFQ line's qualification must mention it.
+    line_keyword: Mapped[str | None] = mapped_column(Text)
+    # Lower-case filename fragments that mark a candidate attachment.
+    keywords: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
+    validity_months: Mapped[int | None] = mapped_column(Integer)
+    blocking: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    position: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SupplierComplianceDocument(Base):
+    """A document a person confirmed for one requirement of one supplier (and line)."""
+
+    __tablename__ = "supplier_compliance_documents"
+    __table_args__ = (
+        CheckConstraint(
+            "attachment_id IS NOT NULL OR url IS NOT NULL",
+            name="supplier_compliance_documents_evidence_check",
+        ),
+        CheckConstraint(
+            "url IS NULL OR url ~ '^https://'", name="supplier_compliance_documents_url_check"
+        ),
+        CheckConstraint(
+            "expires_on IS NULL OR issued_on IS NULL OR expires_on >= issued_on",
+            name="supplier_compliance_documents_dates_check",
+        ),
+        Index(
+            "supplier_compliance_documents_tenant_supplier_idx",
+            "tenant_id",
+            "supplier_id",
+            "requirement_code",
+            "created_at",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    supplier_id: Mapped[UUID] = mapped_column(ForeignKey("suppliers.id", ondelete="CASCADE"))
+    requirement_code: Mapped[str] = mapped_column(Text)
+    rfq_line_id: Mapped[UUID | None] = mapped_column(ForeignKey("rfq_lines.id", ondelete="CASCADE"))
+    attachment_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("attachments.id", ondelete="CASCADE")
+    )
+    url: Mapped[str | None] = mapped_column(Text)
+    issued_on: Mapped[date | None] = mapped_column(Date)
+    expires_on: Mapped[date | None] = mapped_column(Date)
+    recorded_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

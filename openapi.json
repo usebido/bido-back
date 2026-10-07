@@ -103,6 +103,72 @@
         "title": "AwaitingSupplier",
         "type": "object"
       },
+      "BlockingItem": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "rfq_line_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rfq Line Id"
+          },
+          "status": {
+            "enum": [
+              "missing",
+              "received",
+              "expired"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "name",
+          "status"
+        ],
+        "title": "BlockingItem",
+        "type": "object"
+      },
+      "CandidateDocument": {
+        "description": "An attachment the supplier sent whose filename matches the requirement.",
+        "properties": {
+          "attachment_id": {
+            "format": "uuid",
+            "title": "Attachment Id",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "received_at": {
+            "format": "date-time",
+            "title": "Received At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "attachment_id",
+          "filename",
+          "received_at"
+        ],
+        "title": "CandidateDocument",
+        "type": "object"
+      },
       "CandidateView": {
         "description": "One sent email that may be an RFQ (the frontend's `RfqCandidate`).",
         "properties": {
@@ -441,6 +507,133 @@
         "title": "Cell",
         "type": "object"
       },
+      "ChecklistCounts": {
+        "properties": {
+          "expired": {
+            "default": 0,
+            "title": "Expired",
+            "type": "integer"
+          },
+          "missing": {
+            "default": 0,
+            "title": "Missing",
+            "type": "integer"
+          },
+          "received": {
+            "default": 0,
+            "title": "Received",
+            "type": "integer"
+          }
+        },
+        "title": "ChecklistCounts",
+        "type": "object"
+      },
+      "ChecklistItem": {
+        "properties": {
+          "blocking": {
+            "title": "Blocking",
+            "type": "boolean"
+          },
+          "candidates": {
+            "items": {
+              "$ref": "#/components/schemas/CandidateDocument"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "document": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DocumentView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "line_mpn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Mpn"
+          },
+          "line_position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Line Position"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "rfq_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rfq Id"
+          },
+          "rfq_line_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rfq Line Id"
+          },
+          "scope": {
+            "enum": [
+              "supplier",
+              "manufacturer",
+              "line"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "missing",
+              "received",
+              "expired"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "name",
+          "scope",
+          "blocking",
+          "status"
+        ],
+        "title": "ChecklistItem",
+        "type": "object"
+      },
       "Comparison": {
         "properties": {
           "awaiting": {
@@ -453,6 +646,13 @@
           "base_currency": {
             "title": "Base Currency",
             "type": "string"
+          },
+          "compliance": {
+            "items": {
+              "$ref": "#/components/schemas/SupplierComplianceSummary"
+            },
+            "title": "Compliance",
+            "type": "array"
           },
           "computed_on": {
             "format": "date",
@@ -906,6 +1106,107 @@
           "status"
         ],
         "title": "DecisionResponse",
+        "type": "object"
+      },
+      "DocumentView": {
+        "properties": {
+          "attachment_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachment Id"
+          },
+          "expires_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires On"
+          },
+          "filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filename"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "issued_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Issued On"
+          },
+          "recorded_at": {
+            "format": "date-time",
+            "title": "Recorded At",
+            "type": "string"
+          },
+          "requirement_code": {
+            "title": "Requirement Code",
+            "type": "string"
+          },
+          "rfq_line_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rfq Line Id"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "id",
+          "requirement_code",
+          "rfq_line_id",
+          "attachment_id",
+          "filename",
+          "url",
+          "issued_on",
+          "expires_on",
+          "recorded_at"
+        ],
+        "title": "DocumentView",
         "type": "object"
       },
       "ErrorResponse": {
@@ -2315,6 +2616,185 @@
         "title": "Recommendation",
         "type": "object"
       },
+      "RecordDocumentRequest": {
+        "additionalProperties": false,
+        "description": "Confirm a document: an attachment the supplier sent, or an https link.",
+        "properties": {
+          "attachment_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachment Id"
+          },
+          "expires_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires On"
+          },
+          "issued_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Issued On"
+          },
+          "requirement_code": {
+            "pattern": "^[a-z0-9_]{2,40}$",
+            "title": "Requirement Code",
+            "type": "string"
+          },
+          "rfq_line_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Required for line-scoped requirements",
+            "title": "Rfq Line Id"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "pattern": "^https://\\S+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "requirement_code"
+        ],
+        "title": "RecordDocumentRequest",
+        "type": "object"
+      },
+      "Requirement": {
+        "additionalProperties": false,
+        "description": "One document the tenant expects from its suppliers.",
+        "properties": {
+          "blocking": {
+            "default": false,
+            "description": "A missing or expired document blocks the supplier",
+            "title": "Blocking",
+            "type": "boolean"
+          },
+          "code": {
+            "pattern": "^[a-z0-9_]{2,40}$",
+            "title": "Code",
+            "type": "string"
+          },
+          "keywords": {
+            "description": "Filename fragments that mark a received attachment as a candidate",
+            "items": {
+              "maxLength": 40,
+              "minLength": 2,
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Keywords",
+            "type": "array"
+          },
+          "line_keyword": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "minLength": 2,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Required for scope=line, e.g. 'aec-q' or 'ppap'",
+            "title": "Line Keyword"
+          },
+          "name": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Name",
+            "type": "string"
+          },
+          "scope": {
+            "description": "supplier: every supplier; manufacturer: suppliers of type manufacturer; line: each RFQ line whose qualification mentions line_keyword",
+            "enum": [
+              "supplier",
+              "manufacturer",
+              "line"
+            ],
+            "title": "Scope",
+            "type": "string"
+          },
+          "validity_months": {
+            "anyOf": [
+              {
+                "maximum": 120.0,
+                "minimum": 1.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Default validity from the issue date when no expiry date is given",
+            "title": "Validity Months"
+          }
+        },
+        "required": [
+          "code",
+          "name",
+          "scope"
+        ],
+        "title": "Requirement",
+        "type": "object"
+      },
+      "RequirementsView": {
+        "properties": {
+          "customized": {
+            "description": "False while the tenant uses Bido's default set",
+            "title": "Customized",
+            "type": "boolean"
+          },
+          "requirements": {
+            "items": {
+              "$ref": "#/components/schemas/Requirement"
+            },
+            "title": "Requirements",
+            "type": "array"
+          }
+        },
+        "required": [
+          "customized",
+          "requirements"
+        ],
+        "title": "RequirementsView",
+        "type": "object"
+      },
       "RfqCreated": {
         "properties": {
           "base_currency": {
@@ -3002,6 +3482,48 @@
         "title": "StartScanRequest",
         "type": "object"
       },
+      "SupplierChecklist": {
+        "properties": {
+          "as_of": {
+            "format": "date",
+            "title": "As Of",
+            "type": "string"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/ChecklistCounts"
+          },
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/ChecklistItem"
+            },
+            "title": "Items",
+            "type": "array"
+          },
+          "supplier_id": {
+            "format": "uuid",
+            "title": "Supplier Id",
+            "type": "string"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          },
+          "supplier_type": {
+            "title": "Supplier Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "supplier_id",
+          "supplier_name",
+          "supplier_type",
+          "as_of",
+          "counts",
+          "items"
+        ],
+        "title": "SupplierChecklist",
+        "type": "object"
+      },
       "SupplierColumn": {
         "properties": {
           "cells": {
@@ -3171,6 +3693,38 @@
           "totals"
         ],
         "title": "SupplierColumn",
+        "type": "object"
+      },
+      "SupplierComplianceSummary": {
+        "description": "Per invited supplier, in the RFQ comparison under `compliance`.",
+        "properties": {
+          "blocking": {
+            "items": {
+              "$ref": "#/components/schemas/BlockingItem"
+            },
+            "title": "Blocking",
+            "type": "array"
+          },
+          "counts": {
+            "$ref": "#/components/schemas/ChecklistCounts"
+          },
+          "supplier_id": {
+            "format": "uuid",
+            "title": "Supplier Id",
+            "type": "string"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "supplier_id",
+          "supplier_name",
+          "counts",
+          "blocking"
+        ],
+        "title": "SupplierComplianceSummary",
         "type": "object"
       },
       "SupplierView": {
@@ -3539,6 +4093,24 @@
         "title": "UpdateLineRequest",
         "type": "object"
       },
+      "UpdateRequirementsRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "requirements": {
+            "items": {
+              "$ref": "#/components/schemas/Requirement"
+            },
+            "maxItems": 50,
+            "title": "Requirements",
+            "type": "array"
+          }
+        },
+        "required": [
+          "requirements"
+        ],
+        "title": "UpdateRequirementsRequest",
+        "type": "object"
+      },
       "UploadView": {
         "properties": {
           "ext": {
@@ -3875,6 +4447,186 @@
         "summary": "Decide",
         "tags": [
           "approvals"
+        ]
+      }
+    },
+    "/v1/compliance/requirements": {
+      "get": {
+        "operationId": "get_requirements_v1_compliance_requirements_get",
+        "parameters": [
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequirementsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Get Requirements",
+        "tags": [
+          "compliance"
+        ]
+      },
+      "put": {
+        "operationId": "put_requirements_v1_compliance_requirements_put",
+        "parameters": [
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateRequirementsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RequirementsView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Put Requirements",
+        "tags": [
+          "compliance"
         ]
       }
     },
@@ -7337,6 +8089,247 @@
         "summary": "Create Supplier",
         "tags": [
           "suppliers"
+        ]
+      }
+    },
+    "/v1/suppliers/{supplier_id}/compliance": {
+      "get": {
+        "operationId": "supplier_checklist_v1_suppliers__supplier_id__compliance_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "supplier_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Supplier Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only the lines of this RFQ for per-line items",
+            "in": "query",
+            "name": "rfq_id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "format": "uuid",
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Only the lines of this RFQ for per-line items",
+              "title": "Rfq Id"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupplierChecklist"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Supplier Checklist",
+        "tags": [
+          "compliance"
+        ]
+      }
+    },
+    "/v1/suppliers/{supplier_id}/compliance/documents": {
+      "post": {
+        "operationId": "record_document_v1_suppliers__supplier_id__compliance_documents_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "supplier_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Supplier Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Required only for users with memberships in several tenants.",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Required only for users with memberships in several tenants.",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecordDocumentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocumentView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Record Document",
+        "tags": [
+          "compliance"
         ]
       }
     },
