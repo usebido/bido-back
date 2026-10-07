@@ -39,6 +39,7 @@ from bido_back.observability import init_observability
 from bido_back.settings import Settings, get_settings
 from bido_back.worker.envelope import Envelope
 from bido_back.worker.job_types import (
+    FOLLOWUPS_SWEEP,
     FX_REFRESH,
     MAILBOX_SYNC,
     QUOTE_EXTRACT,
@@ -96,6 +97,9 @@ def build_worker_registry(
 ) -> HandlerRegistry:
     """Every job handler of the RFQ flow, wired from settings (the production registry)."""
     from bido_back.agents.config import RunnerConfig
+    from bido_back.followups.agents import default_followup_writer
+    from bido_back.followups.jobs import FollowupSweepHandler
+    from bido_back.followups.send import register_followup_act_tools
     from bido_back.fx.ecb import FxRefreshHandler
     from bido_back.intake.consumer import build_inbound_service
     from bido_back.mailbox import MailboxSyncDeps, MailboxSyncHandler, open_connection
@@ -112,17 +116,20 @@ def build_worker_registry(
     from bido_back.storage import build_storage
 
     act_tools = ActToolRegistry()
-    register_act_tools(
-        act_tools,
-        RfqActDeps(
-            db=engine,
-            email_domain=settings.email_domain,
-            mailbox_senders=mailbox_senders_for(settings),
-        ),
+    act_deps = RfqActDeps(
+        db=engine,
+        email_domain=settings.email_domain,
+        mailbox_senders=mailbox_senders_for(settings),
     )
+    register_act_tools(act_tools, act_deps)
+    register_followup_act_tools(act_tools, act_deps)
     registry = build_registry(engine, act_tools)
     storage = build_storage(settings)
     runner_config = RunnerConfig.from_settings(settings)
+    registry.register(
+        FOLLOWUPS_SWEEP,
+        FollowupSweepHandler(db=engine, writer=default_followup_writer(runner_config)),
+    )
     registry.register(
         QUOTE_EXTRACT,
         quote_extract_handler(db=engine, storage=storage, runner_config=runner_config),

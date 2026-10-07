@@ -31,6 +31,7 @@ from bido_back.db import tenant_session
 from bido_back.db.models import (
     Attachment,
     Contact,
+    FollowupMessage,
     Invite,
     Message,
     Proposal,
@@ -136,6 +137,7 @@ async def rfq_rows(migrator_engine: AsyncEngine, people: People) -> AsyncIterato
     for tenant_id in (people.tenant, people.other_tenant):
         async with tenant_session(migrator_engine, tenant_id) as session:
             for model in (
+                FollowupMessage,
                 ProposalLine,
                 Proposal,
                 Attachment,

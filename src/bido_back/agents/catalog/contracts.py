@@ -199,3 +199,36 @@ class RfqTemplateBuilderOutput(BaseModel):
     columns: list[str] = Field(description="Item table headings, at most 8")
     footer_fields: list[str] = Field(description="Commercial terms asked for after the items")
     fields: list[str] = Field(description="Every field the buyer asks for")
+
+
+# --- rfq_followup_writer: a chase or a clarification question, in the thread ----
+
+FollowupKind = Literal["chase", "clarification"]
+FollowupField = Literal["currency", "valid_until", "unit_price", "quantity", "lead_time"]
+
+
+class FollowupItem(BaseModel):
+    """One thing the clarification email asks the supplier for."""
+
+    position: int | None = Field(description="RFQ line position; null for the whole offer")
+    line: str | None = Field(description="The line's description and MPN, as requested")
+    field: FollowupField
+    problem: Literal["missing", "unclear"]
+
+
+class FollowupEmailInput(BaseModel):
+    kind: FollowupKind
+    rfq_ref: str
+    rfq_title: str
+    buyer_company: str
+    buyer_name: str
+    supplier_name: str
+    supplier_language: str = Field(description="ISO 639-1, e.g. de, en, fr, pt")
+    chase_number: int = Field(description="1 for the first reminder; 0 for a clarification")
+    original_sent_on: date | None = None
+    response_due: date | None = None
+    open_items: list[FollowupItem] = Field(default_factory=list[FollowupItem])
+
+
+class FollowupEmailOutput(BaseModel):
+    body: str = Field(description="Plain text. The subject is set by code (Re: the RFQ email).")
