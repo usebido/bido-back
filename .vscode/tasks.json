@@ -1,0 +1,119 @@
+{
+  // Local development and checks. Run from the Command Palette:
+  // "Tasks: Run Task", then pick one. Start with "dev: start all".
+  // Everything here is local: Postgres, ElasticMQ (local SQS) and Mailpit
+  // (local SMTP, web UI on http://localhost:8025) come from docker compose.
+  "version": "2.0.0",
+  "options": {
+    "env": {
+      // boto3 signs requests even for ElasticMQ; any value works locally.
+      "AWS_ACCESS_KEY_ID": "local",
+      "AWS_SECRET_ACCESS_KEY": "local",
+      "AGNO_TELEMETRY": "false"
+    }
+  },
+  "tasks": [
+    {
+      "label": "dev: services up",
+      "detail": "Postgres, Mailpit and ElasticMQ in docker compose",
+      "type": "shell",
+      "command": "docker compose up -d --wait db mailpit elasticmq",
+      "problemMatcher": []
+    },
+    {
+      "label": "dev: migrate",
+      "detail": "alembic upgrade head (as bido_migrator)",
+      "type": "shell",
+      "command": "uv run alembic upgrade head",
+      "problemMatcher": []
+    },
+    {
+      "label": "dev: seed",
+      "detail": "Dev tenant, buyer + approver users, two suppliers (idempotent)",
+      "type": "shell",
+      "command": "uv run python scripts/seed_dev.py",
+      "problemMatcher": []
+    },
+    {
+      "label": "dev: api",
+      "detail": "FastAPI on http://localhost:8080 (docs at /docs), auto-reload",
+      "type": "shell",
+      "command": "uv run uvicorn bido_back.api.app:create_app --factory --reload --port 8080",
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": { "regexp": "^__never__$" },
+        "background": {
+          "activesBegin": "Will watch for changes",
+          "beginsPattern": "Will watch for changes",
+          "endsPattern": "Application startup complete"
+        }
+      },
+      "presentation": { "group": "dev", "panel": "dedicated" }
+    },
+    {
+      "label": "dev: worker",
+      "detail": "SQS worker: approvals, sends, mailbox sync, extraction, onboarding jobs",
+      "type": "shell",
+      "command": "uv run python -m bido_back.worker",
+      "isBackground": true,
+      "problemMatcher": {
+        "pattern": { "regexp": "^__never__$" },
+        "background": { "beginsPattern": ".", "endsPattern": "." }
+      },
+      "presentation": { "group": "dev", "panel": "dedicated" }
+    },
+    {
+      "label": "dev: start all",
+      "detail": "Services, migrations, seed, then api + worker side by side",
+      "dependsOrder": "sequence",
+      "dependsOn": ["dev: services up", "dev: migrate", "dev: seed", "dev: api + worker"],
+      "problemMatcher": []
+    },
+    {
+      "label": "dev: api + worker",
+      "dependsOn": ["dev: api", "dev: worker"],
+      "problemMatcher": []
+    },
+    {
+      "label": "dev: supplier reply",
+      "detail": "Answer the latest RFQ email in Mailpit with a synthetic quote (xlsx) via /dev/inbound",
+      "type": "shell",
+      "command": "uv run python scripts/dev_reply.py",
+      "problemMatcher": []
+    },
+    {
+      "label": "dev: reset database (deletes local data)",
+      "detail": "docker compose down -v, then services up, migrate and seed again",
+      "type": "shell",
+      "command": "docker compose down -v && docker compose up -d --wait db mailpit elasticmq && uv run alembic upgrade head && uv run python scripts/seed_dev.py",
+      "problemMatcher": []
+    },
+    {
+      "label": "check: lint + types",
+      "type": "shell",
+      "command": "uv run ruff check && uv run ruff format --check && uv run pyright",
+      "problemMatcher": []
+    },
+    {
+      "label": "check: tests",
+      "detail": "Full pytest; database tests need 'dev: services up' and 'dev: migrate'",
+      "type": "shell",
+      "command": "uv run pytest -q",
+      "group": { "kind": "test", "isDefault": true },
+      "problemMatcher": []
+    },
+    {
+      "label": "check: RLS + OpenAPI",
+      "detail": "Forced RLS on every tenant table; regenerate openapi.json",
+      "type": "shell",
+      "command": "uv run python scripts/check_rls.py && uv run python scripts/export_openapi.py && git diff --stat openapi.json",
+      "problemMatcher": []
+    },
+    {
+      "label": "check: everything (pre-PR)",
+      "dependsOrder": "sequence",
+      "dependsOn": ["check: lint + types", "check: RLS + OpenAPI", "check: tests"],
+      "problemMatcher": []
+    }
+  ]
+}

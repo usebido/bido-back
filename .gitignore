@@ -34,7 +34,8 @@ htmlcov/
 
 # Editors and OS
 .idea/
-.vscode/
+.vscode/*
+!.vscode/tasks.json
 *.swp
 .DS_Store
 
