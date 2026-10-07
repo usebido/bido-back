@@ -1,0 +1,218 @@
+name: Deploy (dev)
+
+# Builds the arm64 image once, pushes it to ECR tagged with the git SHA,
+# registers new api / worker / migrate task definitions with that image, runs
+# the migrations as a one-off task (the deploy stops if they fail), then rolls
+# the api and worker services and waits until they are stable.
+#
+# Runs after CI succeeds on a push to main, or by hand. Rollback: run it by
+# hand with `image_tag` set to an earlier SHA; nothing is rebuilt.
+#
+# Inert until the `dev` environment has its variables (README, "Deploy"):
+# without them the job logs a notice and does nothing.
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Redeploy an image already in ECR (a git SHA). Empty: build the selected ref."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-dev
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy to dev
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' &&
+       github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # The deploy role trusts only this repository in this environment; the
+    # environment's protection rules decide who and which branches can deploy.
+    environment: dev
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION || 'us-east-2' }}
+      AWS_DEPLOY_ROLE: ${{ vars.AWS_DEPLOY_ROLE }}
+      ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+      ECS_CLUSTER: ${{ vars.ECS_CLUSTER || 'bido-dev' }}
+      TASK_FAMILY_PREFIX: ${{ vars.TASK_FAMILY_PREFIX || 'bido-dev' }}
+      RUN_TASK_NETWORK_CONFIGURATION: ${{ vars.RUN_TASK_NETWORK_CONFIGURATION }}
+      INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+      RUN_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - name: Preflight
+        id: preflight
+        run: |
+          missing=()
+          for name in AWS_DEPLOY_ROLE ECR_REPOSITORY RUN_TASK_NETWORK_CONFIGURATION; do
+            [ -n "${!name}" ] || missing+=("$name")
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::notice::Deploy skipped: the dev environment has no ${missing[*]} yet (README, 'Deploy')."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -n "$INPUT_IMAGE_TAG" ]; then
+            if ! [[ "$INPUT_IMAGE_TAG" =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+              echo "::error::image_tag must match [A-Za-z0-9._-]{1,128}"
+              exit 1
+            fi
+            tag="$INPUT_IMAGE_TAG"
+          else
+            tag="$RUN_SHA"
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "image=$ECR_REPOSITORY:$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Check out the deployed commit
+        if: steps.preflight.outputs.ready == 'true' && inputs.image_tag == ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.RUN_SHA }}
+          persist-credentials: false
+
+      - name: AWS credentials (OIDC)
+        if: steps.preflight.outputs.ready == 'true'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE }}
+          role-session-name: bido-back-deploy-${{ github.run_id }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Is the image already in ECR?
+        if: steps.preflight.outputs.ready == 'true'
+        id: image
+        env:
+          TAG: ${{ steps.preflight.outputs.tag }}
+        run: |
+          repo_name="${ECR_REPOSITORY#*/}"
+          if aws ecr describe-images --repository-name "$repo_name" --image-ids "imageTag=$TAG" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            if [ -n "$INPUT_IMAGE_TAG" ]; then
+              echo "::error::image_tag $TAG is not in ECR; nothing to redeploy."
+              exit 1
+            fi
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Log in to ECR
+        if: steps.preflight.outputs.ready == 'true' && steps.image.outputs.exists == 'false'
+        run: aws ecr get-login-password | docker login --username AWS --password-stdin "${ECR_REPOSITORY%%/*}"
+
+      - name: Set up QEMU (arm64 builds on an x86 runner)
+        if: steps.preflight.outputs.ready == 'true' && steps.image.outputs.exists == 'false'
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        with:
+          platforms: arm64
+
+      - name: Set up Buildx
+        if: steps.preflight.outputs.ready == 'true' && steps.image.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Build and push (linux/arm64)
+        if: steps.preflight.outputs.ready == 'true' && steps.image.outputs.exists == 'false'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/arm64
+          push: true
+          # ECR tags are immutable: one image per commit, never overwritten.
+          tags: ${{ steps.preflight.outputs.image }}
+          provenance: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Register task definitions with the new image
+        if: steps.preflight.outputs.ready == 'true'
+        id: taskdefs
+        env:
+          IMAGE: ${{ steps.preflight.outputs.image }}
+        run: |
+          set -euo pipefail
+          for role in api worker migrate; do
+            family="$TASK_FAMILY_PREFIX-$role"
+            # Keep everything Terraform set; swap only bido-back's image.
+            aws ecs describe-task-definition --task-definition "$family" --query taskDefinition --output json \
+              | jq --arg repo "$ECR_REPOSITORY:" --arg image "$IMAGE" '
+                  .containerDefinitions |= map(if (.image | startswith($repo)) then .image = $image else . end)
+                  | {family, taskRoleArn, executionRoleArn, networkMode, containerDefinitions, volumes,
+                     placementConstraints, requiresCompatibilities, cpu, memory, runtimePlatform,
+                     ephemeralStorage, pidMode, ipcMode}
+                  | with_entries(select(.value != null))' > "taskdef-$role.json"
+            arn=$(aws ecs register-task-definition --cli-input-json "file://taskdef-$role.json" \
+              --query taskDefinition.taskDefinitionArn --output text)
+            echo "$role=$arn" >> "$GITHUB_OUTPUT"
+            echo "registered $arn"
+          done
+
+      - name: Migrate (one-off task; the deploy stops if it fails)
+        if: steps.preflight.outputs.ready == 'true'
+        env:
+          MIGRATE_TASK_DEFINITION: ${{ steps.taskdefs.outputs.migrate }}
+          TAG: ${{ steps.preflight.outputs.tag }}
+        run: |
+          set -euo pipefail
+          task=$(aws ecs run-task --cluster "$ECS_CLUSTER" --launch-type FARGATE \
+            --task-definition "$MIGRATE_TASK_DEFINITION" \
+            --network-configuration "$RUN_TASK_NETWORK_CONFIGURATION" \
+            --started-by "deploy-${TAG:0:12}" \
+            --query 'tasks[0].taskArn' --output text)
+          echo "migrate task: $task"
+          aws ecs wait tasks-stopped --cluster "$ECS_CLUSTER" --tasks "$task"
+          code=$(aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$task" \
+            --query 'tasks[0].containers[?name==`migrate`].exitCode | [0]' --output text)
+          if [ "$code" != "0" ]; then
+            reason=$(aws ecs describe-tasks --cluster "$ECS_CLUSTER" --tasks "$task" \
+              --query 'tasks[0].stoppedReason' --output text)
+            echo "::error::Migration failed (exit code $code): $reason"
+            aws logs get-log-events \
+              --log-group-name "/ecs/$TASK_FAMILY_PREFIX/migrate" \
+              --log-stream-name "migrate/migrate/${task##*/}" \
+              --limit 100 --query 'events[].message' --output text || true
+            exit 1
+          fi
+          echo "migrations applied"
+
+      - name: Roll the api and worker services
+        if: steps.preflight.outputs.ready == 'true'
+        env:
+          API_TASK_DEFINITION: ${{ steps.taskdefs.outputs.api }}
+          WORKER_TASK_DEFINITION: ${{ steps.taskdefs.outputs.worker }}
+        run: |
+          set -euo pipefail
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service api \
+            --task-definition "$API_TASK_DEFINITION" --query service.serviceName --output text
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service worker \
+            --task-definition "$WORKER_TASK_DEFINITION" --query service.serviceName --output text
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services api worker
+
+      - name: Summary
+        if: steps.preflight.outputs.ready == 'true'
+        env:
+          IMAGE: ${{ steps.preflight.outputs.image }}
+          REUSED: ${{ steps.image.outputs.exists }}
+        run: |
+          {
+            echo "### Deployed to dev"
+            echo "- Image: \`$IMAGE\` (reused from ECR: $REUSED)"
+            echo "- Migrations: applied"
+            echo "- Services: api, worker stable"
+            echo "- Rollback: run this workflow with \`image_tag\` = an earlier SHA"
+          } >> "$GITHUB_STEP_SUMMARY"

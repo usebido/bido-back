@@ -146,10 +146,42 @@ after a person approves it, in the RFQ's thread. Locally, trigger a sweep with
   local variables, and a `before_send` scrubber; span URLs lose their query
   strings, and SQL spans record statements without parameters.
 
+## Deploy (dev)
+
+`.github/workflows/deploy-dev.yml` deploys to the `dev` environment (AWS
+account `b2b-dev`, Terraform in `bido-infra/b2b/dev`). It runs after CI
+succeeds on a push to `main`, or by hand from the Actions tab.
+
+1. Build the arm64 image once and push it to ECR, tagged with the git SHA.
+   ECR tags are immutable; an SHA that is already there is reused.
+2. Register new `api`, `worker` and `migrate` task definitions, changing only
+   the image. Everything else stays as Terraform defined it.
+3. Run `alembic upgrade head` as a one-off `migrate` task. If it fails, the
+   deploy stops and prints the task's log; the services keep the old image.
+4. Roll the `api` and `worker` services and wait until they are stable.
+
+**Rollback:** run the workflow by hand with `image_tag` set to an earlier
+SHA. Nothing is rebuilt. Migrations are not rolled back: keep them backward
+compatible with the previous image.
+
+It authenticates with GitHub OIDC; no AWS keys are stored. The role trusts
+only this repository in the `dev` GitHub environment, so that environment's
+protection rules (required reviewers, allowed branches) decide who deploys.
+Until the variables below exist, the job logs a notice and does nothing.
+
+| `dev` environment variable | Value (`terraform output` in `bido-infra/b2b/dev`) |
+|---|---|
+| `AWS_DEPLOY_ROLE` | `github_deploy_back_role_arn` |
+| `ECR_REPOSITORY` | `ecr_repository_url` |
+| `RUN_TASK_NETWORK_CONFIGURATION` | `run_task_network_configuration` (the JSON as is) |
+| `AWS_REGION` (optional) | default `us-east-2` |
+| `ECS_CLUSTER` (optional) | default `bido-dev` |
+| `TASK_FAMILY_PREFIX` (optional) | default `bido-dev` |
+
 ## Not here yet (deliberately)
 
-- **Deploy workflow:** images are built in CI but not pushed. ECR push and the
-  ECS Fargate deploy via GitHub Actions + OIDC come in a later PR.
+- **Production deploy:** a `prd` environment and promotion of the same image
+  come with `bido-infra/b2b/prd`.
 - **Authentication and authorization** for the api.
 - **Product features:** this is the scaffold that features build on.
 
