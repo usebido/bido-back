@@ -41,6 +41,7 @@ from bido_back.rfqs.schemas import (
     RfqSummary,
     UpdateLineRequest,
 )
+from bido_back.templates.schemas import RfqEmailPreview
 
 Db = Annotated[async_sessionmaker[AsyncSession], Depends(get_db)]
 CurrentPrincipal = Annotated[Principal, Depends(get_principal)]
@@ -142,6 +143,27 @@ def rfqs_router() -> APIRouter:
         except RfqError as exc:
             raise rfq_http_error(exc) from None
 
+    @router.get(
+        "/{rfq_id}/invites/{invite_id}/preview",
+        responses=error_responses(
+            status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT, status.HTTP_502_BAD_GATEWAY
+        ),
+    )
+    async def preview_email(  # pyright: ignore[reportUnusedFunction]
+        rfq_id: UUID,
+        invite_id: UUID,
+        principal: CurrentPrincipal,
+        db: Db,
+        agents: Annotated[RfqAgents, Depends(get_rfq_agents)],
+    ) -> RfqEmailPreview:
+        """The email this invite would get, rendered from the RFQ's template. Sends nothing."""
+        try:
+            return await service.preview_email(
+                db, principal, rfq_id, invite_id, agents.email_writer
+            )
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
+
     @router.post(
         "/{rfq_id}/send",
         responses=error_responses(
@@ -155,7 +177,7 @@ def rfqs_router() -> APIRouter:
         agents: Annotated[RfqAgents, Depends(get_rfq_agents)],
         mailboxes: Annotated[MailboxSenderFactory, Depends(get_mailbox_senders)],
     ) -> PrepareSendResponse:
-        """Draft each invite's email and queue it for approval. Sends nothing."""
+        """Render each invite's email and queue it for approval. Sends nothing."""
         try:
             return await service.prepare_send(db, principal, rfq_id, agents.email_writer, mailboxes)
         except RfqError as exc:

@@ -6,9 +6,12 @@ OUTSIDE any transaction; their results are written afterwards.
 
 Preparing a send never sends. It first checks that the caller (the buyer)
 has a connected mailbox, since that is where the emails will go out from
-(`MailboxNotConnected` otherwise). Then, for each invite still in `draft`, it
-runs the email writer (with the tenant's default RFQ template from
-onboarding as a style hint, when there is one), makes sure the subject
+(`MailboxNotConnected` otherwise). It pins the RFQ to the template version
+its emails use (`bido_back.templates.service.resolve_for_rfq`, recorded at
+the first send). Then, for each invite still in `draft`, it renders the email
+from that template in the supplier's language (`bido_back.templates.render`;
+the email writer agent only translates the buyer's own template text when the
+languages differ), checks it (`rfq_email_problems`), makes sure the subject
 carries the `[RFQ-<n>]` marker, records an `ApprovalProposal` for the act
 tool `send_rfq_email` through `PostgresApprovalSink` (requested by the
 caller), and moves the invite to `pending_approval`. The proposal's run id
@@ -20,6 +23,7 @@ hits the sink's uniqueness rule and the first one stands.
 import importlib
 import logging
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Final, cast
 from uuid import UUID, uuid4
@@ -35,9 +39,10 @@ from bido_back.agents.catalog.contracts import (
     LineCategory,
     RfqEmailInput,
     RfqEmailLine,
-    RfqEmailTemplate,
+    RfqEmailOutput,
     RfqIntakeInput,
 )
+from bido_back.agents.catalog.definitions import rfq_email_problems
 from bido_back.agents.context import ToolContext
 from bido_back.agents.events import args_hash
 from bido_back.approvals import ApprovalConflict, PostgresApprovalSink
@@ -49,12 +54,12 @@ from bido_back.db.models import (
     Invite,
     Rfq,
     RfqLine,
-    RfqTemplate,
     Supplier,
     SupplierContact,
     Tenant,
     User,
 )
+from bido_back.onboarding.standard import TemplateContent
 from bido_back.rfqs.agents import EmailWriterAgent, IntakeAgent
 from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound
 from bido_back.rfqs.mailbox import MailboxSenderFactory
@@ -78,6 +83,15 @@ from bido_back.rfqs.send import (
     SendRfqEmailArgs,
     send_proposal_ids,
     subject_marker,
+)
+from bido_back.templates.localize import localize
+from bido_back.templates.render import RenderedRfq, RenderInput, RenderLine, render_rfq
+from bido_back.templates.schemas import RfqEmailPreview
+from bido_back.templates.service import (
+    ResolvedTemplate,
+    record_template,
+    required_views,
+    resolve_for_rfq,
 )
 
 logger = logging.getLogger(__name__)
@@ -360,24 +374,141 @@ async def _buyer_name(session: AsyncSession, user: User, company: str) -> str:
     return name or f"{company} purchasing"
 
 
-async def default_template(session: AsyncSession) -> RfqEmailTemplate | None:
-    """The tenant's default RFQ template (onboarding), as the email writer's style hint."""
-    row = await session.scalar(
-        select(RfqTemplate).where(RfqTemplate.is_default, RfqTemplate.status == "ready")
-    )
-    if row is None or row.greeting is None:
-        return None
-    return RfqEmailTemplate(
-        language=row.language or "pt",
-        greeting=row.greeting,
-        fields=[str(f) for f in row.fields],
-    )
-
-
 def with_marker(subject: str, rfq_ref: str) -> str:
     """The subject with the `[RFQ-<n>]` marker, added in front if the writer left it out."""
     marker = subject_marker(rfq_ref)
     return subject if marker in subject else f"{marker} {subject}"
+
+
+@dataclass(frozen=True, slots=True)
+class _SendContext:
+    """What every invite's email of one RFQ shares."""
+
+    rfq: Rfq
+    lines: list[RfqLine]
+    template: ResolvedTemplate
+    buyer_name: str
+    buyer_company: str
+
+
+def _render_line(line: RfqLine) -> RenderLine:
+    return RenderLine(
+        position=line.position,
+        description=line.description,
+        mpn=line.mpn,
+        manufacturer=line.manufacturer,
+        quantities=quantities_from_json(line.quantities),
+        unit=line.unit,
+        need_by=line.need_by,
+        incoterm=line.incoterm,
+        delivery_location=line.delivery_location,
+        qualification=line.qualification,
+    )
+
+
+def _email_line(line: RfqLine) -> RfqEmailLine:
+    return RfqEmailLine(
+        position=line.position,
+        description=line.description,
+        mpn=line.mpn,
+        manufacturer=line.manufacturer,
+        quantities=quantities_from_json(line.quantities),
+        unit=line.unit,
+        need_by=line.need_by,
+        incoterm=line.incoterm,
+        qualification=line.qualification,
+    )
+
+
+async def _send_context(session: AsyncSession, principal: Principal, rfq: Rfq) -> _SendContext:
+    lines = await _lines(session, rfq.id)
+    tenant = await session.get(Tenant, principal.tenant_id)
+    user = await session.get(User, principal.user_id)
+    if tenant is None or user is None:
+        raise NotFound("tenant or user not found")
+    return _SendContext(
+        rfq=rfq,
+        lines=lines,
+        template=await resolve_for_rfq(session, rfq, lines),
+        buyer_name=await _buyer_name(session, user, tenant.name),
+        buyer_company=tenant.name,
+    )
+
+
+async def _render_for(
+    ctx: _SendContext,
+    supplier: Supplier,
+    writer: EmailWriterAgent,
+    context: ToolContext,
+    localized: dict[str, TemplateContent],
+) -> RenderedRfq:
+    """The supplier's email; refuses one that fails the deterministic checks."""
+    language = supplier.language
+    display = localized.get(language)
+    if display is None:
+        display = await localize(ctx.template.content, language, writer, context)
+        localized[language] = display
+    rendered = render_rfq(
+        RenderInput(
+            rfq_ref=ctx.rfq.ref,
+            rfq_title=ctx.rfq.title,
+            response_due=ctx.rfq.response_due,
+            buyer_name=ctx.buyer_name,
+            buyer_company=ctx.buyer_company,
+            language=language,
+            template=ctx.template.content,
+            display=display,
+            lines=[_render_line(line) for line in ctx.lines],
+        )
+    )
+    problems = rfq_email_problems(
+        RfqEmailInput(
+            rfq_ref=ctx.rfq.ref,
+            rfq_title=ctx.rfq.title,
+            buyer_company=ctx.buyer_company,
+            buyer_name=ctx.buyer_name,
+            supplier_name=supplier.name,
+            supplier_language=language,
+            response_due=ctx.rfq.response_due,
+            lines=[_email_line(line) for line in ctx.lines],
+        ),
+        RfqEmailOutput(subject=rendered.subject, body=rendered.text),
+    )
+    if problems:
+        # The buyer's template text is the only free text: e.g. a price in it.
+        raise InvalidState(f"rfq {ctx.rfq.id}: rendered email fails checks: {', '.join(problems)}")
+    return rendered
+
+
+async def preview_email(
+    db: Db, principal: Principal, rfq_id: UUID, invite_id: UUID, writer: EmailWriterAgent
+) -> RfqEmailPreview:
+    """The email this invite would get, as `prepare_send` would propose it. Sends nothing."""
+    async with tenant_session(db, principal.tenant_id) as session:
+        rfq = await _rfq(session, rfq_id)
+        row = (
+            await session.execute(
+                select(Invite, Supplier)
+                .join(Supplier, Supplier.id == Invite.supplier_id)
+                .where(Invite.id == invite_id, Invite.rfq_id == rfq_id)
+            )
+        ).first()
+        if row is None:
+            raise NotFound(f"invite {invite_id} not found")
+        _, supplier = row
+        ctx = await _send_context(session, principal, rfq)
+    context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
+    rendered = await _render_for(ctx, supplier, writer, context, {})
+    return RfqEmailPreview(
+        invite_id=invite_id,
+        subject=with_marker(rendered.subject, rfq.ref),
+        text=rendered.text,
+        html=rendered.html,
+        language=rendered.language,
+        template_id=ctx.template.template_id,
+        template_version=ctx.template.version,
+        missing_required=required_views(ctx.template.content),
+    )
 
 
 async def prepare_send(
@@ -387,18 +518,17 @@ async def prepare_send(
     writer: EmailWriterAgent,
     mailboxes: MailboxSenderFactory,
 ) -> PrepareSendResponse:
-    """Draft one email per draft invite and record each as a pending approval.
+    """Render one email per draft invite and record each as a pending approval.
 
     The emails will go out from the caller's connected mailbox; without one
-    this fails with `MailboxNotConnected` before any agent runs.
+    this fails with `MailboxNotConnected` before anything is rendered.
     """
     async with tenant_session(db, principal.tenant_id) as session:
-        rfq = await _rfq(session, rfq_id)
+        rfq = await _rfq(session, rfq_id, lock=True)
         if rfq.status not in ("draft", "open"):
             raise InvalidState(f"rfq {rfq_id} is {rfq.status}")
         # Fail early: nobody should approve an email that cannot be sent.
         await mailboxes(session, principal.tenant_id, principal.user_id)
-        lines = await _lines(session, rfq_id)
         rows = await session.execute(
             select(Invite, Supplier, Contact)
             .join(Supplier, Supplier.id == Invite.supplier_id)
@@ -419,55 +549,28 @@ async def prepare_send(
             .group_by(Approval.tool_call_id)
         )
         attempts = {call_id: count for call_id, count in rejected_counts}
-        tenant = await session.get(Tenant, principal.tenant_id)
-        user = await session.get(User, principal.user_id)
-        if tenant is None or user is None:
-            raise NotFound("tenant or user not found")
-        buyer_name = await _buyer_name(session, user, tenant.name)
-        template = await default_template(session)
+        ctx = await _send_context(session, principal, rfq)
+        if drafts:
+            # Every email of this RFQ, now and later, uses this template version.
+            record_template(rfq, ctx.template)
+            await session.flush()
 
-    email_lines = [
-        RfqEmailLine(
-            position=line.position,
-            description=line.description,
-            mpn=line.mpn,
-            manufacturer=line.manufacturer,
-            quantities=quantities_from_json(line.quantities),
-            unit=line.unit,
-            need_by=line.need_by,
-            incoterm=line.incoterm,
-            qualification=line.qualification,
-        )
-        for line in lines
-    ]
     sink = PostgresApprovalSink(db)
     prepared: list[PreparedInvite] = []
+    localized: dict[str, TemplateContent] = {}
     for invite, supplier, contact in drafts:
         if not contact.email or contact.pseudonymized_at is not None:
             raise InvalidState(f"invite {invite.id}: contact has no usable email address")
         context = ToolContext(
             tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4()
         )
-        draft = await writer(
-            RfqEmailInput(
-                rfq_ref=rfq.ref,
-                rfq_title=rfq.title,
-                buyer_company=tenant.name,
-                buyer_name=buyer_name,
-                supplier_name=supplier.name,
-                supplier_language=supplier.language,
-                response_due=rfq.response_due,
-                lines=email_lines,
-                template=template,
-            ),
-            context,
-        )
+        rendered = await _render_for(ctx, supplier, writer, context, localized)
         args = SendRfqEmailArgs(
             invite_id=invite.id,
             sender_user_id=principal.user_id,
             to=[contact.email],
-            subject=with_marker(draft.subject, rfq.ref),
-            body=draft.body,
+            subject=with_marker(rendered.subject, rfq.ref),
+            body=rendered.text,
         )
         payload = cast(dict[str, JsonValue], args.model_dump(mode="json"))
         call_id = send_proposal_ids(invite.id)[1]

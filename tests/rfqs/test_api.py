@@ -26,6 +26,7 @@ from bido_back.api.deps import (
 from bido_back.api.me import me_router
 from bido_back.api.rfqs import rfqs_router
 from bido_back.api.suppliers import suppliers_router
+from bido_back.api.templates import templates_router
 from bido_back.auth import Principal
 from bido_back.db import create_sessionmaker
 from bido_back.rfqs.agents import RfqAgents
@@ -43,7 +44,13 @@ def build_app() -> FastAPI:
     app.state.resources = ApiResources(
         Settings.model_validate({"environment": "test", "database_url": UNUSED_DB})
     )
-    for router in (rfqs_router(), suppliers_router(), approvals_router(), me_router()):
+    for router in (
+        rfqs_router(),
+        suppliers_router(),
+        approvals_router(),
+        me_router(),
+        templates_router(),
+    ):
         app.include_router(router)
     return app
 
