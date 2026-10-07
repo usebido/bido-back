@@ -7,15 +7,17 @@ from the model's arguments, and works in that tenant's RLS-scoped session.
   missing, proposals, the comparison, quoted price history, supplier
   suggestions, the RFQ template.
 - `draft` tools change only drafts or the tenant's own settings: create an RFQ
-  (draft), invite suppliers (draft invites), update the RFQ template, and
-  prepare sends. Preparing a send does NOT send: it records one pending
-  approval per email (`rfqs.service.prepare_send`), which an approver who is
-  not the requester decides on; the worker sends only after that.
+  (draft), invite suppliers (draft invites), update the RFQ template, prepare
+  sends, and propose counter-offers. Neither sends anything: each records one
+  pending approval per email (`rfqs.service.prepare_send`,
+  `negotiation.service.evaluate_rfq`), which an approver who is not the
+  requester decides on; the worker sends only after that. The prices in a
+  counter-offer are decided by the negotiation strategy, never by this model.
 
 There is no `act` tool here on purpose: the only thing the copilot can make
 happen outside Bido is an email, and that already goes through the approval
-guard via `prepare_send`, with the email written by the vetted writer agent
-rather than by this model.
+guard, with the email written by a vetted writer agent rather than by this
+model.
 """
 
 import logging
@@ -36,6 +38,8 @@ from bido_back.comparison.loader import load_comparison
 from bido_back.copilot import queries
 from bido_back.db import tenant_session
 from bido_back.db.models import Invite, Rfq, RfqLine, RfqTemplate
+from bido_back.negotiation import service as negotiation_service
+from bido_back.negotiation.agents import NegotiationWriter, default_negotiation_writer
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
@@ -61,6 +65,8 @@ class CopilotToolDeps:
     mailboxes: MailboxSenderFactory
     # Text of this message's attachments, for create_rfq. Empty without any.
     attachments_text: str = ""
+    # Writes counter-offers for propose_counteroffers; None = the default agent.
+    negotiation_writer: NegotiationWriter | None = None
     today: Callable[[], date] = lambda: datetime.now(UTC).date()
 
 
@@ -348,6 +354,38 @@ class PreparedApproval(BaseModel):
 class PrepareSendOut(BaseModel):
     ref: str
     approvals: list[PreparedApproval]
+    note: str
+
+
+class NegotiationLineOut(BaseModel):
+    position: int
+    decision: str
+    offered_unit_price: Decimal | None
+    ask_unit_price: Decimal | None
+    lead_time_days: int | None
+
+
+class NegotiationSupplierOut(BaseModel):
+    supplier_name: str
+    status: str
+    rounds_used: int
+    lines: list[NegotiationLineOut]
+
+
+class NegotiationStatusOut(BaseModel):
+    ref: str
+    status: str
+    deadline: datetime | None
+    max_rounds: int
+    base_currency: str
+    suppliers: list[NegotiationSupplierOut]
+    note: str
+
+
+class ProposeCounteroffersOut(BaseModel):
+    ref: str
+    proposed: int
+    approval_ids: list[UUID]
     note: str
 
 
@@ -721,6 +759,74 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             ),
         )
 
+    async def get_negotiation_status(ctx: ToolContext, args: RfqRef) -> NegotiationStatusOut:
+        principal = _principal(ctx)
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+            positions = {line.id: line.position for line in await queries.lines(session, rfq.id)}
+        try:
+            view = await negotiation_service.get_negotiation(db, principal, rfq.id)
+        except RfqError as exc:
+            raise _service_error(exc) from None
+        notes = {
+            "not_started": "No negotiation yet: the buyer sets a deadline and line targets first.",
+            "open": "Negotiating.",
+            "ready_to_close": "Every line has an offer within target: it can be closed now.",
+            "closed": "Closed: the outcome is the best eligible offer per line.",
+        }
+        return NegotiationStatusOut(
+            ref=rfq.ref,
+            status=view.status,
+            deadline=view.settings.deadline,
+            max_rounds=view.settings.max_rounds,
+            base_currency=view.settings.base_currency,
+            suppliers=[
+                NegotiationSupplierOut(
+                    supplier_name=invite.supplier_name,
+                    status=invite.status,
+                    rounds_used=invite.rounds_used,
+                    lines=[
+                        NegotiationLineOut(
+                            position=positions.get(line.rfq_line_id, 0),
+                            decision=line.decision,
+                            offered_unit_price=line.offered_unit_price_base,
+                            ask_unit_price=line.ask_unit_price,
+                            lead_time_days=line.lead_time_days,
+                        )
+                        for line in invite.lines
+                    ],
+                )
+                for invite in view.invites
+            ],
+            note=notes[view.status],
+        )
+
+    async def propose_counteroffers(ctx: ToolContext, args: RfqRef) -> ProposeCounteroffersOut:
+        _principal(ctx)
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+            status = rfq.negotiation_status
+        if status not in ("open", "ready_to_close"):
+            raise ToolError(
+                f"{rfq.ref}: the negotiation is {status.replace('_', ' ')}; it must be open"
+            )
+        result = await negotiation_service.evaluate_rfq(
+            db,
+            ctx.tenant_id,
+            rfq.id,
+            writer=deps.negotiation_writer or default_negotiation_writer(),
+            force=True,
+        )
+        return ProposeCounteroffersOut(
+            ref=rfq.ref,
+            proposed=result.proposed,
+            approval_ids=list(result.approval_ids),
+            note=(
+                "Nothing was sent. Each counter-offer waits for approval by an approver "
+                "other than the requester; it is sent only after that."
+            ),
+        )
+
     rfq_ref_hint = " Takes the RFQ's reference (RFQ-12) or id."
     return (
         Tool(
@@ -835,6 +941,26 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             PrepareSendOut,
             "draft",
             prepare_send,
+            artifact_kind="approvals",
+        ),
+        Tool(
+            "get_negotiation_status",
+            "Where an RFQ's negotiation stands: deadline, each supplier's rounds and how "
+            "its latest offer compares to the buyer's targets." + rfq_ref_hint,
+            RfqRef,
+            NegotiationStatusOut,
+            "read",
+            get_negotiation_status,
+        ),
+        Tool(
+            "propose_counteroffers",
+            "Propose counter-offers (or best-and-final requests) to the suppliers whose "
+            "latest offer is above target. The prices asked are decided by rules, not by "
+            "you. Nothing is sent: each email waits for approval." + rfq_ref_hint,
+            RfqRef,
+            ProposeCounteroffersOut,
+            "draft",
+            propose_counteroffers,
             artifact_kind="approvals",
         ),
     )

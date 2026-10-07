@@ -60,6 +60,7 @@ from bido_back.db.models import (
     User,
 )
 from bido_back.followups.send import SEND_FOLLOWUP_EMAIL, SendFollowupEmailArgs
+from bido_back.negotiation.send import SEND_NEGOTIATION_EMAIL, SendNegotiationEmailArgs
 from bido_back.onboarding.standard import TemplateContent
 from bido_back.rfqs.agents import EmailWriterAgent, IntakeAgent
 from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound
@@ -70,6 +71,7 @@ from bido_back.rfqs.schemas import (
     EmailKind,
     InviteStatus,
     InviteView,
+    NegotiationEmailDraft,
     PreparedInvite,
     PrepareSendResponse,
     RfqCreated,
@@ -636,6 +638,7 @@ async def list_approvals(
             )
         )
         drafts: dict[UUID, tuple[SendRfqEmailArgs | SendFollowupEmailArgs, EmailKind]] = {}
+        negotiations: dict[UUID, SendNegotiationEmailArgs] = {}
         for approval in approvals:
             try:
                 if approval.tool == SEND_RFQ_EMAIL:
@@ -643,9 +646,15 @@ async def list_approvals(
                 elif approval.tool == SEND_FOLLOWUP_EMAIL:
                     followup = SendFollowupEmailArgs.model_validate(approval.args)
                     drafts[approval.id] = (followup, followup.kind)
+                elif approval.tool == SEND_NEGOTIATION_EMAIL:
+                    negotiations[approval.id] = SendNegotiationEmailArgs.model_validate(
+                        approval.args
+                    )
             except ValueError:
                 logger.error("approval %s has args that do not validate", approval.id)
-        invite_ids = {args.invite_id for args, _ in drafts.values()}
+        invite_ids = {args.invite_id for args, _ in drafts.values()} | {
+            args.invite_id for args in negotiations.values()
+        }
         context: dict[UUID, tuple[UUID, str, str]] = {}
         if invite_ids:
             rows = await session.execute(
@@ -675,6 +684,23 @@ async def list_approvals(
                 subject=args.subject,
                 body=args.body,
             )
+        negotiation: NegotiationEmailDraft | None = None
+        negotiation_args = negotiations.get(approval.id)
+        if negotiation_args is not None:
+            rfq_id, ref, supplier_name = context.get(negotiation_args.invite_id, (None, None, None))
+            negotiation = NegotiationEmailDraft(
+                action=negotiation_args.action,
+                round=negotiation_args.round,
+                invite_id=negotiation_args.invite_id,
+                sender_user_id=negotiation_args.sender_user_id,
+                rfq_id=rfq_id,
+                rfq_ref=ref,
+                supplier_name=supplier_name,
+                to=list(negotiation_args.to),
+                cc=list(negotiation_args.cc),
+                subject=negotiation_args.subject,
+                body=negotiation_args.body,
+            )
         items.append(
             ApprovalQueueItem(
                 id=approval.id,
@@ -685,6 +711,7 @@ async def list_approvals(
                 created_at=approval.created_at,
                 decided_at=approval.decided_at,
                 rfq_email=email,
+                negotiation_email=negotiation,
             )
         )
     return items

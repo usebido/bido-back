@@ -23,6 +23,8 @@ EXPECTED_TOOLS = {
     "create_rfq": "draft",
     "invite_suppliers": "draft",
     "prepare_send": "draft",
+    "get_negotiation_status": "read",
+    "propose_counteroffers": "draft",
 }
 
 
