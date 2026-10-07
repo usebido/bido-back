@@ -30,6 +30,7 @@ from bido_back.agents.catalog.contracts import (
     RfqEmailOutput,
     RfqIntakeOutput,
     RfqTemplateBuilderOutput,
+    SheetMappingOutput,
 )
 from bido_back.agents.definition import AgentDefinition
 
@@ -77,8 +78,8 @@ def rfq_email_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[RfqEmailLoca
 def quote_extraction(model: str = EXTRACTION_MODEL) -> AgentDefinition[QuoteExtractionOutput]:
     return AgentDefinition(
         name="quote_extraction",
-        prompt_file="quote_extraction.v1.md",
-        prompt_version=1,
+        prompt_file="quote_extraction.v2.md",
+        prompt_version=2,
         model=model,
         output_model=QuoteExtractionOutput,
         max_turns=_MAX_TURNS,
@@ -164,6 +165,22 @@ def award_notice_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[AwardNoti
 
 
 AWARD_NOTICE_WRITER: Final = award_notice_writer()
+
+
+def sheet_mapper(model: str = DEFAULT_MODEL) -> AgentDefinition[SheetMappingOutput]:
+    return AgentDefinition(
+        name="sheet_mapper",
+        prompt_file="sheet_mapper.v1.md",
+        prompt_version=1,
+        model=model,
+        output_model=SheetMappingOutput,
+        max_turns=_MAX_TURNS,
+        thinking=False,
+        effort="medium",
+    )
+
+
+SHEET_MAPPER: Final = sheet_mapper()
 
 
 # --- Deterministic checks on the RFQ email draft ---------------------------------

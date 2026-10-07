@@ -51,6 +51,7 @@ from bido_back.copilot.tools import CopilotToolDeps, Db, copilot_tools
 from bido_back.db import tenant_session
 from bido_back.db.models import TemplateUpload
 from bido_back.documents import DocumentText, extract_text, render_documents
+from bido_back.purchasing.workbook import SheetMapper, default_sheet_mapper
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.storage import BlobStorage
@@ -71,6 +72,8 @@ class CopilotDeps:
     agents: RfqAgents
     mailboxes: MailboxSenderFactory
     runner_config: RunnerConfig
+    # Reads sheets the import rules cannot; None = the default agent.
+    sheet_mapper: SheetMapper | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +103,7 @@ async def prepare_message(
             message=request.message,
             today=datetime.now(UTC).date(),
             attachments=[d.filename for d in documents],
+            attachment_ids=list(dict.fromkeys(request.attachment_ids)),
             attachments_text=text,
         ),
     )
@@ -142,6 +146,9 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
             agents=deps.agents,
             mailboxes=deps.mailboxes,
             attachments_text=prepared.input.attachments_text,
+            attachment_ids=tuple(prepared.input.attachment_ids),
+            storage=deps.storage,
+            sheet_mapper=deps.sheet_mapper or default_sheet_mapper(deps.runner_config),
         )
     )
     agent = copilot_agent(tools)

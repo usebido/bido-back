@@ -18,9 +18,11 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.followups.jobs import followup_tenants
+from bido_back.mandates.service import auto_approve_pending
 from bido_back.negotiation.agents import NegotiationWriter
 from bido_back.negotiation.service import sweep_tenant
 from bido_back.worker.envelope import Envelope
+from bido_back.worker.jobs import JobQueue
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +37,9 @@ class NegotiationSweepHandler:
     writer: NegotiationWriter
     # Tests pin the clock; None = now.
     now: datetime | None = None
+    # Mandates: after each tenant's sweep, approve its in-bounds emails and
+    # enqueue their execution (`bido_back.mandates`). None: mandates idle.
+    jobs: JobQueue | None = None
 
     async def __call__(self, envelope: Envelope) -> None:
         single = envelope.tenant_id != ALL_TENANTS
@@ -44,6 +49,8 @@ class NegotiationSweepHandler:
         for tenant_id in tenants:
             try:
                 await sweep_tenant(self.db, tenant_id, writer=self.writer, now=self.now)
+                if self.jobs is not None:
+                    await auto_approve_pending(self.db, tenant_id, jobs=self.jobs, now=self.now)
             except Exception:
                 logger.exception("negotiation.sweep failed tenant=%s", tenant_id)
                 if single:

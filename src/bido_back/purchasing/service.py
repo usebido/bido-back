@@ -22,7 +22,7 @@ part number) so a file is never rejected for that.
 
 import logging
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -216,6 +216,78 @@ async def _apply(
             await _apply_purchases(session, tenant_id, table, items, counts)
         case "production_plan":
             await _apply_plan(session, tenant_id, table, counts)
+        case "supplier_contacts":
+            await _apply_contacts(session, tenant_id, table, counts)
+
+
+async def apply_parsed(
+    session: AsyncSession, tenant_id: UUID, table: ParsedTable
+) -> tuple[dict[str, int], dict[str, int]]:
+    """Write one validated table in the caller's transaction: (created, updated) counts."""
+    counts = _Counts(created={}, updated={})
+    if not table.missing_required and table.rows:
+        await _apply(session, tenant_id, table, counts)
+    return counts.created, counts.updated
+
+
+async def _apply_contacts(
+    session: AsyncSession, tenant_id: UUID, table: ParsedTable, counts: _Counts
+) -> None:
+    """Supplier contacts: the supplier by name (created when new), one contact per email."""
+    suppliers: dict[str, Supplier] = {}
+    for _, row in table.rows:
+        name = str(row["supplier"]).strip()
+        supplier = suppliers.get(name.lower())
+        if supplier is None:
+            supplier = await session.scalar(
+                select(Supplier).where(func.lower(Supplier.name) == name.lower()).limit(1)
+            )
+            if supplier is None:
+                supplier = Supplier(tenant_id=tenant_id, name=name, type="distributor")
+                session.add(supplier)
+                await session.flush()
+                counts.add("suppliers", created=True)
+            suppliers[name.lower()] = supplier
+        country = row.get("country")
+        if isinstance(country, str) and country.strip() and not supplier.country:
+            supplier.country = country.strip()[:60]
+        language = row.get("language")
+        if isinstance(language, str) and len(language.strip()) == 2:
+            supplier.language = language.strip().lower()
+        email = str(row["email"]).strip().lower()
+        existing = await session.scalar(
+            select(Contact)
+            .join(SupplierContact, SupplierContact.contact_id == Contact.id)
+            .where(
+                SupplierContact.supplier_id == supplier.id,
+                func.lower(Contact.email) == email,
+                Contact.pseudonymized_at.is_(None),
+            )
+            .limit(1)
+        )
+        if existing is not None:
+            for field_name, value in (
+                ("name", row.get("contact_name")),
+                ("phone", row.get("phone")),
+            ):
+                if isinstance(value, str) and value.strip():
+                    setattr(existing, field_name, value.strip())
+            counts.add("contacts", created=False)
+            continue
+        contact = Contact(
+            tenant_id=tenant_id,
+            kind="supplier",
+            name=_opt(row.get("contact_name")),
+            email=email,
+            phone=_opt(row.get("phone")),
+        )
+        session.add(contact)
+        await session.flush()
+        session.add(
+            SupplierContact(tenant_id=tenant_id, supplier_id=supplier.id, contact_id=contact.id)
+        )
+        counts.add("contacts", created=True)
+    await session.flush()
 
 
 class _ItemCache:
@@ -553,6 +625,78 @@ async def _load_bom(session: AsyncSession, product: str) -> list[calc.BomEntry]:
     return [
         calc.BomEntry(item=_item_info(item), qty_per_unit=bom.qty_per_unit) for bom, item in rows
     ]
+
+
+async def adjust_analysis(
+    db: Db,
+    principal: Principal,
+    analysis_id: UUID,
+    *,
+    exclude_parts: Sequence[str] = (),
+    quantities: Mapping[str, Decimal] | None = None,
+) -> AnalysisView:
+    """The buyer's edits to a recommendation: drop parts, or set how much to buy.
+
+    Only before an RFQ was created from it. Totals are recomputed from the
+    stored target and last prices; nothing else changes.
+    """
+    wanted = {p.strip().lower() for p in exclude_parts}
+    overrides = {k.strip().lower(): v for k, v in (quantities or {}).items()}
+    if any(v < 0 for v in overrides.values()):
+        raise InvalidRequest("quantities must not be negative")
+    async with tenant_session(db, principal.tenant_id) as session:
+        record = await session.scalar(
+            select(Analysis).where(Analysis.id == analysis_id).with_for_update()
+        )
+        if record is None:
+            raise NotFound(f"analysis {analysis_id} not found")
+        if record.rfq_id is not None:
+            raise Conflict("this analysis already has an RFQ; run a new analysis to change it")
+        rows = list(
+            await session.execute(
+                select(AnalysisLine, Item)
+                .join(Item, Item.id == AnalysisLine.item_id)
+                .where(AnalysisLine.analysis_id == analysis_id)
+                .with_for_update(of=AnalysisLine)
+            )
+        )
+        known = {item.part_number.lower() for _, item in rows}
+        unknown = sorted((wanted | set(overrides)) - known)
+        if unknown:
+            raise InvalidRequest(f"not in this analysis: {', '.join(unknown)}")
+        for line, item in rows:
+            key = item.part_number.lower()
+            if key in wanted:
+                line.to_buy = Decimal(0)
+            elif key in overrides:
+                line.to_buy = overrides[key]
+        summary = dict(record.summary)
+        buying = [line for line, _ in rows if line.to_buy > 0]
+        summary["items_to_buy"] = len(buying)
+        for total, price in (
+            ("total_at_target", "target_price"),
+            ("total_at_last_price", "last_price"),
+        ):
+            values = [getattr(line, price) for line in buying]
+            summary[total] = (
+                None
+                if not buying or any(v is None for v in values)
+                else str(
+                    sum(
+                        (line.to_buy * getattr(line, price) for line in buying), Decimal(0)
+                    ).quantize(Decimal("0.01"))
+                )
+            )
+        record.summary = summary
+        await session.flush()
+        logger.info(
+            "analysis adjusted tenant=%s analysis=%s excluded=%d set=%d",
+            principal.tenant_id,
+            analysis_id,
+            len(wanted),
+            len(overrides),
+        )
+        return await _view(session, record)
 
 
 def _item_info(item: Item) -> calc.ItemInfo:

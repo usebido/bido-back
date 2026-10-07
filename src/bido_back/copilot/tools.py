@@ -42,6 +42,7 @@ from bido_back.awards import service as award_service
 from bido_back.awards.schemas import AwardLine, AwardRequest, AwardSelection, PurchaseOrderSummary
 from bido_back.comparison.loader import load_comparison
 from bido_back.copilot import queries
+from bido_back.copilot.journey_tools import journey_tools
 from bido_back.db import tenant_session
 from bido_back.db.models import Invite, Rfq, RfqLine, RfqTemplate
 from bido_back.negotiation import service as negotiation_service
@@ -49,10 +50,12 @@ from bido_back.negotiation.agents import NegotiationWriter, default_negotiation_
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
 from bido_back.purchasing import service as purchasing_service
 from bido_back.purchasing.schemas import AnalysisRequest, RfqFromAnalysisRequest
+from bido_back.purchasing.workbook import SheetMapper
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.errors import Duplicate, MailboxNotConfigured, MailboxNotConnected, RfqError
 from bido_back.rfqs.mailbox import MailboxSenderFactory
+from bido_back.storage import BlobStorage
 from bido_back.templates import service as template_service
 from bido_back.templates.schemas import TemplateEdit
 from bido_back.templates.service import RequiredFieldsRemoved
@@ -76,6 +79,11 @@ class CopilotToolDeps:
     attachments_text: str = ""
     # Writes counter-offers for propose_counteroffers; None = the default agent.
     negotiation_writer: NegotiationWriter | None = None
+    # This message's attachments (upload ids) and where their bytes live, for
+    # import_spreadsheet; the sheet mapper reads sheets the rules cannot.
+    attachment_ids: tuple[UUID, ...] = ()
+    storage: BlobStorage | None = None
+    sheet_mapper: SheetMapper | None = None
     today: Callable[[], date] = lambda: datetime.now(UTC).date()
 
 
@@ -1365,4 +1373,5 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             prepare_award,
             artifact_kind="approvals",
         ),
+        *journey_tools(deps),
     )

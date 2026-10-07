@@ -47,6 +47,7 @@ from bido_back.worker.job_types import (
     TEMPLATE_BUILD,
     TEMPLATE_SCAN,
 )
+from bido_back.worker.jobs import SqsJobQueue
 
 logger = logging.getLogger(__name__)
 
@@ -103,8 +104,9 @@ def build_worker_registry(
     from bido_back.followups.jobs import FollowupSweepHandler
     from bido_back.followups.send import register_followup_act_tools
     from bido_back.fx.ecb import FxRefreshHandler
-    from bido_back.intake.consumer import build_inbound_service
+    from bido_back.intake.consumer import build_inbound_service, sqs_client
     from bido_back.mailbox import MailboxSyncDeps, MailboxSyncHandler, open_connection
+    from bido_back.mandates.service import MandateActDeps, register_mandate_act_tools
     from bido_back.negotiation.agents import default_negotiation_writer
     from bido_back.negotiation.jobs import NegotiationSweepHandler
     from bido_back.negotiation.send import register_negotiation_act_tools
@@ -130,16 +132,29 @@ def build_worker_registry(
     register_followup_act_tools(act_tools, act_deps)
     register_negotiation_act_tools(act_tools, act_deps)
     register_award_act_tools(act_tools, act_deps)
+    # Mandates enqueue the execution of the emails they approve.
+    jobs = (
+        SqsJobQueue(
+            settings.sqs_queue_url,
+            region=settings.aws_region,
+            sqs=sqs or sqs_client(settings),
+        )
+        if settings.sqs_queue_url
+        else None
+    )
+    register_mandate_act_tools(act_tools, MandateActDeps(db=engine, jobs=jobs))
     registry = build_registry(engine, act_tools)
     storage = build_storage(settings)
     runner_config = RunnerConfig.from_settings(settings)
     registry.register(
         FOLLOWUPS_SWEEP,
-        FollowupSweepHandler(db=engine, writer=default_followup_writer(runner_config)),
+        FollowupSweepHandler(db=engine, writer=default_followup_writer(runner_config), jobs=jobs),
     )
     registry.register(
         NEGOTIATION_SWEEP,
-        NegotiationSweepHandler(db=engine, writer=default_negotiation_writer(runner_config)),
+        NegotiationSweepHandler(
+            db=engine, writer=default_negotiation_writer(runner_config), jobs=jobs
+        ),
     )
     registry.register(
         QUOTE_EXTRACT,

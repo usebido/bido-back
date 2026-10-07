@@ -60,6 +60,7 @@ from bido_back.db.models import (
     Contact,
     Invite,
     Message,
+    NegotiationMandate,
     NegotiationMessage,
     Proposal,
     Rfq,
@@ -351,6 +352,61 @@ async def get_negotiation(
     return await _view(db, principal.tenant_id, rfq_id, now or datetime.now(UTC), history)
 
 
+async def apply_settings(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    actor_user_id: UUID | None,
+    rfq_id: UUID,
+    changes: NegotiationSettingsUpdate,
+) -> None:
+    """Save the settings and open the negotiation, in the caller's transaction."""
+    rfq = await session.scalar(select(Rfq).where(Rfq.id == rfq_id).with_for_update())
+    if rfq is None:
+        raise NotFound(f"rfq {rfq_id} not found")
+    if rfq.negotiation_status == "closed":
+        raise InvalidState(f"rfq {rfq_id}: the negotiation is closed")
+    if rfq.status not in ("draft", "open"):
+        raise InvalidState(f"rfq {rfq_id} is {rfq.status}")
+    lines = {
+        line.id: line
+        for line in await session.scalars(
+            select(RfqLine).where(RfqLine.rfq_id == rfq_id).with_for_update()
+        )
+    }
+    for limits in changes.lines:
+        line = lines.get(limits.rfq_line_id)
+        if line is None:
+            raise NotFound(f"line {limits.rfq_line_id} is not on rfq {rfq_id}")
+        line.target_unit_price = limits.target_unit_price
+        line.max_unit_price = limits.max_unit_price
+        line.max_lead_time_days = limits.max_lead_time_days
+    rfq.negotiation_deadline = changes.deadline
+    rfq.negotiation_max_rounds = changes.max_rounds
+    rfq.negotiation_early_close = changes.early_close
+    rfq.negotiation_status = "open"
+    rfq.negotiation_ready_at = None
+    # New limits: the current offers are evaluated again on the next sweep
+    # (suppliers with an email awaiting approval keep it; it is reconciled).
+    await session.execute(
+        update(Invite)
+        .where(
+            Invite.rfq_id == rfq_id,
+            Invite.negotiation_status.not_in(_FINAL_INVITE),
+        )
+        .values(negotiation_evaluated_proposal_id=None)
+    )
+    session.add(
+        AuditEvent(
+            tenant_id=tenant_id,
+            actor_user_id=actor_user_id,
+            action="rfq.negotiation_settings",
+            payload={"rfq_id": str(rfq_id), "lines": len(changes.lines)},
+        )
+    )
+    await session.flush()
+
+
 async def update_negotiation(
     db: Db,
     principal: Principal,
@@ -360,53 +416,29 @@ async def update_negotiation(
     now: datetime | None = None,
     history: PriceHistory = quoted_price_history,
 ) -> RfqNegotiation:
-    """Save the settings and open the negotiation. Current offers are re-evaluated."""
+    """Save the settings and open the negotiation. Current offers are re-evaluated.
+
+    Refused while a negotiation mandate is live: its bounds are what a person
+    approved; pause and replace the mandate to change them.
+    """
     at = now or datetime.now(UTC)
     async with tenant_session(db, principal.tenant_id) as session:
-        rfq = await session.scalar(select(Rfq).where(Rfq.id == rfq_id).with_for_update())
-        if rfq is None:
-            raise NotFound(f"rfq {rfq_id} not found")
-        if rfq.negotiation_status == "closed":
-            raise InvalidState(f"rfq {rfq_id}: the negotiation is closed")
-        if rfq.status not in ("draft", "open"):
-            raise InvalidState(f"rfq {rfq_id} is {rfq.status}")
-        lines = {
-            line.id: line
-            for line in await session.scalars(
-                select(RfqLine).where(RfqLine.rfq_id == rfq_id).with_for_update()
-            )
-        }
-        for limits in changes.lines:
-            line = lines.get(limits.rfq_line_id)
-            if line is None:
-                raise NotFound(f"line {limits.rfq_line_id} is not on rfq {rfq_id}")
-            line.target_unit_price = limits.target_unit_price
-            line.max_unit_price = limits.max_unit_price
-            line.max_lead_time_days = limits.max_lead_time_days
-        rfq.negotiation_deadline = changes.deadline
-        rfq.negotiation_max_rounds = changes.max_rounds
-        rfq.negotiation_early_close = changes.early_close
-        rfq.negotiation_status = "open"
-        rfq.negotiation_ready_at = None
-        # New limits: the current offers are evaluated again on the next sweep
-        # (suppliers with an email awaiting approval keep it; it is reconciled).
-        await session.execute(
-            update(Invite)
-            .where(
-                Invite.rfq_id == rfq_id,
-                Invite.negotiation_status.not_in(_FINAL_INVITE),
-            )
-            .values(negotiation_evaluated_proposal_id=None)
-        )
-        session.add(
-            AuditEvent(
-                tenant_id=principal.tenant_id,
-                actor_user_id=principal.user_id,
-                action="rfq.negotiation_settings",
-                payload={"rfq_id": str(rfq_id), "lines": len(changes.lines)},
+        live = await session.scalar(
+            select(NegotiationMandate.id).where(
+                NegotiationMandate.rfq_id == rfq_id, NegotiationMandate.status != "ended"
             )
         )
-        await session.flush()
+        if live is not None:
+            raise InvalidState(
+                f"rfq {rfq_id}: a negotiation mandate is live; its limits cannot change"
+            )
+        await apply_settings(
+            session,
+            tenant_id=principal.tenant_id,
+            actor_user_id=principal.user_id,
+            rfq_id=rfq_id,
+            changes=changes,
+        )
     logger.info(
         "negotiation settings saved tenant=%s rfq=%s by=%s",
         principal.tenant_id,
@@ -515,6 +547,12 @@ async def close_negotiation(
         )
         if pending:
             await _cancel(session, pending, "negotiation_closed")
+        # A closed negotiation ends its mandate: nothing more goes out on its behalf.
+        await session.execute(
+            update(NegotiationMandate)
+            .where(NegotiationMandate.rfq_id == rfq_id, NegotiationMandate.status != "ended")
+            .values(status="ended", ended_at=now)
+        )
         session.add(
             AuditEvent(
                 tenant_id=tenant_id,
