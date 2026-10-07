@@ -1,18 +1,14 @@
 """PostgresApprovalSink: the runner's proposal becomes a pending row with the same hash."""
 
-from typing import Any, cast
+from typing import cast
 from uuid import uuid4
 
-import anthropic
 import pytest
 from pydantic import JsonValue
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from bido_back.agents import agno_adapter
-from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
-from bido_back.agents.definition import AgentDefinition
 from bido_back.agents.runner import Failed, NeedsApproval, run_to_completion
 from bido_back.approvals import (
     ApprovalConflict,
@@ -23,31 +19,33 @@ from bido_back.approvals import (
 from bido_back.approvals.integrity import payload_matches
 from bido_back.db import tenant_session
 from bido_back.db.models import Approval
-from tests.agents.test_runner import CONFIG, TASK, StubAnthropic, agent, reply, send_calls, tool_use
+from tests.agents.test_runner import (
+    CONFIG,
+    TASK,
+    StubOpenAI,
+    agent,
+    install_stub,
+    reply,
+    send_calls,
+    tool_use,
+)
 
 from .conftest import People, audit_actions, load, proposal
 
 
 @pytest.fixture
-def scripted_model(monkeypatch: pytest.MonkeyPatch) -> StubAnthropic:
+def scripted_model(monkeypatch: pytest.MonkeyPatch) -> StubOpenAI:
     """The model proposes one send_payment call (an act tool)."""
-    stub = StubAnthropic(
-        [reply(tool_use("c1", "send_payment", supplier_id="sup_9", amount_cents=50_000))]
+    stub = StubOpenAI(
+        [reply(tool_use("fc_1", "send_payment", supplier_id="sup_9", amount_cents=50_000))]
     )
-    real = agno_adapter.build_model
-
-    def build_model(definition: AgentDefinition[Any], config: RunnerConfig) -> Any:
-        model = real(definition, config)
-        model.async_client = cast(anthropic.AsyncAnthropic, stub)
-        return model
-
-    monkeypatch.setattr(agno_adapter, "build_model", build_model)
+    install_stub(monkeypatch, stub)
     return stub
 
 
 @pytest.mark.db
 async def test_runner_and_sink_record_a_pending_row_matching_the_event(
-    app_engine: AsyncEngine, people: People, scripted_model: StubAnthropic
+    app_engine: AsyncEngine, people: People, scripted_model: StubOpenAI
 ) -> None:
     context = ToolContext(tenant_id=people.tenant, user_id=people.member, run_id=uuid4())
 
@@ -83,7 +81,7 @@ async def test_runner_and_sink_record_a_pending_row_matching_the_event(
 
 @pytest.mark.db
 async def test_background_run_cannot_request_approval(
-    app_engine: AsyncEngine, people: People, scripted_model: StubAnthropic
+    app_engine: AsyncEngine, people: People, scripted_model: StubOpenAI
 ) -> None:
     context = ToolContext(tenant_id=people.tenant, user_id=None, run_id=uuid4())
 

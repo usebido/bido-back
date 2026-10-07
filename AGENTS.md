@@ -24,7 +24,7 @@ no duplicate side effects are the properties every change must preserve.
    Secrets Manager. The passwords in `docker/postgres/init.sql` and
    `.env.example` are for throwaway local and CI databases only.
 5. Do not run anything against a shared or production environment (migrations,
-   queues, email, the Anthropic API with real data) without explicit approval.
+   queues, email, the OpenAI API with real data) without explicit approval.
 
 ## Code
 
@@ -64,7 +64,7 @@ no duplicate side effects are the properties every change must preserve.
   It is pinned to an exact version in `pyproject.toml`. Upgrade it deliberately,
   in its own PR, after reading the changelog; never inside a feature PR or a
   grouped dependency bump.
-- **Agno and Anthropic types stay inside one module,**
+- **Agno and OpenAI types stay inside one module,**
   `src/bido_back/agents/agno_adapter.py`. Everything else, including the rest of
   the agents package, the api, the worker and the database layer, uses our own
   neutral tool, run and event types through `run()`.

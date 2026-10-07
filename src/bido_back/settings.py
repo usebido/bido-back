@@ -28,10 +28,54 @@ class Settings(BaseSettings):
 
     aws_region: str = "us-east-2"
     sqs_queue_url: str | None = None
+    # Raw inbound emails (SES -> S3 -> this queue); no tenant until matched.
+    sqs_intake_queue_url: str | None = None
+    # Local dev: ElasticMQ (SQS-compatible). Unset in AWS.
+    sqs_endpoint_url: str | None = None
     # Messages the worker cannot handle (no tenant, unknown type) go here.
     sqs_parking_queue_url: str | None = None
 
-    anthropic_api_key: str | None = Field(default=None, repr=False)
+    openai_api_key: str | None = Field(default=None, repr=False)
+
+    # Email. `email_domain` names our Message-IDs and the Bido reply addresses.
+    email_domain: str = "quotes.usebido.com"
+    # How RFQ emails go out. "mailbox": from the requesting buyer's connected
+    # Gmail / Microsoft 365 (the product behavior). "smtp" / "ses": through that
+    # transport instead, From the buyer's address; only for local and test runs
+    # (Mailpit locally), so no mailbox connection is needed to try the flow.
+    email_transport: Literal["mailbox", "smtp", "ses"] = "mailbox"
+    smtp_host: str = "localhost"  # Mailpit locally
+    smtp_port: int = 1025
+
+    # Buyer mailbox connections (OAuth). Bido reads and sends only in RFQ threads it
+    # started; the rest of the mailbox is never listed or stored.
+    google_client_id: str | None = None
+    google_client_secret: str | None = Field(default=None, repr=False)
+    microsoft_client_id: str | None = None
+    microsoft_client_secret: str | None = Field(default=None, repr=False)
+    microsoft_tenant: str = "common"
+    oauth_redirect_base_url: str = "http://localhost:8080"
+    # The frontend page the provider callback forwards `code` and `state` to (in
+    # the URL fragment). It finishes the link with POST /v1/mailbox/complete as
+    # the signed-in user, who must be the one who started it.
+    mailbox_connect_return_url: str = "http://localhost:3000/settings/mailbox"
+    # Encrypts stored OAuth tokens. Local: a Fernet key. AWS: KMS envelope
+    # encryption under `oauth_token_kms_key_id`.
+    token_encryption_key: str | None = Field(default=None, repr=False)
+    oauth_token_kms_key_id: str | None = None
+    mailbox_sync_interval_seconds: int = 120
+
+    # Blob storage for raw emails and attachments.
+    storage_backend: Literal["local", "s3"] = "local"
+    storage_local_dir: str = ".data/blobs"
+    s3_bucket: str | None = None
+
+    # Auth (Clerk). `auth_dev_mode` lets local runs act as a seeded user via
+    # the X-Dev-User header; it is refused unless environment == "local".
+    clerk_issuer: str | None = None
+    clerk_jwks_url: str | None = None
+    clerk_authorized_parties: list[str] = []
+    auth_dev_mode: bool = False
 
     # Observability. Both are off when unset (local runs and tests stay quiet).
     otel_exporter_otlp_endpoint: str | None = None

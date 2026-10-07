@@ -37,7 +37,7 @@ async def test_decision_requires_authentication() -> None:
         response = await http.post(_url(uuid4()), json={"decision": "approve"})
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "authentication not implemented"}
+    assert response.json() == {"detail": "missing bearer token"}
     assert response.headers["www-authenticate"] == "Bearer"
 
 
