@@ -11,7 +11,6 @@ from collections import Counter, defaultdict
 from collections.abc import Sequence
 from decimal import ROUND_HALF_UP, Decimal
 
-from bido_back.purchasing.importers import norm
 from bido_back.purchasing.sources.contracts import (
     Assessment,
     AssessmentLine,
@@ -23,7 +22,10 @@ from bido_back.purchasing.sources.evidence import (
     add_issue as _issue,
 )
 from bido_back.purchasing.sources.evidence import (
-    normalize_unit as _unit,
+    categorical,
+    join_key,
+    same_key,
+    unit_key,
 )
 from bido_back.purchasing.sources.evidence import (
     source_date as _day,
@@ -39,30 +41,6 @@ from bido_back.purchasing.sources.evidence import (
 )
 
 _ZERO = Decimal(0)
-_GROSS = frozenset(
-    {
-        "gross",
-        "gross demand",
-        "gross requirement",
-        "gross requirements",
-        "bruta",
-        "necessidade bruta",
-        "necessidades brutas",
-        "demanda bruta",
-    }
-)
-_NET = frozenset(
-    {
-        "net",
-        "net demand",
-        "net requirement",
-        "net requirements",
-        "liquida",
-        "necessidade liquida",
-        "necessidades liquidas",
-        "demanda liquida",
-    }
-)
 _PLANNING_KINDS = frozenset({"inventory", "material_requirement", "purchase_summary"})
 
 
@@ -115,12 +93,16 @@ def _deduplicate(records: Sequence[Record]) -> list[Record]:
 def _groups(
     records: Sequence[Record], issues: list[Issue]
 ) -> dict[tuple[str, str | None], list[Record]]:
+    """Planning records per item and location, matched by `join_key`; first spelling shown."""
     planning = [record for record in records if record.kind in _PLANNING_KINDS]
-    locations: dict[str, set[str]] = defaultdict(set)
+    names: dict[str | None, str] = {}
+    locations: dict[str, dict[str, str]] = defaultdict(dict)
     for record in planning:
         part, location = _text(record, "part_number"), _text(record, "location")
-        if part is not None and location is not None:
-            locations[part].add(location)
+        if part is not None:
+            names.setdefault(join_key(part), part)
+            if location is not None:
+                locations[names[join_key(part)]].setdefault(join_key(location) or "", location)
     groups: dict[tuple[str, str | None], list[Record]] = defaultdict(list)
     for record in planning:
         part = _text(record, "part_number")
@@ -129,9 +111,12 @@ def _groups(
                 issues, "missing_part_number", "A planning record has no item identifier.", [record]
             )
             continue
+        part = names[join_key(part)]
         location = _text(record, "location")
         if location is None and len(locations[part]) == 1:
-            location = next(iter(locations[part]))
+            location = next(iter(locations[part].values()))
+        elif location is not None:
+            location = locations[part][join_key(location) or ""]
         groups[part, location].append(record)
     return groups
 
@@ -267,8 +252,8 @@ def _calculate(
             [],
         )
         return
-    basis = norm(_text(requirement, "demand_basis") or "")
-    if basis not in _GROSS | _NET:
+    basis = categorical(requirement, "demand_basis")
+    if basis not in ("gross", "net"):
         _issue(
             issues,
             "ambiguous_demand_basis",
@@ -304,7 +289,7 @@ def _calculate(
             "need_by",
             warning=True,
         )
-    if basis in _NET:
+    if basis == "net":
         if not any(issue.severity == "blocker" for issue in issues):
             line.calculated_to_buy = line.demand
         return
@@ -382,7 +367,9 @@ def _planning_line(part: str, location: str | None, records: Sequence[Record]) -
     reported_unit = _text(summary, "unit")
     demand_unit = _text(requirement, "unit")
     inventory_unit = _text(inventory, "unit")
-    units = {_unit(value) for value in (reported_unit, demand_unit, inventory_unit) if value}
+    units = {
+        unit_key(record) for record in (summary, requirement, inventory) if _text(record, "unit")
+    }
     if len(units) > 1:
         _issue(
             issues,
@@ -457,7 +444,7 @@ def _supplier_matches(
     name: str | None,
 ) -> list[Record]:
     if code is not None:
-        return [record for record in records if _text(record, "supplier_code") == code]
+        return [record for record in records if same_key(_text(record, "supplier_code"), code)]
     if name is None:
         return []
     matches = [record for record in records if _name(_text(record, "name")) == _name(name)]
@@ -609,10 +596,10 @@ def assess(records: Sequence[Record]) -> Assessment:
     masters = [record for record in unique if record.kind == "supplier"]
     performance = [record for record in unique if record.kind == "supplier_performance"]
     all_purchases = [record for record in unique if record.kind == "purchase"]
-    purchases: dict[str, list[Record]] = defaultdict(list)
+    purchases: dict[str | None, list[Record]] = defaultdict(list)
     for record in unique:
         if record.kind == "purchase" and (part := _text(record, "part_number")) is not None:
-            purchases[part].append(record)
+            purchases[join_key(part)].append(record)
     for (part, location), group in grouped.items():
         line = _planning_line(part, location, group)
         if location is None and any(key[0] == part and key[1] is not None for key in grouped):
@@ -627,7 +614,7 @@ def assess(records: Sequence[Record]) -> Assessment:
             )
             line.calculated_to_buy = None
         by_supplier: dict[tuple[str | None, str | None], list[Record]] = defaultdict(list)
-        for record in purchases[part]:
+        for record in purchases[join_key(part)]:
             code = _text(record, "supplier_code")
             name = _text(record, "supplier_name")
             if code is None and name is None:
@@ -639,7 +626,7 @@ def assess(records: Sequence[Record]) -> Assessment:
                     warning=True,
                 )
                 continue
-            by_supplier[code, None if code else _name(name)].append(record)
+            by_supplier[join_key(code), None if code else _name(name)].append(record)
         line.suppliers = [
             supplier_evidence(rows, masters, performance, all_purchases, line.issues)
             for rows in by_supplier.values()

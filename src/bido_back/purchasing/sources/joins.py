@@ -1,4 +1,15 @@
-"""Reconcile dated stock and purchase evidence by business keys, never row position."""
+"""Reconcile dated stock and purchase evidence by business keys, never row position.
+
+Identifiers are compared with `join_key`, so "000101", "101" and "101.0" (or "Planta A"
+and "PLANTA A") are one key across reports. Statuses, movements and units are compared
+as canonical terms: the mapper's checked interpretation of a section's spelling, or the
+built-in multilingual vocabulary.
+
+A purchase register may carry its own receipt and open-balance facts (received date,
+received/rejected and open quantity, expected date). They stand in for separate receipt
+or delivery-schedule tables only when those have nothing for the same order line; when
+both exist they must agree.
+"""
 
 from collections import defaultdict
 from collections.abc import Sequence
@@ -6,8 +17,8 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
-from bido_back.purchasing.importers import norm
 from bido_back.purchasing.sources.contracts import (
+    CanonicalValue,
     InboundEvidence,
     Issue,
     PlanningScope,
@@ -16,22 +27,45 @@ from bido_back.purchasing.sources.contracts import (
 )
 from bido_back.purchasing.sources.evidence import (
     add_issue,
+    categorical,
+    fact_key,
+    join_key,
     normalize_unit,
+    same_key,
     source_date,
     source_number,
     source_refs,
     source_text,
+    unit_key,
 )
 
 ZERO = Decimal(0)
-OPEN = frozenset({"open", "em aberto", "aberto", "partially received", "parcial"})
-CLOSED = frozenset({"closed", "encerrado", "encerrada", "fechado", "recebido", "received"})
-CANCELLED = frozenset({"cancelled", "canceled", "cancelado", "cancelada"})
-PENDING = frozenset({"not received", "nao recebido", "pending", "pendente", "em aberto"})
+# Canonical terms (see `vocabulary`); source spellings are interpreted before comparing.
+OPEN = frozenset({"open"})
+CLOSED = frozenset({"closed"})
+CANCELLED = frozenset({"cancelled"})
+PENDING = frozenset({"pending"})
+# Purchase-register fields that describe the order line's own receipt.
+_INLINE_RECEIPT = {
+    "po_number": "po_number",
+    "po_line": "po_line",
+    "location": "location",
+    "unit": "unit",
+    "received_at": "received_at",
+    "received_quantity": "quantity",
+    "rejected_quantity": "rejected",
+}
 
 
 def state(record: Record) -> str:
-    return norm(source_text(record, "status") or "")
+    """The record's canonical status term, or "" when its status is unknown."""
+    return categorical(record, "status") or ""
+
+
+def _at_location(record: Record, location: str) -> bool:
+    """The record is at the location, or names none (the caller decides about that)."""
+    found = source_text(record, "location")
+    return found is None or same_key(found, location)
 
 
 def coalesce(
@@ -40,11 +74,14 @@ def coalesce(
     issues: list[Issue],
     code: str,
 ) -> list[Record]:
-    """Identical business facts may be repeated across reports; conflicts stay blocked."""
+    """Identical business facts may be repeated across reports; conflicts stay blocked.
+
+    Facts are compared by meaning, not spelling: "000101"/"101", "25"/"25.0" and
+    "2026-10-08"/"08/10/2026" agree. The first record's spelling is kept for display.
+    """
     grouped: dict[tuple[str, ...], list[Record]] = defaultdict(list)
     for record in records:
-        key = tuple(source_text(record, field) or "" for field in keys)
-        if not all(key):
+        if not all(source_text(record, field) for field in keys):
             add_issue(
                 issues,
                 "missing_join_key",
@@ -53,23 +90,32 @@ def coalesce(
                 *keys,
             )
             continue
-        grouped[key].append(record)
+        grouped[tuple(fact_key(record, field) for field in keys)].append(record)
     result: list[Record] = []
     for group in grouped.values():
         values: dict[str, str] = {}
         evidence: dict[str, SourceRef] = {}
+        canonical: dict[str, CanonicalValue] = {}
+        providers: dict[str, Record] = {}
         conflict = False
         for index, record in enumerate(group):
             for field, value in record.values.items():
-                if field in values and values[field] != value:
+                provider = providers.get(field)
+                if provider is None:
+                    providers[field] = record
+                    values[field] = value
+                    if field in record.canonical:
+                        canonical[field] = record.canonical[field]
+                elif fact_key(provider, field) != fact_key(record, field):
                     conflict = True
-                values[field] = value
             for field, ref in record.evidence.items():
                 evidence[field if field not in evidence else f"{field}#{index}"] = ref
         if conflict:
             add_issue(issues, code, "Records with the same business key disagree.", group)
         else:
-            result.append(Record(kind=group[0].kind, values=values, evidence=evidence))
+            result.append(
+                Record(kind=group[0].kind, values=values, evidence=evidence, canonical=canonical)
+            )
     return result
 
 
@@ -91,12 +137,12 @@ def inventory_at(
         r
         for r in records
         if r.kind == "inventory"
-        and source_text(r, "part_number") == part
-        and source_text(r, "location") in {scope.location, None}
+        and same_key(source_text(r, "part_number"), part)
+        and _at_location(r, scope.location)
     ]
     warehouses: dict[str, list[tuple[date, Record]]] = defaultdict(list)
     for record in candidates:
-        if source_text(record, "location") != scope.location:
+        if source_text(record, "location") is None:
             add_issue(
                 issues,
                 "missing_inventory_location",
@@ -108,7 +154,7 @@ def inventory_at(
         if as_of is None:
             add_issue(issues, "missing_snapshot_date", "Stock needs a snapshot date.", [record])
         elif as_of <= scope.as_of:
-            warehouses[source_text(record, "warehouse") or ""].append((as_of, record))
+            warehouses[join_key(source_text(record, "warehouse")) or ""].append((as_of, record))
     if "" in warehouses and len(warehouses) > 1:
         add_issue(
             issues,
@@ -143,7 +189,7 @@ def inventory_at(
             "No usable stock snapshot exists for this plant.",
             candidates,
         )
-    units = {normalize_unit(source_text(r, "unit")) for r in chosen}
+    units = {unit_key(r) for r in chosen}
     if None in units or len(units) != 1:
         add_issue(
             issues, "inventory_unit_conflict", "Stock units are missing or incompatible.", chosen
@@ -156,6 +202,18 @@ def inventory_at(
         total = source_number(record, "total", issues)
         reserved = source_number(record, "reserved", issues)
         blocked = source_number(record, "blocked", issues)
+        if free is not None and categorical(record, "balance_basis") == "gross":
+            valid = False
+            add_issue(
+                issues,
+                "inventory_basis_conflict",
+                "The quantity mapped as available stock is gross physical stock "
+                "according to the source's own balance definition.",
+                [record],
+                "available",
+                "balance_basis",
+            )
+            continue
         if free is None and total is not None and reserved is not None and blocked is not None:
             free = total - reserved - blocked
         if free is None:
@@ -196,9 +254,41 @@ def inventory_at(
 
 def _order_key(record: Record) -> tuple[str | None, str | None, str | None]:
     return (
-        source_text(record, "po_number"),
-        source_text(record, "po_line"),
-        source_text(record, "location"),
+        join_key(source_text(record, "po_number")),
+        join_key(source_text(record, "po_line")),
+        join_key(source_text(record, "location")),
+    )
+
+
+def _same_line(record: Record, order: Record) -> bool:
+    """The record names the order's number and line, at its plant or at no plant."""
+    location = source_text(order, "location")
+    return (
+        same_key(source_text(record, "po_number"), source_text(order, "po_number"))
+        and same_key(source_text(record, "po_line"), source_text(order, "po_line"))
+        and (
+            source_text(record, "location") is None
+            or same_key(source_text(record, "location"), location)
+        )
+    )
+
+
+def _inline_receipt(order: Record) -> Record | None:
+    """The order line's own receipt facts, as a receipt whose evidence is the order's cells."""
+    if not any(source_text(order, field) for field in ("received_quantity", "received_at")):
+        return None
+    pairs = [
+        (source, target) for source, target in _INLINE_RECEIPT.items() if source in order.values
+    ]
+    return Record(
+        kind="receipt",
+        values={target: order.values[source] for source, target in pairs},
+        evidence={
+            target: order.evidence[source] for source, target in pairs if source in order.evidence
+        },
+        canonical={
+            target: order.canonical[source] for source, target in pairs if source in order.canonical
+        },
     )
 
 
@@ -208,20 +298,41 @@ def receipts_for(
     as_of: date,
     issues: list[Issue],
 ) -> tuple[list[Record], Decimal]:
-    candidates = [
-        r
-        for r in records
-        if r.kind == "receipt"
-        and source_text(r, "po_number") == source_text(order, "po_number")
-        and source_text(r, "po_line") == source_text(order, "po_line")
-        and source_text(r, "location") in {None, source_text(order, "location")}
-    ]
+    """Physical receipts of an order line up to `as_of`, and their received quantity.
+
+    Separate receipt records come first; the purchase register's own received
+    quantity and date stand in only when no separate receipt names the line, and
+    must equal the separate receipts' total when both exist.
+    """
+    candidates = [r for r in records if r.kind == "receipt" and _same_line(r, order)]
     found = coalesce(
         candidates,
         ("po_number", "po_line", "location", "receipt_id", "movement"),
         issues,
         "conflicting_receipt",
     )
+    inline = _inline_receipt(order)
+    if inline is not None and candidates:
+        reported = source_number(inline, "quantity", issues)
+        separate = [source_number(r, "quantity", []) for r in found]
+        total = sum((q for q in separate if q is not None), ZERO)
+        if reported is not None and (None in separate or reported != total):
+            add_issue(
+                issues,
+                "conflicting_receipt_evidence",
+                "The order line's own received quantity does not reconcile with the "
+                "separate receipt records.",
+                [order, *candidates],
+                "received_quantity",
+                "quantity",
+                "po_number",
+                "po_line",
+            )
+    elif inline is not None:
+        quantity = source_number(inline, "quantity", issues)
+        if quantity == ZERO:
+            return [], ZERO  # Nothing received yet: no receipt date is needed.
+        found = [inline]
     eligible: list[Record] = []
     received = ZERO
     for receipt in found:
@@ -231,7 +342,7 @@ def receipts_for(
             continue
         if day > as_of:
             continue
-        if norm(source_text(receipt, "movement") or "") not in {"101", "receipt", "entrada"}:
+        if receipt is not inline and categorical(receipt, "movement") != "receipt":
             add_issue(
                 issues,
                 "unsupported_receipt_movement",
@@ -241,9 +352,7 @@ def receipts_for(
             )
             continue
         quantity = source_number(receipt, "quantity", issues)
-        if quantity is None or normalize_unit(source_text(receipt, "unit")) != normalize_unit(
-            source_text(order, "unit")
-        ):
+        if quantity is None or unit_key(receipt) != unit_key(order):
             add_issue(
                 issues,
                 "invalid_receipt_quantity",
@@ -264,6 +373,101 @@ def receipts_for(
     return eligible, received
 
 
+def _pending(
+    order: Record,
+    schedules: list[Record],
+    ordered: Decimal | None,
+    received: Decimal,
+    receipts_known: bool,
+    part: str,
+    unit: str | None,
+    related: list[Record],
+    issues: list[Issue],
+) -> tuple[Decimal, date | None] | None:
+    """The order line's pending balance and expected date, or None when unresolved."""
+    inline = source_text(order, "open_quantity") is not None
+    if len(schedules) == 1:
+        schedule = schedules[0]
+        if (
+            state(schedule) not in PENDING
+            or not same_key(source_text(schedule, "part_number"), part)
+            or unit_key(schedule) != normalize_unit(unit)
+            or _order_key(schedule) != _order_key(order)
+        ):
+            add_issue(
+                issues,
+                "incompatible_delivery_schedule",
+                "The delivery confirmation "
+                "does not identify the same pending order line and physical unit.",
+                related,
+            )
+            return None
+        quantity = source_number(schedule, "quantity", issues)
+        expected = source_date(schedule, "expected_at", issues)
+        if ordered is None or (quantity is not None and quantity != ordered - received):
+            add_issue(
+                issues,
+                "outstanding_quantity_conflict",
+                "The pending delivery quantity "
+                "does not reconcile with the order and physical receipts.",
+                related,
+            )
+            return None
+        if inline and (
+            source_number(order, "open_quantity", issues) != quantity
+            or (
+                source_text(order, "expected_at") is not None
+                and source_date(order, "expected_at", issues) != expected
+            )
+        ):
+            add_issue(
+                issues,
+                "conflicting_pending_evidence",
+                "The order line's own open quantity or expected date differs from its "
+                "delivery confirmation.",
+                related,
+            )
+            return None
+    elif inline:
+        # The register states the pending balance itself: no separate schedule is needed.
+        quantity = source_number(order, "open_quantity", issues)
+        field = "expected_at" if source_text(order, "expected_at") is not None else "promised_at"
+        expected = source_date(order, field, issues)
+        if (
+            ordered is None
+            or quantity is None
+            or quantity > ordered
+            or (receipts_known and quantity != ordered - received)
+        ):
+            add_issue(
+                issues,
+                "outstanding_quantity_conflict",
+                "The order line's open quantity does not reconcile with the ordered and "
+                "physically received quantities.",
+                related,
+            )
+            return None
+    else:
+        # No receipt row is not proof of zero receipts. Require an explicit pending balance.
+        add_issue(
+            issues,
+            "missing_pending_confirmation",
+            "An open order needs an explicit "
+            "pending delivery balance; absence of receipts does not prove it is unreceived.",
+            related,
+        )
+        return None
+    if quantity is None:
+        add_issue(
+            issues,
+            "missing_pending_quantity",
+            "A delivery has no valid pending quantity.",
+            related,
+        )
+        return None
+    return quantity, expected
+
+
 def incoming_for(
     records: Sequence[Record],
     part: str,
@@ -276,8 +480,8 @@ def incoming_for(
         r
         for r in records
         if r.kind == "purchase"
-        and source_text(r, "part_number") == part
-        and source_text(r, "location") in {scope.location, None}
+        and same_key(source_text(r, "part_number"), part)
+        and _at_location(r, scope.location)
     ]
     orders = coalesce(
         candidates, ("po_number", "po_line", "location"), issues, "conflicting_purchase_order"
@@ -286,8 +490,8 @@ def incoming_for(
     for schedule in records:
         if (
             schedule.kind == "delivery_schedule"
-            and source_text(schedule, "part_number") == part
-            and source_text(schedule, "location") in {scope.location, None}
+            and same_key(source_text(schedule, "part_number"), part)
+            and _at_location(schedule, scope.location)
             and _order_key(schedule) not in keys
         ):
             add_issue(
@@ -328,7 +532,7 @@ def incoming_for(
             continue
         if ordered_at > scope.as_of:
             continue
-        if normalize_unit(source_text(order, "unit")) != normalize_unit(unit):
+        if unit_key(order) != normalize_unit(unit):
             add_issue(
                 issues,
                 "inbound_unit_conflict",
@@ -337,66 +541,36 @@ def incoming_for(
             )
             continue
         receipts, received = receipts_for(order, records, scope.as_of, issues)
-        schedules = [
-            r
-            for r in records
-            if r.kind == "delivery_schedule"
-            and source_text(r, "po_number") == source_text(order, "po_number")
-            and source_text(r, "po_line") == source_text(order, "po_line")
-            and source_text(r, "location") in {None, scope.location}
-        ]
         schedules = coalesce(
-            schedules, ("po_number", "po_line", "location"), issues, "conflicting_delivery_schedule"
+            [
+                r
+                for r in records
+                if r.kind == "delivery_schedule"
+                and _same_line(r, order)
+                and _at_location(r, scope.location)
+            ],
+            ("po_number", "po_line", "location"),
+            issues,
+            "conflicting_delivery_schedule",
         )
-        ordered = source_number(order, "quantity", issues)
-        quantity: Decimal | None = None
-        expected: date | None = None
         related = [order, *receipts, *schedules]
-        if len(schedules) == 1:
-            schedule = schedules[0]
-            if (
-                state(schedule) not in PENDING
-                or source_text(schedule, "part_number") != part
-                or normalize_unit(source_text(schedule, "unit")) != normalize_unit(unit)
-                or _order_key(schedule) != _order_key(order)
-            ):
-                add_issue(
-                    issues,
-                    "incompatible_delivery_schedule",
-                    "The delivery confirmation "
-                    "does not identify the same pending order line and physical unit.",
-                    related,
-                )
-                continue
-            quantity = source_number(schedule, "quantity", issues)
-            expected = source_date(schedule, "expected_at", issues)
-            if ordered is None or (quantity is not None and quantity != ordered - received):
-                add_issue(
-                    issues,
-                    "outstanding_quantity_conflict",
-                    "The pending delivery quantity "
-                    "does not reconcile with the order and physical receipts.",
-                    related,
-                )
-                continue
-        else:
-            # No receipt row is not proof of zero receipts. Require an explicit pending balance.
-            add_issue(
-                issues,
-                "missing_pending_confirmation",
-                "An open order needs an explicit "
-                "pending delivery balance; absence of receipts does not prove it is unreceived.",
-                related,
-            )
+        receipts_known = _inline_receipt(order) is not None or any(
+            r.kind == "receipt" and _same_line(r, order) for r in records
+        )
+        pending = _pending(
+            order,
+            schedules,
+            source_number(order, "quantity", issues),
+            received,
+            receipts_known,
+            part,
+            unit,
+            related,
+            issues,
+        )
+        if pending is None:
             continue
-        if quantity is None:
-            add_issue(
-                issues,
-                "missing_pending_quantity",
-                "A delivery has no valid pending quantity.",
-                related,
-            )
-            continue
+        quantity, expected = pending
         eligible = expected is not None and scope.as_of <= expected <= need_by
         if not eligible:
             add_issue(
