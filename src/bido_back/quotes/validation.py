@@ -361,6 +361,10 @@ def check_field(
             issues.append(located)
 
     parsed, value_issues = _parse(kind, raw, decimal)
+    if name == "price_basis_quantity" and parsed == 1 and not value_issues:
+        # A basis of one unit is the default ("0,039 EUR pro Stück", "each"): it cannot
+        # change a price and the "1" is rarely written, so it never puts an offer on review.
+        return FieldCheck(name=name, extracted=extracted, parsed=parsed)
     issues.extend(value_issues)
     if parsed is not None and source is not None and source.quote.strip():
         header = _column_header(source, sources) if kind == "days" else None
