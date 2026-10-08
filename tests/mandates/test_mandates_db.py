@@ -84,7 +84,7 @@ class MandateWorld(World):
         if connected:
             await self.connect()
         rfq = await rfq_service.create_rfq_from_text(
-            self.engine, principal, "Need MLCC and connectors", FakeIntake()
+            self.engine, principal, "Need MLCC and connectors", FakeIntake(), currency="EUR"
         )
         self.rfq_id = rfq.id
         for name, language, country in (("rhein", "de", "DE"), ("lyon", "fr", "FR")):

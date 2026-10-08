@@ -65,7 +65,9 @@ async def test_set_up_read_and_close(
     http: httpx.AsyncClient, app_engine: AsyncEngine, rfq_rows: People
 ) -> None:
     principal = Principal(tenant_id=rfq_rows.tenant, user_id=rfq_rows.owner, role="owner")
-    rfq = await rfq_service.create_rfq_from_text(app_engine, principal, "MLCC", FakeIntake())
+    rfq = await rfq_service.create_rfq_from_text(
+        app_engine, principal, "MLCC", FakeIntake(), currency="EUR"
+    )
     url = f"/v1/rfqs/{rfq.id}/negotiation"
 
     initial = await http.get(url)

@@ -5,7 +5,10 @@ from the model's arguments, and works in that tenant's RLS-scoped session.
 
 - `read` tools answer questions: RFQs and their status, who responded, what is
   missing, proposals, the comparison, quoted price history, supplier
-  suggestions, the RFQ template.
+  suggestions, the RFQ template, and the company's imported data: its
+  suppliers with their contacts and what was bought from each
+  (`list_suppliers`) and the prices it paid (`purchase_history`). That data
+  belongs to the company, not to a conversation: these work in any chat.
 - `draft` tools change only drafts or the tenant's own settings: run a
   purchase analysis (stored, from the imported BOM, stock and purchase
   history), create an RFQ (draft, from text or from an analysis), invite
@@ -54,9 +57,11 @@ from bido_back.negotiation.agents import NegotiationWriter, default_negotiation_
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
 from bido_back.purchasing import service as purchasing_service
 from bido_back.purchasing.schemas import AnalysisRequest, CurrencyTotalView, RfqFromAnalysisRequest
+from bido_back.purchasing.sources.mapping import Mapper
 from bido_back.purchasing.workbook import SheetMapper
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
+from bido_back.rfqs.currency import CurrencyChange, known_currency
 from bido_back.rfqs.errors import (
     Duplicate,
     MailboxNotConfigured,
@@ -65,7 +70,13 @@ from bido_back.rfqs.errors import (
     RfqError,
 )
 from bido_back.rfqs.mailbox import MailboxSenderFactory
-from bido_back.rfqs.schemas import AddLineRequest, RfqDetail, UpdateLineRequest, UpdateRfqRequest
+from bido_back.rfqs.schemas import (
+    AddLineRequest,
+    CurrencySource,
+    RfqDetail,
+    UpdateLineRequest,
+    UpdateRfqRequest,
+)
 from bido_back.storage import BlobStorage
 from bido_back.templates import service as template_service
 from bido_back.templates.schemas import TemplateEdit
@@ -106,6 +117,7 @@ class CopilotToolDeps:
     buyer_messages: Callable[[], Awaitable[list[str]]] | None = None
     storage: BlobStorage | None = None
     sheet_mapper: SheetMapper | None = None
+    source_mapper: Mapper | None = None
     today: Callable[[], date] = lambda: datetime.now(UTC).date()
 
 
@@ -306,8 +318,91 @@ class PricePointItem(BaseModel):
 
 class PriceHistoryOut(BaseModel):
     mpn: str
-    # Quoted prices: Bido does not record purchase orders yet.
+    # Quoted prices from RFQs; what was paid is purchase_history.
     points: list[PricePointItem]
+
+
+# --- list_suppliers / purchase_history (the company's imported data) -----------------------
+
+
+class ListSuppliersIn(BaseModel):
+    supplier: str | None = Field(default=None, description="Part of the supplier's name")
+    category: str | None = Field(
+        default=None, description="Only suppliers the company bought this part category from"
+    )
+    part_number: str | None = Field(
+        default=None, description="Only suppliers the company bought this part (or MPN) from"
+    )
+    limit: int = Field(default=MAX_LIST, ge=1, le=MAX_LIST)
+
+
+class SupplierContactItem(BaseModel):
+    name: str | None
+    email: str
+
+
+class PartBought(BaseModel):
+    part_number: str
+    description: str
+
+
+class SupplierEntryItem(BaseModel):
+    supplier_id: UUID
+    name: str
+    type: str
+    country: str | None
+    contacts: list[SupplierContactItem]
+    # From the imported purchase history.
+    purchase_orders: int
+    last_ordered_at: date | None
+    categories: list[str]
+    # What was bought from it (at most 20), to tell its part families apart.
+    parts: list[PartBought]
+    # From RFQs sent through Bido.
+    rfq_invites: int
+    rfq_responses: int
+
+
+class ListSuppliersOut(BaseModel):
+    total: int
+    suppliers: list[SupplierEntryItem]
+
+
+class PurchaseHistoryIn(BaseModel):
+    part_numbers: list[str] = Field(
+        default_factory=list[str],
+        max_length=MAX_LIST,
+        description="Internal part numbers or MPNs; empty = the parts bought most recently",
+    )
+    supplier: str | None = Field(default=None, description="Part of a supplier's name")
+    limit: int = Field(default=10, ge=1, le=MAX_LIST, description="Parts to return")
+
+
+class PaidLineItem(BaseModel):
+    supplier_name: str
+    po_number: str
+    ordered_at: date
+    quantity: Decimal
+    unit_price: Decimal
+    currency: str
+
+
+class PaidPartItem(BaseModel):
+    part_number: str
+    description: str
+    mpn: str | None
+    category: str | None
+    unit: str
+    last_paid: PaidLineItem
+    # Every purchase of the part, newest first (at most 10).
+    purchases: list[PaidLineItem]
+    purchase_count: int
+
+
+class PurchaseHistoryOut(BaseModel):
+    # Part numbers asked for that the purchase history does not have.
+    not_found: list[str]
+    parts: list[PaidPartItem]
 
 
 class SuggestSuppliersIn(BaseModel):
@@ -358,6 +453,19 @@ class UpdateTemplateIn(BaseModel):
 
 # --- create_rfq / invite_suppliers / prepare_send ------------------------------------------
 
+_CURRENCY_ARG = (
+    "ISO 4217 code (BRL, EUR, USD...), only when the buyer said which currency the RFQ is in "
+    "('em reais' = BRL). Never guess it: left empty, Bido takes it from the buyer's data"
+)
+_CURRENCY_RESULT = (
+    " The result has the RFQ's `currency` and `currency_source`: stated (the buyer said it), "
+    "analysis (the parts were bought in it) or purchase_history (most of the company's "
+    "purchases are in it). Always tell the buyer the currency and why, e.g. 'em BRL, a moeda "
+    "das suas compras'; set_rfq_terms(currency=...) changes it while the RFQ is a draft. If "
+    "the tool says the currency is unknown, ask the buyer which currency and call it again "
+    "with `currency`."
+)
+
 
 class CreateRfqIn(BaseModel):
     text: str = Field(
@@ -385,6 +493,7 @@ class CreateRfqIn(BaseModel):
             "the ones attached earlier in this conversation)"
         ),
     )
+    currency: str | None = Field(default=None, description=_CURRENCY_ARG)
 
 
 class CreateRfqOut(BaseModel):
@@ -392,6 +501,9 @@ class CreateRfqOut(BaseModel):
     ref: str
     title: str
     status: str
+    # The RFQ's currency (offers are compared in it) and where it came from.
+    currency: str
+    currency_source: CurrencySource | None
     lines: list[LineItem]
     questions: list[str]
 
@@ -470,6 +582,13 @@ _TERMS_FIELDS = Literal[
 
 class SetRfqTermsIn(BaseModel):
     rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
+    currency: str | None = Field(
+        default=None,
+        description=(
+            "The RFQ's currency, ISO 4217 (BRL, EUR, USD...), when the buyer asks to change it; "
+            "negotiation limits already set are converted at the ECB reference rate"
+        ),
+    )
     incoterm: str | None = Field(
         default=None, description="For every line. The rule only: DAP, FCA, EXW..."
     )
@@ -503,10 +622,13 @@ class EditedRfqOut(BaseModel):
     title: str
     status: str
     response_due: date | None
+    currency: str
     # What is stored now: report these, not what was asked for.
     payment_terms: str | None
     quote_validity_days: int | None
     lines: list[LineItem]
+    # What a currency change did to the negotiation limits; None when nothing to tell.
+    note: str | None = None
 
 
 def _request[M: BaseModel](model: type[M], fields: dict[str, object]) -> M:
@@ -518,13 +640,26 @@ def _request[M: BaseModel](model: type[M], fields: dict[str, object]) -> M:
         raise ToolError(f"invalid value for: {where}") from None
 
 
-def _edited(detail: RfqDetail) -> EditedRfqOut:
+def _currency_note(change: CurrencyChange | None) -> str | None:
+    if change is None or not change.converted_lines:
+        return None
+    positions = ", ".join(str(p) for p in change.converted_lines)
+    when = f" of {change.rate_date.isoformat()}" if change.rate_date else ""
+    return (
+        f"the negotiation limits of line(s) {positions} were converted from {change.old} to "
+        f"{change.new} at the ECB reference rate{when}; tell the buyer"
+    )
+
+
+def _edited(detail: RfqDetail, change: CurrencyChange | None = None) -> EditedRfqOut:
     return EditedRfqOut(
         id=detail.id,
         ref=detail.ref,
         title=detail.title,
         status=detail.status,
         response_due=detail.response_due,
+        currency=detail.base_currency,
+        note=_currency_note(change),
         payment_terms=detail.payment_terms,
         quote_validity_days=detail.quote_validity_days,
         lines=[
@@ -760,6 +895,7 @@ class PurchaseAnalysisOut(BaseModel):
 
 class RfqFromAnalysisIn(BaseModel):
     analysis_id: UUID = Field(description="The analysis_id returned by run_purchase_analysis")
+    currency: str | None = Field(default=None, description=_CURRENCY_ARG)
 
 
 class RfqFromAnalysisOut(BaseModel):
@@ -769,6 +905,7 @@ class RfqFromAnalysisOut(BaseModel):
     status: str
     # The RFQ's currency: offers are compared, and limits set, in it.
     currency: str
+    currency_source: CurrencySource | None
     lines: list[LineItem]
     invited_suppliers: list[str]
     skipped_suppliers: list[str]
@@ -1025,6 +1162,76 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             ],
         )
 
+    async def list_suppliers(ctx: ToolContext, args: ListSuppliersIn) -> ListSuppliersOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            entries = await queries.supplier_directory(
+                session, name=args.supplier, category=args.category, part_number=args.part_number
+            )
+        return ListSuppliersOut(
+            total=len(entries),
+            suppliers=[
+                SupplierEntryItem(
+                    supplier_id=e.supplier.id,
+                    name=e.supplier.name,
+                    type=e.supplier.type,
+                    country=e.supplier.country,
+                    contacts=[SupplierContactItem(name=n, email=m) for n, m in e.contacts],
+                    purchase_orders=e.purchase_orders,
+                    last_ordered_at=e.last_ordered_at,
+                    categories=sorted(e.categories),
+                    parts=[
+                        PartBought(part_number=n, description=d)
+                        for n, d in sorted(e.parts.items())[:MAX_LIST]
+                    ],
+                    rfq_invites=e.invited,
+                    rfq_responses=e.responded,
+                )
+                for e in entries[: args.limit]
+            ],
+        )
+
+    async def purchase_history(ctx: ToolContext, args: PurchaseHistoryIn) -> PurchaseHistoryOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            found = await queries.purchase_history(
+                session,
+                part_numbers=args.part_numbers,
+                supplier=args.supplier,
+                limit=max(args.limit, len(args.part_numbers)),
+            )
+        known = {
+            queries.normalize_mpn(code)
+            for p in found
+            for code in (p.item.part_number, p.item.mpn)
+            if code
+        }
+
+        def item(line: queries.PaidLine) -> PaidLineItem:
+            return PaidLineItem(
+                supplier_name=line.supplier_name,
+                po_number=line.po_number,
+                ordered_at=line.ordered_at,
+                quantity=line.quantity,
+                unit_price=line.unit_price,
+                currency=line.currency,
+            )
+
+        return PurchaseHistoryOut(
+            not_found=[p for p in args.part_numbers if queries.normalize_mpn(p) not in known],
+            parts=[
+                PaidPartItem(
+                    part_number=p.item.part_number,
+                    description=p.item.description,
+                    mpn=p.item.mpn,
+                    category=p.item.category,
+                    unit=p.item.unit,
+                    last_paid=item(p.lines[0]),
+                    purchases=[item(line) for line in p.lines[:10]],
+                    purchase_count=len(p.lines),
+                )
+                for p in found
+            ],
+        )
+
     async def suggest_suppliers(ctx: ToolContext, args: SuggestSuppliersIn) -> SuggestSuppliersOut:
         async with tenant_session(db, ctx.tenant_id) as session:
             records, matched = await queries.supplier_records(
@@ -1109,7 +1316,12 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         own_words = await deps.buyer_messages() if deps.buyer_messages is not None else []
         try:
             created = await rfq_service.create_rfq_from_text(
-                db, principal, text, deps.agents.intake, buyer_messages=own_words
+                db,
+                principal,
+                text,
+                deps.agents.intake,
+                buyer_messages=own_words,
+                currency=args.currency,
             )
         except RfqError as exc:
             raise _service_error(exc) from None
@@ -1124,6 +1336,8 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             ref=created.ref,
             title=created.title,
             status=created.status,
+            currency=created.base_currency,
+            currency_source=created.currency_source,
             lines=[
                 LineItem(
                     position=line.position,
@@ -1195,11 +1409,19 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         changes.update({field: None for field in args.clear})
         if not changes:
             raise ToolError("nothing to change: pass the terms to set or to clear")
+        if args.currency is not None:
+            try:
+                changes["currency"] = known_currency(args.currency)
+            except RfqError as exc:
+                raise _service_error(exc) from None
         patch = _request(UpdateRfqRequest, changes)
         try:
-            return _edited(await rfq_service.update_rfq(db, _principal(ctx), rfq.id, patch))
+            edited = await rfq_service.edit_rfq(
+                db, _principal(ctx), rfq.id, patch, today=deps.today()
+            )
         except RfqError as exc:
             raise _service_error(exc) from None
+        return _edited(edited.detail, edited.currency_change)
 
     async def invite_suppliers(ctx: ToolContext, args: InviteSuppliersIn) -> InviteSuppliersOut:
         principal = _principal(ctx)
@@ -1325,8 +1547,13 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         principal = _principal(ctx)
         analysis_id = args.analysis_id
         try:
+            currency = known_currency(args.currency) if args.currency else None
+        except RfqError as exc:
+            raise _service_error(exc) from None
+        request = RfqFromAnalysisRequest(currency=currency)
+        try:
             created = await purchasing_service.create_rfq_from_analysis(
-                db, principal, analysis_id, RfqFromAnalysisRequest()
+                db, principal, analysis_id, request
             )
         except purchasing_service.NotFound:
             # Models sometimes copy an id wrongly: fall back to this buyer's most
@@ -1336,7 +1563,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 raise ToolError(f"analysis {analysis_id} not found") from None
             try:
                 created = await purchasing_service.create_rfq_from_analysis(
-                    db, principal, latest, RfqFromAnalysisRequest()
+                    db, principal, latest, request
                 )
             except purchasing_service.PurchasingError as exc:
                 raise ToolError(str(exc)) from None
@@ -1349,6 +1576,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             title=rfq.title,
             status=rfq.status,
             currency=rfq.base_currency,
+            currency_source=created.currency_source,
             lines=[
                 LineItem(
                     position=line.position,
@@ -1571,6 +1799,28 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             price_history,
         ),
         Tool(
+            "list_suppliers",
+            "The company's suppliers, stored from its imported data and RFQs: contacts "
+            "(emails), what it bought from each (part categories, part numbers, purchase "
+            "orders, last order date) and RFQ invites. Filter by name, category or part "
+            "number. Works in any conversation, with no file attached.",
+            ListSuppliersIn,
+            ListSuppliersOut,
+            "read",
+            list_suppliers,
+        ),
+        Tool(
+            "purchase_history",
+            "What the company PAID for parts, from its imported purchase orders: the last "
+            "price paid (supplier, date, currency) and earlier purchases. Give part numbers "
+            "or MPNs, or none for the parts bought most recently. Needs no BOM and no file "
+            "attached.",
+            PurchaseHistoryIn,
+            PurchaseHistoryOut,
+            "read",
+            purchase_history,
+        ),
+        Tool(
             "suggest_suppliers",
             "Suppliers to invite, ranked by how often they were invited and responded "
             "for the same part number or category.",
@@ -1612,7 +1862,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             "create_rfq_from_analysis",
             "Create a DRAFT RFQ from a purchase analysis: the parts to buy with their "
             "quantities and need-by dates, and the suggested suppliers as DRAFT invites. "
-            "Nothing is sent.",
+            "Nothing is sent." + _CURRENCY_RESULT,
             RfqFromAnalysisIn,
             RfqFromAnalysisOut,
             "draft",
@@ -1622,7 +1872,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         Tool(
             "create_rfq",
             "Create a DRAFT RFQ from a description of what to buy (and the attached "
-            "files). Nothing is sent.",
+            "files). Nothing is sent." + _CURRENCY_RESULT,
             CreateRfqIn,
             CreateRfqOut,
             "draft",
@@ -1663,9 +1913,10 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         Tool(
             "set_rfq_terms",
             "Set a draft RFQ's terms for every line at once: Incoterm, delivery location, "
-            "need-by date; and the RFQ's response date, title, payment terms (the buyer's "
-            "words, e.g. '28 DDL') and minimum quote validity in days. The RFQ email states "
-            "the payment terms and validity to suppliers. Only the fields passed change; "
+            "need-by date; and the RFQ's response date, title, currency (any negotiation "
+            "limits are converted with it; tell the buyer the `note`), payment terms (the "
+            "buyer's words, e.g. '28 DDL') and minimum quote validity in days. The RFQ email "
+            "states the payment terms and validity to suppliers. Only the fields passed change; "
             "`clear` empties optional ones. The result is what is stored: report those "
             "values, and never claim a term the result does not show." + _DRAFT_ONLY,
             SetRfqTermsIn,

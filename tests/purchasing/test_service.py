@@ -201,6 +201,8 @@ async def test_rfq_from_analysis_drafts_lines_and_invites(
 
     rfq = created.rfq
     assert rfq.status == "draft"
+    # The lines bought before were all bought in EUR (the history has no currency column).
+    assert (rfq.base_currency, created.currency_source) == ("EUR", "analysis")
     assert [
         (line.part_number, line.description, line.quantities, line.unit, line.category)
         for line in rfq.lines
@@ -296,7 +298,7 @@ MIXED_HISTORY = [
 ]  # fmt: skip
 
 
-async def test_rfq_from_analysis_takes_the_main_currency_and_converts_the_rest(
+async def test_a_mixed_analysis_takes_the_history_currency_and_converts_the_rest(
     app_engine: AsyncEngine, migrator_engine: AsyncEngine, purchasing_rows: People
 ) -> None:
     who = buyer(purchasing_rows)
@@ -331,9 +333,48 @@ async def test_rfq_from_analysis_takes_the_main_currency_and_converts_the_rest(
             async with migrator_engine.begin() as conn:
                 await conn.execute(delete(FxRate).where(FxRate.rate_date == today))
 
-    assert rfq is not None and rfq.base_currency == "BRL"  # two lines of three
+    # The lines to buy mix BRL and EUR; two of the three purchase orders are in BRL.
+    assert rfq is not None and rfq.base_currency == "BRL"
+    assert created.currency_source == "purchase_history"
     assert limits["Cuscinetto 6205 2RS"] == (Decimal("12.0000"), Decimal("12.6000"))
     if had_rates is None:
         # The EUR housing's limits at 6 BRL per EUR: 30 -> 180, max 31.50 -> 189.
         assert limits["Carcassa in alluminio"] == (Decimal("180.0000"), Decimal("189.0000"))
         assert created.lines_without_limits == []
+
+
+# Only the housing (covered by stock, not bought) was ever purchased, in BRL.
+HOUSING_IN_BRL = [
+    ["Numero Ordine", "Fornitore", "Codice Articolo", "Quantità", "Prezzo Unitario",
+     "Data Ordine", "Valuta"],
+    ["PO-9", "Fonderia Paulista Ltda", "HSG-AL", 10, 150.0, date(2026, 8, 1), "BRL"],
+]  # fmt: skip
+
+
+async def test_parts_never_bought_take_the_history_currency_or_ask(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = buyer(purchasing_rows)
+    storage = FakeStorage()
+    await load(app_engine, storage, who, "bom", BOM)
+    await load(app_engine, storage, who, "inventory", STOCK)
+    request = AnalysisRequest(product="Motor EV-120", quantity=Decimal(100))
+    unpriced = await service.create_analysis(app_engine, who, request, today=TODAY)
+    assert {line.currency for line in unpriced.lines if line.to_buy > 0} == {None}
+
+    # No history at all: no silent EUR, the buyer is asked (and nothing is created).
+    with pytest.raises(service.InvalidRequest, match="ask the buyer which currency"):
+        await service.create_rfq_from_analysis(
+            app_engine, who, unpriced.id, RfqFromAnalysisRequest()
+        )
+    stated = await service.create_rfq_from_analysis(
+        app_engine, who, unpriced.id, RfqFromAnalysisRequest(currency="USD")
+    )
+    assert (stated.rfq.base_currency, stated.currency_source) == ("USD", "stated")
+
+    await load(app_engine, storage, who, "purchase_history", HOUSING_IN_BRL)
+    view = await service.create_analysis(app_engine, who, request, today=TODAY)
+    created = await service.create_rfq_from_analysis(
+        app_engine, who, view.id, RfqFromAnalysisRequest()
+    )
+    assert (created.rfq.base_currency, created.currency_source) == ("BRL", "purchase_history")

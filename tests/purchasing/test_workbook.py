@@ -23,12 +23,16 @@ from bido_back.db import tenant_session
 from bido_back.db.models import BomLine, Contact, Item, PoLine, Supplier, SupplierContact
 from bido_back.onboarding import service as onboarding
 from bido_back.purchasing.workbook import (
+    MAX_SHEETS,
     SheetGrid,
+    WorkbookFileError,
     import_workbook,
     map_workbook,
     parse_section,
     preview,
+    profile,
     read_workbook,
+    resolve_supplier_codes,
 )
 from tests.approvals.conftest import People
 from tests.purchasing.conftest import FakeStorage
@@ -166,8 +170,186 @@ async def test_the_mapper_reads_what_the_rules_cannot_and_is_checked() -> None:
 def test_the_preview_is_short() -> None:
     grid = SheetGrid(name="big", rows=[[f"c{i}-{j}" * 30 for j in range(50)] for i in range(100)])
     text = preview(grid)
-    assert text.count("\n") == 24
-    assert "[30]" not in text and "…" in text
+    # 50 columns: every column, fewer rows (750 cells), each cell cut short.
+    assert text.count("\n") == 14
+    assert "[49]" in text and "…" in text
+
+
+def test_workbooks_over_the_sheet_limit_are_rejected_without_truncation() -> None:
+    data = workbook(
+        {f"Sheet {i}": [["Material", "Stock"], ["A-1", 1]] for i in range(MAX_SHEETS + 1)}
+    )
+
+    with pytest.raises(WorkbookFileError, match="limited to 20 sheets"):
+        read_workbook(data, "too-many-sheets.xlsx")
+
+
+async def test_supplier_codes_join_unimported_masters_without_losing_leading_zeros() -> None:
+    grids = [
+        SheetGrid(
+            "History",
+            [
+                ["PO", "Supplier", "Part number", "Quantity", "Unit price", "Order date"],
+                ["PO-1", "000123", "000010", 20, 2, "2026-10-01"],
+                ["PO-2", "123", "000010", 5, 3, "2026-10-02"],
+            ],
+        ),
+        # These names must be usable even without contact emails or importable sections.
+        SheetGrid(
+            "Supplier ratings",
+            [
+                ["Supplier code", "Supplier name", "Rating"],
+                ["000123", "First Supplier", 4],
+                ["123", "Second Supplier", 5],
+            ],
+        ),
+    ]
+    sections, _ = await map_workbook(grids, "orders.xlsx", mapper=None, context=ctx())
+    tables = [parse_section(s, grids[0], None) for s in sections]
+
+    assert resolve_supplier_codes(tables, grids) == [2]
+    [table] = tables
+    assert table.errors == []
+    assert [row["supplier"] for _, row in table.rows] == ["First Supplier", "Second Supplier"]
+    assert [row["supplier_code"] for _, row in table.rows] == ["000123", "123"]
+    assert {row["part_number"] for _, row in table.rows} == {"000010"}
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+async def test_supplier_code_conflicts_and_missing_names_fail_closed(reverse: bool) -> None:
+    masters = [
+        SheetGrid(
+            "Master",
+            [
+                ["Supplier code", "Supplier name"],
+                ["001", "First Supplier"],
+            ],
+        ),
+        SheetGrid(
+            "Ratings",
+            [
+                ["Supplier code", "Supplier name"],
+                ["001", "Different Supplier"],
+            ],
+        ),
+    ]
+    if reverse:
+        masters.reverse()
+    history = SheetGrid(
+        "History",
+        [
+            ["PO", "Supplier", "Part number", "Quantity", "Unit price", "Order date"],
+            ["PO-1", "001", "A-1", 20, 2, "2026-10-01"],
+            ["PO-2", "999", "A-1", 5, 3, "2026-10-02"],
+            ["PO-3", "Known Supplier", "A-1", 5, 3, "2026-10-03"],
+        ],
+    )
+    grids = [history, *masters]
+    sections, _ = await map_workbook(grids, "orders.xlsx", mapper=None, context=ctx())
+    tables = [parse_section(s, history, None) for s in sections]
+
+    assert resolve_supplier_codes(tables, grids) == [0]
+    [table] = tables
+    assert [(offset, row["supplier"]) for offset, row in table.rows] == [(4, "Known Supplier")]
+    assert [(error.row, error.field, error.message.split()[0]) for error in table.errors] == [
+        (2, "supplier", "ambiguous"),
+        (3, "supplier", "missing"),
+    ]
+    assert table.field_failures == {"supplier": 2}
+    assert table.total_rows == 3
+
+
+async def test_supplier_codes_are_not_coerced_to_a_nearby_identifier() -> None:
+    history = SheetGrid(
+        "History",
+        [
+            ["PO", "Supplier", "Part number", "Quantity", "Unit price", "Order date"],
+            ["PO-1", "000123", "A-1", 20, 2, "2026-10-01"],
+        ],
+    )
+    grids = [
+        history,
+        SheetGrid("Master", [["Supplier code", "Supplier name"], ["123", "First Supplier"]]),
+    ]
+    sections, _ = await map_workbook(grids, "orders.xlsx", mapper=None, context=ctx())
+    tables = [parse_section(s, history, None) for s in sections]
+
+    assert resolve_supplier_codes(tables, grids) == [0]
+    [table] = tables
+    assert table.rows == []
+    assert [(error.row, error.field) for error in table.errors] == [(2, "supplier")]
+
+
+@pytest.mark.db
+async def test_inventory_metadata_survives_history_import_and_codes_are_resolved(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
+    storage = FakeStorage()
+    upload = await onboarding.store_upload(
+        app_engine,
+        storage,
+        who,
+        filename="joined.xlsx",
+        content_type=XLSX,
+        data=workbook(
+            {
+                "History": [
+                    ["PO", "Supplier", "Part number", "Quantity", "Unit price", "Order date"],
+                    ["PO-1", "001", "000010", 20, 2, "2026-10-01"],
+                ],
+                "Stock": [
+                    ["Material", "Description", "Unit", "Stock"],
+                    ["000010", "Steel plate", "UN", 10],
+                ],
+                "Master": [["Supplier code", "Supplier name"], ["001", "First Supplier"]],
+            }
+        ),
+    )
+
+    report = await import_workbook(app_engine, storage, who, upload.id, mapper=None)
+
+    assert report.status == "imported", report.questions
+    assert report.unimported_sheets == ["Master"]
+    async with tenant_session(app_engine, who.tenant_id) as session:
+        item = await session.scalar(select(Item).where(Item.part_number == "000010"))
+        assert item is not None
+        assert (item.description, item.unit) == ("Steel plate", "UN")
+        assert list(await session.scalars(select(Supplier.name))) == ["First Supplier"]
+
+
+@pytest.mark.db
+async def test_confirmation_cannot_import_an_unresolved_supplier_code(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
+    storage = FakeStorage()
+    upload = await onboarding.store_upload(
+        app_engine,
+        storage,
+        who,
+        filename="unresolved.xlsx",
+        content_type=XLSX,
+        data=workbook(
+            {
+                "History": [
+                    ["PO", "Supplier", "Part number", "Quantity", "Unit price", "Order date"],
+                    ["PO-1", "001", "A-1", 20, 2, "2026-10-01"],
+                ]
+            }
+        ),
+    )
+
+    first = await import_workbook(app_engine, storage, who, upload.id, mapper=None)
+    assert first.status == "needs_confirmation"
+    confirmed = await import_workbook(
+        app_engine, storage, who, upload.id, mapper=None, confirmed=True
+    )
+    assert confirmed.sections[0].rows_failed == 1
+    assert confirmed.sections[0].rows_ok == 0
+    async with tenant_session(app_engine, who.tenant_id) as session:
+        assert await session.scalar(select(func.count()).select_from(PoLine)) == 0
+        assert await session.scalar(select(func.count()).select_from(Supplier)) == 0
 
 
 @pytest.mark.db
@@ -368,6 +550,8 @@ async def test_an_erp_export_imports_with_codes_types_and_notes(
     assert bom == {"IM-N48H-40": Decimal(64), "EX-120-42": Decimal(1), "RL-6206": Decimal(1)}
     # Every supplier came with a contact email.
     assert report.suppliers_without_email == []
+    # The copilot analyses this exact name when the buyer says "this product".
+    assert report.products == ["MT-120-ASM"]
 
 
 async def test_an_import_names_the_suppliers_still_without_an_email(
@@ -442,3 +626,284 @@ async def test_a_sheet_the_rules_read_only_in_part_also_goes_to_the_mapper() -> 
     )
     sections, _ = await map_workbook(grids, "erp.xlsx", mapper=mapper, context=ctx())
     assert [(s.import_type, s.source) for s in sections] == [("purchase_history", "model")]
+
+
+class SequenceMapper:
+    """Answers each call with the next output (the last one repeats)."""
+
+    def __init__(self, *outputs: SheetMappingOutput) -> None:
+        self.outputs = list(outputs)
+        self.calls: list[SheetMappingInput] = []
+
+    async def __call__(self, task: SheetMappingInput, context: ToolContext) -> SheetMappingOutput:
+        self.calls.append(task)
+        return self.outputs[min(len(self.calls), len(self.outputs)) - 1]
+
+
+# Headers the rules do not read, so the sheet goes to the mapper.
+ORDINI: list[list[object]] = [
+    ["Rif. ordine", "Ditta", "Art.", "Descr.", "UdM", "Pz", "Costo", "Emesso il"],
+    ["OA-1", "Rame Italia", "CU-01", "Filo di rame", "KG", 500, 11.4, date(2026, 6, 1)],
+    ["OA-2", "Rame Italia", "CU-02", "Barra di rame", "M", 80, 9.9, date(2026, 6, 3)],
+    ["OA-3", "Cuscinetti P.", "BR-6205", "Cuscinetto", "EA", 400, 1.92, date(2026, 7, 1)],
+]
+
+
+def ordini(*mapped: tuple[str, int]) -> SheetMappingOutput:
+    return SheetMappingOutput(
+        sections=[
+            SheetSection(
+                sheet="Ordini",
+                import_type="purchase_history",
+                header_row=1,
+                first_data_row=2,
+                last_data_row=None,
+                columns=[ColumnAssignment(field=f, column=c) for f, c in mapped],
+                confidence=0.9,
+                question=None,
+            )
+        ]
+    )
+
+
+BASE: tuple[tuple[str, int], ...] = (
+    ("po_number", 0), ("supplier", 1), ("part_number", 2), ("quantity", 5), ("ordered_at", 7),
+)  # fmt: skip
+
+
+def section_logs(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    return [
+        r.__dict__ for r in caplog.records if r.getMessage() == "workbook section"
+    ]  # fmt: skip
+
+
+async def stored(app_engine: AsyncEngine, who: Principal, rows: list[list[object]]) -> Any:
+    storage = FakeStorage()
+    upload = await onboarding.store_upload(
+        app_engine,
+        storage,
+        who,
+        filename="ordini.xlsx",
+        content_type=XLSX,
+        data=workbook({"Ordini": rows}),
+    )
+    return storage, upload.id
+
+
+async def test_a_failing_mapping_is_retried_once_with_what_was_wrong(
+    app_engine: AsyncEngine, purchasing_rows: People, caplog: pytest.LogCaptureFixture
+) -> None:
+    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
+    storage, upload_id = await stored(app_engine, who, ORDINI)
+    # First the price is read from the description (every row fails), then right.
+    mapper = SequenceMapper(ordini(*BASE, ("unit_price", 3)), ordini(*BASE, ("unit_price", 6)))
+    caplog.set_level("INFO", logger="bido_back.purchasing.workbook")
+
+    report = await import_workbook(app_engine, storage, who, upload_id, mapper=mapper)
+
+    assert report.status == "imported", report.questions
+    assert [(r.rows_ok, r.rows_failed) for r in report.sections] == [(3, 0)]
+    assert len(mapper.calls) == 2
+    assert mapper.calls[0].feedback == []
+    feedback = " ".join(mapper.calls[1].feedback)
+    assert "'unit_price'" in feedback and "[3] 'Descr.'" in feedback and "3 of 3" in feedback
+    [line] = section_logs(caplog)
+    assert (line["degraded"], line["degraded_reason"], line["retried"]) == (
+        True,
+        "retry_mapping",
+        True,
+    )
+    # Codes and field names only: no header or cell of the buyer's sheet.
+    logged = repr({k: line[k] for k in ("degraded_reasons", "dropped_fields", "error_reasons")})
+    assert "Descr" not in logged and "Rame" not in logged
+
+
+async def test_a_retry_that_does_not_help_keeps_the_first_reading_and_asks_plainly(
+    app_engine: AsyncEngine, purchasing_rows: People, caplog: pytest.LogCaptureFixture
+) -> None:
+    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
+    storage, upload_id = await stored(app_engine, who, ORDINI)
+    mapper = SequenceMapper(ordini(*BASE, ("unit_price", 3)), SheetMappingOutput(sections=[]))
+    caplog.set_level("INFO", logger="bido_back.purchasing.workbook")
+
+    report = await import_workbook(app_engine, storage, who, upload_id, mapper=mapper)
+
+    assert report.status == "needs_confirmation"
+    assert len(mapper.calls) == 2  # one retry, never more
+    [question] = report.questions
+    assert "none of its 3 rows could be read" in question
+    assert "unit_price (column 'Descr.')" in question
+    assert "only the valid rows" not in question
+    [line] = section_logs(caplog)
+    assert line["degraded_reasons"] == ["retry_mapping", "high_failure_rate"]
+
+
+async def test_a_unit_of_measure_read_as_a_number_is_dropped_without_a_retry(
+    app_engine: AsyncEngine, purchasing_rows: People, caplog: pytest.LogCaptureFixture
+) -> None:
+    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
+    storage, upload_id = await stored(app_engine, who, ORDINI)
+    mapper = SequenceMapper(
+        ordini(*BASE, ("unit_price", 6), ("price_quantity_basis", 4)),
+    )
+    caplog.set_level("INFO", logger="bido_back.purchasing.workbook")
+
+    report = await import_workbook(app_engine, storage, who, upload_id, mapper=mapper)
+
+    assert report.status == "imported"
+    [section] = report.sections
+    assert (section.rows_ok, section.rows_failed) == (3, 0)
+    assert "price_quantity_basis" not in section.columns
+    assert any("'UdM' does not hold price quantity basis values" in n for n in section.notes)
+    assert len(mapper.calls) == 1
+    [line] = section_logs(caplog)
+    assert (line["degraded"], line["degraded_reason"]) == (True, "optional_field_dropped")
+    assert line["dropped_fields"] == ["price_quantity_basis"]
+    async with tenant_session(app_engine, who.tenant_id) as session:
+        prices = set(await session.scalars(select(PoLine.unit_price)))
+    assert prices == {Decimal("11.4"), Decimal("9.9"), Decimal("1.92")}
+
+
+async def test_the_mapper_is_told_field_types_and_what_confusable_fields_mean() -> None:
+    grids = read_workbook(workbook({"Ordini": ORDINI}), "ordini.xlsx")
+    mapper = SequenceMapper(ordini(*BASE, ("unit_price", 6)))
+    await map_workbook(grids, "ordini.xlsx", mapper=mapper, context=ctx())
+    [history] = [c for c in mapper.calls[0].catalog if c.import_type == "purchase_history"]
+    assert history.types["price_quantity_basis"] == "number"
+    assert "never the unit of measure" in history.hints["price_quantity_basis"]
+
+
+async def test_the_mapper_sees_what_each_column_holds() -> None:
+    grids = read_workbook(workbook({"Ordini": ORDINI}), "ordini.xlsx")
+    mapper = SequenceMapper(ordini(*BASE, ("unit_price", 6)))
+    await map_workbook(grids, "ordini.xlsx", mapper=mapper, context=ctx())
+    lines = mapper.calls[0].sheets[0].profile.splitlines()
+    assert lines[4] == "[4] UdM: unit-like, 3 distinct (KG, M, EA), 0% empty"
+    assert lines[6] == "[6] Costo: number, 3 distinct, 1.92..11.4, 0% empty"
+    assert lines[7].startswith("[7] Emesso il: date, 3 distinct, 2026-06-01..2026-07-01")
+
+
+# A wide ERP export: the PO status sits past column 30.
+WIDE_TITLES: list[object] = [
+    "PO_Ref", "Vendor_Label", "Mat_Ref", "Ord_Q", "Net_Price_LC", "Doc_Date",
+    *[f"Extra_{i}" for i in range(6, 40)], "Line_State", *[f"Tail_{i}" for i in range(41, 50)],
+]  # fmt: skip
+
+
+def wide_rows() -> list[list[object]]:
+    rows: list[list[object]] = [list(WIDE_TITLES)]
+    for n, state in enumerate(("CLOSED", "CANCELLED", "OPEN")):
+        row: list[object] = [f"PO-{n}", "Rame Italia", f"CU-0{n}", 100 + n, 2.5,
+                             date(2026, 6, 1 + n)]  # fmt: skip
+        row += [f"x{i}" for i in range(6, 40)] + [state] + [i for i in range(41, 50)]
+        rows.append(row)
+    return rows
+
+
+async def test_a_column_past_the_thirtieth_reaches_the_mapper_and_is_used() -> None:
+    grids = read_workbook(workbook({"Wide": wide_rows()}), "wide.xlsx")
+    assert grids[0].width == 50
+    mapped = (("po_number", 0), ("supplier", 1), ("part_number", 2), ("quantity", 3),
+              ("unit_price", 4), ("ordered_at", 5), ("status", 40))  # fmt: skip
+    mapper = SequenceMapper(
+        SheetMappingOutput(
+            sections=[
+                SheetSection(
+                    sheet="Wide",
+                    import_type="purchase_history",
+                    header_row=1,
+                    first_data_row=2,
+                    last_data_row=None,
+                    columns=[ColumnAssignment(field=f, column=c) for f, c in mapped],
+                    confidence=0.9,
+                    question=None,
+                )
+            ]
+        )
+    )
+    [section], problems = await map_workbook(grids, "wide.xlsx", mapper=mapper, context=ctx())
+    sent = mapper.calls[0].sheets[0]
+    assert "[40] Line_State: text, 3 distinct (CLOSED, CANCELLED, OPEN)" in sent.profile
+    assert "[49] Tail_49" in sent.preview
+    assert len(sent.profile.splitlines()) == 50
+    assert problems == []
+    table = parse_section(section, grids[0], None)
+    assert [r[1]["po_number"] for r in table.rows] == ["PO-0", "PO-2"]
+    assert table.cancelled_rows == 1
+
+
+def test_a_wide_sheet_previews_fewer_rows_but_profiles_every_row() -> None:
+    rows = wide_rows() * 1
+    rows += [list(r) for r in rows[1:] for _ in range(20)]
+    grid = SheetGrid(name="Wide", rows=rows)
+    assert len([ln for ln in preview(grid).splitlines() if ln]) == 15
+    assert "[3] Ord_Q: number, 3 distinct, 100..102, 0% empty" in profile(grid)
+
+
+async def test_a_retry_that_only_reads_fewer_rows_is_not_kept(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
+    bad: list[object] = ["OA-4", "Rame Italia", "CU-03", "Filo", "KG", "n/d", 8.1, date(2026, 7, 2)]
+    rows = [*ORDINI, bad]
+    storage, upload_id = await stored(app_engine, who, rows)
+    narrower = ordini(*BASE, ("unit_price", 6))
+    narrower.sections[0].last_data_row = 4  # leaves out the unreadable row
+    mapper = SequenceMapper(ordini(*BASE, ("unit_price", 6)), narrower)
+
+    report = await import_workbook(app_engine, storage, who, upload_id, mapper=mapper)
+
+    # Same valid rows: the first reading stays, and the unreadable row is asked about.
+    assert len(mapper.calls) == 2
+    assert report.status == "needs_confirmation"
+    assert [(r.rows_ok, r.rows_failed) for r in report.sections] == [(3, 1)]
+
+
+async def test_a_retry_does_not_add_a_new_kind_of_data_to_a_sheet_that_partly_worked(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
+    bad: list[object] = ["OA-4", "Rame Italia", "CU-03", "Filo", "KG", "n/d", 8.1, date(2026, 7, 2)]
+    rows = [*ORDINI, bad]
+    storage, upload_id = await stored(app_engine, who, rows)
+    extra = ordini(*BASE, ("unit_price", 6))
+    extra.sections.append(
+        SheetSection(
+            sheet="Ordini",
+            import_type="items",
+            header_row=1,
+            first_data_row=2,
+            last_data_row=None,
+            columns=[
+                ColumnAssignment(field="part_number", column=2),
+                ColumnAssignment(field="description", column=3),
+            ],  # fmt: skip
+            confidence=0.9,
+            question=None,
+        )
+    )
+    mapper = SequenceMapper(ordini(*BASE, ("unit_price", 6)), extra)
+
+    report = await import_workbook(app_engine, storage, who, upload_id, mapper=mapper)
+
+    assert [r.type for r in report.sections] == ["purchase_history"]
+
+
+@pytest.mark.db
+async def test_legacy_import_retains_published_omission_metadata(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
+    storage = FakeStorage()
+    upload = await onboarding.store_upload(
+        app_engine,
+        storage,
+        who,
+        filename="legacy.xlsx",
+        content_type=XLSX,
+        data=workbook({"Stock": STOCK, "Notes": [["Unstructured note"]]}),
+    )
+    report = await import_workbook(app_engine, storage, who, upload.id, mapper=None)
+    assert report.status == "imported"
+    assert report.unimported_sheets == ["Notes"]
+    assert report.questions == []

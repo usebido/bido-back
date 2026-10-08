@@ -18,6 +18,8 @@ from bido_back.agents.catalog.contracts import ColumnAssignment, SheetSection
 from bido_back.purchasing.importers import ImportType
 from evals.data import Dataset, PurchaseRow, build
 from evals.erp import FILENAME, sap_motor
+from evals.erp_wide import FILENAME as WIDE_FILENAME
+from evals.erp_wide import wide_export
 
 Language = Literal["en", "it", "pt"]
 
@@ -207,6 +209,10 @@ def _tidy(ds: Dataset, lang: Language = "en", *, dates: Callable[[date, int], ob
     if ds.plan:
         sheets.append(("Plan", [h["plan"], *_plan_rows(ds, dates)], {}))
     return sheets
+
+
+def _columns(*pairs: tuple[str, int]) -> list[ColumnAssignment]:
+    return [ColumnAssignment(field=f, column=c) for f, c in pairs]
 
 
 def _sections(*pairs: tuple[str, ImportType]) -> tuple[tuple[str, ImportType], ...]:
@@ -593,4 +599,50 @@ def fixtures(today: date) -> list[Fixture]:
                 asks_confirmation=gaps,
             )
         )  # fmt: skip
+
+    # 13. A wide AI-generated "ERP DEMO" export: 46 English snake-case columns in the
+    # purchase history, a UoM column (EA/KG) that is not a number, a local price next
+    # to a USD one, cancelled lines, open lines with an outstanding quantity, a notes
+    # sheet; stock, BOM and MRP plan sheets with off-synonym headers (the mapper).
+    data, ds = wide_export(today)
+    mapping = (
+        SheetSection(sheet="Estoque_MMBE", import_type="inventory", header_row=1,
+                     first_data_row=2, last_data_row=None,
+                     columns=_columns(("part_number", 0), ("location", 3), ("on_hand", 4)),
+                     confidence=0.9, question=None),
+        SheetSection(sheet="Estrutura_BOM", import_type="bom", header_row=1, first_data_row=2,
+                     last_data_row=None,
+                     columns=_columns(("product", 0), ("part_number", 1), ("description", 2),
+                                     ("qty_per_unit", 3), ("unit", 4), ("mpn", 5),
+                                     ("manufacturer", 6)),
+                     confidence=0.9, question=None),
+        SheetSection(sheet="MRP_Plano", import_type="production_plan", header_row=1,
+                     first_data_row=2, last_data_row=None,
+                     columns=_columns(("product", 0), ("quantity", 1), ("need_by", 2)),
+                     confidence=0.9, question=None),
+        SheetSection(sheet="LEIA-ME", import_type="ignore", header_row=1, first_data_row=2,
+                     last_data_row=None, columns=[], confidence=0.9, question=None),
+    )  # fmt: skip
+    out.append(
+        Fixture(
+            name=ds.key,
+            description="Wide AI-generated ERP export: 46-column purchase history with a UoM "
+            "column, local and USD prices, cancelled and open lines; stock, BOM and MRP plan "
+            "with off-synonym headers; a notes sheet",
+            filename=WIDE_FILENAME,
+            data=data,
+            dataset=ds,
+            language="pt",
+            quantity=None,
+            sections=_sections(("Historico_Compras", "purchase_history"),
+                               ("Estoque_MMBE", "inventory"), ("Estrutura_BOM", "bom"),
+                               ("MRP_Plano", "production_plan"),
+                               ("Fornecedores", "supplier_contacts")),
+            rows_ok=_count(ds),
+            contacts=True,
+            analysable=True,
+            unique_po_lines=len(ds.purchases),
+            mapping=mapping,
+        )
+    )  # fmt: skip
     return out

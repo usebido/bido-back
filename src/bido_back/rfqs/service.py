@@ -26,7 +26,7 @@ import importlib
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Final, cast
 from uuid import UUID, uuid4
@@ -68,6 +68,7 @@ from bido_back.negotiation.send import SEND_NEGOTIATION_EMAIL, SendNegotiationEm
 from bido_back.onboarding.standard import TemplateContent
 from bido_back.outbound.domains import RecipientCheck, check_recipients, recipients_in_args
 from bido_back.rfqs.agents import EmailWriterAgent, IntakeAgent
+from bido_back.rfqs.currency import CurrencyChange, change_currency, resolve_currency
 from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound, ReplyByRequired
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.readiness import reply_by_refusal, send_blockers, utc_today
@@ -112,7 +113,6 @@ logger = logging.getLogger(__name__)
 
 Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
-BASE_CURRENCY: Final = "EUR"
 REPLY_TOKENS_MODULE: Final = "bido_back.email.addresses"
 _REF_PATTERN: Final = r"^RFQ-([0-9]+)$"
 _EDITABLE_INVITES: Final = frozenset({"draft"})
@@ -244,16 +244,22 @@ async def create_rfq_from_text(
     intake: IntakeAgent,
     *,
     buyer_messages: Sequence[str] = (),
+    currency: str | None = None,
 ) -> RfqCreated:
     """Structure the buyer's text with the intake agent and store it as a draft RFQ.
 
     From the Copilot, `source_text` is its summary of what to quote and
     `buyer_messages` the buyer's own words, which win on codes and terms.
+    `currency` is the one the buyer stated; without it the purchase history
+    decides, and when it cannot, `CurrencyRequired` is raised before the intake
+    agent runs (`bido_back.rfqs.currency`).
     """
+    async with tenant_session(db, principal.tenant_id) as session:
+        resolved = await resolve_currency(session, stated=currency)
     context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
     draft = await intake(
         RfqIntakeInput(
-            text=source_text, base_currency=BASE_CURRENCY, buyer_messages=list(buyer_messages)
+            text=source_text, base_currency=resolved.code, buyer_messages=list(buyer_messages)
         ),
         context,
     )
@@ -264,7 +270,7 @@ async def create_rfq_from_text(
             ref=await _next_ref(session, principal.tenant_id),
             title=draft.title,
             status="draft",
-            base_currency=BASE_CURRENCY,
+            base_currency=resolved.code,
             response_due=draft.response_due,
             source_text=source_text,
             created_by=principal.user_id,
@@ -293,8 +299,16 @@ async def create_rfq_from_text(
         await session.flush()
         await session.refresh(rfq)
         detail = await _detail(session, rfq)
-    logger.info("rfq created tenant=%s rfq=%s run=%s", principal.tenant_id, rfq.id, context.run_id)
-    return RfqCreated.model_validate({**detail.model_dump(), "questions": draft.questions})
+    logger.info(
+        "rfq created tenant=%s rfq=%s run=%s currency_source=%s",
+        principal.tenant_id,
+        rfq.id,
+        context.run_id,
+        resolved.source,
+    )
+    return RfqCreated.model_validate(
+        {**detail.model_dump(), "questions": draft.questions, "currency_source": resolved.source}
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,9 +334,11 @@ async def create_draft_rfq(
     lines: Sequence[NewRfqLine],
     source_text: str | None = None,
     response_due: date | None = None,
-    base_currency: str = BASE_CURRENCY,
+    base_currency: str,
 ) -> tuple[Rfq, list[RfqLine]]:
-    """Store a draft RFQ with the given lines, in the caller's tenant session."""
+    """Store a draft RFQ with the given lines, in the caller's tenant session.
+
+    `base_currency` comes from `bido_back.rfqs.currency.resolve_currency`."""
     rfq = Rfq(
         tenant_id=principal.tenant_id,
         ref=await _next_ref(session, principal.tenant_id),
@@ -465,13 +481,39 @@ async def remove_line(db: Db, principal: Principal, rfq_id: UUID, line_id: UUID)
 async def update_rfq(
     db: Db, principal: Principal, rfq_id: UUID, patch: UpdateRfqRequest
 ) -> RfqDetail:
-    """RFQ-wide changes to a draft: its title, response date, payment terms and quote
-    validity, and the Incoterm, delivery location and need-by date of every line."""
+    """RFQ-wide changes to a draft: its title, response date, currency, payment terms
+    and quote validity, and the Incoterm, delivery location and need-by date of every
+    line."""
+    return (await edit_rfq(db, principal, rfq_id, patch)).detail
+
+
+@dataclass(frozen=True, slots=True)
+class EditedRfq:
+    detail: RfqDetail
+    # Set when the patch changed the currency (and converted any negotiation limits).
+    currency_change: CurrencyChange | None = None
+
+
+async def edit_rfq(
+    db: Db,
+    principal: Principal,
+    rfq_id: UUID,
+    patch: UpdateRfqRequest,
+    *,
+    today: date | None = None,
+) -> EditedRfq:
+    """`update_rfq`, also telling what a currency change converted."""
     changes = patch.model_dump(exclude_unset=True)
-    if "title" in changes and changes["title"] is None:
-        raise InvalidState("title cannot be cleared")
+    for required in ("title", "currency"):
+        if required in changes and changes[required] is None:
+            raise InvalidState(f"{required} cannot be cleared")
     async with tenant_session(db, principal.tenant_id) as session:
         rfq = await _editable_rfq(session, rfq_id)
+        currency_change = None
+        if "currency" in changes:
+            currency_change = await change_currency(
+                session, rfq, changes["currency"], today or datetime.now(UTC).date()
+            )
         for field in ("title", "response_due", "payment_terms", "quote_validity_days"):
             if field in changes:
                 setattr(rfq, field, changes[field])
@@ -486,7 +528,7 @@ async def update_rfq(
                     setattr(line, field, value)
         await session.flush()
         await session.refresh(rfq)
-        return await _detail(session, rfq)
+        return EditedRfq(await _detail(session, rfq), currency_change)
 
 
 async def _editable_rfq(session: AsyncSession, rfq_id: UUID) -> Rfq:

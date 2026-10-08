@@ -3,6 +3,7 @@
     uv run python -m evals.run                    # live model, k=3
     uv run python -m evals.run --mock             # scripted model (harness check)
     uv run python -m evals.run -k 1 --scenario import --fixture motor_tidy_en
+    uv run python -m evals.run --scenario import --mapper-model gpt-6.1-sol
 
 Needs DATABASE_URL (and AGNO_DATABASE_URL for the copilot) pointing at a
 migrated database; live mode needs OPENAI_API_KEY. Every run creates its own
@@ -51,6 +52,7 @@ COPILOT_FIXTURES: Final = (
     "battery_no_bom",
     "erp_sap_motor",
     "erp_sap_motor_gaps",
+    "erp_wide_export",
 )
 REPORTS: Final = Path(__file__).parent / "reports"
 
@@ -221,7 +223,14 @@ async def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("-k", type=int, default=None, help="runs per case (default 3 live, 1 mock)")
     parser.add_argument("--scenario", action="append", choices=SCENARIOS, help="repeatable")
     parser.add_argument("--fixture", action="append", default=[], help="fixture or case name")
+    parser.add_argument("--mapper-model", help="model for the sheet mapper, to compare models")
     args = parser.parse_args(argv)
+    if args.mapper_model:
+        from bido_back.agents.catalog import definitions
+
+        # The mapper is looked up at each run, so the import and the copilot both use it.
+        setattr(definitions, "SHEET_MAPPER", definitions.sheet_mapper(args.mapper_model))  # noqa: B010
+        print(f"sheet mapper model: {args.mapper_model}")
 
     mode: Mode = "mock" if args.mock else "live"
     settings = get_settings()
