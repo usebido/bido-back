@@ -28,9 +28,13 @@ Idempotency (the executor may retry after a crash):
    a retry adds nothing), the invite becomes `sent`, a draft RFQ becomes
    `open`, and the audit event is written.
 
-A crash after the send and before that commit resends on retry with the SAME
-Message-ID, so mail clients and reply matching see one thread. Removing that
-window needs the transactional outbox, which does not exist yet.
+A crash after the send and before that commit leaves the invite
+`pending_approval` with its Message-ID stored. The retry reuses that
+Message-ID and marks the email `possibly_sent`; the mailbox sender then looks
+for it in the buyer's Sent folder and, when it is there, records it without
+sending a second copy. Only a provider that has not indexed the message yet
+by the time of the retry (seconds; the retry comes after the queue's
+visibility timeout) could still send twice, with the same Message-ID.
 
 Rejection: `release_rejected_send` (a `RejectHook`, see `REJECT_HOOKS`) puts
 the invite back from `pending_approval` to `draft` in the decision's
@@ -125,6 +129,8 @@ class RfqActDeps:
 class _Claim:
     message_id: str
     rfq_id: UUID
+    # The Message-ID was claimed by an earlier attempt, which may have sent it.
+    possibly_sent: bool = False
 
 
 class _SendRfqEmail:
@@ -179,10 +185,13 @@ class _SendRfqEmail:
                 )
             if invite.status != "pending_approval":
                 raise InvalidState(f"invite {invite.id} is {invite.status}, not pending_approval")
+            reused = invite.thread_message_id is not None
             if invite.thread_message_id is None:
                 invite.thread_message_id = make_message_id(self._deps.email_domain)
                 await session.flush()
-            return _Claim(message_id=invite.thread_message_id, rfq_id=invite.rfq_id)
+            return _Claim(
+                message_id=invite.thread_message_id, rfq_id=invite.rfq_id, possibly_sent=reused
+            )
 
     async def _send_and_record(
         self, ctx: ToolContext, args: SendRfqEmailArgs, claim: _Claim
@@ -229,6 +238,7 @@ class _SendRfqEmail:
                     text_body=args.body,
                     html_body=args.html_body,
                     message_id=claim.message_id,
+                    possibly_sent=claim.possibly_sent,
                 )
             )
             # A provider that rewrites the Message-ID wins: replies reference

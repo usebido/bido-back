@@ -5,10 +5,18 @@ tests use an in-memory fake. Delivery is at-least-once and a job can be
 enqueued more than once, so every handler deduplicates by the envelope's
 `idempotency_key` (or by the state it guards).
 
-Not yet transactional: callers enqueue AFTER their database transaction
-commits. A crash between the commit and the enqueue loses the job; the
-transactional outbox (written in the same transaction, relayed to SQS) closes
-that gap and is not built yet.
+Not transactional: callers enqueue AFTER their database transaction commits,
+so a crash between the commit and the enqueue loses the job. Each producer
+heals that from the state it committed instead of an outbox:
+
+* `approval.execute`: the follow-ups sweep re-enqueues approvals still
+  `approved` a few minutes after their decision (`approvals/reconcile.py`);
+  mandates also re-enqueue their own on every sweep;
+* `quote.extract`: the inbound message is redelivered and the duplicate path
+  enqueues the extraction again (`intake/service.py`);
+* `template.scan` / `template.build`: an enqueue error marks the row `failed`
+  so the user starts again; a crash leaves it pending until they do;
+* scheduled jobs (sweeps, `mailbox.sync`, `fx.refresh`) simply run again.
 """
 
 import asyncio

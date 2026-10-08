@@ -9,6 +9,8 @@ Calls used, and nothing else (no history, no inbox listing):
 * `GET users/me/messages/{id}?format=metadata&metadataHeaders=Message-ID` for
   the message just sent, to return the Message-ID Gmail actually used (it
   keeps ours; this guards against it ever rewriting it).
+* `GET users/me/messages?q=in:sent rfc822msgid:<id>` before RESENDING a message
+  an earlier attempt may have sent (`find_sent`): ids only, at most one.
 * `GET users/me/threads/{threadId}?format=metadata&metadataHeaders=From`
   lists the message ids, labels and senders of ONE thread.
 * `GET users/me/messages/{id}?format=raw` for each new message in it.
@@ -54,6 +56,8 @@ from bido_back.mailbox.http import AuthorizedHttp, json_object, list_field, str_
 
 GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me"
 _ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+# Printable, no spaces, quotes, parentheses or brackets: safe inside a Gmail query.
+_MESSAGE_ID_RE = re.compile(r"^[A-Za-z0-9._%+=$&!#*/?^`{|}~@-]{3,250}$")
 _LIST_PAGE = 100
 # Metadata calls in flight at once during a scan (Gmail allows far more).
 _SCAN_CONCURRENCY = 8
@@ -69,6 +73,14 @@ def sent_query(keywords: Sequence[str], since: datetime) -> str:
     """The Gmail search for sent messages since `since` matching any keyword."""
     terms = " OR ".join(f'"{k}"' if " " in k else k for k in keywords)
     return f"in:sent after:{since:%Y/%m/%d} ({terms})"
+
+
+def bare_message_id(message_id: str) -> str:
+    """A Message-ID without angle brackets, refused if it could break a search query."""
+    bare = message_id.strip().removeprefix("<").removesuffix(">")
+    if not _MESSAGE_ID_RE.match(bare):
+        raise ValueError("not a searchable Message-ID")
+    return bare
 
 
 def _id(value: str) -> str:
@@ -103,6 +115,24 @@ class GmailMailbox(MailboxSender):
             thread_id=sent_thread,
             internet_message_id=await self._message_id_header(message_id),
         )
+
+    async def find_sent(self, message_id: str) -> ProviderSent | None:
+        response = await self._http.request(
+            "GET",
+            f"{GMAIL_API}/messages",
+            operation="find sent",
+            params={"q": f"in:sent rfc822msgid:{bare_message_id(message_id)}", "maxResults": "1"},
+        )
+        for meta in list_field(json_object(response), "messages"):
+            found_id = str_field(meta, "id")
+            thread_id = str_field(meta, "threadId")
+            if found_id is not None and thread_id is not None:
+                return ProviderSent(
+                    provider_message_id=found_id,
+                    thread_id=thread_id,
+                    internet_message_id=message_id,
+                )
+        return None
 
     async def _message_id_header(self, message_id: str) -> str | None:
         try:

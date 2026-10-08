@@ -29,6 +29,10 @@ class OutboundEmail:
     # Our own Message-ID (angle brackets included), set by the caller so it can be
     # stored before sending and matched on replies.
     message_id: str | None = None
+    # An earlier attempt claimed this Message-ID and may have sent it before it
+    # crashed. A mailbox sender then looks for it in the Sent folder first and
+    # does not send it again (`MailboxSender.send`).
+    possibly_sent: bool = False
     in_reply_to: str | None = None
     references: tuple[str, ...] = ()
     attachments: tuple[OutboundAttachment, ...] = field(default=())
