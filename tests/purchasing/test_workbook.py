@@ -23,13 +23,16 @@ from bido_back.db import tenant_session
 from bido_back.db.models import BomLine, Contact, Item, PoLine, Supplier, SupplierContact
 from bido_back.onboarding import service as onboarding
 from bido_back.purchasing.workbook import (
+    MAX_SHEETS,
     SheetGrid,
+    WorkbookFileError,
     import_workbook,
     map_workbook,
     parse_section,
     preview,
     profile,
     read_workbook,
+    resolve_supplier_codes,
 )
 from tests.approvals.conftest import People
 from tests.purchasing.conftest import FakeStorage
@@ -170,6 +173,183 @@ def test_the_preview_is_short() -> None:
     # 50 columns: every column, fewer rows (750 cells), each cell cut short.
     assert text.count("\n") == 14
     assert "[49]" in text and "…" in text
+
+
+def test_workbooks_over_the_sheet_limit_are_rejected_without_truncation() -> None:
+    data = workbook(
+        {f"Sheet {i}": [["Material", "Stock"], ["A-1", 1]] for i in range(MAX_SHEETS + 1)}
+    )
+
+    with pytest.raises(WorkbookFileError, match="limited to 20 sheets"):
+        read_workbook(data, "too-many-sheets.xlsx")
+
+
+async def test_supplier_codes_join_unimported_masters_without_losing_leading_zeros() -> None:
+    grids = [
+        SheetGrid(
+            "History",
+            [
+                ["PO", "Supplier", "Part number", "Quantity", "Unit price", "Order date"],
+                ["PO-1", "000123", "000010", 20, 2, "2026-10-01"],
+                ["PO-2", "123", "000010", 5, 3, "2026-10-02"],
+            ],
+        ),
+        # These names must be usable even without contact emails or importable sections.
+        SheetGrid(
+            "Supplier ratings",
+            [
+                ["Supplier code", "Supplier name", "Rating"],
+                ["000123", "First Supplier", 4],
+                ["123", "Second Supplier", 5],
+            ],
+        ),
+    ]
+    sections, _ = await map_workbook(grids, "orders.xlsx", mapper=None, context=ctx())
+    tables = [parse_section(s, grids[0], None) for s in sections]
+
+    assert resolve_supplier_codes(tables, grids) == [2]
+    [table] = tables
+    assert table.errors == []
+    assert [row["supplier"] for _, row in table.rows] == ["First Supplier", "Second Supplier"]
+    assert [row["supplier_code"] for _, row in table.rows] == ["000123", "123"]
+    assert {row["part_number"] for _, row in table.rows} == {"000010"}
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+async def test_supplier_code_conflicts_and_missing_names_fail_closed(reverse: bool) -> None:
+    masters = [
+        SheetGrid(
+            "Master",
+            [
+                ["Supplier code", "Supplier name"],
+                ["001", "First Supplier"],
+            ],
+        ),
+        SheetGrid(
+            "Ratings",
+            [
+                ["Supplier code", "Supplier name"],
+                ["001", "Different Supplier"],
+            ],
+        ),
+    ]
+    if reverse:
+        masters.reverse()
+    history = SheetGrid(
+        "History",
+        [
+            ["PO", "Supplier", "Part number", "Quantity", "Unit price", "Order date"],
+            ["PO-1", "001", "A-1", 20, 2, "2026-10-01"],
+            ["PO-2", "999", "A-1", 5, 3, "2026-10-02"],
+            ["PO-3", "Known Supplier", "A-1", 5, 3, "2026-10-03"],
+        ],
+    )
+    grids = [history, *masters]
+    sections, _ = await map_workbook(grids, "orders.xlsx", mapper=None, context=ctx())
+    tables = [parse_section(s, history, None) for s in sections]
+
+    assert resolve_supplier_codes(tables, grids) == [0]
+    [table] = tables
+    assert [(offset, row["supplier"]) for offset, row in table.rows] == [(4, "Known Supplier")]
+    assert [(error.row, error.field, error.message.split()[0]) for error in table.errors] == [
+        (2, "supplier", "ambiguous"),
+        (3, "supplier", "missing"),
+    ]
+    assert table.field_failures == {"supplier": 2}
+    assert table.total_rows == 3
+
+
+async def test_supplier_codes_are_not_coerced_to_a_nearby_identifier() -> None:
+    history = SheetGrid(
+        "History",
+        [
+            ["PO", "Supplier", "Part number", "Quantity", "Unit price", "Order date"],
+            ["PO-1", "000123", "A-1", 20, 2, "2026-10-01"],
+        ],
+    )
+    grids = [
+        history,
+        SheetGrid("Master", [["Supplier code", "Supplier name"], ["123", "First Supplier"]]),
+    ]
+    sections, _ = await map_workbook(grids, "orders.xlsx", mapper=None, context=ctx())
+    tables = [parse_section(s, history, None) for s in sections]
+
+    assert resolve_supplier_codes(tables, grids) == [0]
+    [table] = tables
+    assert table.rows == []
+    assert [(error.row, error.field) for error in table.errors] == [(2, "supplier")]
+
+
+@pytest.mark.db
+async def test_inventory_metadata_survives_history_import_and_codes_are_resolved(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
+    storage = FakeStorage()
+    upload = await onboarding.store_upload(
+        app_engine,
+        storage,
+        who,
+        filename="joined.xlsx",
+        content_type=XLSX,
+        data=workbook(
+            {
+                "History": [
+                    ["PO", "Supplier", "Part number", "Quantity", "Unit price", "Order date"],
+                    ["PO-1", "001", "000010", 20, 2, "2026-10-01"],
+                ],
+                "Stock": [
+                    ["Material", "Description", "Unit", "Stock"],
+                    ["000010", "Steel plate", "UN", 10],
+                ],
+                "Master": [["Supplier code", "Supplier name"], ["001", "First Supplier"]],
+            }
+        ),
+    )
+
+    report = await import_workbook(app_engine, storage, who, upload.id, mapper=None)
+
+    assert report.status == "imported", report.questions
+    assert report.unimported_sheets == ["Master"]
+    async with tenant_session(app_engine, who.tenant_id) as session:
+        item = await session.scalar(select(Item).where(Item.part_number == "000010"))
+        assert item is not None
+        assert (item.description, item.unit) == ("Steel plate", "UN")
+        assert list(await session.scalars(select(Supplier.name))) == ["First Supplier"]
+
+
+@pytest.mark.db
+async def test_confirmation_cannot_import_an_unresolved_supplier_code(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
+    storage = FakeStorage()
+    upload = await onboarding.store_upload(
+        app_engine,
+        storage,
+        who,
+        filename="unresolved.xlsx",
+        content_type=XLSX,
+        data=workbook(
+            {
+                "History": [
+                    ["PO", "Supplier", "Part number", "Quantity", "Unit price", "Order date"],
+                    ["PO-1", "001", "A-1", 20, 2, "2026-10-01"],
+                ]
+            }
+        ),
+    )
+
+    first = await import_workbook(app_engine, storage, who, upload.id, mapper=None)
+    assert first.status == "needs_confirmation"
+    confirmed = await import_workbook(
+        app_engine, storage, who, upload.id, mapper=None, confirmed=True
+    )
+    assert confirmed.sections[0].rows_failed == 1
+    assert confirmed.sections[0].rows_ok == 0
+    async with tenant_session(app_engine, who.tenant_id) as session:
+        assert await session.scalar(select(func.count()).select_from(PoLine)) == 0
+        assert await session.scalar(select(func.count()).select_from(Supplier)) == 0
 
 
 @pytest.mark.db

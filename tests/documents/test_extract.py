@@ -68,6 +68,39 @@ def test_pdf_without_text_layer_needs_vision() -> None:
     assert doc.text == "[scan.pdf] scanned PDF without a text layer: needs vision, not read"
 
 
+def test_mixed_pdf_keeps_readable_text_and_discloses_unread_image_pages() -> None:
+    data = build_pdf(
+        [
+            PdfPage(texts=[PdfText(50, 800, "Purchase requirements")]),
+            PdfPage(image=True),
+            PdfPage(texts=[PdfText(50, 800, "Supplier reference 000123")]),
+        ]
+    )
+
+    doc = extract_text("mixed.pdf", "application/pdf", data)
+
+    assert doc.readable and doc.truncated
+    assert not doc.needs_vision
+    assert "Purchase requirements" in doc.text
+    assert "Supplier reference 000123" in doc.text
+    assert "[mixed.pdf p.2] no text layer: needs vision, not read" in doc.text
+
+
+def test_blank_page_does_not_make_readable_pdf_incomplete() -> None:
+    data = build_pdf([PdfPage(texts=[PdfText(50, 800, "Purchase requirements")]), PdfPage()])
+
+    doc = extract_text("with-blank.pdf", "application/pdf", data)
+
+    assert doc.readable and not doc.truncated
+    assert "[with-blank.pdf p.2] empty page" in doc.text
+
+
+def test_image_only_pdf_still_needs_vision() -> None:
+    doc = extract_text("scan.pdf", "application/pdf", build_pdf([PdfPage(image=True)]))
+
+    assert doc.needs_vision and not doc.readable
+
+
 def test_pdf_page_limit_truncates_with_a_marker() -> None:
     pages = [PdfPage(texts=[PdfText(50, 800, f"page {n}")]) for n in range(1, 4)]
 

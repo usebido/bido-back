@@ -127,6 +127,29 @@ def test_xlsx_cells_keep_their_types() -> None:
     assert values["as_of"] == date(2026, 10, 1)
 
 
+def test_inventory_preserves_descriptions_units_and_text_identifiers() -> None:
+    table = parse_rows(
+        "inventory",
+        [
+            ["Material", "Descrição do material", "Unidade de medida", "Estoque disponível"],
+            ["000010", "Steel plate", "UN", 20],
+        ],
+    )
+
+    assert table.errors == []
+    assert table.rows == [
+        (
+            2,
+            {
+                "part_number": "000010",
+                "description": "Steel plate",
+                "unit": "UN",
+                "on_hand": Decimal(20),
+            },
+        )
+    ]
+
+
 def test_dates() -> None:
     assert parse_date("2026-11-15") == date(2026, 11, 15)
     assert parse_date("15.11.2026") == date(2026, 11, 15)
