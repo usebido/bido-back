@@ -39,6 +39,7 @@ from bido_back.approvals import PostgresApprovalSink
 from bido_back.auth import Principal
 from bido_back.copilot.agent import copilot_agent
 from bido_back.copilot.contracts import (
+    ATTACHMENTS_ONLY_MESSAGE,
     AnswerEvent,
     ConversationEvent,
     ConversationList,
@@ -107,7 +108,8 @@ async def prepare_message(
         principal=principal,
         conversation_id=request.conversation_id or uuid4(),
         input=CopilotInput(
-            message=request.message,
+            # The request requires text or files; files alone get a standing instruction.
+            message=request.message if request.message.strip() else ATTACHMENTS_ONLY_MESSAGE,
             today=datetime.now(UTC).date(),
             attachments=[d.filename for d in documents],
             attachment_ids=list(dict.fromkeys(request.attachment_ids)),
@@ -217,13 +219,18 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
 
 
 def conversation_title(input: CopilotInput) -> str:
-    """The first message, whitespace collapsed and truncated; a placeholder for files only."""
-    text = " ".join(input.message.split())
+    """The first message, whitespace collapsed and truncated; the file names for files only."""
+    text = ", ".join(input.attachments) if _files_only(input) else " ".join(input.message.split())
     if not text:
         return "(attachments)" if input.attachment_ids else "(empty)"
     if len(text) <= TITLE_CHARS:
         return text
     return text[: TITLE_CHARS - 1].rstrip() + "…"
+
+
+def _files_only(input: CopilotInput) -> bool:
+    """The buyer sent files without text, so the message is the standing instruction."""
+    return bool(input.attachment_ids) and input.message == ATTACHMENTS_ONLY_MESSAGE
 
 
 async def _record_turn(db: Db, principal: Principal, prepared: PreparedMessage) -> None:
@@ -306,16 +313,22 @@ async def conversation(
     turns: list[ConversationTurn] = []
     for stored in runs:
         message: str | None = None
+        attachments: list[str] = []
         if stored.input:
             try:
-                message = CopilotInput.model_validate_json(stored.input).message
+                parsed = CopilotInput.model_validate_json(stored.input)
             except ValidationError:
-                message = None
+                parsed = None
+            if parsed is not None:
+                attachments = parsed.attachments
+                # Show what the buyer wrote, not the instruction sent for files alone.
+                message = "" if _files_only(parsed) else parsed.message
         turns.append(
             ConversationTurn(
                 run_id=stored.run_id,
                 created_at=datetime.fromtimestamp(stored.created_at, UTC),
                 message=message,
+                attachments=attachments,
                 answer=_answer(stored.output),
                 status=stored.status,
             )

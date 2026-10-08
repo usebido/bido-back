@@ -1,13 +1,17 @@
 """The copilot agent's own input and output, and the request/response shapes of its API."""
 
 from datetime import date, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Self
 from uuid import UUID
 
-from pydantic import BaseModel, Field, JsonValue
+from pydantic import BaseModel, Field, JsonValue, model_validator
 
 MAX_MESSAGE_CHARS = 8_000
 MAX_ATTACHMENTS = 5
+# What the copilot is asked when the buyer sends files without writing anything:
+# import and analyse them. Portuguese, since the buyer's language is not stored
+# and the copilot answers in the language of the message it reads.
+ATTACHMENTS_ONLY_MESSAGE = "Importe e analise o(s) arquivo(s) anexado(s)."
 
 
 # --- What the model sees and answers -------------------------------------------------
@@ -36,11 +40,18 @@ class CopilotReply(BaseModel):
 
 
 class CopilotMessageRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=MAX_MESSAGE_CHARS)
+    # May be empty when files are attached: the buyer just dropped a spreadsheet.
+    message: str = Field(default="", max_length=MAX_MESSAGE_CHARS)
     # Files uploaded first through POST /v1/onboarding/uploads (same storage).
     attachment_ids: list[UUID] = Field(default_factory=list[UUID], max_length=MAX_ATTACHMENTS)
     # Omit to start a new conversation; the first event returns its id.
     conversation_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def _text_or_files(self) -> Self:
+        if not self.message.strip() and not self.attachment_ids:
+            raise ValueError("write a message or attach a file")
+        return self
 
 
 class CopilotAction(BaseModel):
@@ -82,7 +93,10 @@ class DoneEvent(BaseModel):
 class ConversationTurn(BaseModel):
     run_id: str
     created_at: datetime
+    # Empty when the buyer only sent files.
     message: str | None
+    # The names of the files attached to this turn.
+    attachments: list[str] = Field(default_factory=list[str])
     answer: str | None
     status: str
 

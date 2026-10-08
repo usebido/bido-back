@@ -1897,6 +1897,13 @@
             ],
             "title": "Answer"
           },
+          "attachments": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Attachments",
+            "type": "array"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -1978,15 +1985,12 @@
             "title": "Conversation Id"
           },
           "message": {
+            "default": "",
             "maxLength": 8000,
-            "minLength": 1,
             "title": "Message",
             "type": "string"
           }
         },
-        "required": [
-          "message"
-        ],
         "title": "CopilotMessageRequest",
         "type": "object"
       },
