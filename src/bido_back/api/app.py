@@ -23,6 +23,7 @@ from bido_back.api.copilot import copilot_router
 from bido_back.api.cors import add_cors
 from bido_back.api.deps import ApiResources
 from bido_back.api.exports import exports_router
+from bido_back.api.files import files_router
 from bido_back.api.followups import followups_router
 from bido_back.api.mailbox import mailbox_router
 from bido_back.api.me import me_router
@@ -99,6 +100,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(awards_router())
     app.include_router(outbound_router())
     app.include_router(uploads_router())
+    app.include_router(files_router())
     app.include_router(branding_router())
     if resolved.environment == "local":
         # Never mounted elsewhere (and every route refuses outside local too).
