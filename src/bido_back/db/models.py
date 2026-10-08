@@ -1110,7 +1110,7 @@ class OutboundDomainConfirmation(Base):
 
 
 class CopilotProposal(Base):
-    """What the Copilot offered to do, waiting for the buyer's go-ahead (migration 0028).
+    """What the Copilot offered to do, waiting for the buyer's go-ahead (migration 0029).
 
     A gated tool (create an RFQ, invite suppliers) called without a proposal
     stores its args and the preview the buyer is shown, and does nothing else.

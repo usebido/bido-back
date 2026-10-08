@@ -1,7 +1,7 @@
 """Copilot proposals: what the Copilot offered to do, waiting for the buyer's go-ahead.
 
-Revision ID: 0028
-Revises: 0027
+Revision ID: 0029
+Revises: 0028
 Create Date: 2026-10-08
 
 Creating an RFQ and inviting suppliers are draft actions (nothing is sent),
@@ -24,8 +24,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0028"
-down_revision: str | Sequence[str] | None = "0027"
+revision: str = "0029"
+down_revision: str | Sequence[str] | None = "0028"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
