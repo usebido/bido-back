@@ -24,15 +24,18 @@
   copilot does sends an email: preparing a send creates approvals that a
   person decides on in `/v1/approvals` (the buyer by default; a second
   person in four-eyes tenants).
+* `GET /v1/copilot/conversations`: the caller's own conversations, most recent
+  activity first (`limit`, and `before` = the previous page's `next_before`).
 * `GET /v1/copilot/conversations/{id}`: the caller's own conversation so far.
 """
 
 import json
 from collections.abc import AsyncIterator
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -49,7 +52,12 @@ from bido_back.api.deps import (
 from bido_back.api.rfqs import error_responses
 from bido_back.auth import Principal
 from bido_back.copilot import service
-from bido_back.copilot.contracts import ConversationView, CopilotMessageRequest, StreamItem
+from bido_back.copilot.contracts import (
+    ConversationList,
+    ConversationView,
+    CopilotMessageRequest,
+    StreamItem,
+)
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.storage import BlobStorage
@@ -119,6 +127,18 @@ def copilot_router() -> APIRouter:
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
+
+    @router.get("/conversations")
+    async def list_conversations(  # pyright: ignore[reportUnusedFunction]
+        principal: CurrentPrincipal,
+        db: Db,
+        limit: Annotated[int, Query(ge=1, le=service.LIST_LIMIT_MAX)] = 20,
+        before: Annotated[
+            datetime | None, Query(description="The previous page's `next_before`")
+        ] = None,
+    ) -> ConversationList:
+        """The caller's own conversations, most recent activity first."""
+        return await service.list_conversations(db, principal, limit=limit, before=before)
 
     @router.get(
         "/conversations/{conversation_id}",

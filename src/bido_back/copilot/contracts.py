@@ -92,4 +92,24 @@ class ConversationView(BaseModel):
     turns: list[ConversationTurn]
 
 
+class ConversationSummary(BaseModel):
+    """One of the caller's conversations, for a history list."""
+
+    conversation_id: UUID
+    title: str = Field(description="The first message, truncated")
+    created_at: datetime
+    last_activity_at: datetime
+    turns: int = Field(description="Messages sent in this conversation")
+
+
+class ConversationList(BaseModel):
+    """The caller's conversations, most recent activity first."""
+
+    items: list[ConversationSummary]
+    next_before: datetime | None = Field(
+        default=None,
+        description="Pass as `before` for the next page; null on the last page",
+    )
+
+
 StreamItem = ConversationEvent | AnswerEvent | DoneEvent | dict[str, Any]

@@ -1061,3 +1061,26 @@ class AwardNotice(Base):
     message_id_header: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class CopilotConversation(Base):
+    """One copilot conversation, for listing (migration 0022).
+
+    The turns themselves live in Agno's run storage; this row only lets a user
+    list their conversations: the owner, a title (the first message,
+    truncated), the turn count and the last activity.
+    """
+
+    __tablename__ = "copilot_conversations"
+
+    # Keyed by owner and conversation id: a continued conversation's id is
+    # client-supplied, so it only ever matches the caller's own row.
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(Text)
+    turns: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_activity_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
