@@ -73,15 +73,18 @@ from bido_back.purchasing.schemas import (
     ImportRequest,
     ImportRowError,
     InvitedSupplier,
+    PlannedRfqLine,
+    PlannedSupplier,
     ProductView,
     RfqFromAnalysis,
+    RfqFromAnalysisPlan,
     RfqFromAnalysisRequest,
     SkippedSupplier,
     SupplierStatView,
 )
 from bido_back.quotes.parsing import DecimalSeparator
 from bido_back.rfqs import service as rfq_service
-from bido_back.rfqs.currency import fx_factor, resolve_currency
+from bido_back.rfqs.currency import ResolvedCurrency, fx_factor, resolve_currency
 from bido_back.rfqs.errors import RfqError
 from bido_back.rfqs.language import DEFAULT_LANGUAGE, country_language
 from bido_back.storage import BlobStorage
@@ -1104,53 +1107,130 @@ def rfq_category(item_category: str | None) -> LineCategory:
     return "catalog"
 
 
+async def plan_rfq_from_analysis(
+    db: Db, principal: Principal, analysis_id: UUID, request: RfqFromAnalysisRequest
+) -> RfqFromAnalysisPlan:
+    """What `create_rfq_from_analysis` would create (same checks), writing nothing: the
+    lines with quantities and units, and each supplier with the email it would invite."""
+    async with tenant_session(db, principal.tenant_id) as session:
+        record, rows, resolved = await _checked_analysis(session, analysis_id, request, lock=False)
+        suppliers: list[PlannedSupplier] = []
+        for supplier_id, name in _wanted_suppliers(rows, request.max_suppliers_per_line).items():
+            contact = await _email_contact(session, supplier_id)
+            suppliers.append(
+                PlannedSupplier(
+                    supplier_id=supplier_id,
+                    name=name,
+                    email=contact[1] if contact is not None else None,
+                )
+            )
+    return RfqFromAnalysisPlan(
+        analysis_id=analysis_id,
+        title=_analysis_rfq_title(record, request),
+        currency=resolved.code,
+        currency_source=resolved.source,
+        lines=[
+            PlannedRfqLine(
+                description=item.description,
+                part_number=item.part_number,
+                quantity=line.to_buy,
+                unit=line.unit,
+                need_by=line.need_by,
+            )
+            for line, item in rows
+        ],
+        suppliers=suppliers,
+    )
+
+
+async def _checked_analysis(
+    session: AsyncSession, analysis_id: UUID, request: RfqFromAnalysisRequest, *, lock: bool
+) -> tuple[Analysis, list[tuple[AnalysisLine, Item]], ResolvedCurrency]:
+    """The analysis, its lines to buy and the RFQ currency, if an RFQ can be made from it."""
+    record = await session.get(Analysis, analysis_id, with_for_update=lock)
+    if record is None:
+        raise NotFound(f"analysis {analysis_id} not found")
+    if record.rfq_id is not None:
+        raise Conflict(f"analysis {analysis_id} already has an RFQ")
+    rows = [
+        (line, item)
+        for line, item in await session.execute(
+            select(AnalysisLine, Item)
+            .join(Item, Item.id == AnalysisLine.item_id)
+            .where(AnalysisLine.analysis_id == analysis_id, AnalysisLine.to_buy > 0)
+            .order_by(AnalysisLine.position)
+        )
+    ]
+    if not rows:
+        raise InvalidRequest("nothing to buy: stock and open orders cover the build")
+    for line, _ in rows:
+        calculation = CalculationView.model_validate(line.calculation)
+        uncertain = (
+            not calculation.stock_known
+            or "shared_stock_competing_demand" in calculation.stock_issues
+            or "inbound_date_unknown" in calculation.stock_issues
+            or "inbound_location_unknown" in calculation.stock_issues
+            or "partial_receipt_status_unknown" in calculation.stock_issues
+        )
+        if uncertain and calculation.buyer_quantity_override != line.to_buy:
+            raise InvalidRequest(
+                "confirm purchase quantities for lines with uncertain supply "
+                "or competing demand before creating an RFQ"
+            )
+    try:
+        resolved = await resolve_currency(
+            session, stated=request.currency, analysis=[line.currency for line, _ in rows]
+        )
+    except RfqError as exc:
+        raise InvalidRequest(str(exc)) from None
+    return record, rows, resolved
+
+
+def _analysis_rfq_title(record: Analysis, request: RfqFromAnalysisRequest) -> str:
+    title = request.title or f"{record.product}: {record.quantity.normalize():f} un"
+    if request.pending_validation is not None:
+        title = rfq_service.preliminary_title(title, request.pending_validation)
+    return title
+
+
+def _wanted_suppliers(rows: Sequence[tuple[AnalysisLine, Item]], per_line: int) -> dict[UUID, str]:
+    """The suggested suppliers to invite (the best-ranked per line), by id, in order."""
+    wanted: dict[UUID, str] = {}
+    for line, _ in rows:
+        suggested = [s for s in line.suppliers if s.get("suggested")]
+        for supplier in suggested[:per_line]:
+            wanted.setdefault(UUID(str(supplier["supplier_id"])), str(supplier["name"]))
+    return wanted
+
+
+async def _email_contact(session: AsyncSession, supplier_id: UUID) -> tuple[UUID, str] | None:
+    """The supplier's first contact with a usable email: (contact id, email)."""
+    found = (
+        await session.execute(
+            select(Contact.id, Contact.email)
+            .join(SupplierContact, SupplierContact.contact_id == Contact.id)
+            .where(
+                SupplierContact.supplier_id == supplier_id,
+                Contact.email.is_not(None),
+                Contact.pseudonymized_at.is_(None),
+            )
+            .order_by(Contact.created_at)
+            .limit(1)
+        )
+    ).one_or_none()
+    if found is None or found.email is None:
+        return None
+    return found.id, found.email
+
+
 async def create_rfq_from_analysis(
     db: Db, principal: Principal, analysis_id: UUID, request: RfqFromAnalysisRequest
 ) -> RfqFromAnalysis:
     """A DRAFT RFQ with the analysis's lines to buy, its suggested suppliers invited
     as DRAFT invites. Nothing is sent; preparing the send asks for approval."""
     async with tenant_session(db, principal.tenant_id) as session:
-        record = await session.get(Analysis, analysis_id, with_for_update=True)
-        if record is None:
-            raise NotFound(f"analysis {analysis_id} not found")
-        if record.rfq_id is not None:
-            raise Conflict(f"analysis {analysis_id} already has an RFQ")
-        rows = list(
-            (
-                await session.execute(
-                    select(AnalysisLine, Item)
-                    .join(Item, Item.id == AnalysisLine.item_id)
-                    .where(AnalysisLine.analysis_id == analysis_id, AnalysisLine.to_buy > 0)
-                    .order_by(AnalysisLine.position)
-                )
-            ).all()
-        )
-        if not rows:
-            raise InvalidRequest("nothing to buy: stock and open orders cover the build")
-        for line, _ in rows:
-            calculation = CalculationView.model_validate(line.calculation)
-            uncertain = (
-                not calculation.stock_known
-                or "shared_stock_competing_demand" in calculation.stock_issues
-                or "inbound_date_unknown" in calculation.stock_issues
-                or "inbound_location_unknown" in calculation.stock_issues
-                or "partial_receipt_status_unknown" in calculation.stock_issues
-            )
-            if uncertain and calculation.buyer_quantity_override != line.to_buy:
-                raise InvalidRequest(
-                    "confirm purchase quantities for lines with uncertain supply "
-                    "or competing demand before creating an RFQ"
-                )
-
-        title = request.title or f"{record.product}: {record.quantity.normalize():f} un"
-        if request.pending_validation is not None:
-            title = rfq_service.preliminary_title(title, request.pending_validation)
-        try:
-            resolved = await resolve_currency(
-                session, stated=request.currency, analysis=[line.currency for line, _ in rows]
-            )
-        except RfqError as exc:
-            raise InvalidRequest(str(exc)) from None
+        record, rows, resolved = await _checked_analysis(session, analysis_id, request, lock=True)
+        title = _analysis_rfq_title(record, request)
         currency = resolved.code
         rates = await load_rates(session, datetime.now(UTC).date())
         rfq, rfq_lines = await rfq_service.create_draft_rfq(
@@ -1174,7 +1254,6 @@ async def create_rfq_from_analysis(
             response_due=request.response_due,
             base_currency=currency,
         )
-        wanted: dict[UUID, str] = {}
         without_limits: list[int] = []
         for (line, _), rfq_line in zip(rows, rfq_lines, strict=True):
             line.rfq_line_id = rfq_line.id
@@ -1202,31 +1281,19 @@ async def create_rfq_from_analysis(
                 rfq_line.max_unit_price = (line.max_price * factor).quantize(calc.PRICE_PLACES)
             else:
                 without_limits.append(rfq_line.position)
-            suggested = [s for s in line.suppliers if s.get("suggested")]
-            for supplier in suggested[: request.max_suppliers_per_line]:
-                wanted.setdefault(UUID(str(supplier["supplier_id"])), str(supplier["name"]))
+        wanted = _wanted_suppliers(rows, request.max_suppliers_per_line)
         record.rfq_id = rfq.id
 
         invited: list[InvitedSupplier] = []
         skipped: list[SkippedSupplier] = []
         for supplier_id, name in wanted.items():
-            contact_id = await session.scalar(
-                select(Contact.id)
-                .join(SupplierContact, SupplierContact.contact_id == Contact.id)
-                .where(
-                    SupplierContact.supplier_id == supplier_id,
-                    Contact.email.is_not(None),
-                    Contact.pseudonymized_at.is_(None),
-                )
-                .order_by(Contact.created_at)
-                .limit(1)
-            )
-            if contact_id is None:
+            contact = await _email_contact(session, supplier_id)
+            if contact is None:
                 skipped.append(
                     SkippedSupplier(supplier_id=supplier_id, name=name, reason="no contact email")
                 )
                 continue
-            await rfq_service.add_draft_invite(session, principal, rfq, supplier_id, contact_id)
+            await rfq_service.add_draft_invite(session, principal, rfq, supplier_id, contact[0])
             invited.append(InvitedSupplier(supplier_id=supplier_id, name=name))
         await session.flush()
         detail = await rfq_service.rfq_detail(session, rfq)

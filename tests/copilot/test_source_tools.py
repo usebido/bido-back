@@ -1,5 +1,6 @@
 """Source assessment stays within the conversation, user and tenant and writes nothing."""
 
+from dataclasses import replace
 from decimal import Decimal
 from typing import cast
 from uuid import UUID, uuid4
@@ -12,7 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from bido_back.agents.context import ToolContext
 from bido_back.agents.tools import Tool, ToolError
 from bido_back.auth import Principal
-from bido_back.copilot.journey_tools import AnalyzeSourcesIn, ListAssessmentsOut
+from bido_back.copilot.journey_tools import (
+    AnalyzeSourcesIn,
+    AssessmentRfqOut,
+    ListAssessmentsOut,
+)
 from bido_back.copilot.tools import CopilotToolDeps, copilot_tools
 from bido_back.db import tenant_session
 from bido_back.db.models import (
@@ -37,7 +42,6 @@ from bido_back.purchasing.sources.contracts import (
     SourceAssessment,
     TableProposal,
 )
-from bido_back.purchasing.sources.snapshots import AssessmentRfqResult
 from tests.approvals.conftest import People
 from tests.purchasing.conftest import FakeStorage
 from tests.purchasing.test_workbook import XLSX, workbook
@@ -350,6 +354,7 @@ async def test_saved_evidence_can_be_found_and_drafted_in_a_later_conversation(
                 db=app_engine,
                 agents=fake_agents(),
                 mailboxes=mailboxes,
+                conversation_id=uuid4(),
             )
         )
     }
@@ -378,16 +383,22 @@ async def test_saved_evidence_can_be_found_and_drafted_in_a_later_conversation(
     )
     assert restored == saved
     draft = later["create_rfq_from_assessment"]
-    result = AssessmentRfqResult.model_validate(
+    args = {
+        "assessment_id": str(saved.assessment_id),
+        "title": "Motor components",
+        "base_currency": "BRL",
+    }
+    # Nothing is created until the buyer confirms, in a later message.
+    proposed = AssessmentRfqOut.model_validate(await draft.invoke(ctx, draft.parse_input(args)))
+    assert proposed.awaiting_confirmation and proposed.rfq_id is None
+    assert proposed.preview is not None and proposed.preview.issues == []
+    assert [(line.part_number, line.unit) for line in proposed.preview.lines] == [
+        (saved.lines[0].part_number, saved.lines[0].unit)
+    ]
+    confirm = replace(ctx, run_id=uuid4())
+    result = AssessmentRfqOut.model_validate(
         await draft.invoke(
-            ctx,
-            draft.parse_input(
-                {
-                    "assessment_id": str(saved.assessment_id),
-                    "title": "Motor components",
-                    "base_currency": "BRL",
-                }
-            ),
+            confirm, draft.parse_input({**args, "proposal_id": str(proposed.proposal_id)})
         )
     )
     assert result.lines == 1 and result.assessment_id == saved.assessment_id

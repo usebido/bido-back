@@ -227,7 +227,8 @@ def milestone(
     """
     found: dict[MilestoneKind, Mapping[str, JsonValue]] = {}
     for tool, ok, output in actions:
-        if not ok or output is None:
+        # A proposal awaiting the buyer's confirmation created nothing yet.
+        if not ok or output is None or output.get("awaiting_confirmation") is True:
             continue
         if tool in _AWARD_TOOLS:
             found["award"] = output
