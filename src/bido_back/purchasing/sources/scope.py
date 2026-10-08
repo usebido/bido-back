@@ -82,6 +82,16 @@ class _Product:
     plans: list[_Demand]
 
 
+def has_production_plans(records: Sequence[Record]) -> bool:
+    """Production orders that can still create demand: a product, not cancelled or closed."""
+    return any(
+        record.kind == "production_plan"
+        and source_text(record, "product_code") is not None
+        and state(record) not in CANCELLED | CLOSED
+        for record in records
+    )
+
+
 def as_request(scope: ScopeRequest | PlanningScope | None) -> ScopeRequest | None:
     """A plain request; an explicit planning scope is a complete one."""
     return None if scope is None else ScopeRequest.model_validate(scope.model_dump())
@@ -184,10 +194,10 @@ class _Resolver:
         if product is not None:
             subject, relevant = product.code, product.plans
         elif area is not None:
-            subject = f"Area {area}"
+            subject = f"area {area}"
             relevant = [d for d in self.demands if same_place(d.area, area)]
         else:
-            subject, relevant = "The production orders", plans
+            subject, relevant = "the planned products", plans
         location = self._location(subject, relevant)
         as_of = self._as_of(location)
         horizon_end = self._horizon(relevant, location, as_of)
@@ -351,7 +361,7 @@ class _Resolver:
                 self._ask(
                     "unknown_location",
                     "location",
-                    f"{subject}: no order or requirement at '{given}'.",
+                    f"No order or requirement for {subject} is at '{given}'.",
                     self._plant_options(relevant, plants),
                 )
             return found
@@ -360,12 +370,12 @@ class _Resolver:
                 "location_single_plant",
                 "location",
                 plants[0],
-                f"No plant was given: {subject} is planned only at {plants[0]}.",
+                f"No plant was given: every order for {subject} is at {plants[0]}.",
                 self._refs([d.record for d in relevant], "location"),
             )
             return plants[0]
         if plants:
-            message = f"{subject}: orders at several plants; which one?"
+            message = f"Several plants have orders for {subject}; which plant?"
         else:
             message = "No order or requirement names a plant; which plant?"
             plants = _places(
@@ -378,7 +388,7 @@ class _Resolver:
         options: list[ScopeOption] = []
         for plant in plants:
             here = [d for d in relevant if same_place(d.location, plant)]
-            details = "; ".join(_demand_label(d) for d in _by_date(here))
+            details = "; ".join(_demand_label(d, place=False) for d in _by_date(here))
             options.append(
                 ScopeOption(
                     value=plant,
@@ -606,15 +616,15 @@ def _by_date(demands: Sequence[_Demand]) -> list[_Demand]:
     return sorted(demands, key=lambda d: (d.need_by or date.max, d.code))
 
 
-def _demand_label(demand: _Demand) -> str:
+def _demand_label(demand: _Demand, *, code: bool = True, place: bool = True) -> str:
     record = demand.record
     parts = [
         source_text(record, "reference"),
-        demand.code,
+        demand.code if code else None,
         source_text(record, "quantity"),
         source_text(record, "unit"),
         f"due {demand.need_by}" if demand.need_by is not None else None,
-        f"at {demand.location}" if demand.location is not None else None,
+        f"at {demand.location}" if place and demand.location is not None else None,
     ]
     return " ".join(part for part in parts if part)
 
@@ -627,7 +637,7 @@ def _product_option(product: _Product) -> ScopeOption:
     details = [" / ".join(product.descriptions)] if product.descriptions else []
     if product.areas:
         details.append(f"area {', '.join(product.areas)}")
-    details.extend(_demand_label(d) for d in _by_date(product.plans))
+    details.extend(_demand_label(d, code=False) for d in _by_date(product.plans))
     return ScopeOption(
         value=product.code,
         label=f"{product.code} ({'; '.join(details)})" if details else product.code,

@@ -31,6 +31,7 @@ from bido_back.purchasing.sources.scope import (
     ResolvedScope,
     as_request,
     direct_scope,
+    has_production_plans,
     resolve_scope,
     scope_issues,
 )
@@ -78,7 +79,7 @@ async def analyze_documents(
     records, problems, coverage = await map_sources(tables, objective, context, mapper)
     candidates, snapshot_dates = planning_context(records)
     request = as_request(scope)
-    planned = any(record.kind == "production_plan" for record in records)
+    planned = has_production_plans(records)
     resolved: ResolvedScope | None = None
     if planned:
         resolved = resolve_scope(records, request or ScopeRequest())

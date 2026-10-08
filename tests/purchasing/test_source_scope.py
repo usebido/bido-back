@@ -27,6 +27,7 @@ from bido_back.purchasing.sources.scope import (
     ResolvedScope,
     as_request,
     direct_scope,
+    has_production_plans,
     resolve_scope,
     scope_issues,
 )
@@ -389,6 +390,19 @@ async def test_direct_demand_sources_keep_the_unscoped_assessment() -> None:
     ]
     assert unscoped.scope_resolution is None and scoped.scope is None
     assert "scope_not_applied" in {i.code for i in scoped.issues}
+
+
+async def test_only_closed_production_orders_keep_the_unscoped_assessment() -> None:
+    records = motor_records()
+    for record in records:
+        if record.kind == "production_plan":
+            record.values["status"] = "Closed"
+    assert not has_production_plans(records)
+    data, mapper = motor_workbook(records)
+    result = await _analyze(None, data, mapper)
+    assert result.scope_resolution is None
+    assert "missing_planning_scope" not in {i.code for i in result.issues}
+    assert result.lines  # The legacy direct reading, not a question about a product.
 
 
 @pytest.mark.db
