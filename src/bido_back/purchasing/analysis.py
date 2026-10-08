@@ -10,6 +10,14 @@ Formulas (per item of the product's BOM):
 * `to_buy = max(0, required * (1 + safety_stock_pct / 100) - on_hand - on_order)`,
   rounded UP: to whole units for discrete units (pcs, un, pz, stk, ...), to
   3 decimals otherwise (kg, m).
+* `on_order`: the stock's on-order quantity when the stock export gives one
+  (it already counts open purchase orders, so they are not added again).
+  Otherwise the open purchase-order lines due in time: not yet received
+  (no receipt date), promised on or before `need_by` (any date without one),
+  and not stale (promised at most `open_po_stale_days` ago). Each counts its
+  ordered minus received quantity; the line is flagged `on_order_from_pos`. A
+  line without a promised date is not counted (nobody knows when it arrives),
+  nor is a partly received line with a receipt date (it may be closed short).
 * History window: purchase-order lines ordered in the last `lookback_days`
   (365 by default), in the item's currency: the one most of its lines in the
   window were bought in (on a tie, one a non-broker sold in, then the most
@@ -73,6 +81,7 @@ FlagCode = Literal[
     "broker_source",
     "mixed_currency",
     "covered_by_stock",
+    "on_order_from_pos",
 ]
 
 
@@ -84,6 +93,8 @@ class Params:
     price_up_pct: Decimal = Decimal(5)
     late_threshold: Decimal = Decimal("0.8")
     quality_threshold: Decimal = Decimal("0.98")
+    # An open line promised longer ago than this and still not received is stale.
+    open_po_stale_days: int = 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,12 +347,19 @@ def analyze(
     for position, entry in enumerate(bom, start=1):
         item = entry.item
         held = stock.get(item.id, Stock())
+        from_pos = Decimal(0)
+        if held.on_order == 0:
+            from_pos = open_on_order(purchases, item.id, need_by, today, params)
+            held = replace(held, on_order=from_pos)
         required = entry.qty_per_unit * quantity
         gross = required * (1 + params.safety_stock_pct / 100)
         to_buy = round_up_quantity(gross - held.on_hand - held.on_order, item.unit)
-        lines.append(
-            _line(position, item, required, held, to_buy, need_by, by_item[item.id], today, params)
+        line = _line(
+            position, item, required, held, to_buy, need_by, by_item[item.id], today, params
         )
+        if from_pos:
+            line = replace(line, flags=(*line.flags, Flag("on_order_from_pos", value=from_pos)))
+        lines.append(line)
 
     return AnalysisResult(
         product=product,
@@ -351,6 +369,25 @@ def analyze(
         summary=_summary(lines),
         params=params,
     )
+
+
+def open_on_order(
+    purchases: Iterable[Purchase],
+    item_id: UUID,
+    need_by: date | None,
+    today: date,
+    params: Params,
+) -> Decimal:
+    """What open purchase-order lines will still deliver of an item in time (see the top)."""
+    stale = today - timedelta(days=params.open_po_stale_days)
+    total = Decimal(0)
+    for p in purchases:
+        if p.item_id != item_id or p.received_at is not None or p.promised_at is None:
+            continue
+        if p.promised_at < stale or (need_by is not None and p.promised_at > need_by):
+            continue
+        total += max(p.quantity - (p.received_qty or Decimal(0)), Decimal(0))
+    return total
 
 
 def _line(
