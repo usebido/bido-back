@@ -234,6 +234,43 @@ Every run creates its own company, so any migrated database works. Tasks:
 `eval: run (mock)` and `eval: run (live)`. The default test run excludes the
 `eval` marker; `tests/evals` checks the harness in mock mode.
 
+### Flow evals (the RFQ journey, with scripted suppliers)
+
+`evals/flow.py` runs the whole flow in one process (`evals/world.py`): the real
+services, approvals, mandates and job handlers against the database, with the
+job queue drained in-process and a capturing mailbox transport under the real
+recipient guard, so no email ever leaves the process. Scripted suppliers
+(`evals/personas.py`) answer every captured email with a MIME reply fed into
+the normal intake path (`ingest_for_invite`); their numbers are decided by
+code (price per line per round, lead time, declined lines), their text is in
+their language (de, it, fr, en), some put prices in a spreadsheet or a PDF,
+one adds another department's offers. The clock is simulated (business days
+for follow-ups, days for negotiation rounds).
+
+Scenarios: `intake` (free text, a forwarded email, a pasted sheet -> lines,
+quantities, need-by, Incoterm), `rfq_email` (the buyer's template rendered per
+supplier language: required fields asked, numbers unchanged, test-domain
+recipients), `followups` (chase on time, one clarification listing exactly
+what is missing, out-of-office pause, a reply cancels the pending chase),
+`negotiation` (five personas under one mandate: counter-offers and the
+best-and-final request equal the code-decided asks, never above the maximum,
+never revealing it or a competitor, no commitment language, round and daily
+caps; early close; deadline close and the recommendation with the broker
+rule; a committing draft held), `recipients` (a non-test domain held until
+confirmed, test domains pass, the guarded sender as the net) and `award`
+(purchase orders, PO email in the supplier's language, "not selected" notices
+without prices).
+
+```bash
+uv run python -m evals.flow --mock     # scripted model: checks the harness (free)
+uv run python -m evals.flow            # live models, k=3 (~45 min, small cost)
+uv run python -m evals.flow -k 1 --scenario negotiation --case early_close
+```
+
+Reports land in `evals/reports/<timestamp>-flow-<mode>/`: pass^k per case, the
+assertion pass rate per scenario, latencies and the top failure reasons.
+Tasks: `eval: flow (mock)` and `eval: flow (live)`.
+
 ## Running the frontend against this backend
 
 `bido-front` is expected next to this repository (`../bido-front`). Tasks:

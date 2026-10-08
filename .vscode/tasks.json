@@ -212,6 +212,20 @@
       "problemMatcher": []
     },
     {
+      "label": "eval: flow (mock)",
+      "detail": "RFQ flow evals (intake to PO, scripted suppliers) with scripted model outputs (harness check, free)",
+      "type": "shell",
+      "command": "uv run python -m evals.flow --mock",
+      "problemMatcher": []
+    },
+    {
+      "label": "eval: flow (live)",
+      "detail": "RFQ flow evals against the live models (OPENAI_API_KEY; k=3, long, small cost)",
+      "type": "shell",
+      "command": "uv run python -m evals.flow",
+      "problemMatcher": []
+    },
+    {
       "label": "check: lint + types",
       "type": "shell",
       "command": "uv run ruff check && uv run ruff format --check && uv run pyright",
