@@ -7,7 +7,12 @@
 
   - `conversation` `{conversation_id, run_id}`: always first. Send the
     conversation id back with the next message to continue the conversation.
-  - `reasoning_step` `{text}`: a summary of the model's thinking.
+  - `reasoning_delta` `{step_id, text}`: the next piece of a thinking step,
+    as the model writes it. Append pieces with the same `step_id` into one
+    block.
+  - `reasoning_step` `{step_id, text}`: a whole thinking step (a summary of
+    the model's reasoning), sent once its pieces are complete. Clients that
+    ignore `reasoning_delta` render only these.
   - `tool_called` `{call_id, tool, kind, args}` and `tool_result`
     `{call_id, tool, ok, output | error}`: a lookup or a draft action.
   - `artifact` `{kind, data}`: a card to render. Kinds: `rfq_draft`,
