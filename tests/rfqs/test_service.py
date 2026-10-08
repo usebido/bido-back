@@ -209,7 +209,10 @@ async def test_prepare_send_records_pending_approvals_with_the_exact_email(
     preview = await service.preview_email(
         app_engine, buyer(rfq_rows), rfq.id, invite_id, FakeWriter()
     )
-    assert approval.args == {
+    document = approval.args.get("document")
+    assert isinstance(document, dict) and document["supplier_name"] == "Rhein"
+    assert document["language"] == "de" and document["rfq_ref"] == rfq.ref
+    assert {k: v for k, v in approval.args.items() if k != "document"} == {
         "invite_id": str(invite_id),
         "sender_user_id": str(rfq_rows.owner),
         "to": [to],

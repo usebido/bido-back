@@ -268,6 +268,44 @@ def rfqs_router() -> APIRouter:
         except RfqError as exc:
             raise rfq_http_error(exc) from None
 
+    @router.get(
+        "/{rfq_id}/invites/{invite_id}/document.pdf",
+        response_class=Response,
+        responses={
+            status.HTTP_200_OK: {
+                "content": {"application/pdf": {"schema": {"type": "string", "format": "binary"}}},
+                "description": "The RFQ document this invite's email carries",
+            },
+            **error_responses(
+                status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT, status.HTTP_502_BAD_GATEWAY
+            ),
+        },
+    )
+    async def invite_document(  # pyright: ignore[reportUnusedFunction]
+        rfq_id: UUID,
+        invite_id: UUID,
+        principal: CurrentPrincipal,
+        db: Db,
+        agents: Annotated[RfqAgents, Depends(get_rfq_agents)],
+    ) -> Response:
+        """The PDF attached to this invite's email: the approved one once a send was
+        proposed, else as it would be prepared now. Addressed to this supplier only."""
+        try:
+            doc = await service.preview_document(
+                db, principal, rfq_id, invite_id, agents.email_writer
+            )
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
+        return Response(
+            content=doc.content,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'inline; filename="{doc.filename}"',
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-store",
+            },
+        )
+
     @router.post(
         "/{rfq_id}/send",
         responses=error_responses(
