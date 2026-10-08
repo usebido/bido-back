@@ -21,7 +21,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
@@ -472,6 +472,7 @@ async def scenario_copilot(env: Env, fixture: Fixture, result: RunResult) -> Non
         if golden is not None:
             conversation, turn = await _turn(env, principal, conversation, "Pode criar a RFQ.", [])
             turns.append(turn)
+            await _check_context(env, principal, conversation, fixture, result, turns)
         result.notes["answers"] = [t.answer[:600] for t in turns]
         result.notes["tools"] = [t.tools for t in turns]
 
@@ -554,6 +555,64 @@ async def scenario_copilot(env: Env, fixture: Fixture, result: RunResult) -> Non
         "rfq_invites",
         invited == want,
         f"missing={sorted(want - invited)} extra={sorted(invited - want)}",
+    )
+
+
+# Phrases of a copilot that thinks the company's data lives in the chat.
+_ASKS_FOR_FILE_AGAIN: Final = ("anex", "envie a planilha", "reenvie", "nesta conversa", "attach")
+
+
+async def _check_context(
+    env: Env,
+    principal: Principal,
+    conversation: UUID,
+    fixture: Fixture,
+    result: RunResult,
+    turns: list[Turn],
+) -> None:
+    """Live: the copilot remembers the conversation and knows the company's data anywhere.
+
+    1. Same conversation, several tool calls later: which product?
+    2. A NEW conversation with no file: who supplies a category and what was
+       last paid for one of its parts (stored data; no BOM, no attachment).
+    """
+    dataset = fixture.dataset
+    _, recall = await _turn(
+        env, principal, conversation, "Só pra confirmar: pra qual produto é essa compra?", []
+    )
+    turns.append(recall)
+    result.check(
+        "remembers_the_conversation",
+        dataset.product.lower() in recall.answer.lower(),
+        f"the answer does not name the product {dataset.product!r}",
+    )
+
+    last = max(dataset.purchases, key=lambda r: (r.ordered_at, r.po_number))
+    category = dataset.part(last.part).category
+    _, fresh = await _turn(
+        env,
+        principal,
+        None,
+        f"Quem são nossos fornecedores de {category}? E quanto pagamos da última vez pelo "
+        f"{last.part}, e para quem?",
+        [],
+    )
+    turns.append(fresh)
+    answer = fresh.answer.lower()
+    result.check(
+        "company_data_tools",
+        _called([fresh], "list_suppliers") and _called([fresh], "purchase_history"),
+        f"tools called: {fresh.tools}",
+    )
+    result.check(
+        "last_paid_supplier_named",
+        last.supplier.lower() in answer,
+        f"the answer does not name {last.supplier!r}, the last supplier of {last.part}",
+    )
+    result.check(
+        "no_request_to_reattach",
+        not any(p in answer for p in _ASKS_FOR_FILE_AGAIN),
+        "the answer asks for the file again or blames this conversation",
     )
 
 
