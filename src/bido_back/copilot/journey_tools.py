@@ -30,7 +30,9 @@ from bido_back.agents.catalog.contracts import ExtraOfferDraft, ModelDecimal
 from bido_back.agents.context import ToolContext
 from bido_back.agents.tools import AnyTool, Tool, ToolError
 from bido_back.auth import Principal
+from bido_back.comparison.compute import DecisionOffer, ExcludedOffer, OfferAlternative
 from bido_back.comparison.loader import load_comparison
+from bido_back.comparison.policy import ComparisonPolicy, SupplierPerformance
 from bido_back.copilot import queries
 from bido_back.db import tenant_session
 from bido_back.db.models import Contact, Invite, Proposal, Supplier, SupplierContact
@@ -44,6 +46,14 @@ from bido_back.purchasing.schemas import AnalysisRequest, CurrencyTotalView
 from bido_back.purchasing.sources.contracts import SourceAssessment
 from bido_back.purchasing.sources.mapping import default_mapper
 from bido_back.purchasing.sources.service import SourceAccessError, analyze_uploads
+from bido_back.purchasing.sources.snapshots import (
+    AssessmentRfqRequest,
+    AssessmentRfqResult,
+    AssessmentSnapshotSummary,
+    draft_from_snapshot,
+    get_snapshot,
+    list_snapshots,
+)
 from bido_back.purchasing.workbook import WorkbookFileError, WorkbookImportReport, import_workbook
 from bido_back.rfqs import suppliers as supplier_service
 from bido_back.rfqs.errors import MailboxNotConfigured, MailboxNotConnected, RfqError
@@ -74,6 +84,15 @@ class RfqArg(BaseModel):
     rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
 
 
+class ComparisonPolicyInput(ComparisonPolicy):
+    minimum_on_time_rate: ModelDecimal | None = Field(default=None, ge=0, le=1)
+    minimum_accepted_quantity_rate: ModelDecimal | None = Field(default=None, ge=0, le=1)
+
+
+class SetComparisonPolicyIn(RfqArg):
+    policy: ComparisonPolicyInput
+
+
 class ImportSpreadsheetIn(BaseModel):
     upload_id: UUID = Field(description="The attachment id from attachment_ids")
     confirmed: bool = Field(
@@ -101,6 +120,23 @@ class AddContactIn(BaseModel):
     name: str | None = Field(default=None, max_length=200, description="The person's name")
 
 
+class AssessmentArg(BaseModel):
+    assessment_id: UUID
+
+
+class ListAssessmentsIn(BaseModel):
+    search: str | None = Field(default=None, max_length=200)
+    limit: int = Field(default=20, ge=1, le=50)
+
+
+class ListAssessmentsOut(BaseModel):
+    assessments: list[AssessmentSnapshotSummary]
+
+
+class CreateAssessmentRfqIn(AssessmentRfqRequest):
+    assessment_id: UUID
+
+
 class AddContactOut(BaseModel):
     supplier: str
     supplier_created: bool
@@ -119,6 +155,11 @@ class RefineAnalysisIn(BaseModel):
     )
     safety_stock_pct: int | None = Field(default=None, ge=0, le=100)
     need_by: date | None = None
+    planning_start: date | None = None
+    planning_end: date | None = None
+    location: str | None = Field(default=None, max_length=200)
+    stock_as_of: date | None = None
+    max_stock_age_days: int | None = Field(default=None, ge=0, le=1095)
     exclude_parts: list[str] = Field(
         default_factory=list[str], description="Part numbers the buyer does not want to buy now"
     )
@@ -199,6 +240,19 @@ class OutcomeLineOut(BaseModel):
     within_target: bool | None
     covered: bool
     why_not: list[str]
+    justification: str = ""
+    readiness: str = "needs_review"
+    line_total: Decimal | None = None
+    landed_total: Decimal | None = None
+    evidence_gaps: list[str] = Field(default_factory=list[str])
+    alternatives: list[OfferAlternative] = Field(default_factory=list[OfferAlternative])
+    performance: SupplierPerformance = Field(default_factory=SupplierPerformance)
+    evidence_message_ids: list[UUID] = Field(default_factory=list[UUID])
+    part_number: str | None = None
+    unit: str | None = None
+    offer: DecisionOffer | None = None
+    policy_reasons: list[str] = Field(default_factory=list[str])
+    excluded: list[ExcludedOffer] = Field(default_factory=list[ExcludedOffer])
 
 
 class OutcomeOut(BaseModel):
@@ -208,6 +262,8 @@ class OutcomeOut(BaseModel):
     lines: list[OutcomeLineOut]
     uncovered_lines: int
     note: str
+    readiness: str = "needs_review"
+    policy: ComparisonPolicy = Field(default_factory=ComparisonPolicy)
 
 
 class ExtraOfferOut(BaseModel):
@@ -285,7 +341,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         return report
 
     async def analyze_procurement_sources(
-        ctx: ToolContext, args: AnalyzeSourcesIn
+        ctx: ToolContext, args: AnalyzeSourcesIn, *, persist: bool = False
     ) -> SourceAssessment:
         principal = _principal(ctx)
         allowed = set(deps.attachment_ids) | set(deps.earlier_attachment_ids)
@@ -302,8 +358,62 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
                 args.objective,
                 ctx,
                 deps.source_mapper or default_mapper(),
+                persist=persist,
             )
         except SourceAccessError as exc:
+            raise ToolError(str(exc)) from None
+
+    async def save_procurement_assessment(
+        ctx: ToolContext, args: AnalyzeSourcesIn
+    ) -> SourceAssessment:
+        return await analyze_procurement_sources(ctx, args, persist=True)
+
+    async def list_procurement_assessments(
+        ctx: ToolContext, args: ListAssessmentsIn
+    ) -> ListAssessmentsOut:
+        return ListAssessmentsOut(
+            assessments=await list_snapshots(
+                db, _principal(ctx), search=args.search, limit=args.limit
+            )
+        )
+
+    async def get_procurement_assessment(ctx: ToolContext, args: AssessmentArg) -> SourceAssessment:
+        try:
+            return await get_snapshot(db, _principal(ctx), args.assessment_id)
+        except purchasing_service.PurchasingError as exc:
+            raise ToolError(str(exc)) from None
+
+    async def set_comparison_policy(
+        ctx: ToolContext, args: SetComparisonPolicyIn
+    ) -> ComparisonPolicy:
+        principal = _principal(ctx)
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await queries.find_rfq(session, args.rfq)
+            if rfq is None:
+                raise ToolError("RFQ not found")
+            rfq_id = rfq.id
+        try:
+            return await negotiation_service.set_comparison_policy(
+                db, principal, rfq_id, ComparisonPolicy.model_validate(args.policy.model_dump())
+            )
+        except RfqError as exc:
+            raise ToolError(str(exc)) from None
+
+    async def create_rfq_from_assessment(
+        ctx: ToolContext, args: CreateAssessmentRfqIn
+    ) -> AssessmentRfqResult:
+        try:
+            return await draft_from_snapshot(
+                db,
+                _principal(ctx),
+                args.assessment_id,
+                AssessmentRfqRequest(
+                    title=args.title,
+                    base_currency=args.base_currency,
+                    response_due=args.response_due,
+                ),
+            )
+        except purchasing_service.PurchasingError as exc:
             raise ToolError(str(exc)) from None
 
     async def add_supplier_contact(ctx: ToolContext, args: AddContactIn) -> AddContactOut:
@@ -339,19 +449,49 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         principal = _principal(ctx)
         analysis_id = args.analysis_id
         try:
-            if args.quantity or args.safety_stock_pct is not None or args.need_by:
+            if any(
+                value is not None
+                for value in (
+                    args.quantity,
+                    args.safety_stock_pct,
+                    args.need_by,
+                    args.planning_start,
+                    args.planning_end,
+                    args.location,
+                    args.stock_as_of,
+                    args.max_stock_age_days,
+                )
+            ):
                 current = await purchasing_service.get_analysis(db, principal, analysis_id)
+                from_plan = current.demand_source == "production_plan" and args.quantity is None
                 rerun = await purchasing_service.create_analysis(
                     db,
                     principal,
                     AnalysisRequest(
                         product=current.product,
-                        quantity=Decimal(args.quantity) if args.quantity else current.quantity,
-                        need_by=args.need_by or current.need_by,
+                        quantity=(
+                            Decimal(args.quantity)
+                            if args.quantity
+                            else (None if from_plan else current.quantity)
+                        ),
+                        need_by=args.need_by if from_plan else args.need_by or current.need_by,
                         safety_stock_pct=Decimal(args.safety_stock_pct)
                         if args.safety_stock_pct is not None
                         else current.safety_stock_pct,
                         lookback_days=current.lookback_days,
+                        planning_start=args.planning_start or current.planning_start,
+                        planning_end=(
+                            args.planning_end
+                            or (args.need_by if from_plan else None)
+                            or current.planning_end
+                        ),
+                        location=args.location or current.location,
+                        stock_as_of=args.stock_as_of or current.stock_as_of,
+                        max_stock_age_days=(
+                            args.max_stock_age_days
+                            if args.max_stock_age_days is not None
+                            else current.max_stock_age_days
+                        ),
                     ),
                     today=deps.today(),
                 )
@@ -505,17 +645,29 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
                     within_target=(price <= target) if price is not None and target else None,
                     covered=rec.invite_id is not None,
                     why_not=[str(r) for r in rec.reasons] if rec.invite_id is None else [],
+                    justification=rec.justification,
+                    readiness=rec.readiness,
+                    line_total=rec.line_total_base,
+                    landed_total=rec.landed_total_base,
+                    evidence_gaps=rec.evidence_gaps,
+                    alternatives=rec.alternatives,
+                    performance=rec.performance,
+                    evidence_message_ids=rec.evidence_message_ids,
+                    part_number=line.part_number if line else None,
+                    unit=line.unit if line else None,
+                    offer=rec.offer,
+                    policy_reasons=rec.policy_reasons,
+                    excluded=rec.excluded,
                 )
             )
         uncovered = sum(1 for line in out if not line.covered)
         note = (
-            "Every line has an offer that can be ordered."
+            "Every line has a candidate offer for buyer review. Check readiness and evidence gaps."
             if not uncovered
             else (
                 f"{uncovered} line(s) have no eligible offer from the buyer's suppliers: the "
-                "buyer's network was not enough for them. Offer a partial order with the "
-                "covered lines (prepare_award with those lines), or ask the buyer to add "
-                "more suppliers or contacts."
+                "buyer can review the covered lines, request missing evidence, or add "
+                "more suppliers or contacts. No order is created by this workflow."
             )
         )
         return OutcomeOut(
@@ -525,6 +677,8 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             lines=sorted(out, key=lambda line: line.position),
             uncovered_lines=uncovered,
             note=note,
+            readiness=comparison.readiness,
+            policy=comparison.policy,
         )
 
     async def close_negotiation(ctx: ToolContext, args: RfqArg) -> OutcomeOut:
@@ -581,6 +735,52 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
 
     ref_hint = " Pass the RFQ reference (RFQ-12) or id."
     return (
+        Tool(
+            "set_comparison_policy",
+            "Save the buyer's declared price/reliability priorities and evidence thresholds "
+            "for this RFQ. Do not invent preferences. Does not start a negotiation or send email.",
+            SetComparisonPolicyIn,
+            ComparisonPolicy,
+            "draft",
+            set_comparison_policy,
+        ),
+        Tool(
+            "save_procurement_assessment",
+            "Analyze the conversation's procurement sources and save an immutable evidence "
+            "snapshot. Returns assessment_id for later retrieval and draft RFQ creation. "
+            "Use when the buyer asks to save the analysis or proceed to an RFQ. Nothing is sent.",
+            AnalyzeSourcesIn,
+            SourceAssessment,
+            "draft",
+            save_procurement_assessment,
+        ),
+        Tool(
+            "get_procurement_assessment",
+            "Retrieve this buyer's saved source assessment by its assessment_id.",
+            AssessmentArg,
+            SourceAssessment,
+            "read",
+            get_procurement_assessment,
+        ),
+        Tool(
+            "list_procurement_assessments",
+            "Find the buyer's saved source assessments across conversations, optionally by "
+            "objective text. Retrieve a selected id with get_procurement_assessment.",
+            ListAssessmentsIn,
+            ListAssessmentsOut,
+            "read",
+            list_procurement_assessments,
+        ),
+        Tool(
+            "create_rfq_from_assessment",
+            "Create one draft RFQ from validated saved source quantities, units, dates and "
+            "evidence. Blocks unresolved assessments. Requires the buyer's RFQ currency. "
+            "No suppliers are invited and nothing is sent; use invite_suppliers next.",
+            CreateAssessmentRfqIn,
+            AssessmentRfqResult,
+            "draft",
+            create_rfq_from_assessment,
+        ),
         Tool(
             "analyze_procurement_sources",
             "Read and cross-reference all attached procurement sources: direct material "

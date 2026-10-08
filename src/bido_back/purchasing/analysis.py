@@ -9,10 +9,12 @@ Formulas (per item of the product's BOM):
 * `required = qty_per_unit * quantity` (units of the product to build).
 * `to_buy = max(0, required * (1 + safety_stock_pct / 100) - on_hand - on_order)`,
   rounded UP: to whole units for discrete units (pcs, un, pz, stk, ...), to
-  3 decimals otherwise (kg, m).
+  3 decimals otherwise (kg, m). With dated demand, supply is consumed once in
+  chronological order and rounding surplus carries into the next requirement.
 * `on_order`: the stock's on-order quantity when the stock export gives one
   (it already counts open purchase orders, so they are not added again).
-  Otherwise the open purchase-order lines due in time: not yet received
+  An aggregate without an arrival date cannot cover dated demand. Otherwise
+  the open purchase-order lines due in time: not yet received
   (no receipt date), promised on or before `need_by` (any date without one),
   and not stale (promised at most `open_po_stale_days` ago). Each counts its
   ordered minus received quantity; the line is flagged `on_order_from_pos`. A
@@ -33,11 +35,12 @@ Formulas (per item of the product's BOM):
   the new normal). `max_price = max(last_price, avg_price) * (1 +
   max_over_pct / 100)` (5% by default): the most the buyer should accept
   without escalating.
-* Per supplier: `on_time_rate` = share of received lines with
-  `received_at <= promised_at` (lines without both dates are not counted);
-  `quality_rate = 1 - rejected / received` over received quantity.
-* Suppliers are ranked: brokers/resellers last, then by quality, on-time
-  rate (unknown counts as perfect) and average price. Up to 3 are suggested,
+* Per supplier: `on_time_rate` measures complete, timely receipts and overdue
+  open lines; partial receipts are failures, missing receipt quantities unknown.
+  `quality_rate = 1 - rejected / received` over validated, dated receipts.
+* Suppliers are ranked: brokers/resellers last, then by measured quality, on-time
+  rate and average price. Unknown performance follows measured performance.
+  Up to 3 are suggested,
   brokers only when nobody else ever sold the item.
 
 Currencies: every line keeps the currency of its item's purchases (above). The
@@ -95,6 +98,7 @@ class Params:
     quality_threshold: Decimal = Decimal("0.98")
     # An open line promised longer ago than this and still not received is stale.
     open_po_stale_days: int = 60
+    location: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -116,8 +120,45 @@ class BomEntry:
 
 @dataclass(frozen=True, slots=True)
 class Stock:
+    # Eligible, available quantities; reservations have already been deducted.
     on_hand: Decimal = Decimal(0)
     on_order: Decimal = Decimal(0)
+    on_order_due: date | None = None
+    known: bool = True
+    issues: tuple[str, ...] = ()
+    gross_on_hand: Decimal = Decimal(0)
+    reserved_qty: Decimal = Decimal(0)
+    blocked_qty: Decimal = Decimal(0)
+    # Separate dated receipts for multiple locations; never add the same PO again.
+    inbound: tuple[tuple[date | None, Decimal], ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Demand:
+    quantity: Decimal
+    need_by: date | None
+
+
+@dataclass(frozen=True, slots=True)
+class DemandAllocation:
+    need_by: date | None
+    required: Decimal
+    gross_required: Decimal
+    stock_used: Decimal
+    inbound_used: Decimal
+    to_buy: Decimal
+    planned_supply_used: Decimal = Decimal(0)
+
+
+@dataclass(frozen=True, slots=True)
+class Calculation:
+    stock_known: bool = True
+    stock_issues: tuple[str, ...] = ()
+    gross_on_hand: Decimal = Decimal(0)
+    reserved_qty: Decimal = Decimal(0)
+    blocked_qty: Decimal = Decimal(0)
+    allocations: tuple[DemandAllocation, ...] = ()
+    excluded_inbound: Decimal = Decimal(0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +191,9 @@ class SupplierStats:
     on_time_rate: Decimal | None
     quality_rate: Decimal | None
     suggested: bool = False
+    delivery_observations: int = 0
+    quality_observations: int = 0
+    last_received_at: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +221,7 @@ class LineResult:
     max_price: Decimal | None
     suppliers: tuple[SupplierStats, ...] = ()
     flags: tuple[Flag, ...] = ()
+    calculation: Calculation = field(default_factory=Calculation)
 
     @property
     def suggested(self) -> tuple[SupplierStats, ...]:
@@ -256,31 +301,44 @@ def _latest(rows: Sequence[Purchase]) -> Purchase:
     return best
 
 
-def _on_time_rate(rows: Sequence[Purchase]) -> Decimal | None:
-    measured = 0
-    on_time = 0
+def _delivery_outcomes(rows: Sequence[Purchase], today: date) -> list[bool]:
+    outcomes: list[bool] = []
     for row in rows:
-        if row.received_at is None or row.promised_at is None:
+        if row.promised_at is None:
             continue
-        measured += 1
-        on_time += row.received_at <= row.promised_at
-    if not measured:
-        return None
-    return (Decimal(on_time) / Decimal(measured)).quantize(RATE_PLACES)
+        arrived = row.received_at is not None and row.received_at <= today
+        if not arrived and row.promised_at >= today:
+            continue
+        if arrived and row.received_qty is None:
+            continue
+        outcomes.append(
+            bool(
+                arrived
+                and row.received_qty is not None
+                and row.received_qty >= row.quantity
+                and row.received_at is not None
+                and row.received_at <= row.promised_at
+            )
+        )
+    return outcomes
 
 
-def _quality_rate(rows: Sequence[Purchase]) -> Decimal | None:
-    received = sum((p.received_qty for p in rows if p.received_qty), Decimal(0))
-    if received <= 0:
-        return None
-    rejected = sum((p.rejected_qty for p in rows if p.received_qty), Decimal(0))
-    return (Decimal(1) - min(rejected, received) / received).quantize(RATE_PLACES)
-
-
-def _supplier_stats(rows: Sequence[Purchase]) -> SupplierStats:
+def _supplier_stats(rows: Sequence[Purchase], today: date) -> SupplierStats:
     latest = _latest(rows)
     avg = _weighted_avg(rows)
     assert avg is not None  # rows have positive quantities
+    delivery = _delivery_outcomes(rows, today)
+    quality = [
+        p
+        for p in rows
+        if p.received_at is not None
+        and p.received_at <= today
+        and p.received_qty is not None
+        and p.received_qty > 0
+        and 0 <= p.rejected_qty <= p.received_qty
+    ]
+    received = sum((p.received_qty for p in quality if p.received_qty is not None), Decimal(0))
+    rejected = sum((p.rejected_qty for p in quality), Decimal(0))
     return SupplierStats(
         supplier_id=latest.supplier_id,
         name=latest.supplier_name,
@@ -291,17 +349,27 @@ def _supplier_stats(rows: Sequence[Purchase]) -> SupplierStats:
         last_ordered_at=latest.ordered_at,
         avg_price=_price(avg),
         min_price=_price(min(p.unit_price for p in rows)),
-        on_time_rate=_on_time_rate(rows),
-        quality_rate=_quality_rate(rows),
+        on_time_rate=(Decimal(sum(delivery)) / len(delivery)).quantize(RATE_PLACES)
+        if delivery
+        else None,
+        quality_rate=(1 - rejected / received).quantize(RATE_PLACES) if received else None,
+        delivery_observations=len(delivery),
+        quality_observations=len(quality),
+        last_received_at=max(
+            (p.received_at for p in rows if p.received_at and p.received_at <= today), default=None
+        ),
     )
 
 
-def _rank_key(stats: SupplierStats) -> tuple[bool, Decimal, Decimal, Decimal]:
+def _rank_key(stats: SupplierStats) -> tuple[bool, bool, Decimal, bool, Decimal, Decimal, str]:
     return (
         stats.type in BROKER_TYPES,
-        -(stats.quality_rate if stats.quality_rate is not None else Decimal(1)),
-        -(stats.on_time_rate if stats.on_time_rate is not None else Decimal(1)),
+        stats.quality_rate is None,
+        -(stats.quality_rate if stats.quality_rate is not None else Decimal(0)),
+        stats.on_time_rate is None,
+        -(stats.on_time_rate if stats.on_time_rate is not None else Decimal(0)),
         stats.avg_price,
+        str(stats.supplier_id),
     )
 
 
@@ -335,31 +403,49 @@ def analyze(
     purchases: Sequence[Purchase],
     today: date,
     params: Params | None = None,
+    demands: Sequence[Demand] | None = None,
 ) -> AnalysisResult:
     params = params or Params()
     window_start = today - timedelta(days=params.lookback_days)
     by_item: dict[UUID, list[Purchase]] = defaultdict(list)
     for purchase in purchases:
-        if purchase.ordered_at >= window_start and purchase.quantity > 0:
+        if window_start <= purchase.ordered_at <= today and purchase.quantity > 0:
             by_item[purchase.item_id].append(purchase)
 
     lines: list[LineResult] = []
     for position, entry in enumerate(bom, start=1):
         item = entry.item
-        held = stock.get(item.id, Stock())
-        from_pos = Decimal(0)
-        if held.on_order == 0:
-            from_pos = open_on_order(purchases, item.id, need_by, today, params)
-            held = replace(held, on_order=from_pos)
-        required = entry.qty_per_unit * quantity
-        gross = required * (1 + params.safety_stock_pct / 100)
-        to_buy = round_up_quantity(gross - held.on_hand - held.on_order, item.unit)
+        held = stock.get(item.id, Stock(known=False, issues=("stock_unknown",)))
+        scoped = sorted(
+            demands or (Demand(quantity, need_by),), key=lambda d: d.need_by or date.max
+        )
+        allocations, from_pos, inbound_total, issues, excluded_inbound = _allocate(
+            entry, scoped, held, purchases, today, params
+        )
+        required = sum((a.required for a in allocations), Decimal(0))
+        to_buy = sum((a.to_buy for a in allocations), Decimal(0))
+        shortage_dates = [a.need_by for a in allocations if a.to_buy > 0 and a.need_by]
+        line_need_by = min(shortage_dates) if shortage_dates else need_by
+        held = replace(held, on_order=inbound_total)
         line = _line(
-            position, item, required, held, to_buy, need_by, by_item[item.id], today, params
+            position, item, required, held, to_buy, line_need_by, by_item[item.id], today, params
         )
         if from_pos:
             line = replace(line, flags=(*line.flags, Flag("on_order_from_pos", value=from_pos)))
-        lines.append(line)
+        lines.append(
+            replace(
+                line,
+                calculation=Calculation(
+                    stock_known=held.known,
+                    stock_issues=issues,
+                    gross_on_hand=held.gross_on_hand or held.on_hand,
+                    reserved_qty=held.reserved_qty,
+                    blocked_qty=held.blocked_qty,
+                    allocations=allocations,
+                    excluded_inbound=excluded_inbound,
+                ),
+            )
+        )
 
     return AnalysisResult(
         product=product,
@@ -369,6 +455,109 @@ def analyze(
         summary=_summary(lines),
         params=params,
     )
+
+
+def _allocate(
+    entry: BomEntry,
+    demands: Sequence[Demand],
+    held: Stock,
+    purchases: Sequence[Purchase],
+    today: date,
+    params: Params,
+) -> tuple[tuple[DemandAllocation, ...], Decimal, Decimal, tuple[str, ...], Decimal]:
+    """Consume each stock/receipt once in demand order; late supply cannot erase a shortage."""
+    if any(d.quantity <= 0 for d in demands):
+        raise ValueError("demand quantities must be positive")
+    issues = list(held.issues)
+    if held.on_order == 0 and any(
+        p.item_id == entry.item.id
+        and p.received_at is not None
+        and p.received_qty is not None
+        and p.received_qty < p.quantity
+        and p.promised_at is not None
+        and p.promised_at >= today - timedelta(days=params.open_po_stale_days)
+        for p in purchases
+    ):
+        issues.append("partial_receipt_status_unknown")
+    from_pos = Decimal(0)
+    receipts = list(held.inbound or ((held.on_order_due, held.on_order),))
+    if held.on_order == 0 and not held.inbound:
+        # Imported order history has no destination. It cannot establish availability
+        # at an explicitly selected warehouse.
+        if params.location is not None:
+            if any(p.item_id == entry.item.id and p.received_at is None for p in purchases):
+                issues.append("inbound_location_unknown")
+            receipts = []
+        else:
+            stale = today - timedelta(days=params.open_po_stale_days)
+            receipts = [
+                (p.promised_at, max(p.quantity - (p.received_qty or Decimal(0)), Decimal(0)))
+                for p in purchases
+                if p.item_id == entry.item.id
+                and p.received_at is None
+                and p.promised_at is not None
+                and p.promised_at >= stale
+                and p.ordered_at <= today
+            ]
+            from_pos = sum(
+                (
+                    qty
+                    for due, qty in receipts
+                    if demands[-1].need_by is None or due <= demands[-1].need_by
+                ),
+                Decimal(0),
+            )
+    elif any(due is None and qty > 0 for due, qty in receipts):
+        issues.append("inbound_date_unknown")
+    excluded_inbound = Decimal(0)
+    if any(d.need_by is not None for d in demands):
+        excluded_inbound = sum((qty for due, qty in receipts if due is None), Decimal(0))
+        receipts = [(due, qty) for due, qty in receipts if due is not None]
+    receipts.sort(key=lambda receipt: receipt[0] or date.min)
+    inbound_total = sum(
+        (
+            qty
+            for due, qty in receipts
+            if due is None or demands[-1].need_by is None or due <= demands[-1].need_by
+        ),
+        Decimal(0),
+    )
+    excluded_inbound += sum((qty for _, qty in receipts), Decimal(0)) - inbound_total
+    remaining_stock = held.on_hand
+    remaining_inbound = Decimal(0)
+    purchased_surplus = Decimal(0)
+    cursor = 0
+    result: list[DemandAllocation] = []
+    for demand in demands:
+        while cursor < len(receipts):
+            due, qty = receipts[cursor]
+            if due is not None and demand.need_by is not None and due > demand.need_by:
+                break
+            remaining_inbound += qty
+            cursor += 1
+        required = entry.qty_per_unit * demand.quantity
+        gross = required * (1 + params.safety_stock_pct / 100)
+        stock_used = min(remaining_stock, gross)
+        remaining_stock -= stock_used
+        inbound_used = min(remaining_inbound, gross - stock_used)
+        remaining_inbound -= inbound_used
+        surplus_used = min(purchased_surplus, gross - stock_used - inbound_used)
+        purchased_surplus -= surplus_used
+        shortage = gross - stock_used - inbound_used - surplus_used
+        to_buy = round_up_quantity(shortage, entry.item.unit)
+        purchased_surplus += to_buy - shortage
+        result.append(
+            DemandAllocation(
+                need_by=demand.need_by,
+                required=required,
+                gross_required=gross,
+                stock_used=stock_used,
+                inbound_used=inbound_used,
+                to_buy=to_buy,
+                planned_supply_used=surplus_used,
+            )
+        )
+    return tuple(result), from_pos, inbound_total, tuple(dict.fromkeys(issues)), excluded_inbound
 
 
 def open_on_order(
@@ -382,7 +571,13 @@ def open_on_order(
     stale = today - timedelta(days=params.open_po_stale_days)
     total = Decimal(0)
     for p in purchases:
-        if p.item_id != item_id or p.received_at is not None or p.promised_at is None:
+        if (
+            p.item_id != item_id
+            or p.received_at is not None
+            or p.promised_at is None
+            or p.ordered_at > today
+            or params.location is not None
+        ):
             continue
         if p.promised_at < stale or (need_by is not None and p.promised_at > need_by):
             continue
@@ -432,7 +627,7 @@ def _line(
     per_supplier: dict[UUID, list[Purchase]] = defaultdict(list)
     for row in rows:
         per_supplier[row.supplier_id].append(row)
-    suppliers = _ranked([_supplier_stats(group) for group in per_supplier.values()])
+    suppliers = _ranked([_supplier_stats(group, today) for group in per_supplier.values()])
 
     last = _price(_latest(rows).unit_price)
     avg_raw = _weighted_avg(rows)

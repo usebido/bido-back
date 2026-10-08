@@ -9,7 +9,7 @@ correct import finds. The analysis golden comes from `evals.golden`.
 
 import io
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, Final, Literal, cast
@@ -196,12 +196,24 @@ def _count(ds: Dataset) -> dict[ImportType, int]:
 def _tidy(ds: Dataset, lang: Language = "en", *, dates: Callable[[date, int], object] = _as_date
           ) -> list[Sheet]:  # fmt: skip
     h = _H[lang]
+    stock_header = h["stock"]
+    stock_rows = _stock_rows(ds, _num)
+    if ds.stock_as_of is not None:
+        stock_header = [*stock_header, "As of", "On order due"]
+        stock_rows = [[*row, ds.stock_as_of, ds.stock_due] for row in stock_rows]
     sheets: list[Sheet] = [
         ("BOM", [h["bom"], *_bom_rows(ds, _num)], {}),
-        ("Stock", [h["stock"], *_stock_rows(ds, _num)], {}),
+        ("Stock", [stock_header, *stock_rows], {}),
         (
             "Purchases",
-            [h["po"]] + [_po_row(r, _num, _num, dates, i) for i, r in enumerate(ds.purchases)],
+            [[*h["po"], "Received qty"]]
+            + [
+                [
+                    *_po_row(r, _num, _num, dates, i),
+                    _num(r.received_qty) if r.received_qty is not None else None,
+                ]
+                for i, r in enumerate(ds.purchases)
+            ],
             {},
         ),  # fmt: skip
         ("Suppliers", [h["suppliers"], *_supplier_rows(ds)], {}),
@@ -224,6 +236,15 @@ def fixtures(today: date) -> list[Fixture]:
 
     # 1. The tidy baseline: one sheet per table, English headers on row 1.
     ds = build("motor_tidy_en", "motor", today, seed=1)
+    ds = replace(
+        ds,
+        stock_as_of=today,
+        stock_due=today + timedelta(days=15),
+        purchases=tuple(
+            replace(row, received_qty=row.quantity if row.received_at else None)
+            for row in ds.purchases
+        ),
+    )
     out.append(
         Fixture(
             name=ds.key,

@@ -148,6 +148,10 @@ class ExtractedValue(BaseModel):
     confidence: float = Field(ge=0, le=1)
 
 
+def _absent_value() -> ExtractedValue:
+    return ExtractedValue(value=None, source=None, confidence=0)
+
+
 class ProposalLineDraft(BaseModel):
     rfq_line_position: int | None = Field(
         description="Which requested line this answers; None if unclear"
@@ -164,6 +168,28 @@ class ProposalLineDraft(BaseModel):
     # The automotive qualification the supplier states for this offer, e.g. AEC-Q200.
     # No Field(description=...): next to a $ref, OpenAI's strict schema rejects it.
     qualification: ExtractedValue
+    # The written price and its denominator remain separate; code normalizes them.
+    price_basis_quantity: ExtractedValue = Field(default_factory=_absent_value)
+    freight_cost: ExtractedValue = Field(default_factory=_absent_value)
+    tax_rate_percent: ExtractedValue = Field(default_factory=_absent_value)
+    conditional_terms: ExtractedValue = Field(default_factory=_absent_value)
+
+
+class PriorSupplierOffer(BaseModel):
+    """Supplier-only context, with no buyer limits or competitor information."""
+
+    message_id: str
+    currency: str | None
+    lines: list[ProposalLineDraft]
+
+
+class OfferConflict(BaseModel):
+    """Two incompatible claims in the current message or its attachments."""
+
+    field: str
+    rfq_line_position: int | None = None
+    first: SourceRef
+    second: SourceRef
 
 
 class QuoteExtractionInput(BaseModel):
@@ -172,6 +198,7 @@ class QuoteExtractionInput(BaseModel):
     email_subject: str
     email_body: str
     attachments_text: str = Field(description="Extracted text with [file p.N] / [sheet!A1] markers")
+    prior_supplier_offer: PriorSupplierOffer | None = None
 
 
 class ExtraOfferDraft(BaseModel):
@@ -192,7 +219,7 @@ class ExtraOfferDraft(BaseModel):
 
 class QuoteExtractionOutput(BaseModel):
     is_quote: bool = Field(
-        description="False for out-of-office, refusals, questions without prices"
+        description="True for a priced offer or an amendment/withdrawal of an existing offer"
     )
     declined: bool = False
     currency: ExtractedValue
@@ -203,6 +230,13 @@ class QuoteExtractionOutput(BaseModel):
     missing_fields: list[str] = Field(default_factory=list[str])
     # Offers for things not requested; empty when there are none.
     extra_offers: list[ExtraOfferDraft] = Field(default_factory=list[ExtraOfferDraft])
+    reply_kind: Literal["replacement", "amendment", "withdrawal", "clarification"] = "replacement"
+    # Only an explicit, grounded preservation statement permits field inheritance.
+    unchanged_terms: ExtractedValue = Field(default_factory=_absent_value)
+    update_evidence: ExtractedValue = Field(default_factory=_absent_value)
+    withdrawn_line_positions: list[int] = Field(default_factory=list[int])
+    conflicts: list[OfferConflict] = Field(default_factory=list[OfferConflict])
+    technical_questions: list[str] = Field(default_factory=list[str])
 
 
 # --- rfq_candidate_classifier: sent-mail metadata -> is it an RFQ the buyer sent?

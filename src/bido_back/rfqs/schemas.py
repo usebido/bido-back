@@ -10,7 +10,7 @@ from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints
 
 from bido_back.agents.catalog.contracts import LineCategory
 from bido_back.awards.views import AwardApprovalView, ThreadEmailApprovalView
@@ -64,6 +64,7 @@ class RfqLineView(BaseModel):
     incoterm: str | None
     delivery_location: str | None
     qualification: str | None
+    source_evidence: dict[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
 
 
 class InviteView(BaseModel):

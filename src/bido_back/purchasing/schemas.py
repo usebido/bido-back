@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from bido_back.purchasing.importers import TableImportType
 from bido_back.rfqs.schemas import RfqDetail
@@ -65,11 +65,28 @@ class ProductView(BaseModel):
 
 class AnalysisRequest(_Strict):
     product: str = Field(min_length=1, max_length=200)
-    # Units to build; the production plan from today on when omitted.
+    # Units to build; dated production demand in the planning window when omitted.
     quantity: Decimal | None = Field(default=None, gt=0)
     need_by: date | None = None
     safety_stock_pct: Decimal = Field(default=Decimal(0), ge=0, le=100)
     lookback_days: int = Field(default=365, ge=30, le=1095)
+    # Demand dates, not the dates on which the buyer is negotiating.
+    planning_start: date | None = None
+    planning_end: date | None = None
+    location: str | None = Field(default=None, max_length=200)
+    stock_as_of: date | None = None
+    max_stock_age_days: int | None = Field(default=None, ge=0, le=1095)
+
+    @model_validator(mode="after")
+    def valid_horizon(self) -> "AnalysisRequest":
+        end = self.planning_end or self.need_by
+        if self.planning_start is not None and end is not None and end < self.planning_start:
+            raise ValueError("planning_end must not precede planning_start")
+        if self.location is not None:
+            self.location = self.location.strip()
+            if not self.location:
+                raise ValueError("location must not be blank")
+        return self
 
 
 class SupplierStatView(BaseModel):
@@ -85,6 +102,30 @@ class SupplierStatView(BaseModel):
     on_time_rate: Decimal | None
     quality_rate: Decimal | None
     suggested: bool
+    delivery_observations: int = 0
+    quality_observations: int = 0
+    last_received_at: date | None = None
+
+
+class DemandAllocationView(BaseModel):
+    need_by: date | None
+    required: Decimal
+    gross_required: Decimal
+    stock_used: Decimal
+    inbound_used: Decimal
+    to_buy: Decimal
+    planned_supply_used: Decimal = Decimal(0)
+
+
+class CalculationView(BaseModel):
+    stock_known: bool = True
+    stock_issues: list[str] = []
+    gross_on_hand: Decimal = Decimal(0)
+    reserved_qty: Decimal = Decimal(0)
+    blocked_qty: Decimal = Decimal(0)
+    allocations: list[DemandAllocationView] = []
+    buyer_quantity_override: Decimal | None = None
+    excluded_inbound: Decimal = Decimal(0)
 
 
 class FlagView(BaseModel):
@@ -117,6 +158,7 @@ class AnalysisLineView(BaseModel):
     suppliers: list[SupplierStatView]
     flags: list[FlagView]
     rfq_line_id: UUID | None
+    calculation: CalculationView = Field(default_factory=CalculationView)
 
 
 class CurrencyTotalView(BaseModel):
@@ -149,6 +191,12 @@ class AnalysisView(BaseModel):
     lines: list[AnalysisLineView]
     rfq_id: UUID | None
     created_at: datetime
+    planning_start: date | None = None
+    planning_end: date | None = None
+    location: str | None = None
+    stock_as_of: date | None = None
+    max_stock_age_days: int | None = None
+    demand_source: Literal["explicit_quantity", "production_plan"] = "explicit_quantity"
 
 
 class RfqFromAnalysisRequest(_Strict):

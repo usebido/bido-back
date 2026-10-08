@@ -15,7 +15,9 @@ from bido_back.approvals.audit import approval_audit
 from bido_back.db.models import Approval, NegotiationMessage
 
 
-async def cancel_on_new_offer(session: AsyncSession, invite_id: UUID) -> int:
+async def cancel_on_new_offer(
+    session: AsyncSession, invite_id: UUID, *, reason: str = "newer_offer"
+) -> int:
     rows = list(
         await session.scalars(
             select(NegotiationMessage)
@@ -29,7 +31,7 @@ async def cancel_on_new_offer(session: AsyncSession, invite_id: UUID) -> int:
     approval_ids = [r.approval_id for r in rows if r.approval_id is not None]
     for row in rows:
         row.status = "canceled"
-        row.canceled_reason = "newer_offer"
+        row.canceled_reason = reason
     if approval_ids:
         expired = list(
             await session.scalars(

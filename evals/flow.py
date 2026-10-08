@@ -96,7 +96,6 @@ from evals.personas import (
     ITEMS,
     NEGOTIATION_CAST,
     RESELLER,
-    TOUGH,
     WITHIN,
     Item,
     Persona,
@@ -582,10 +581,17 @@ def golden_asks(quote: Quote, items: Sequence[Item] = ITEMS) -> Asks:
 
 
 def golden_actions(persona: Persona) -> list[tuple[str, Asks]]:
-    """Each negotiation email the persona should get: (action, asks), at most MAX_ROUNDS,
-    the last allowed round being the best-and-final request; none once all is accepted."""
+    """Expected sends, stopping after two unchanged supplier replies.
+
+    The final allowed productive round is best-and-final; stagnant negotiations
+    are held for the buyer rather than spending another automatic round.
+    """
     actions: list[tuple[str, Asks]] = []
     for round in range(1, MAX_ROUNDS + 1):
+        if round >= 3 and persona.quote(round - 1) == persona.quote(round - 2) == persona.quote(
+            round - 3
+        ):
+            break
         asks = golden_asks(persona.quote(round - 1))
         if not asks:
             break
@@ -855,7 +861,7 @@ async def scenario_negotiation(world: World, case: str, result: RunResult) -> No
     winners = {str(o.get("rfq_line_id")): o.get("invite_id") for o in outcome}
     golden = {
         str(rfq.lines[1]): (str(world.invites[EAGER.key]), Decimal("0.040")),
-        str(rfq.lines[2]): (str(world.invites[TOUGH.key]), Decimal("1.02")),
+        str(rfq.lines[2]): (str(world.invites[EAGER.key]), Decimal("1.05")),
     }
     for line_id, (invite_id, price) in golden.items():
         found = next((o for o in outcome if str(o.get("rfq_line_id")) == line_id), None)

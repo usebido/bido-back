@@ -22,6 +22,7 @@ from fastapi import APIRouter, Depends, status
 
 from bido_back.api.deps import get_mailbox_senders, get_rfq_agents
 from bido_back.api.rfqs import CurrentPrincipal, Db, error_responses, rfq_http_error
+from bido_back.comparison.policy import ComparisonPolicy
 from bido_back.mandates import service as mandates
 from bido_back.mandates.schemas import (
     MandateActivity,
@@ -57,6 +58,19 @@ def negotiation_router() -> APIRouter:
     ) -> RfqNegotiation:
         try:
             return await service.update_negotiation(db, principal, rfq_id, body)
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
+
+    @router.put(
+        "/{rfq_id}/comparison/policy",
+        responses=error_responses(status.HTTP_404_NOT_FOUND),
+    )
+    async def put_comparison_policy(  # pyright: ignore[reportUnusedFunction]
+        rfq_id: UUID, body: ComparisonPolicy, principal: CurrentPrincipal, db: Db
+    ) -> ComparisonPolicy:
+        """Set buyer review priorities without opening negotiation or changing its bounds."""
+        try:
+            return await service.set_comparison_policy(db, principal, rfq_id, body)
         except RfqError as exc:
             raise rfq_http_error(exc) from None
 

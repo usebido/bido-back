@@ -103,6 +103,19 @@ async def test_import_analyse_and_draft_over_http(http: httpx.AsyncClient) -> No
     assert done.json()["created"] == {"items": 3, "bom_lines": 3}
     assert done.json()["columns"]["qty_per_unit"] == "Quantità per unità"
 
+    # Explicit zero inventory establishes a balance; absent stock is unknown.
+    stock_upload = await http.post(
+        "/v1/onboarding/uploads",
+        params={"filename": "stock.xlsx"},
+        content=xlsx([["Part number", "On hand"], ["BRG-6205", 0], ["CU-WIRE", 0], ["HSG-AL", 0]]),
+        headers={"content-type": XLSX},
+    )
+    stock_import = await http.post(
+        "/v1/data/imports",
+        json={"type": "inventory", "upload_id": stock_upload.json()["id"]},
+    )
+    assert stock_import.status_code == 200
+
     no_plan = await http.post("/v1/analyses", json={"product": "motor"})
     assert no_plan.status_code == 422
     unknown = await http.post("/v1/analyses", json={"product": "turbine", "quantity": 5})

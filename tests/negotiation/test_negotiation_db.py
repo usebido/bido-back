@@ -485,3 +485,305 @@ async def test_limits_must_belong_to_the_rfq_and_tenants_are_isolated(
     other = Principal(tenant_id=two_tenants.b.tenant_id, user_id=two_tenants.b.user_id)
     with pytest.raises(NotFound, match="not found"):
         await service.get_negotiation(world.engine, other, world.rfq_id)
+
+
+async def test_sent_refusals_stop_after_two_rounds_without_buyer_concession(world: World) -> None:
+    await world.configure(max_rounds=8)
+    await world.offer("rhein", ("0.050", "1.20"))
+    writer = FakeNegotiationWriter()
+    for _ in range(2):
+        assert (await world.sweep(writer)).proposed == 1
+        counter = (await world.messages("rhein"))[-1]
+        assert counter.approval_id is not None
+        await world.approve(counter.approval_id)
+        await world.offer("rhein", ("0.050", "1.20"))
+    result = await world.sweep(writer)
+    assert result.proposed == 0
+    assert len(writer.calls) == 2
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.status == "closed"
+    assert rhein.stalled_rounds == 2
+    assert rhein.strategy_reasons == ["stalled_negotiation_requires_buyer"]
+
+
+async def test_policy_change_cancels_pending_email_without_changing_negotiation_bounds(
+    world: World,
+) -> None:
+    from bido_back.comparison.policy import ComparisonPolicy
+
+    deadline = datetime.now(UTC) + timedelta(days=10)
+    await world.configure(max_rounds=5, deadline=deadline)
+    await world.offer("rhein", ("0.050", "1.20"))
+    writer = FakeNegotiationWriter()
+    assert (await world.sweep(writer)).proposed == 1
+    before = await world.rfq()
+    [pending] = await world.messages("rhein")
+    policy = ComparisonPolicy(require_complete_costs=True)
+    await service.set_comparison_policy(world.engine, buyer(world.people), world.rfq_id, policy)
+    after = await world.rfq()
+    assert after.negotiation_deadline == before.negotiation_deadline
+    assert after.negotiation_max_rounds == before.negotiation_max_rounds
+    [canceled] = await world.messages("rhein")
+    assert canceled.status == "canceled"
+    assert canceled.canceled_reason == "comparison_policy_changed"
+    assert (await world.approval(pending.approval_id)).status == "expired"
+    assert (await world.sweep(writer)).proposed == 0
+    assert len(writer.calls) == 1
+
+
+async def test_clarification_pauses_price_negotiation_with_existing_offer(world: World) -> None:
+    await world.configure()
+    proposal_id = await world.offer("rhein", ("0.050", "1.20"))
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        proposal = await session.get(Proposal, proposal_id)
+        assert proposal is not None
+        proposal.fields = {"_offer_state": {"reply_kind": "clarification", "issues": []}}
+    writer = FakeNegotiationWriter()
+    assert (await world.sweep(writer)).proposed == 0
+    assert writer.calls == []
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.strategy_reasons == ["supplier_clarification_requires_buyer"]
+
+
+async def test_closed_outcome_keeps_its_policy_and_evidence_snapshot(world: World) -> None:
+    from bido_back.comparison.policy import ComparisonPolicy
+
+    await world.configure()
+    proposal_id = await world.offer("rhein", ("0.039", "0.95"))
+    outcome = await service.close(world.engine, buyer(world.people), world.rfq_id)
+    assert outcome[0].proposal_id == proposal_id
+    assert "freight_cost_unknown" in outcome[0].evidence_gaps
+    assert outcome[0].readiness == "needs_review"
+    await service.set_comparison_policy(
+        world.engine,
+        buyer(world.people),
+        world.rfq_id,
+        ComparisonPolicy(preference="reliability_first"),
+    )
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    assert view.status == "closed"
+    assert view.settings.comparison_policy.preference == "reliability_first"
+    assert view.outcome is not None
+    assert view.outcome[0].policy.preference == "cost_first"
+    assert view.outcome[0].proposal_id == proposal_id
+
+
+async def test_comparison_loads_item_specific_history_and_policy(world: World) -> None:
+    from sqlalchemy import delete
+
+    from bido_back.comparison.loader import load_comparison
+    from bido_back.comparison.policy import ComparisonPolicy
+    from bido_back.db.models import Item, PoLine, PurchaseOrder
+
+    await world.offer("rhein", ("0.039", "0.95"))
+    await world.offer("lyon", ("0.050", "1.20"))
+    today = datetime.now(UTC).date()
+    item_ids: list[UUID] = []
+    order_ids: list[UUID] = []
+    try:
+        async with tenant_session(world.engine, world.people.tenant) as session:
+            first = await session.get(RfqLine, world.lines[0])
+            assert first is not None
+            matched = Item(
+                tenant_id=world.people.tenant,
+                part_number=first.part_number or "MATCHED",
+                description="Capacitor",
+                mpn=first.mpn,
+            )
+            unrelated = Item(
+                tenant_id=world.people.tenant,
+                part_number="UNRELATED",
+                description="Other",
+                mpn="OTHER",
+            )
+            session.add_all([matched, unrelated])
+            await session.flush()
+            item_ids = [matched.id, unrelated.id]
+            for name in ("rhein", "lyon"):
+                invite = await session.get(Invite, world.invites[name])
+                assert invite is not None
+                order = PurchaseOrder(
+                    tenant_id=world.people.tenant,
+                    supplier_id=invite.supplier_id,
+                    po_number=f"history-{name}",
+                    ordered_at=today - timedelta(days=40),
+                )
+                session.add(order)
+                await session.flush()
+                order_ids.append(order.id)
+                for n in range(5):
+                    session.add(
+                        PoLine(
+                            tenant_id=world.people.tenant,
+                            purchase_order_id=order.id,
+                            line_no=n + 1,
+                            item_id=matched.id,
+                            quantity=Decimal(100),
+                            unit_price=Decimal("0.05"),
+                            promised_at=today - timedelta(days=10),
+                            received_at=today - timedelta(days=5 if name == "rhein" else 12),
+                            received_qty=Decimal(100),
+                            rejected_qty=Decimal(10 if name == "rhein" else 0),
+                        )
+                    )
+                session.add(
+                    PoLine(
+                        tenant_id=world.people.tenant,
+                        purchase_order_id=order.id,
+                        line_no=99,
+                        item_id=unrelated.id,
+                        quantity=Decimal(100),
+                        unit_price=Decimal("0.05"),
+                        promised_at=today - timedelta(days=10),
+                        received_at=today - timedelta(days=12),
+                        received_qty=Decimal(100),
+                        rejected_qty=Decimal(0),
+                    )
+                )
+        await service.set_comparison_policy(
+            world.engine,
+            buyer(world.people),
+            world.rfq_id,
+            ComparisonPolicy(preference="reliability_first"),
+        )
+        comparison = await load_comparison(world.engine, buyer(world.people), world.rfq_id, today)
+        rec = next(
+            r for r in comparison.recommendations if r.rfq_line_id == world.lines[0] and r.tier == 0
+        )
+        assert rec.supplier_name == "Lyon"
+        assert rec.performance.delivery_samples == 5
+        assert rec.performance.on_time_rate == 1
+        rhein = next(s for s in comparison.suppliers if s.supplier_name == "Rhein")
+        cell = next(c for c in rhein.cells if c.rfq_line_id == world.lines[0] and c.tier == 0)
+        assert cell.performance.delivery_samples == 5
+        assert cell.performance.on_time_rate == 0
+        assert cell.performance.accepted_quantity_rate == Decimal("0.9")
+        second = next(c for c in rhein.cells if c.rfq_line_id == world.lines[1] and c.tier == 0)
+        assert second.performance.observations == 0
+    finally:
+        async with tenant_session(world.engine, world.people.tenant) as session:
+            await session.execute(delete(PurchaseOrder).where(PurchaseOrder.id.in_(order_ids)))
+            await session.execute(delete(Item).where(Item.id.in_(item_ids)))
+
+
+async def test_comparison_policy_race_does_not_relabel_stale_offers(
+    world: World,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import date
+
+    from bido_back.comparison.compute import Comparison
+    from bido_back.comparison.policy import ComparisonPolicy
+
+    await world.configure()
+    await world.offer("rhein", ("0.050", "1.20"))
+    original = service.load_comparison
+
+    async def changed_after_read(
+        db: service.Db,
+        principal: Principal,
+        rfq_id: UUID,
+        today: date,
+    ) -> Comparison:
+        stale = await original(db, principal, rfq_id, today)
+        await service.set_comparison_policy(
+            db, principal, rfq_id, ComparisonPolicy(require_complete_costs=True)
+        )
+        return stale
+
+    monkeypatch.setattr(service, "load_comparison", changed_after_read)
+    writer = FakeNegotiationWriter()
+    result = await world.sweep(writer)
+    assert result.skipped == 1
+    assert result.proposed == 0
+    assert writer.calls == []
+
+
+async def test_correction_during_writer_call_invalidates_unrecorded_proposal(world: World) -> None:
+    from bido_back.corrections import service as corrections
+    from bido_back.corrections.schemas import LineCorrectionRequest
+
+    await world.configure()
+    proposal_id = await world.offer("rhein", ("0.050", "1.20"))
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        line_id = await session.scalar(
+            select(ProposalLine.id).where(
+                ProposalLine.proposal_id == proposal_id,
+                ProposalLine.rfq_line_id == world.lines[0],
+            )
+        )
+    assert line_id is not None
+    fake = FakeNegotiationWriter()
+
+    async def correcting_writer(
+        task: NegotiationEmailInput, context: ToolContext
+    ) -> NegotiationEmailOutput:
+        await corrections.correct_line(
+            world.engine,
+            buyer(world.people),
+            proposal_id,
+            line_id,
+            LineCorrectionRequest(conditional_terms="Only with full package"),
+        )
+        return await fake(task, context)
+
+    result = await service.evaluate_rfq(
+        world.engine, world.people.tenant, world.rfq_id, writer=correcting_writer
+    )
+    assert result.proposed == 0
+    assert await world.messages("rhein") == []
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        approvals = list(
+            await session.scalars(select(Approval).where(Approval.tool == SEND_NEGOTIATION_EMAIL))
+        )
+    assert len(approvals) == 1
+    assert approvals[0].status == "expired"
+
+
+async def test_final_quotation_excludes_offers_above_buyer_limits(world: World) -> None:
+    await world.configure()
+    await world.offer("rhein", ("0.080", "2.00"))
+    outcome = await service.close(world.engine, buyer(world.people), world.rfq_id)
+    assert all(line.invite_id is None for line in outcome)
+    assert all(line.readiness == "no_feasible_offer" for line in outcome)
+    assert all(
+        any("above_buyer_maximum" in offer.reasons for offer in line.excluded) for line in outcome
+    )
+
+
+async def test_historical_target_uses_latest_comparable_quantity_and_price_basis(
+    world: World,
+) -> None:
+    from bido_back.negotiation.history import quoted_price_history
+
+    await world.offer("rhein", ("0.001", "1.00"))
+    latest = await world.offer("rhein", ("0.50", "1.00"))
+    current = await rfq_service.create_rfq_from_text(
+        world.engine, buyer(world.people), "New capacitor need", FakeIntake()
+    )
+    mpn = current.lines[0].mpn
+    assert mpn is not None
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        rfq = await session.get(Rfq, current.id)
+        line = await session.scalar(
+            select(ProposalLine).where(
+                ProposalLine.proposal_id == latest,
+                ProposalLine.rfq_line_id == world.lines[0],
+            )
+        )
+        assert rfq is not None and line is not None
+        line.fields = {
+            "price_basis_quantity": {"parsed": "100", "confidence": 1, "needs_review": False}
+        }
+        line.min_quantity = Decimal(50000)
+        await session.flush()
+        # The older cheap version is not current, and the current break is inapplicable.
+        assert await quoted_price_history(session, rfq, mpn) is None
+        line.min_quantity = Decimal(100)
+        await session.flush()
+        assert await quoted_price_history(session, rfq, mpn) == Decimal("0.005")
+        line.unit = "box"
+        await session.flush()
+        assert await quoted_price_history(session, rfq, mpn) is None

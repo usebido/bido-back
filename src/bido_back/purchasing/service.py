@@ -25,14 +25,14 @@ import logging
 import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from dataclasses import asdict, dataclass, field, replace
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Final
 from uuid import UUID
 
 from pydantic import JsonValue
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.agents.catalog.contracts import LineCategory
@@ -68,6 +68,7 @@ from bido_back.purchasing.schemas import (
     AnalysisRequest,
     AnalysisSummary,
     AnalysisView,
+    CalculationView,
     FlagView,
     ImportReport,
     ImportRequest,
@@ -384,9 +385,20 @@ async def _apply_inventory(
         if stock is None:
             stock = InventoryRow(tenant_id=tenant_id, item_id=item.id, location=location)
             session.add(stock)
+        as_of = row.get("as_of")
+        if (
+            not created
+            and stock.as_of is not None
+            and (not isinstance(as_of, date) or as_of < stock.as_of)
+        ):
+            counts.skip("inventory_older_snapshot")
+            continue
         stock.on_hand = _dec(row.get("on_hand"), Decimal(0)) or Decimal(0)
         stock.on_order = _dec(row.get("on_order"), Decimal(0)) or Decimal(0)
-        as_of = row.get("as_of")
+        stock.reserved_qty = _dec(row.get("reserved_qty"), Decimal(0)) or Decimal(0)
+        stock.blocked_qty = _dec(row.get("blocked_qty"), Decimal(0)) or Decimal(0)
+        due = row.get("on_order_due")
+        stock.on_order_due = due if isinstance(due, date) else None
         stock.as_of = as_of if isinstance(as_of, date) else None
         counts.add("inventory", created=created)
     await session.flush()
@@ -457,8 +469,6 @@ async def _apply_purchases(
         quantity = _dec(row["quantity"], Decimal(0)) or Decimal(0)
         received_qty = _dec(row.get("received_qty"))
         received_at = row.get("received_at")
-        if received_qty is None and isinstance(received_at, date):
-            received_qty = quantity
         rejected = _dec(row.get("rejected_qty"))
         if rejected is None:
             rejected = (
@@ -622,30 +632,68 @@ async def create_analysis(
 ) -> AnalysisView:
     today = today or datetime.now(UTC).date()
     params = calc.Params(
-        safety_stock_pct=request.safety_stock_pct, lookback_days=request.lookback_days
+        safety_stock_pct=request.safety_stock_pct,
+        lookback_days=request.lookback_days,
+        location=request.location,
     )
+    planning_start = request.planning_start or today
+    planning_end = request.planning_end or request.need_by
+    if planning_end is not None and planning_end < planning_start:
+        raise InvalidRequest("planning_end must not precede planning_start")
+    stock_as_of = request.stock_as_of or today
+    if stock_as_of > today:
+        raise InvalidRequest("stock_as_of must not be in the future")
     async with tenant_session(db, principal.tenant_id) as session:
         product = await _resolve_product(session, request.product)
-        quantity, need_by = request.quantity, request.need_by
+        quantity, need_by = request.quantity, request.need_by or request.planning_end
+        demands: list[calc.Demand] | None = None
         if quantity is None:
-            planned: Decimal | None = await session.scalar(
-                select(func.sum(ProductionPlanRow.quantity)).where(
-                    ProductionPlanRow.product == product, ProductionPlanRow.need_by >= today
-                )
+            query = select(ProductionPlanRow).where(
+                ProductionPlanRow.product == product,
+                ProductionPlanRow.need_by >= planning_start,
             )
-            if planned is None:
+            if planning_end is not None:
+                query = query.where(ProductionPlanRow.need_by <= planning_end)
+            planned = list(await session.scalars(query.order_by(ProductionPlanRow.need_by)))
+            if not planned:
                 raise InvalidRequest(
-                    f"no production plan for {product!r} from today; give a quantity"
+                    "no production plan in the selected demand window; give a quantity"
                 )
-            first: date | None = await session.scalar(
-                select(func.min(ProductionPlanRow.need_by)).where(
-                    ProductionPlanRow.product == product, ProductionPlanRow.need_by >= today
-                )
-            )
-            quantity, need_by = Decimal(planned), need_by or first
+            demands = [calc.Demand(row.quantity, row.need_by) for row in planned]
+            quantity = sum((d.quantity for d in demands), Decimal(0))
+            need_by = planned[0].need_by
 
         bom = await _load_bom(session, product)
-        stock = await _load_stock(session, [entry.item.id for entry in bom])
+        stock = await _load_stock(
+            session,
+            [entry.item.id for entry in bom],
+            location=request.location,
+            as_of=stock_as_of,
+            max_age_days=request.max_stock_age_days,
+        )
+        competing = (
+            select(BomLine.item_id)
+            .join(
+                ProductionPlanRow,
+                ProductionPlanRow.product == BomLine.product,
+            )
+            .where(
+                BomLine.item_id.in_([entry.item.id for entry in bom]),
+                ProductionPlanRow.need_by >= today,
+                or_(
+                    ProductionPlanRow.product != product, ProductionPlanRow.need_by < planning_start
+                ),
+            )
+        )
+        coverage_end = demands[-1].need_by if demands else need_by
+        if coverage_end is not None:
+            competing = competing.where(ProductionPlanRow.need_by <= coverage_end)
+        for item_id in set(await session.scalars(competing)):
+            held = stock.get(item_id, calc.Stock(known=False, issues=("stock_unknown",)))
+            stock[item_id] = replace(
+                held,
+                issues=(*held.issues, "shared_stock_competing_demand"),
+            )
         purchases = await _load_purchases(session, [entry.item.id for entry in bom])
         result = calc.analyze(
             product=product,
@@ -656,6 +704,7 @@ async def create_analysis(
             purchases=purchases,
             today=today,
             params=params,
+            demands=demands,
         )
         record = Analysis(
             tenant_id=principal.tenant_id,
@@ -667,6 +716,14 @@ async def create_analysis(
                 "lookback_days": params.lookback_days,
                 "max_over_pct": str(params.max_over_pct),
                 "today": today.isoformat(),
+                "planning_start": planning_start.isoformat(),
+                "planning_end": planning_end.isoformat() if planning_end else None,
+                "location": request.location,
+                "stock_as_of": stock_as_of.isoformat(),
+                "max_stock_age_days": request.max_stock_age_days,
+                "demand_source": "production_plan"
+                if request.quantity is None
+                else "explicit_quantity",
             },
             summary=_summary_json(result.summary),
             created_by=principal.user_id,
@@ -750,6 +807,10 @@ async def adjust_analysis(
                 line.to_buy = Decimal(0)
             elif key in overrides:
                 line.to_buy = overrides[key]
+                line.calculation = {
+                    **line.calculation,
+                    "buyer_quantity_override": str(line.to_buy),
+                }
         summary = dict(record.summary)
         buying = [line for line, _ in rows if line.to_buy > 0]
         summary["items_to_buy"] = len(buying)
@@ -785,20 +846,64 @@ def _item_info(item: Item) -> calc.ItemInfo:
     )
 
 
-async def _load_stock(session: AsyncSession, item_ids: Sequence[UUID]) -> dict[UUID, calc.Stock]:
+async def _load_stock(
+    session: AsyncSession,
+    item_ids: Sequence[UUID],
+    *,
+    location: str | None = None,
+    as_of: date | None = None,
+    max_age_days: int | None = None,
+) -> dict[UUID, calc.Stock]:
     if not item_ids:
         return {}
-    rows = await session.execute(
-        select(
-            InventoryRow.item_id, func.sum(InventoryRow.on_hand), func.sum(InventoryRow.on_order)
+    query = select(InventoryRow).where(InventoryRow.item_id.in_(item_ids))
+    if location is not None:
+        query = query.where(InventoryRow.location == location)
+    grouped: dict[UUID, list[InventoryRow]] = defaultdict(list)
+    for row in await session.scalars(query):
+        grouped[row.item_id].append(row)
+    cutoff = as_of or datetime.now(UTC).date()
+    result: dict[UUID, calc.Stock] = {}
+    for item_id, rows in grouped.items():
+        eligible: list[InventoryRow] = []
+        issues: list[str] = []
+        for row in rows:
+            if row.as_of is not None and row.as_of > cutoff:
+                issues.append("stock_after_cutoff")
+                continue
+            if row.as_of is None:
+                issues.append("stock_undated")
+                if max_age_days is not None:
+                    continue
+            if (
+                max_age_days is not None
+                and row.as_of is not None
+                and row.as_of < cutoff - timedelta(days=max_age_days)
+            ):
+                issues.append("stock_stale")
+                continue
+            if row.reserved_qty + row.blocked_qty > row.on_hand:
+                issues.append("stock_reservations_exceed_on_hand")
+            eligible.append(row)
+        if len(eligible) != len(rows):
+            issues.append("stock_unknown")
+        result[item_id] = calc.Stock(
+            on_hand=sum(
+                (
+                    max(row.on_hand - row.reserved_qty - row.blocked_qty, Decimal(0))
+                    for row in eligible
+                ),
+                Decimal(0),
+            ),
+            on_order=sum((row.on_order for row in eligible), Decimal(0)),
+            known=len(eligible) == len(rows) and "stock_reservations_exceed_on_hand" not in issues,
+            issues=tuple(dict.fromkeys(issues)),
+            gross_on_hand=sum((row.on_hand for row in eligible), Decimal(0)),
+            reserved_qty=sum((row.reserved_qty for row in eligible), Decimal(0)),
+            blocked_qty=sum((row.blocked_qty for row in eligible), Decimal(0)),
+            inbound=tuple((row.on_order_due, row.on_order) for row in eligible if row.on_order),
         )
-        .where(InventoryRow.item_id.in_(item_ids))
-        .group_by(InventoryRow.item_id)
-    )
-    return {
-        item_id: calc.Stock(on_hand=Decimal(on_hand), on_order=Decimal(on_order))
-        for item_id, on_hand, on_order in rows
-    }
+    return result
 
 
 async def _load_purchases(session: AsyncSession, item_ids: Sequence[UUID]) -> list[calc.Purchase]:
@@ -873,6 +978,9 @@ def _line_row(tenant_id: UUID, analysis_id: UUID, line: calc.LineResult) -> Anal
             "on_time_rate": _num(s.on_time_rate),
             "quality_rate": _num(s.quality_rate),
             "suggested": s.suggested,
+            "delivery_observations": s.delivery_observations,
+            "quality_observations": s.quality_observations,
+            "last_received_at": s.last_received_at.isoformat() if s.last_received_at else None,
         }
         for s in line.suppliers
     ]
@@ -899,6 +1007,9 @@ def _line_row(tenant_id: UUID, analysis_id: UUID, line: calc.LineResult) -> Anal
         max_price=line.max_price,
         suppliers=suppliers,
         flags=flags,
+        calculation=CalculationView.model_validate(asdict(line.calculation)).model_dump(
+            mode="json"
+        ),
     )
 
 
@@ -932,6 +1043,12 @@ async def _view(session: AsyncSession, record: Analysis) -> AnalysisView:
         need_by=record.need_by,
         safety_stock_pct=Decimal(str(params.get("safety_stock_pct", "0"))),
         lookback_days=int(params.get("lookback_days", 365)),
+        planning_start=params.get("planning_start"),
+        planning_end=params.get("planning_end"),
+        location=params.get("location"),
+        stock_as_of=params.get("stock_as_of"),
+        max_stock_age_days=params.get("max_stock_age_days"),
+        demand_source=params.get("demand_source", "explicit_quantity"),
         summary=AnalysisSummary.model_validate(record.summary),
         lines=[
             AnalysisLineView(
@@ -958,6 +1075,7 @@ async def _view(session: AsyncSession, record: Analysis) -> AnalysisView:
                 suppliers=[SupplierStatView.model_validate(s) for s in line.suppliers],
                 flags=[FlagView.model_validate(f) for f in line.flags],
                 rfq_line_id=line.rfq_line_id,
+                calculation=CalculationView.model_validate(line.calculation),
             )
             for line, item in rows
         ],
@@ -1002,6 +1120,20 @@ async def create_rfq_from_analysis(
         )
         if not rows:
             raise InvalidRequest("nothing to buy: stock and open orders cover the build")
+        for line, _ in rows:
+            calculation = CalculationView.model_validate(line.calculation)
+            uncertain = (
+                not calculation.stock_known
+                or "shared_stock_competing_demand" in calculation.stock_issues
+                or "inbound_date_unknown" in calculation.stock_issues
+                or "inbound_location_unknown" in calculation.stock_issues
+                or "partial_receipt_status_unknown" in calculation.stock_issues
+            )
+            if uncertain and calculation.buyer_quantity_override != line.to_buy:
+                raise InvalidRequest(
+                    "confirm purchase quantities for lines with uncertain supply "
+                    "or competing demand before creating an RFQ"
+                )
 
         title = request.title or f"{record.product}: {record.quantity.normalize():f} un"
         currency = _rfq_currency([line.currency for line, _ in rows])
@@ -1031,6 +1163,18 @@ async def create_rfq_from_analysis(
         without_limits: list[int] = []
         for (line, _), rfq_line in zip(rows, rfq_lines, strict=True):
             line.rfq_line_id = rfq_line.id
+            rfq_line.source_evidence = {
+                "kind": "purchase_analysis",
+                "analysis_id": str(record.id),
+                "analysis_line_id": str(line.id),
+                "item_id": str(line.item_id),
+                "product": record.product,
+                "calculation": line.calculation,
+                "planning_start": record.params.get("planning_start"),
+                "planning_end": record.params.get("planning_end"),
+                "location": record.params.get("location"),
+                "stock_as_of": record.params.get("stock_as_of"),
+            }
             # The analysis prices become the negotiation's default limits (the buyer
             # can still change them), in the RFQ's currency: the strategy compares
             # offers in base currency. A line bought in another currency has its

@@ -74,10 +74,10 @@ def test_only_the_lead_time_is_asked_when_the_price_is_fine() -> None:
 
 def test_without_a_target_the_history_or_competition_or_five_percent_is_asked() -> None:
     no_target = limits(target=None, max_price=None, max_lead=None)
-    assert decide_line(no_target, offer("0.050"), Decimal("0.044")).ask_price == Decimal("0.044")
+    assert decide_line(no_target, offer("0.050"), Decimal("0.044")).ask_price == Decimal("0.0475")
     assert decide_line(no_target, offer("0.050"), None).ask_price == Decimal("0.0475")
     history = limits(target=None, max_price=None, max_lead=None, history="0.042")
-    assert decide_line(history, offer("0.050"), None).ask_price == Decimal("0.042")
+    assert decide_line(history, offer("0.050"), None).ask_price == Decimal("0.0475")
     assert decide_line(history, offer("0.041"), None).kind == "accept"
 
 
@@ -241,3 +241,93 @@ def test_negotiation_email_checks_the_numbers() -> None:
         "rfq_ref_missing_in_body"
     ]
     assert negotiation_email_problems(task, NegotiationEmailOutput(body=" ")) == ["empty"]
+
+
+def test_stalled_sent_rounds_stop_instead_of_repeating_the_target() -> None:
+    from bido_back.negotiation.strategy import PreviousRound
+
+    decision = decide_supplier(
+        lines=[limits()],
+        offers={LINE: offer("0.050")},
+        best_competing={},
+        rounds_used=2,
+        bafo_already_requested=False,
+        max_rounds=8,
+        deadline=None,
+        now=NOW,
+        previous_rounds=[
+            PreviousRound({LINE: offer("0.050")}),
+            PreviousRound({LINE: offer("0.050")}),
+        ],
+    )
+    assert decision.action == "final"
+    assert not decision.sends_email
+    assert decision.stalled_rounds == 2
+    assert decision.reasons == ("stalled_negotiation_requires_buyer",)
+
+
+def test_evidenced_concession_or_delivery_improvement_keeps_negotiation_open() -> None:
+    from bido_back.negotiation.strategy import PreviousRound
+
+    for current in (offer("0.049"), offer("0.050", lead=20)):
+        decision = decide_supplier(
+            lines=[limits()],
+            offers={LINE: current},
+            best_competing={},
+            rounds_used=2,
+            bafo_already_requested=False,
+            max_rounds=8,
+            deadline=None,
+            now=NOW,
+            previous_rounds=[
+                PreviousRound({LINE: offer("0.050")}),
+                PreviousRound({LINE: offer("0.050")}),
+            ],
+        )
+        assert decision.action == "counter"
+        assert decision.stalled_rounds == 0
+
+
+def test_supplier_question_holds_price_negotiation_until_buyer_clarifies() -> None:
+    decision = decide_supplier(
+        lines=[limits()],
+        offers={LINE: offer("0.035")},
+        best_competing={},
+        rounds_used=0,
+        bafo_already_requested=False,
+        max_rounds=3,
+        deadline=None,
+        now=NOW,
+        holds=["supplier_clarification_requires_buyer"],
+    )
+    assert decision.action == "none"
+    assert not decision.sends_email
+    assert not ready_to_close(line_ids=[LINE], waiting_suppliers=0, decisions=[decision])
+
+
+def test_partial_offer_is_not_marked_as_supplier_acceptance() -> None:
+    decision = decide_supplier(
+        lines=[limits(), limits(line=OTHER_LINE)],
+        offers={LINE: offer("0.035")},
+        best_competing={},
+        rounds_used=0,
+        bafo_already_requested=False,
+        max_rounds=3,
+        deadline=None,
+        now=NOW,
+    )
+    assert decision.status == "open"
+    assert decision.reasons == ("partial_coverage_requires_review",)
+
+
+def test_historical_reference_cannot_override_the_buyers_maximum() -> None:
+    d = decide_line(limits(target=None, history="0.100", max_price="0.060"), offer("0.080"), None)
+    assert d.kind == "above_max"
+    assert d.ask_price is None
+
+
+def test_competitor_price_never_becomes_supplier_facing_ask() -> None:
+    d = decide_line(limits(target=None), offer("0.050"), Decimal("0.044"))
+    assert d.better_offer_exists
+    assert d.ask_price == Decimal("0.0475")
+    assert d.ask_price != Decimal("0.044")

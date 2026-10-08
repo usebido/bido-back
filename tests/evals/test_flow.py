@@ -26,11 +26,10 @@ def test_personas_write_to_test_domains_only() -> None:
 
 
 def test_golden_negotiation_follows_the_buyer_rules() -> None:
-    # Above target on both lines: ask the targets, twice, then best and final.
+    # Two unchanged replies stop the automatic loop and hold for the buyer.
     assert golden_actions(TOUGH) == [
         ("counter", {1: (Decimal("0.040"), None), 2: (Decimal("1.00"), None)}),
         ("counter", {1: (Decimal("0.040"), None), 2: (Decimal("1.00"), None)}),
-        ("bafo", {1: (Decimal("0.040"), None), 2: (Decimal("1.00"), None)}),
     ]
     # Cheap but late: only the lead time is asked.
     assert golden_actions(CHEAP_LATE)[0] == ("counter", {1: (None, 42), 2: (None, 42)})
