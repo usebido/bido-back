@@ -8488,6 +8488,14 @@
             "title": "Problems",
             "type": "array"
           },
+          "products": {
+            "description": "The products the BOMs and production plans name (at most 20), as written. Analyse one of these by this exact name when the buyer says 'this product'; never a name from an example",
+            "items": {
+              "type": "string"
+            },
+            "title": "Products",
+            "type": "array"
+          },
           "questions": {
             "items": {
               "type": "string"

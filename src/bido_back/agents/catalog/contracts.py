@@ -371,18 +371,31 @@ class SheetPreview(BaseModel):
     preview: str = Field(
         description="The first rows, one per line: 'row N: [0] value | [1] value | ...'"
     )
+    profile: str = Field(
+        default="",
+        description=(
+            "Every column, one line each, computed over the rows under the likely header "
+            "row: '[N] title: kind, distinct count, examples or min..max, % empty'"
+        ),
+    )
 
 
 class ImportFieldCatalog(BaseModel):
     import_type: str
     fields: list[str]
     required: list[str]
+    # Field -> its value type ("text", "number", "date", "bool", "int").
+    types: dict[str, str] = {}
+    # Field -> what it means, for fields that are easy to confuse.
+    hints: dict[str, str] = {}
 
 
 class SheetMappingInput(BaseModel):
     filename: str
     sheets: list[SheetPreview]
     catalog: list[ImportFieldCatalog]
+    # On a second attempt: what was wrong with the first mapping of these sheets.
+    feedback: list[str] = []
 
 
 class ColumnAssignment(BaseModel):

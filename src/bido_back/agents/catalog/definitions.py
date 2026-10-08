@@ -9,7 +9,8 @@ validates before anything is stored.
 
 Each agent has a factory taking the model id, so the caller can choose it
 from configuration; the module constants use `DEFAULT_MODEL`, except quote
-extraction, which uses `EXTRACTION_MODEL`.
+extraction (`EXTRACTION_MODEL`), the template builder (`TEMPLATE_MODEL`) and the
+sheet mapper (`MAPPER_MODEL`).
 """
 
 import re
@@ -40,6 +41,10 @@ DEFAULT_MODEL: Final = "gpt-6-luna"
 EXTRACTION_MODEL: Final = "gpt-6.1-sol"
 # The template is learned once per tenant from a handful of documents.
 TEMPLATE_MODEL: Final = "gpt-6.1-sol"
+# Reading a spreadsheet's columns is the way into every analysis, runs once per
+# workbook (about $0.02 a read) and was at least as accurate as the small model
+# on the mapper evals and a real AI-generated ERP export (2026-10-08).
+MAPPER_MODEL: Final = "gpt-6.1-sol"
 
 # One request for the answer plus one spare, in case the model's first final
 # answer does not validate and Agno asks again.
@@ -170,11 +175,11 @@ def award_notice_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[AwardNoti
 AWARD_NOTICE_WRITER: Final = award_notice_writer()
 
 
-def sheet_mapper(model: str = DEFAULT_MODEL) -> AgentDefinition[SheetMappingOutput]:
+def sheet_mapper(model: str = MAPPER_MODEL) -> AgentDefinition[SheetMappingOutput]:
     return AgentDefinition(
         name="sheet_mapper",
-        prompt_file="sheet_mapper.v1.md",
-        prompt_version=1,
+        prompt_file="sheet_mapper.v2.md",
+        prompt_version=2,
         model=model,
         output_model=SheetMappingOutput,
         max_turns=_MAX_TURNS,
