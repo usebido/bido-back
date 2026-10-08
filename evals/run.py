@@ -3,6 +3,7 @@
     uv run python -m evals.run                    # live model, k=3
     uv run python -m evals.run --mock             # scripted model (harness check)
     uv run python -m evals.run -k 1 --scenario import --fixture motor_tidy_en
+    uv run python -m evals.run --scenario grounding --fixture unrecorded_terms_pt
 
 Needs DATABASE_URL (and AGNO_DATABASE_URL for the copilot) pointing at a
 migrated database; live mode needs OPENAI_API_KEY. Every run creates its own
@@ -27,6 +28,7 @@ from bido_back.db import create_engine
 from bido_back.settings import get_settings
 from evals.golden import golden_analysis
 from evals.harness import (
+    GROUNDING_CASES,
     Env,
     MemoryStorage,
     Mode,
@@ -36,13 +38,14 @@ from evals.harness import (
     scenario_analysis,
     scenario_copilot,
     scenario_extraction,
+    scenario_grounding,
     scenario_import,
 )
 from evals.layouts import Fixture, fixtures
 from evals.mock import mock_extractor
 from evals.quotes import cases
 
-SCENARIOS: Final = ("import", "analysis", "copilot", "extraction")
+SCENARIOS: Final = ("import", "analysis", "copilot", "grounding", "extraction")
 # The copilot conversation is the expensive one: a representative subset.
 COPILOT_FIXTURES: Final = (
     "motor_tidy_en",
@@ -64,6 +67,7 @@ async def run_suite(
 ) -> list[RunResult]:
     selected = [f for f in fixtures(env.today) if not only or f.name in only]
     quote_cases = [c for c in cases(env.today) if not only or c.name in only]
+    grounding_cases = [c for c in GROUNDING_CASES if not only or c.name in only]
     extractor = (
         mock_extractor(env.today) if env.mode == "mock" else live_extractor(env.runner_config)
     )
@@ -76,6 +80,14 @@ async def run_suite(
                 results.append(await _one(env, "analysis", fixture, run))
             if "copilot" in scenarios and (only or fixture.name in COPILOT_FIXTURES):
                 results.append(await _one(env, "copilot", fixture, run))
+        if "grounding" in scenarios:
+            for grounding in grounding_cases:
+                result = RunResult("grounding", grounding.name, run)
+                results.append(
+                    await run_timed(
+                        lambda c=grounding, r=result: scenario_grounding(env, c, r), result
+                    )
+                )
         if "extraction" in scenarios:
             for case in quote_cases:
                 result = RunResult("extraction", case.name, run)
