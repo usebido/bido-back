@@ -295,6 +295,7 @@ async def create_draft_rfq(
     lines: Sequence[NewRfqLine],
     source_text: str | None = None,
     response_due: date | None = None,
+    base_currency: str = BASE_CURRENCY,
 ) -> tuple[Rfq, list[RfqLine]]:
     """Store a draft RFQ with the given lines, in the caller's tenant session."""
     rfq = Rfq(
@@ -302,7 +303,7 @@ async def create_draft_rfq(
         ref=await _next_ref(session, principal.tenant_id),
         title=title,
         status="draft",
-        base_currency=BASE_CURRENCY,
+        base_currency=base_currency,
         response_due=response_due,
         source_text=source_text,
         created_by=principal.user_id,

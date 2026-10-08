@@ -27,6 +27,7 @@ import logging
 import signal
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import date
 from typing import Literal, Protocol, cast
 from uuid import UUID
 
@@ -405,6 +406,7 @@ class Worker:
 
 
 async def main() -> None:
+    from bido_back.fx.ecb import refresh_if_stale
     from bido_back.intake.consumer import build_intake_consumer, sqs_client
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -427,6 +429,8 @@ async def main() -> None:
     )
     # Raw inbound emails (SES -> S3 -> SQS); None when SQS_INTAKE_QUEUE_URL is unset.
     intake = build_intake_consumer(settings, engine)
+    # Exchange rates for converting negotiation limits and offers (fails open).
+    await refresh_if_stale(engine, date.today())
 
     loop = asyncio.get_running_loop()
 

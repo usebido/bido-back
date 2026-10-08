@@ -23,6 +23,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Final
 
 import httpx
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -142,6 +143,29 @@ async def refresh_rates(
     count = await upsert_rates(db, daily)
     logger.info("fx rates refreshed date=%s currencies=%d", daily.rate_date, count)
     return daily
+
+
+async def refresh_if_stale(
+    db: AsyncEngine | async_sessionmaker[AsyncSession],
+    today: date,
+    *,
+    max_age_days: int = 3,
+    fetch: Fetch | None = None,
+) -> None:
+    """Fetch today's rates when the newest stored ones are older than `max_age_days`.
+
+    Run when the worker starts, so a fresh environment has rates before any
+    scheduled `fx.refresh`. Fails open: without rates, conversions are skipped.
+    """
+    sessionmaker = db if isinstance(db, async_sessionmaker) else async_sessionmaker(db)
+    async with sessionmaker() as session:
+        latest = await session.scalar(select(func.max(FxRate.rate_date)))
+    if latest is not None and (today - latest).days <= max_age_days:
+        return
+    try:
+        await refresh_rates(db, fetch)
+    except FxError as exc:
+        logger.warning("fx rates not refreshed at start: %s", exc)
 
 
 class FxRefreshHandler:

@@ -10,10 +10,13 @@ import pytest
 
 from bido_back.purchasing.importers import (
     ImportFileError,
+    decimal_evidence,
     map_columns,
     parse_date,
+    parse_number,
     parse_rows,
     read_table,
+    supplier_type,
 )
 
 
@@ -134,3 +137,107 @@ def test_unsupported_files_are_refused() -> None:
         read_table(b"%PDF-1.4", "history.pdf")
     with pytest.raises(ImportFileError):
         read_table(b"not a zip", "history.xlsx")
+
+
+def test_sap_headers_map_to_fields() -> None:
+    # ME2M: "Item" is the line next to "Material"; the supplier's name wins over its code.
+    _, columns, missing, unknown = map_columns(
+        "purchase_history",
+        [
+            "Doc.compras", "Item", "Fornecedor", "Nome do fornecedor", "Material", "Texto breve",
+            "Qtd.do pedido", "UMP", "Preço líquido", "Moeda", "Por", "Data doc.", "Data remessa",
+            "Data EM", "Qtd.fornecida", "Qtd.devolvida", "Centro",
+        ],
+    )  # fmt: skip
+    assert missing == []
+    assert columns == {
+        "po_number": "Doc.compras",
+        "supplier": "Nome do fornecedor",
+        "supplier_code": "Fornecedor",
+        "part_number": "Material",
+        "quantity": "Qtd.do pedido",
+        "unit_price": "Preço líquido",
+        "price_unit": "Por",
+        "ordered_at": "Data doc.",
+        "currency": "Moeda",
+        "promised_at": "Data remessa",
+        "received_at": "Data EM",
+        "received_qty": "Qtd.fornecida",
+        "rejected_qty": "Qtd.devolvida",
+        "line_no": "Item",
+        "description": "Texto breve",
+    }
+    assert unknown == ["UMP", "Centro"]
+
+    # Without a "Material" column, "Item" is the part number.
+    _, columns, _, _ = map_columns("inventory", ["Item", "Estoque"])
+    assert columns["part_number"] == "Item"
+
+    # XK03: a bare "Nome" next to a contact column is the supplier's name.
+    _, columns, missing, _ = map_columns(
+        "supplier_contacts",
+        ["Fornecedor", "Nome", "País", "Pessoa de contato", "E-mail", "Classificação"],
+    )
+    assert missing == []
+    assert (columns["supplier"], columns["supplier_code"]) == ("Nome", "Fornecedor")
+    assert (columns["contact_name"], columns["type"]) == ("Pessoa de contato", "Classificação")
+    # Without a contact column, a "Nome" is not taken for the supplier.
+    _, columns, _, _ = map_columns("supplier_contacts", ["Fornecedor", "Nome", "E-mail"])
+    assert columns["supplier"] == "Fornecedor" and "supplier_code" not in columns
+
+    # MB52 and MD04.
+    _, columns, missing, _ = map_columns(
+        "inventory", ["Material", "Utilização livre", "Em contr.qualidade", "Depósito"]
+    )
+    assert missing == [] and columns["on_hand"] == "Utilização livre"
+    _, columns, missing, _ = map_columns(
+        "production_plan", ["Material", "Texto breve", "Qtd.planejada", "Data necessidade"]
+    )
+    assert missing == [] and columns["product"] == "Material"
+
+
+def test_text_numbers_resolve_with_their_column() -> None:
+    # "888,000" reads as 888 or 888000: the column's other numbers decide.
+    table = parse_rows(
+        "inventory",
+        [["Material", "Utilização livre"], ["A", "888,000"], ["B", "1.850,000"], ["C", "12"]],
+    )
+    assert table.errors == []
+    assert [v["on_hand"] for _, v in table.rows] == [Decimal(888), Decimal(1850), Decimal(12)]
+
+    # No evidence in the column: the caller's separator (the workbook's evidence), else an error.
+    rows: list[list[object]] = [["Material", "Utilização livre"], ["A", "888,000"]]
+    assert parse_rows("inventory", rows, decimal=",").rows[0][1]["on_hand"] == Decimal(888)
+    assert [e.field for e in parse_rows("inventory", rows).errors] == ["on_hand"]
+
+    assert decimal_evidence(["1.234,56", "1,000", 3.5]) == ","
+    assert decimal_evidence(["1,234.56", "12"]) == "."
+    assert decimal_evidence(["888,000", "1.000"]) is None  # ambiguous only
+    assert decimal_evidence(["1.234,56", "1,234.56"]) is None  # conflicting
+    assert parse_number("1.250,00-", ",") == Decimal("-1250.00")  # SAP's trailing minus
+
+
+def test_totals_are_skipped_and_prices_follow_the_price_unit() -> None:
+    table = parse_rows(
+        "purchase_history",
+        [
+            ["PO", "Supplier", "Part number", "Quantity", "Unit price", "Por", "Order date"],
+            ["PO-1", "Conectores", "NTC-10K", 3000, "195,40", 100, "01.03.2026"],
+            ["PO-2", "Conectores", "HV-3P", 10, "185,00", 1, "02.03.26"],
+            ["", "", "", "", "", "", ""],
+            ["*", "Total", "", 3010, "", "", ""],
+        ],
+    )
+    assert table.errors == []
+    assert (table.total_rows, table.skipped_rows) == (2, 1)
+    assert [v["unit_price"] for _, v in table.rows] == [Decimal("1.954"), Decimal("185.00")]
+    assert table.rows[1][1]["ordered_at"] == date(2026, 3, 2)
+    assert all("price_unit" not in v for _, v in table.rows)
+
+
+def test_supplier_types() -> None:
+    assert supplier_type("Fabricante") == "manufacturer"
+    assert supplier_type("Distribuidor autorizado") == "authorized_distributor"
+    assert supplier_type("Revendedor") == "reseller"
+    assert supplier_type("Broker") == "reseller"
+    assert supplier_type("Parceiro estratégico") is None

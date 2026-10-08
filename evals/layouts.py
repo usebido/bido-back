@@ -3,8 +3,8 @@
 Each fixture writes one dataset in one shape (tidy sheets, Italian headers with
 title rows and a totals row, Portuguese with decimal commas, one sheet mixing
 two tables, off-synonym headers, mixed date formats, duplicates and bad rows,
-no BOM, no production plan, two products) and declares what a correct import
-finds. The analysis golden comes from `evals.golden`.
+no BOM, no production plan, two products, a SAP export) and declares what a
+correct import finds. The analysis golden comes from `evals.golden`.
 """
 
 import io
@@ -17,6 +17,7 @@ from typing import Any, Final, Literal, cast
 from bido_back.agents.catalog.contracts import ColumnAssignment, SheetSection
 from bido_back.purchasing.importers import ImportType
 from evals.data import Dataset, PurchaseRow, build
+from evals.erp import FILENAME, sap_motor
 
 Language = Literal["en", "it", "pt"]
 
@@ -42,6 +43,8 @@ class Fixture:
     unique_po_lines: int
     # The right mapping for sheets the rules cannot read (scripted mapper in mock mode).
     mapping: tuple[SheetSection, ...] = field(default_factory=tuple[SheetSection, ...])
+    # The import must ask before writing (the buyer confirms in a later message).
+    asks_confirmation: bool = False
 
 
 # --- Writing -----------------------------------------------------------------------------
@@ -558,4 +561,36 @@ def fixtures(today: date) -> list[Fixture]:
             unique_po_lines=len(ds.purchases),
         )
     )  # fmt: skip
+
+    # 11-12. A SAP export (MB52, ME2M, CS12, MD04, XK03): titles above every table,
+    # SAP field names, text numbers with three decimals, a three-level BOM named only
+    # in its title, BRL and EUR, price units, vendor codes. The second also has stock
+    # rows that cannot be read, so the import asks first (confirmed by text only).
+    for gaps in (False, True):
+        data, ds = sap_motor(today, gaps=gaps)
+        rows_ok = _count(ds)
+        out.append(
+            Fixture(
+                name=ds.key,
+                description="SAP export: title rows, SAP field names, '888,000' quantities, "
+                "3-level CS12 BOM with the product in the title, BRL+EUR, price unit 100, "
+                "supplier master by vendor code"
+                + (", plus unreadable stock rows (asks before importing)" if gaps else ""),
+                filename=FILENAME,
+                data=data,
+                dataset=ds,
+                language="pt",
+                quantity=None,
+                sections=_sections(("MB52 Estoque", "inventory"),
+                                   ("ME2M Pedidos", "purchase_history"),
+                                   ("CS12 Lista técnica", "bom"),
+                                   ("Plano de produção", "production_plan"),
+                                   ("XK03 Fornecedores", "supplier_contacts")),
+                rows_ok=rows_ok,
+                contacts=True,
+                analysable=True,
+                unique_po_lines=len(ds.purchases),
+                asks_confirmation=gaps,
+            )
+        )  # fmt: skip
     return out

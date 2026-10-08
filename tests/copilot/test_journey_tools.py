@@ -1,5 +1,6 @@
 """The copilot's journey tools against Postgres: contacts, extras, outcome, guards."""
 
+from decimal import Decimal
 from uuid import uuid4
 
 import pytest
@@ -8,12 +9,17 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.tools import ToolError
 from bido_back.db import tenant_session
-from bido_back.db.models import Contact, Proposal
+from bido_back.db.models import Approval, Contact, Proposal
+from bido_back.onboarding import service as onboarding
 from tests.approvals.conftest import People
+from tests.purchasing.conftest import FakeStorage, purchasing_rows, xlsx
 
 from .conftest import buyer_of, context_of, invite, make_rfq, make_tools, seed_quote, supplier
 
 pytestmark = pytest.mark.db
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+__all__ = ["purchasing_rows"]
 
 
 async def test_contacts_from_the_chat_are_saved_once(
@@ -136,3 +142,76 @@ async def test_the_outcome_names_lines_no_supplier_covers(
     assert covered.get(1) is True
     if len(rfq.lines) > 1:
         assert out.uncovered_lines >= 1 and "network" in out.note
+
+
+async def test_the_mandate_takes_limits_the_buyer_gives_for_lines_without_them(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    ctx = context_of(principal)
+    tools = make_tools(app_engine)
+    rfq = await make_rfq(app_engine, principal)  # from text: no target or maximum yet
+    await invite(app_engine, principal, rfq, await supplier(app_engine, principal, "Murata"))
+
+    with pytest.raises(ToolError, match="target and a maximum"):
+        await tools.call(ctx, "propose_negotiation_mandate", rfq=rfq.ref, deadline="2026-10-20")
+    with pytest.raises(ToolError, match="no line 9"):
+        await tools.call(
+            ctx,
+            "propose_negotiation_mandate",
+            rfq=rfq.ref,
+            deadline="2026-10-20",
+            limits=[{"position": 9, "target_unit_price": "1", "max_unit_price": "2"}],
+        )
+
+    proposed = await tools.call(
+        ctx,
+        "propose_negotiation_mandate",
+        rfq=rfq.ref,
+        deadline="2026-10-20",
+        limits=[
+            {"position": 1, "target_unit_price": "0.0040", "max_unit_price": "0.0050"},
+            {"position": 2, "target_unit_price": "0.0100", "max_unit_price": "0.0120"},
+        ],
+    )
+
+    assert proposed.lines == 2 and proposed.approval_id is not None
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        approval = await session.get(Approval, proposed.approval_id)
+    assert approval is not None
+    limits = {
+        line["position"]: Decimal(str(line["max_unit_price"])) for line in approval.args["lines"]
+    }
+    assert limits == {1: Decimal("0.0050"), 2: Decimal("0.0120")}
+
+
+async def test_only_the_buyer_confirms_an_import(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    principal = buyer_of(purchasing_rows)
+    ctx = context_of(principal)
+    storage = FakeStorage()
+    upload = await onboarding.store_upload(
+        app_engine,
+        storage,
+        principal,
+        filename="stock.xlsx",
+        content_type=XLSX,
+        data=xlsx([["Código", "Estoque"], ["A-1", 10], ["A-2", "n/d"], ["A-3", "n/d"]]),
+    )
+
+    # The message that attaches the file cannot confirm its own questions.
+    first = make_tools(app_engine, attachment_ids=(upload.id,), storage=storage)
+    report = await first.call(ctx, "import_spreadsheet", upload_id=str(upload.id), confirmed=True)
+    assert report.status == "needs_confirmation"
+
+    # The buyer's next message: an earlier file, confirmed, but not twice in one go.
+    later = make_tools(app_engine, earlier_attachment_ids=(upload.id,), storage=storage)
+    again = await later.call(ctx, "import_spreadsheet", upload_id=str(upload.id))
+    assert again.status == "needs_confirmation"
+    held = await later.call(ctx, "import_spreadsheet", upload_id=str(upload.id), confirmed=True)
+    assert held.status == "needs_confirmation"
+
+    answer = make_tools(app_engine, earlier_attachment_ids=(upload.id,), storage=storage)
+    done = await answer.call(ctx, "import_spreadsheet", upload_id=str(upload.id), confirmed=True)
+    assert done.status == "imported"

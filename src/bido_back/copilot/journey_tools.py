@@ -37,9 +37,10 @@ from bido_back.db.models import Contact, Invite, Proposal, Supplier, SupplierCon
 from bido_back.mandates import service as mandates
 from bido_back.mandates.schemas import ProposeMandateRequest
 from bido_back.negotiation import service as negotiation_service
+from bido_back.negotiation.schemas import LineLimitsUpdate
 from bido_back.outbound.domains import RecipientCheck
 from bido_back.purchasing import service as purchasing_service
-from bido_back.purchasing.schemas import AnalysisRequest
+from bido_back.purchasing.schemas import AnalysisRequest, CurrencyTotalView
 from bido_back.purchasing.workbook import WorkbookFileError, WorkbookImportReport, import_workbook
 from bido_back.rfqs import suppliers as supplier_service
 from bido_back.rfqs.errors import MailboxNotConfigured, MailboxNotConnected, RfqError
@@ -122,13 +123,30 @@ class RefineAnalysisOut(BaseModel):
     items_to_buy: int
     currency: str | None
     total_at_target: Decimal | None
+    # Spend per currency; never add amounts in different currencies together.
+    totals: list[CurrencyTotalView]
     lines: list[RefinedLine]
+
+
+_AS_GIVEN: Final = "In the RFQ's currency, exactly as the buyer gave it"
+
+
+class LineLimitIn(BaseModel):
+    position: int = Field(ge=1, description="The RFQ line's position")
+    target_unit_price: ModelDecimal = Field(gt=0, description=_AS_GIVEN)
+    max_unit_price: ModelDecimal = Field(gt=0, description=_AS_GIVEN)
 
 
 class ProposeMandateIn(BaseModel):
     rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
     deadline: date = Field(description="The last day of the negotiation, as the buyer said")
     max_rounds: int = Field(default=3, ge=1, le=10)
+    limits: list[LineLimitIn] = Field(
+        default_factory=list[LineLimitIn],
+        max_length=200,
+        description="Only limits the buyer stated, for lines without them "
+        "(lines_without_limits); other lines keep the analysis limits",
+    )
 
 
 class ProposeMandateOut(BaseModel):
@@ -217,6 +235,9 @@ def _conversation_upload(
 def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
     db = deps.db
 
+    # Uploads this message's import asked about: the buyer has not answered yet.
+    asked: set[UUID] = set()
+
     async def import_spreadsheet(
         ctx: ToolContext, args: ImportSpreadsheetIn
     ) -> WorkbookImportReport:
@@ -226,17 +247,25 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         )
         if deps.storage is None:
             raise ToolError("file storage is not available")
+        # Only the buyer confirms, after seeing the questions: never in the message
+        # that attached the file, nor after this message's import asked.
+        confirmed = (
+            args.confirmed and upload_id not in deps.attachment_ids and upload_id not in asked
+        )
         try:
-            return await import_workbook(
+            report = await import_workbook(
                 db,
                 deps.storage,
                 principal,
                 upload_id,
                 mapper=deps.sheet_mapper,
-                confirmed=args.confirmed,
+                confirmed=confirmed,
             )
         except WorkbookFileError as exc:
             raise ToolError(str(exc)) from None
+        if report.status == "needs_confirmation":
+            asked.add(upload_id)
+        return report
 
     async def add_supplier_contact(ctx: ToolContext, args: AddContactIn) -> AddContactOut:
         principal = _principal(ctx)
@@ -302,6 +331,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             items_to_buy=view.summary.items_to_buy,
             currency=view.summary.currency,
             total_at_target=view.summary.total_at_target,
+            totals=view.summary.totals,
             lines=[
                 RefinedLine(
                     part_number=line.part_number,
@@ -324,15 +354,29 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             if rfq is None:
                 raise ToolError(f"no RFQ {args.rfq!r}; use list_rfqs to find it")
             rfq_id, ref = rfq.id, rfq.ref
+            line_ids = {line.position: line.id for line in await queries.lines(session, rfq_id)}
         if args.deadline < deps.today():
             raise ToolError("the deadline is in the past")
+        limits: list[LineLimitsUpdate] = []
+        for given in args.limits:
+            if given.position not in line_ids:
+                raise ToolError(f"{ref} has no line {given.position}")
+            if given.target_unit_price > given.max_unit_price:
+                raise ToolError(f"line {given.position}: the target is above the maximum")
+            limits.append(
+                LineLimitsUpdate(
+                    rfq_line_id=line_ids[given.position],
+                    target_unit_price=given.target_unit_price,
+                    max_unit_price=given.max_unit_price,
+                )
+            )
         try:
             proposed = await mandates.propose_mandate(
                 db,
                 principal,
                 rfq_id,
                 ProposeMandateRequest(
-                    deadline=_deadline(args.deadline), max_rounds=args.max_rounds
+                    deadline=_deadline(args.deadline), max_rounds=args.max_rounds, lines=limits
                 ),
                 writer=deps.agents.email_writer,
                 mailboxes=deps.mailboxes,

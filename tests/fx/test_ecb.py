@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.db.models import FxRate
 from bido_back.fx import FxError, FxRefreshHandler, fetch_ecb_daily, parse_ecb_daily
-from bido_back.fx.ecb import MAX_DOCUMENT_BYTES
+from bido_back.fx.ecb import MAX_DOCUMENT_BYTES, refresh_if_stale
 from bido_back.worker.envelope import Envelope
 from tests.db.conftest import app_engine, migrator_engine
 
@@ -104,6 +104,31 @@ async def test_refresh_job_upserts_rates(
             ).all()
         assert len(rows) == 6
         assert {currency: rate for currency, rate in rows}["USD"] == Decimal("1.18")
+    finally:
+        async with migrator_engine.begin() as conn:
+            await conn.execute(delete(FxRate).where(FxRate.rate_date == date(1999, 1, 4)))
+
+
+@pytest.mark.db
+async def test_the_worker_start_fetches_rates_only_when_stale(
+    app_engine: AsyncEngine, migrator_engine: AsyncEngine
+) -> None:
+    document = FIXTURE.replace(b"2026-10-05", b"1999-01-04")
+    fetched: list[int] = []
+
+    async def fetch() -> bytes:
+        fetched.append(1)
+        return document
+
+    async def down() -> bytes:
+        raise FxError("could not fetch ECB rates: ConnectError")
+
+    try:
+        await refresh_if_stale(app_engine, date(2100, 1, 1), fetch=fetch)  # stale
+        assert fetched == [1]
+        await refresh_if_stale(app_engine, date(1999, 1, 5), fetch=fetch)  # fresh enough
+        assert fetched == [1]
+        await refresh_if_stale(app_engine, date(2100, 1, 1), fetch=down)  # fails open
     finally:
         async with migrator_engine.begin() as conn:
             await conn.execute(delete(FxRate).where(FxRate.rate_date == date(1999, 1, 4)))

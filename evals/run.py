@@ -49,6 +49,8 @@ COPILOT_FIXTURES: Final = (
     "battery_titles_it",
     "inverter_no_plan",
     "battery_no_bom",
+    "erp_sap_motor",
+    "erp_sap_motor_gaps",
 )
 REPORTS: Final = Path(__file__).parent / "reports"
 

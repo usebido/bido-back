@@ -3,6 +3,7 @@
 import io
 from collections.abc import Mapping, Sequence
 from datetime import date
+from decimal import Decimal
 from typing import Any, cast
 from uuid import uuid4
 
@@ -19,7 +20,7 @@ from bido_back.agents.catalog.contracts import (
 from bido_back.agents.context import ToolContext
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
-from bido_back.db.models import Contact, PoLine, Supplier, SupplierContact
+from bido_back.db.models import BomLine, Contact, Item, PoLine, Supplier, SupplierContact
 from bido_back.onboarding import service as onboarding
 from bido_back.purchasing.workbook import (
     SheetGrid,
@@ -235,3 +236,175 @@ async def test_import_asks_when_unsure_then_imports_after_confirmation(
     assert {(r.sheet, r.type): r for r in again.sections}[
         ("Compras", "supplier_contacts")
     ].created.get("contacts") is None
+
+
+CS12: list[list[object]] = [
+    ["Explosão de lista técnica multinível"],
+    ["Material: MT-120-ASM   Centro: 1100   Qtd.base: 2 UN"],
+    [],
+    ["Nível", "Componente", "Texto do objeto", "Quantidade", "UM"],
+    ["0", "MT-120-ASM", "MOTOR EV-120", "2,000", "UN"],
+    [".1", "RT-120-ASM", "ROTOR", "2,000", "UN"],
+    ["..2", "PK-MAG-08", "PACOTE IMAS", "8,000", "UN"],
+    ["...3", "IM-N48H-40", "IMA NDFEB", "8,000", "UN"],
+    ["..2", "EX-120-42", "EIXO", "1,000", "UN"],
+    [".1", "RL-6206", "ROLAMENTO", "2,000", "UN"],
+    [".1", "ST-120-ASM", "ESTATOR", "x", "UN"],
+    ["..2", "FI-CU-180", "FIO COBRE", "6,400", "KG"],
+]
+
+
+async def test_a_multi_level_bom_is_exploded_to_the_parts_bought() -> None:
+    grids = read_workbook(workbook({"CS12": CS12}), "cs12.xlsx")
+    sections, problems = await map_workbook(grids, "cs12.xlsx", mapper=None, context=ctx())
+
+    assert problems == []
+    [section] = sections
+    assert section.import_type == "bom" and section.header_row == 3
+    table = parse_section(section, grids[0], ",")
+    # Per ONE motor (base quantity 2): magnets 2 rotors x 8 packs x 8 / 2 = 64.
+    assert {v["part_number"]: v["qty_per_unit"] for _, v in table.rows} == {
+        "IM-N48H-40": Decimal(64),
+        "EX-120-42": Decimal(1),
+        "RL-6206": Decimal(1),
+    }
+    assert {v["product"] for _, v in table.rows} == {"MT-120-ASM"}
+    # The motor row and the two assemblies are skipped; the stator's bad quantity
+    # fails its row and the wire under it.
+    assert table.skipped_rows == 3
+    assert sorted((e.row, e.field) for e in table.errors) == [(11, "qty_per_unit"), (12, None)]
+    assert table.total_rows - len(table.rows) == 2
+
+
+async def test_the_product_of_a_bom_can_come_from_its_title() -> None:
+    rows: list[list[object]] = [
+        ["Lista técnica — Material: MT-120-ASM"],
+        ["Componente", "Quantidade"],
+        ["RL-6206", 2],
+    ]
+    grids = read_workbook(workbook({"BOM": rows}), "bom.xlsx")
+    sections, _ = await map_workbook(grids, "bom.xlsx", mapper=None, context=ctx())
+
+    [section] = sections
+    table = parse_section(section, grids[0], None)
+    assert [v["product"] for _, v in table.rows] == ["MT-120-ASM"]
+
+
+ME2M: list[list[object]] = [
+    ["Documentos de compras por material"],
+    [],
+    ["Doc.compras", "Item", "Fornecedor", "Nome do fornecedor", "Material", "Qtd.do pedido",
+     "Preço líquido", "Moeda", "Por", "Data doc."],
+    ["4500000001", "00010", "300902", "Global Parts Brokers Ltd", "RL-6206", "400,000", "8,16",
+     "EUR", "1", "01.06.2026"],
+    ["4500000002", "00010", "100377", "Rolamentos Precisão", "RL-6206", "150,000", "57,99",
+     "BRL", "1", "01.07.2026"],
+]  # fmt: skip
+XK03: list[list[object]] = [
+    ["Mestre de fornecedores"],
+    [],
+    ["Fornecedor", "Pessoa de contato", "E-mail", "Classificação"],
+    ["300902", "Tom Hughes", "quotes@gpbrokers.example.test", "Revendedor"],
+    ["100377", "Carla Nunes", "cotacao@rolprecisao.example.test", "Distribuidor autorizado"],
+]
+MB52: list[list[object]] = [
+    ["Lista de estoque em depósito"],
+    [],
+    ["Material", "Utilização livre", "Em contr.qualidade", "Estoque bloqueado"],
+    ["RL-6206", "1.200,000", "60,000", "0,000"],
+    ["*", "Total", "", ""],
+]
+
+
+@pytest.mark.db
+async def test_an_erp_export_imports_with_codes_types_and_notes(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
+    storage = FakeStorage()
+    upload = await onboarding.store_upload(
+        app_engine,
+        storage,
+        who,
+        filename="sap.xlsx",
+        content_type=XLSX,
+        data=workbook({"ME2M": ME2M, "XK03": XK03, "MB52": MB52, "CS12": CS12[:10]}),
+    )
+
+    report = await import_workbook(app_engine, storage, who, upload.id, mapper=None)
+
+    assert report.status == "imported", report.questions
+    sections = {r.sheet: r for r in report.sections}
+    assert {s: (r.type, r.rows_ok, r.rows_failed) for s, r in sections.items()} == {
+        "ME2M": ("purchase_history", 2, 0),
+        "XK03": ("supplier_contacts", 2, 0),
+        "MB52": ("inventory", 1, 0),
+        "CS12": ("bom", 3, 0),
+    }
+    assert sections["MB52"].rows_skipped == 1
+    assert any("Em contr.qualidade, Estoque bloqueado" in n for n in sections["MB52"].notes)
+    assert any("Multi-level BOM" in n for n in sections["CS12"].notes)
+    assert any("by code" in n for n in sections["XK03"].notes)
+    async with tenant_session(app_engine, who.tenant_id) as session:
+        suppliers = {
+            name: kind
+            for name, kind in (await session.execute(select(Supplier.name, Supplier.type))).all()
+        }
+        bom = {
+            number: qty
+            for number, qty in (
+                await session.execute(
+                    select(Item.part_number, BomLine.qty_per_unit)
+                    .join(Item, Item.id == BomLine.item_id)
+                    .where(BomLine.product == "MT-120-ASM")
+                )
+            ).all()
+        }
+    # The supplier master's codes became the names the purchase orders give them.
+    assert suppliers == {
+        "Global Parts Brokers Ltd": "reseller",
+        "Rolamentos Precisão": "authorized_distributor",
+    }
+    assert bom == {"IM-N48H-40": Decimal(64), "EX-120-42": Decimal(1), "RL-6206": Decimal(1)}
+
+
+async def test_a_sheet_the_rules_read_only_in_part_also_goes_to_the_mapper() -> None:
+    # "Item Code" + "Item Description" read as a parts list; the rest is unknown to the rules.
+    rows: list[list[object]] = [
+        ["PO #", "Date of Order", "Vendor Name", "Item Code", "Item Description", "Qty Ordered",
+         "Unit Cost (EUR)"],
+        ["PO-1", date(2026, 6, 1), "Rame Italia", "CU-01", "Copper wire", 500, 11.4],
+    ]  # fmt: skip
+    grids = read_workbook(workbook({"ERP": rows}), "erp.xlsx")
+
+    alone, problems = await map_workbook(grids, "erp.xlsx", mapper=None, context=ctx())
+    assert {s.import_type for s in alone} == {"items"} and problems == []
+
+    mapper = StubMapper(
+        SheetMappingOutput(
+            sections=[
+                SheetSection(
+                    sheet="ERP",
+                    import_type="purchase_history",
+                    header_row=1,
+                    first_data_row=2,
+                    last_data_row=None,
+                    columns=[
+                        ColumnAssignment(field=f, column=c)
+                        for f, c in (
+                            ("po_number", 0),
+                            ("ordered_at", 1),
+                            ("supplier", 2),
+                            ("part_number", 3),
+                            ("quantity", 5),
+                            ("unit_price", 6),
+                        )
+                    ],  # fmt: skip
+                    confidence=0.9,
+                    question=None,
+                )
+            ]
+        )
+    )
+    sections, _ = await map_workbook(grids, "erp.xlsx", mapper=mapper, context=ctx())
+    assert [(s.import_type, s.source) for s in sections] == [("purchase_history", "model")]

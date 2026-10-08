@@ -37,6 +37,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.agents.catalog.contracts import LineCategory
 from bido_back.auth import Principal
+from bido_back.comparison.compute import Rate
+from bido_back.comparison.loader import load_rates
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Analysis,
@@ -59,6 +61,7 @@ from bido_back.purchasing.importers import (
     TableImportType,
     parse_rows,
     read_table,
+    supplier_type,
 )
 from bido_back.purchasing.schemas import (
     AnalysisLineView,
@@ -262,6 +265,9 @@ async def _apply_contacts(
         language = row.get("language")
         if isinstance(language, str) and len(language.strip()) == 2:
             supplier.language = language.strip().lower()
+        kind = supplier_type(row.get("type"))
+        if kind is not None:
+            supplier.type = kind  # the buyer's supplier master says what it is
         email = str(row["email"]).strip().lower()
         existing = await session.scalar(
             select(Contact)
@@ -747,20 +753,14 @@ async def adjust_analysis(
         summary = dict(record.summary)
         buying = [line for line, _ in rows if line.to_buy > 0]
         summary["items_to_buy"] = len(buying)
-        for total, price in (
-            ("total_at_target", "target_price"),
-            ("total_at_last_price", "last_price"),
-        ):
-            values = [getattr(line, price) for line in buying]
-            summary[total] = (
-                None
-                if not buying or any(v is None for v in values)
-                else str(
-                    sum(
-                        (line.to_buy * getattr(line, price) for line in buying), Decimal(0)
-                    ).quantize(Decimal("0.01"))
-                )
-            )
+        totals = calc.currency_totals(
+            (line.currency, line.to_buy, line.target_price, line.last_price) for line in buying
+        )
+        single = totals[0] if len(totals) == 1 else None
+        summary["currency"] = single.currency if single else None
+        summary["total_at_target"] = _num(single.total_at_target if single else None)
+        summary["total_at_last_price"] = _num(single.total_at_last_price if single else None)
+        summary["totals"] = _totals_json(totals)
         record.summary = summary
         await session.flush()
         logger.info(
@@ -842,7 +842,20 @@ def _summary_json(summary: calc.Summary) -> dict[str, Any]:
         "total_at_target": _num(summary.total_at_target),
         "total_at_last_price": _num(summary.total_at_last_price),
         "flagged_items": summary.flagged_items,
+        "totals": _totals_json(summary.totals),
     }
+
+
+def _totals_json(totals: Sequence[calc.CurrencyTotal]) -> list[dict[str, Any]]:
+    return [
+        {
+            "currency": t.currency,
+            "items_to_buy": t.items_to_buy,
+            "total_at_target": str(t.total_at_target),
+            "total_at_last_price": str(t.total_at_last_price),
+        }
+        for t in totals
+    ]
 
 
 def _line_row(tenant_id: UUID, analysis_id: UUID, line: calc.LineResult) -> AnalysisLine:
@@ -991,6 +1004,8 @@ async def create_rfq_from_analysis(
             raise InvalidRequest("nothing to buy: stock and open orders cover the build")
 
         title = request.title or f"{record.product}: {record.quantity.normalize():f} un"
+        currency = _rfq_currency([line.currency for line, _ in rows])
+        rates = await load_rates(session, datetime.now(UTC).date())
         rfq, rfq_lines = await rfq_service.create_draft_rfq(
             session,
             principal,
@@ -1009,16 +1024,24 @@ async def create_rfq_from_analysis(
             ],
             source_text=f"Purchase analysis {analysis_id}",
             response_due=request.response_due,
+            base_currency=currency,
         )
         wanted: dict[UUID, str] = {}
+        without_limits: list[int] = []
         for (line, _), rfq_line in zip(rows, rfq_lines, strict=True):
             line.rfq_line_id = rfq_line.id
             # The analysis prices become the negotiation's default limits (the buyer
-            # can still change them). Only in the RFQ's own currency: the strategy
-            # compares offers in base currency and there is no FX here.
-            if line.currency == rfq.base_currency:
-                rfq_line.target_unit_price = line.target_price
-                rfq_line.max_unit_price = line.max_price
+            # can still change them), in the RFQ's currency: the strategy compares
+            # offers in base currency. A line bought in another currency has its
+            # limits converted at the latest reference rate; without a rate it has none.
+            factor = _fx_factor(line.currency, currency, rates)
+            if factor is not None and line.target_price is not None and line.max_price is not None:
+                rfq_line.target_unit_price = (line.target_price * factor).quantize(
+                    calc.PRICE_PLACES
+                )
+                rfq_line.max_unit_price = (line.max_price * factor).quantize(calc.PRICE_PLACES)
+            else:
+                without_limits.append(rfq_line.position)
             suggested = [s for s in line.suppliers if s.get("suggested")]
             for supplier in suggested[: request.max_suppliers_per_line]:
                 wanted.setdefault(UUID(str(supplier["supplier_id"])), str(supplier["name"]))
@@ -1054,4 +1077,33 @@ async def create_rfq_from_analysis(
         rfq.id,
         len(invited),
     )
-    return RfqFromAnalysis(analysis_id=analysis_id, rfq=detail, invited=invited, skipped=skipped)
+    return RfqFromAnalysis(
+        analysis_id=analysis_id,
+        rfq=detail,
+        invited=invited,
+        skipped=skipped,
+        lines_without_limits=without_limits,
+    )
+
+
+def _rfq_currency(currencies: Sequence[str | None]) -> str:
+    """The currency most lines to buy were bought in (the RFQ's base currency)."""
+    counts: dict[str, int] = defaultdict(int)
+    for currency in currencies:
+        if currency is not None:
+            counts[currency] += 1
+    if not counts:
+        return rfq_service.BASE_CURRENCY
+    return min(counts, key=lambda c: (-counts[c], c != rfq_service.BASE_CURRENCY, c))
+
+
+def _fx_factor(source: str | None, target: str, rates: Mapping[str, Rate]) -> Decimal | None:
+    """Units of `target` per unit of `source` (ECB reference rates, per EUR)."""
+    if source is None:
+        return None
+    if source == target:
+        return Decimal(1)
+    per_eur = {code: rate.per_eur for code, rate in rates.items()} | {"EUR": Decimal(1)}
+    if source not in per_eur or target not in per_eur or per_eur[source] <= 0:
+        return None
+    return per_eur[target] / per_eur[source]

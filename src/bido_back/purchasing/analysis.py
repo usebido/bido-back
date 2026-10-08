@@ -11,8 +11,11 @@ Formulas (per item of the product's BOM):
   rounded UP: to whole units for discrete units (pcs, un, pz, stk, ...), to
   3 decimals otherwise (kg, m).
 * History window: purchase-order lines ordered in the last `lookback_days`
-  (365 by default), in the item's currency (the currency of its most recent
-  purchase; other currencies are ignored and flagged `mixed_currency`).
+  (365 by default), in the item's currency: the one most of its lines in the
+  window were bought in (on a tie, one a non-broker sold in, then the most
+  recent purchase's). Lines in other currencies are ignored and the item is
+  flagged `mixed_currency`: one recent broker purchase in EUR does not hide a
+  year of purchases in BRL.
 * `last_price`: unit price of the most recent purchase. `avg_price`: the
   quantity-weighted average. `min_price`: the lowest.
 * `trend_pct = (avg of the last 90 days - avg before that) / avg before * 100`;
@@ -29,6 +32,12 @@ Formulas (per item of the product's BOM):
   rate (unknown counts as perfect) and average price. Up to 3 are suggested,
   brokers only when nobody else ever sold the item.
 
+Currencies: every line keeps the currency of its item's purchases (above). The
+summary's totals are per currency (`totals`): amounts in different currencies
+are never added up or converted here (historical prices paid in BRL and in EUR
+are not comparable at today's rate). `currency` / `total_at_*` are set only
+when every line to buy is in one currency.
+
 Flags per line: `no_history`, `single_source`, `price_up` (trend above
 `price_up_pct`), `supplier_late` (on-time below `late_threshold`),
 `quality_issue` (quality below `quality_threshold`), `broker_source`,
@@ -36,7 +45,7 @@ Flags per line: `no_history`, `single_source`, `price_up` (trend above
 """
 
 from collections import defaultdict
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
@@ -164,6 +173,14 @@ class LineResult:
 
 
 @dataclass(frozen=True, slots=True)
+class CurrencyTotal:
+    currency: str
+    items_to_buy: int
+    total_at_target: Decimal
+    total_at_last_price: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class Summary:
     items: int
     items_to_buy: int
@@ -171,6 +188,7 @@ class Summary:
     total_at_target: Decimal | None
     total_at_last_price: Decimal | None
     flagged_items: int
+    totals: tuple[CurrencyTotal, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +221,19 @@ def _weighted_avg(rows: Sequence[Purchase]) -> Decimal | None:
     if quantity <= 0:
         return None
     return sum((p.quantity * p.unit_price for p in rows), Decimal(0)) / quantity
+
+
+def _main_currency(rows: Sequence[Purchase]) -> str:
+    """Most lines; on a tie, a currency some non-broker sold in; then the latest."""
+    counts: dict[str, int] = defaultdict(int)
+    regular: set[str] = set()
+    for row in rows:
+        counts[row.currency] += 1
+        if row.supplier_type not in BROKER_TYPES:
+            regular.add(row.currency)
+    most = max(counts.values())
+    tied = [r for r in rows if counts[r.currency] == most]
+    return _latest([r for r in tied if r.currency in regular] or tied).currency
 
 
 def _latest(rows: Sequence[Purchase]) -> Purchase:
@@ -356,7 +387,7 @@ def _line(
             flags=tuple(flags),
         )
 
-    currency = _latest(history).currency
+    currency = _main_currency(history)
     rows = [p for p in history if p.currency == currency]
     if len(rows) < len(history):
         flags.append(Flag("mixed_currency"))
@@ -406,28 +437,47 @@ def _line(
     )
 
 
+def currency_totals(
+    lines: Iterable[tuple[str | None, Decimal, Decimal | None, Decimal | None]],
+) -> tuple[CurrencyTotal, ...]:
+    """Spend per currency of (currency, to_buy, target_price, last_price) lines to buy.
+
+    Lines without a currency (no purchase history) have no price: not counted.
+    """
+    grouped: dict[str, list[tuple[Decimal, Decimal | None, Decimal | None]]] = defaultdict(list)
+    for currency, to_buy, target, last in lines:
+        if currency is not None and to_buy > 0:
+            grouped[currency].append((to_buy, target, last))
+    cents = Decimal("0.01")
+    return tuple(
+        CurrencyTotal(
+            currency=currency,
+            items_to_buy=len(rows),
+            total_at_target=sum((q * t for q, t, _ in rows if t is not None), Decimal(0)).quantize(
+                cents, rounding=ROUND_HALF_UP
+            ),
+            total_at_last_price=sum(
+                (q * p for q, _, p in rows if p is not None), Decimal(0)
+            ).quantize(cents, rounding=ROUND_HALF_UP),
+        )
+        for currency, rows in sorted(grouped.items(), key=lambda kv: (-len(kv[1]), kv[0]))
+    )
+
+
 def _summary(lines: Sequence[LineResult]) -> Summary:
     buying = [line for line in lines if line.to_buy > 0]
-    currencies = {line.currency for line in buying if line.currency is not None}
-    currency = currencies.pop() if len(currencies) == 1 else None
-    total_target: Decimal | None = None
-    total_last: Decimal | None = None
-    if currency is not None:
-        total_target = sum(
-            (line.to_buy * line.target_price for line in buying if line.target_price is not None),
-            Decimal(0),
-        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        total_last = sum(
-            (line.to_buy * line.last_price for line in buying if line.last_price is not None),
-            Decimal(0),
-        ).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    totals = currency_totals(
+        (line.currency, line.to_buy, line.target_price, line.last_price) for line in buying
+    )
+    single = totals[0] if len(totals) == 1 else None
     return Summary(
         items=len(lines),
         items_to_buy=len(buying),
-        currency=currency,
-        total_at_target=total_target,
-        total_at_last_price=total_last,
+        currency=single.currency if single else None,
+        total_at_target=single.total_at_target if single else None,
+        total_at_last_price=single.total_at_last_price if single else None,
         flagged_items=sum(
             1 for line in lines if any(f.code != "covered_by_stock" for f in line.flags)
         ),
+        totals=totals,
     )

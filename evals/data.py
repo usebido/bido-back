@@ -44,6 +44,8 @@ class SupplierSpec:
     price_factor: Decimal
     late_every: int  # every Nth received order arrives late; 0 = never
     reject_every: int  # every Nth received order has rejects; 0 = never
+    # `suppliers.type` once imported; "distributor" unless the spreadsheet says.
+    type: str = "distributor"
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +61,9 @@ class PurchaseRow:
     promised_at: date
     received_at: date | None
     rejected_qty: Decimal
+    # Delivered quantity when the spreadsheet has one (partial deliveries);
+    # None means the whole quantity once received.
+    received_qty: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)

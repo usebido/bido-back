@@ -32,7 +32,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Final, Literal, Protocol, cast
 
-from bido_back.quotes.parsing import DecimalSeparator, parse_decimal
+from bido_back.quotes.parsing import DecimalSeparator, number_tokens, parse_decimal
 
 # What POST /v1/data/imports accepts (unchanged contract); workbooks add contacts.
 TableImportType = Literal["items", "bom", "inventory", "purchase_history", "production_plan"]
@@ -50,6 +50,13 @@ class FieldSpec:
     kind: FieldKind
     required: bool
     synonyms: tuple[str, ...]
+    # Matched before `synonyms` (the supplier's NAME over a generic "Supplier"
+    # column that may hold its code).
+    preferred: tuple[str, ...] = ()
+    # Matched only after every field had its chance at its own synonyms: words
+    # like "Item" or "Material" that name a field in one table and another field
+    # in the next ("Item" is the line number next to a "Material" column).
+    weak: tuple[str, ...] = ()
 
 
 def _norm(text: str) -> str:
@@ -57,24 +64,58 @@ def _norm(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", folded.lower()).strip()
 
 
+def norm(text: str) -> str:
+    """Lower case, no accents, no punctuation: how headers are compared."""
+    return _norm(text)
+
+
 _PART = (
-    "part number", "part no", "pn", "codigo", "cod", "codigo item", "codigo interno", "item",
-    "item code", "sku", "codice", "codice articolo", "articolo", "internal pn", "material",
+    "part number", "part no", "pn", "codigo", "codigo item", "codigo interno", "item code",
+    "sku", "codice", "codice articolo", "articolo", "internal pn", "material",
+    "material number", "numero material", "codigo material", "cod material",
+    "codice materiale", "componente", "component", "codice componente",
 )  # fmt: skip
-_DESC = ("description", "descricao", "descrizione", "desc", "nome", "name", "item name")
+_PART_WEAK = ("item", "cod", "code", "ref", "referencia", "riferimento")
+_DESC = (
+    "description", "descricao", "descrizione", "desc", "nome", "name", "item name",
+    "item description", "texto breve", "short text", "texto do objeto", "txt brv material",
+    "texto breve material", "material description", "descricao material",
+    "descricao do material", "object description", "testo breve", "descrizione materiale",
+)  # fmt: skip
 _MPN = (
     "mpn", "manufacturer part number", "codigo fabricante", "part number fabricante",
-    "codice produttore", "manufacturer pn",
+    "codice produttore", "manufacturer pn", "n peca fabricante", "no peca fabricante",
+    "numero peca fabricante", "peca fabricante", "manufacturer part no", "mfr part number",
+    "mfr pn", "mfg part number", "codigo do fabricante",
 )  # fmt: skip
 _MANUFACTURER = ("manufacturer", "fabricante", "produttore", "marca", "brand", "maker")
 _CATEGORY = ("category", "categoria", "familia", "family", "famiglia", "tipo", "type")
-_UNIT = ("unit", "unidade", "un", "unita", "uom", "um", "unit of measure")
+_UNIT = (
+    "unit", "unidade", "un", "unita", "uom", "um", "unit of measure", "um basica",
+    "unidade medida", "unidade de medida", "base unit", "base uom", "unita di misura",
+)  # fmt: skip
 _PRODUCT = ("product", "produto", "prodotto", "model", "modelo", "modello", "assembly")
-_QTY = ("quantity", "quantidade", "qtd", "qty", "quantita", "qta", "qt")
+_QTY = (
+    "quantity", "quantidade", "qtd", "qty", "quantita", "qta", "qt", "qtd do pedido",
+    "quantidade do pedido", "qtd pedido", "order qty", "order quantity", "ordered qty",
+    "qty ordered", "quantita ordinata", "qta ordinata",
+)  # fmt: skip
+_SUPPLIER_NAME = (
+    "supplier name", "nome do fornecedor", "nome fornecedor", "fornecedor nome", "vendor name",
+    "razao social", "ragione sociale", "nome fornitore", "denominazione fornitore",
+    "company name", "nome da empresa", "name of supplier",
+)  # fmt: skip
+_SUPPLIER_CODE = (
+    "supplier code", "supplier id", "supplier no", "supplier number", "vendor code",
+    "vendor id", "vendor no", "vendor number", "codigo fornecedor", "cod fornecedor",
+    "codigo do fornecedor", "n fornecedor", "conta fornecedor", "codice fornitore",
+    "cod fornitore", "lifnr",
+)  # fmt: skip
+_SUPPLIER_GENERIC = ("supplier", "fornecedor", "fornitore", "vendor")
 
 SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
     "items": (
-        FieldSpec("part_number", "text", True, _PART),
+        FieldSpec("part_number", "text", True, _PART, weak=_PART_WEAK),
         FieldSpec("description", "text", True, _DESC),
         FieldSpec("mpn", "text", False, _MPN),
         FieldSpec("manufacturer", "text", False, _MANUFACTURER),
@@ -82,8 +123,26 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
         FieldSpec("unit", "text", False, _UNIT),
     ),
     "bom": (
-        FieldSpec("product", "text", True, _PRODUCT),
-        FieldSpec("part_number", "text", True, _PART),
+        FieldSpec(
+            "product",
+            "text",
+            True,
+            (
+                *_PRODUCT,
+                "parent",
+                "parent item",
+                "parent part",
+                "item pai",
+                "codigo pai",
+                "produto acabado",
+                "finished good",
+                "finished product",
+                "assieme",
+                "conjunto",
+            ),
+            weak=("material",),
+        ),  # fmt: skip
+        FieldSpec("part_number", "text", True, _PART, weak=_PART_WEAK),
         FieldSpec(
             "qty_per_unit",
             "number",
@@ -98,6 +157,11 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "qta per unita",
                 "qty per",
                 "usage",
+                "qtd componente",
+                "quantidade componente",
+                "component qty",
+                "comp qty",
+                "qta componente",
                 *_QTY,
             ),
         ),  # fmt: skip
@@ -106,9 +170,16 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
         FieldSpec("manufacturer", "text", False, _MANUFACTURER),
         FieldSpec("category", "text", False, _CATEGORY),
         FieldSpec("unit", "text", False, _UNIT),
+        # A multi-level BOM ("0", ".1", "..2"): exploded to the parts to buy.
+        FieldSpec(
+            "level",
+            "text",
+            False,
+            ("level", "nivel", "livello", "lvl", "bom level", "explosion level", "stufe"),
+        ),
     ),
     "inventory": (
-        FieldSpec("part_number", "text", True, _PART),
+        FieldSpec("part_number", "text", True, _PART, weak=_PART_WEAK),
         FieldSpec(
             "on_hand",
             "number",
@@ -124,6 +195,28 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "disponibile",
                 "stock",
                 "in stock",
+                # Unrestricted stock only: quality inspection and blocked stock
+                # cannot go into a build, so they are not counted (see the module doc).
+                "utilizacao livre",
+                "livre utilizacao",
+                "estoque livre",
+                "estoque disponivel",
+                "free stock",
+                "unrestricted",
+                "unrestricted use",
+                "unrestricted stock",
+                "available",
+                "available stock",
+                "qty available",
+                "quantidade disponivel",
+                "disponivel",
+                "libero",
+                "uso libero",
+                "stock libero",
+                "giacenza disponibile",
+                "current stock",
+                "estoque atual",
+                "saldo atual",
             ),
         ),  # fmt: skip
         FieldSpec(
@@ -142,7 +235,10 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             ),
         ),  # fmt: skip
         FieldSpec(
-            "location", "text", False, ("location", "local", "deposito", "magazzino", "warehouse")
+            "location",
+            "text",
+            False,
+            ("location", "local", "deposito", "magazzino", "warehouse", "storage location"),
         ),
         FieldSpec("as_of", "date", False, ("as of", "data inventario", "inventory date", "date")),
     ),
@@ -168,10 +264,22 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "numero ordine",
                 "order number",
                 "purchase order",
+                "doc compras",
+                "documento de compras",
+                "documento compras",
+                "pedido de compra",
+                "purchasing document",
+                "purchase order number",
+                "po doc",
+                "ordine d acquisto",
+                "numero oda",
             ),
         ),  # fmt: skip
-        FieldSpec("supplier", "text", True, ("supplier", "fornecedor", "fornitore", "vendor")),
-        FieldSpec("part_number", "text", True, _PART),
+        FieldSpec("supplier", "text", True, _SUPPLIER_GENERIC, preferred=_SUPPLIER_NAME),
+        # The supplier's code in the buyer's ERP, next to its name: used to match the
+        # supplier master (contacts) that may list suppliers by code only.
+        FieldSpec("supplier_code", "text", False, _SUPPLIER_CODE, weak=_SUPPLIER_GENERIC),
+        FieldSpec("part_number", "text", True, _PART, weak=_PART_WEAK),
         FieldSpec("quantity", "number", True, _QTY),
         FieldSpec(
             "unit_price",
@@ -185,8 +293,21 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "preco",
                 "prezzo",
                 "valor unitario",
+                "preco liquido",
+                "net price",
+                "prezzo netto",
+                "unit cost",
+                "custo unitario",
+                "costo unitario",
             ),
         ),  # fmt: skip
+        # SAP prices are per a price unit ("Por" 100): the unit price is price / unit.
+        FieldSpec(
+            "price_unit",
+            "number",
+            False,
+            ("por", "price unit", "per", "unidade de preco", "unita di prezzo", "price per"),
+        ),
         FieldSpec(
             "ordered_at",
             "date",
@@ -199,6 +320,12 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "data do pedido",
                 "data ordine",
                 "po date",
+                "data doc",
+                "data documento",
+                "data do documento",
+                "document date",
+                "data emissao",
+                "data de emissao",
             ),
         ),  # fmt: skip
         FieldSpec("currency", "text", False, ("currency", "moeda", "valuta", "ccy")),
@@ -215,6 +342,11 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "data consegna prevista",
                 "due date",
                 "confirmed date",
+                "data remessa",
+                "data de remessa",
+                "data entrega prevista",
+                "data de entrega prevista",
+                "scheduled delivery",
             ),
         ),  # fmt: skip
         FieldSpec(
@@ -230,6 +362,14 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "data consegna",
                 "data ricevimento",
                 "delivery date",
+                "data em",
+                "data entrada",
+                "data de entrada",
+                "data entrada mercadoria",
+                "data do recebimento",
+                "gr date",
+                "goods receipt date",
+                "data entrata merci",
             ),
         ),  # fmt: skip
         FieldSpec(
@@ -243,6 +383,15 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "qtd recebida",
                 "qta ricevuta",
                 "quantita ricevuta",
+                "qtd fornecida",
+                "quantidade fornecida",
+                "qtd entregue",
+                "quantidade entregue",
+                "delivered qty",
+                "qty delivered",
+                "delivered quantity",
+                "qta consegnata",
+                "quantita consegnata",
             ),
         ),  # fmt: skip
         FieldSpec(
@@ -258,6 +407,14 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "scarti",
                 "qta scartata",
                 "scartati",
+                "qtd devolvida",
+                "quantidade devolvida",
+                "devolvido",
+                "devolvida",
+                "returned",
+                "returned qty",
+                "qty returned",
+                "qta resa",
             ),
         ),  # fmt: skip
         FieldSpec(
@@ -266,12 +423,52 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             False,
             ("quality ok", "qualidade ok", "chegou ok", "conforme", "ok", "qualita ok", "quality"),
         ),  # fmt: skip
-        FieldSpec("line_no", "int", False, ("line", "line no", "linha", "riga", "item no")),
+        FieldSpec(
+            "line_no",
+            "int",
+            False,
+            ("line", "line no", "linha", "riga", "item no", "po item", "po line", "item do pedido"),
+            weak=("item", "pos", "posicao", "position"),
+        ),
         FieldSpec("description", "text", False, _DESC),
     ),
     "production_plan": (
-        FieldSpec("product", "text", True, _PRODUCT),
-        FieldSpec("quantity", "number", True, _QTY),
+        FieldSpec(
+            "product",
+            "text",
+            True,
+            _PRODUCT,
+            # In a plan, the material planned IS the product.
+            weak=(
+                "material",
+                "item",
+                "codigo",
+                "codigo material",
+                "sku",
+                "codice",
+                "articolo",
+                "codice articolo",
+                "part number",
+            ),
+        ),  # fmt: skip
+        FieldSpec(
+            "quantity",
+            "number",
+            True,
+            (
+                *_QTY,
+                "qtd planejada",
+                "quantidade planejada",
+                "planned qty",
+                "planned quantity",
+                "qta pianificata",
+                "quantita pianificata",
+                "qtd a produzir",
+                "quantidade a produzir",
+                "build qty",
+                "quantity to build",
+            ),
+        ),  # fmt: skip
         FieldSpec(
             "need_by",
             "date",
@@ -288,6 +485,9 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "data produzione",
                 "week",
                 "periodo",
+                "data de necessidade",
+                "data requerida",
+                "required date",
             ),
         ),  # fmt: skip
     ),
@@ -296,20 +496,10 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             "supplier",
             "text",
             True,
-            (
-                "supplier",
-                "fornecedor",
-                "fornitore",
-                "vendor",
-                "supplier name",
-                "nome fornecedor",
-                "razao social",
-                "ragione sociale",
-                "company",
-                "empresa",
-                "azienda",
-            ),
-        ),  # fmt: skip
+            (*_SUPPLIER_GENERIC, "company", "empresa", "azienda"),
+            preferred=_SUPPLIER_NAME,
+        ),
+        FieldSpec("supplier_code", "text", False, _SUPPLIER_CODE, weak=_SUPPLIER_GENERIC),
         FieldSpec(
             "email",
             "text",
@@ -331,19 +521,63 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             "contact_name",
             "text",
             False,
-            ("contact", "contact name", "contato", "nome contato", "referente", "nome referente"),
+            (
+                "contact",
+                "contact name",
+                "contato",
+                "nome contato",
+                "referente",
+                "nome referente",
+                "pessoa de contato",
+                "pessoa contato",
+                "contact person",
+                "persona di contatto",
+                "persona contatto",
+            ),
         ),  # fmt: skip
         FieldSpec("phone", "text", False, ("phone", "telefone", "telefono", "tel", "celular")),
         FieldSpec("country", "text", False, ("country", "pais", "paese", "nazione")),
         FieldSpec("language", "text", False, ("language", "idioma", "lingua", "lang")),
+        # Manufacturer, authorized distributor, reseller...: brokers rank last.
+        FieldSpec(
+            "type",
+            "text",
+            False,
+            (
+                "supplier type",
+                "tipo fornecedor",
+                "tipo de fornecedor",
+                "tipo fornitore",
+                "classificacao",
+                "classification",
+                "categoria fornecedor",
+                "supplier category",
+                "tipologia",
+                "tipologia fornitore",
+                "type",
+            ),
+            weak=("tipo", "categoria"),
+        ),  # fmt: skip
     ),
 }
 
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+_TRAILING_MINUS = re.compile(r"^(.*\d)\s*-$")
+# Rows an ERP or a person adds under a table: not data, skipped without an error.
+_TOTAL_WORDS = frozenset(
+    {
+        "total", "totais", "totale", "totali", "subtotal", "sub total", "subtotale",
+        "grand total", "total geral", "totale generale", "soma", "somatorio", "summe",
+        "gesamt", "sum",
+    }
+)  # fmt: skip
+_TOTAL_MARKS = frozenset({"*", "**", "***"})  # SAP list subtotal markers
 
 _TRUE = frozenset({"yes", "y", "sim", "s", "si", "true", "1", "ok", "x", "conforme", "vero"})
 _FALSE = frozenset({"no", "n", "nao", "false", "0", "ko", "nok", "nc", "falso", "non conforme"})
-_DATE_FORMATS: Final = ("%Y-%m-%d", "%d/%m/%Y", "%d.%m.%Y", "%d-%m-%Y", "%d/%m/%y", "%Y/%m/%d")
+_DATE_FORMATS: Final = (
+    "%Y-%m-%d", "%d/%m/%Y", "%d.%m.%Y", "%d-%m-%Y", "%d/%m/%y", "%Y/%m/%d", "%d.%m.%y",
+)  # fmt: skip
 
 
 class ImportFileError(Exception):
@@ -367,7 +601,10 @@ class ParsedTable:
         default_factory=list[tuple[int, dict[str, object]]]
     )
     errors: list[RowError] = field(default_factory=list[RowError])
+    # Data rows read (skipped ones excluded): imported or failed.
     total_rows: int = 0
+    # Totals and subtotals; for a multi-level BOM also the assemblies, exploded.
+    skipped_rows: int = 0
 
 
 # --- Reading the file ---------------------------------------------------------------------
@@ -442,26 +679,68 @@ def _read_csv(data: bytes) -> list[list[object]]:
 # --- Mapping and values ---------------------------------------------------------------------
 
 
+def _words(words: Iterable[str]) -> tuple[frozenset[str], frozenset[str]]:
+    wanted = frozenset(_norm(w) for w in words)
+    # "E-mail" and "Email", "Nº Pedido" and "N Pedido": compare without spaces too.
+    return wanted, frozenset(w.replace(" ", "") for w in wanted)
+
+
+def _find(normalized: Sequence[str], words: Iterable[str], used: set[int]) -> int | None:
+    wanted, compact = _words(words)
+    if not wanted:
+        return None
+    for position, name in enumerate(normalized):
+        if position in used or not name:
+            continue
+        if name in wanted or name.replace(" ", "") in compact:
+            return position
+    return None
+
+
+# A bare "Name" column is the SUPPLIER's name in a supplier list that has a
+# separate contact-person column ("Fornecedor | Nome | Pessoa de contato").
+_BARE_NAME: Final = ("name", "nome", "nombre", "denominacao", "denominazione")
+
+
 def map_columns(
     import_type: ImportType, header: Sequence[object]
 ) -> tuple[dict[str, int], dict[str, str], list[str], list[str]]:
-    """Field -> column index, field -> header text, missing required, unknown headers."""
+    """Field -> column index, field -> header text, missing required, unknown headers.
+
+    Each field takes the first column matching its preferred names, else its
+    synonyms; fields still unmatched then try their weak synonyms, so a weak
+    word never takes a column another field names outright.
+    """
     normalized = [_norm(str(cell)) if cell is not None else "" for cell in header]
     used: set[int] = set()
     index: dict[str, int] = {}
-    for spec in SPECS[import_type]:
-        wanted = {_norm(s) for s in (spec.name.replace("_", " "), *spec.synonyms)}
-        # "E-mail" and "Email", "Nº Pedido" and "N Pedido": compare without spaces too.
-        compact = {w.replace(" ", "") for w in wanted}
-        for position, name in enumerate(normalized):
-            if position in used or not name:
-                continue
-            if name in wanted or name.replace(" ", "") in compact:
+    specs = SPECS[import_type]
+    for spec in specs:
+        for words in (spec.preferred, (spec.name.replace("_", " "), *spec.synonyms)):
+            position = _find(normalized, words, used)
+            if position is not None:
                 index[spec.name] = position
                 used.add(position)
                 break
+    for spec in specs:
+        if spec.name not in index:
+            position = _find(normalized, spec.weak, used)
+            if position is not None:
+                index[spec.name] = position
+                used.add(position)
+    if (
+        import_type == "supplier_contacts"
+        and "supplier" in index
+        and "supplier_code" not in index
+        and "contact_name" in index
+    ):
+        named = _find(normalized, _BARE_NAME, used)
+        if named is not None:
+            index["supplier_code"] = index["supplier"]
+            index["supplier"] = named
+            used.add(named)
     columns = {name: str(header[i]) for name, i in index.items()}
-    missing = [s.name for s in SPECS[import_type] if s.required and s.name not in index]
+    missing = [s.name for s in specs if s.required and s.name not in index]
     unknown = [
         str(cell) for i, cell in enumerate(header) if i not in used and cell not in (None, "")
     ]
@@ -478,7 +757,33 @@ def parse_number(value: object, decimal: DecimalSeparator | None) -> Decimal | N
             return None
     if isinstance(value, Decimal):
         return value
-    return parse_decimal(str(value), decimal=decimal)
+    text = str(value).strip()
+    trailing = _TRAILING_MINUS.fullmatch(text)
+    if trailing is not None:
+        # SAP writes negatives with the sign after the number: "1.250,00-".
+        number = parse_decimal(trailing.group(1), decimal=decimal)
+        return None if number is None else -number
+    return parse_decimal(text, decimal=decimal)
+
+
+def decimal_evidence(cells: Iterable[object]) -> DecimalSeparator | None:
+    """The decimal separator the numbers written as text in `cells` agree on.
+
+    Only a number with a single reading votes: "1.234,56", "12,5" and "0,000"
+    for the comma, "1,234.56" and "12.5" for the point. "1,000" or "888,000"
+    (SAP's three-decimal quantities) read both ways and do not vote. No vote, or
+    votes for both, gives None. Callers resolve the ambiguous numbers of a column
+    with the evidence of that column first, then of its section, then of the
+    whole workbook; never from one cell alone.
+    """
+    votes: set[DecimalSeparator] = set()
+    for cell in cells:
+        if not isinstance(cell, str):
+            continue
+        tokens = number_tokens(cell, with_pieces=False)
+        if len(tokens) == 1 and len(tokens[0]) == 1 and tokens[0][0].decimal is not None:
+            votes.add(tokens[0][0].decimal)
+    return next(iter(votes)) if len(votes) == 1 else None
 
 
 def parse_date(value: object) -> date | None:
@@ -557,8 +862,15 @@ def parse_mapped(
     table = ParsedTable(import_type, columns, missing, unknown)
     if missing:
         return table
-    for offset, raw in rows:
-        if all(_blank(c) for c in raw):
+    data = [(offset, raw) for offset, raw in rows if not all(_blank(c) for c in raw)]
+    decimals: dict[str, DecimalSeparator | None] = {
+        name: decimal_evidence(raw[i] for _, raw in data if i < len(raw)) or decimal
+        for name, i in index.items()
+        if specs[name].kind in ("number", "int")
+    }
+    for offset, raw in data:
+        if _is_total_row(raw):
+            table.skipped_rows += 1
             continue
         table.total_rows += 1
         if table.total_rows > MAX_ROWS:
@@ -572,7 +884,7 @@ def parse_mapped(
                 if spec.required:
                     row_errors.append(RowError(offset, name, "required value is empty"))
                 continue
-            parsed = _parse(spec.kind, cell, decimal)
+            parsed = _parse(spec.kind, cell, decimals.get(name, decimal))
             if parsed is None:
                 row_errors.append(RowError(offset, name, f"not a valid {spec.kind}: {cell!r}"))
                 continue
@@ -582,8 +894,17 @@ def parse_mapped(
             if len(table.errors) < MAX_ERRORS:
                 table.errors.extend(row_errors[: MAX_ERRORS - len(table.errors)])
             continue
+        per = values.pop("price_unit", None)
+        price = values.get("unit_price")
+        if isinstance(per, Decimal) and isinstance(price, Decimal) and per != 1:
+            values["unit_price"] = price / per
         table.rows.append((offset, values))
     return table
+
+
+def _is_total_row(raw: Sequence[object]) -> bool:
+    texts = [c.strip() for c in raw if isinstance(c, str) and c.strip()]
+    return any(t in _TOTAL_MARKS or _norm(t) in _TOTAL_WORDS for t in texts)
 
 
 def _parse(kind: FieldKind, cell: object, decimal: DecimalSeparator | None) -> object | None:
@@ -621,6 +942,7 @@ def _check_row(import_type: ImportType, row: int, values: Mapping[str, object]) 
         case "purchase_history":
             positive("quantity")
             positive("unit_price", allow_zero=True)
+            positive("price_unit")
             positive("received_qty", allow_zero=True)
             positive("rejected_qty", allow_zero=True)
             currency = values.get("currency")
@@ -638,3 +960,37 @@ def _check_row(import_type: ImportType, row: int, values: Mapping[str, object]) 
         case "items":
             pass
     return errors
+
+
+# What buyers' supplier masters call each supplier type (`suppliers.type`).
+_SUPPLIER_TYPES: Final[dict[str, str]] = {
+    **dict.fromkeys(
+        ("manufacturer", "fabricante", "produttore", "fabbricante", "oem", "hersteller",
+         "factory", "fabrica", "fabricant"),
+        "manufacturer",
+    ),
+    **dict.fromkeys(
+        ("authorized distributor", "authorised distributor", "distribuidor autorizado",
+         "distributore autorizzato", "franchised distributor", "distribuidor oficial"),
+        "authorized_distributor",
+    ),
+    **dict.fromkeys(
+        ("distributor", "distribuidor", "distributore", "wholesaler", "atacadista",
+         "distribuidora", "grossista"),
+        "distributor",
+    ),
+    **dict.fromkeys(
+        ("reseller", "revendedor", "revenda", "broker", "trader", "rivenditore",
+         "intermediario", "independent distributor", "trading"),
+        "reseller",
+    ),
+    **dict.fromkeys(
+        ("machining", "usinagem", "machine shop", "lavorazioni meccaniche", "officina"),
+        "machining",
+    ),
+}  # fmt: skip
+
+
+def supplier_type(text: object) -> str | None:
+    """A `suppliers.type` for what the buyer wrote ("Distribuidor autorizado"), or None."""
+    return _SUPPLIER_TYPES.get(_norm(str(text))) if text is not None else None

@@ -13,6 +13,7 @@ from bido_back.purchasing.analysis import (
     Purchase,
     Stock,
     analyze,
+    currency_totals,
     round_up_quantity,
 )
 
@@ -190,3 +191,59 @@ def test_round_up_quantity() -> None:
     assert round_up_quantity(Decimal("10.0001"), "kg") == Decimal("10.001")
     assert round_up_quantity(Decimal("-3"), "pcs") == Decimal(0)
     assert round_up_quantity(Decimal(7), "Pz") == Decimal(7)
+
+
+def test_the_currency_most_purchases_were_in_wins() -> None:
+    # Three BRL purchases from the distributor, one later EUR purchase from a broker.
+    history = [
+        buy(BEARING, DIST, date(2026, 3, 1), "100", "58.00", currency="BRL"),
+        buy(BEARING, DIST, date(2026, 5, 1), "100", "59.00", currency="BRL"),
+        buy(BEARING, DIST, date(2026, 7, 1), "100", "57.00", currency="BRL"),
+        buy(BEARING, BROKER, date(2026, 9, 1), "50", "8.20", currency="EUR"),
+    ]
+    [line] = analyze(
+        product="Motor",
+        quantity=Decimal(10),
+        need_by=None,
+        bom=[BomEntry(BEARING, Decimal(1))],
+        stock={},
+        purchases=history,
+        today=TODAY,
+    ).lines
+    assert line.currency == "BRL"
+    assert [s.name for s in line.suggested] == ["Cuscinetti Precisione S.r.l."]
+    assert ("mixed_currency", None) in codes(line)
+
+    # A tie goes to the currency a non-broker sold in, even if the broker was later.
+    [line] = analyze(
+        product="Motor",
+        quantity=Decimal(10),
+        need_by=None,
+        bom=[BomEntry(BEARING, Decimal(1))],
+        stock={},
+        purchases=[history[0], history[3]],
+        today=TODAY,
+    ).lines
+    assert line.currency == "BRL"
+
+
+def test_totals_are_per_currency_and_never_added_up() -> None:
+    result = analyze(
+        product="Motor",
+        quantity=Decimal(10),
+        need_by=None,
+        bom=[BomEntry(BEARING, Decimal(1)), BomEntry(HOUSING, Decimal(2))],
+        stock={},
+        purchases=[
+            buy(BEARING, DIST, date(2026, 9, 1), "100", "58.00", currency="BRL"),
+            buy(HOUSING, FOUNDRY, date(2026, 9, 1), "10", "30.00"),
+        ],
+        today=TODAY,
+    )
+    summary = result.summary
+    assert (summary.currency, summary.total_at_target) == (None, None)
+    assert [(t.currency, t.items_to_buy, t.total_at_target) for t in summary.totals] == [
+        ("BRL", 1, Decimal("580.00")),
+        ("EUR", 1, Decimal("600.00")),
+    ]
+    assert currency_totals([(None, Decimal(5), None, None)]) == ()

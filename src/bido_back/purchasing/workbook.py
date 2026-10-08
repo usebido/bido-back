@@ -19,12 +19,33 @@ Buyers send what their ERP or their own Excel produces. There is no template:
 
 The model never sees more than a preview (first rows, cells cut short) and
 never produces a value that is written.
+
+What ERP exports (SAP and the like) need, and how it is read:
+
+* Numbers written as text. A number such as "888,000" reads both ways; it is
+  resolved with the numbers of its own column, then of its section, then of the
+  whole workbook ("1.850,000" or "14,73" elsewhere settle the comma), and as a
+  last hint with day-first dotted dates ("08.10.2026"). With no evidence the
+  row is reported, never guessed (`importers.decimal_evidence`).
+* Totals and subtotals under a table ("Total", "*") are skipped.
+* A multi-level BOM (a level column: "0", ".1", "..2") is exploded to the parts
+  bought: each leaf's quantity is multiplied through its assemblies and divided
+  by the base quantity of the level-0 row; assemblies are not imported (they are
+  built, not bought, and their stock is not netted). The product is the level-0
+  row, else the product named in the title rows ("Material: MT-120-ASM").
+* Supplier codes: a sheet listing suppliers by code only ("Fornecedor 100231")
+  takes their names from a sheet that has both (purchase orders).
+* Stock: only unrestricted stock counts as on hand; quality-inspection and
+  blocked stock cannot go into a build and are left out (the report says so).
+* Currencies stay as written per purchase line; the analysis handles them.
 """
 
 import io
 import logging
+import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal
 from typing import Final, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
@@ -49,7 +70,10 @@ from bido_back.purchasing.importers import (
     ImportFileError,
     ImportType,
     ParsedTable,
+    RowError,
+    decimal_evidence,
     map_columns,
+    norm,
     parse_mapped,
     read_table,
 )
@@ -186,6 +210,10 @@ def _rule_candidates(grid: SheetGrid) -> list[Section]:
             continue
         for import_type in SPECS:
             index, _, missing, _ = map_columns(import_type, row)
+            if missing == ["product"] and import_type == "bom":
+                # A BOM explosion names its product above the table or in its level-0 row.
+                if "level" in index or _title_product(grid.rows[:at]) is not None:
+                    missing = []
             if missing:
                 continue
             score = len(index)
@@ -207,10 +235,32 @@ def _rule_candidates(grid: SheetGrid) -> list[Section]:
     if any(s.import_type in _DETAIL_TYPES for s in sections):
         # Purchase lines and BOMs carry descriptions too: not a separate catalog.
         sections = [s for s in sections if s.import_type != "items"]
-    if any(s.import_type == "bom" for s in sections):
-        # A BOM's "quantity" also reads as a production plan; the BOM wins.
+    if any(s.import_type in ("bom", "purchase_history") for s in sections):
+        # A BOM's or a purchase line's quantity and date also read as a production
+        # plan; the BOM or the purchase history wins.
         sections = [s for s in sections if s.import_type != "production_plan"]
     return sections
+
+
+# "Material: MT-120-ASM   Centro: 1100", "Product MT-120", "Articolo: X-1". The code
+# must hold a digit, so "Produto acabado: ..." does not read "acabado" as a code.
+_TITLE_PRODUCT: Final = re.compile(
+    r"\b(?:material|produto|product|prodotto|articolo|assembly|montagem|modelo|model|"
+    r"conjunto|item)\b\s*[:=]?\s*([A-Za-z0-9][A-Za-z0-9._/-]*)",
+    re.IGNORECASE,
+)
+
+
+def _title_product(rows: Sequence[Sequence[object]]) -> str | None:
+    for row in rows:
+        for cell in row:
+            if not isinstance(cell, str):
+                continue
+            for match in _TITLE_PRODUCT.finditer(cell):
+                code = match.group(1).rstrip(".")
+                if any(c.isdigit() for c in code):
+                    return code
+    return None
 
 
 def _catalog() -> list[ImportFieldCatalog]:
@@ -286,19 +336,32 @@ async def map_workbook(
     mapper: SheetMapper | None,
     context: ToolContext,
 ) -> tuple[list[Section], list[str]]:
-    """The sections to import: rules where they suffice, the mapper for the rest."""
+    """The sections to import: rules where they suffice, the mapper for the rest.
+
+    A sheet where the rules only see a parts list or supplier contacts, with
+    several columns left unexplained, also goes to the mapper (a purchase table
+    with headers the rules do not know reads as "part + description" alone); its
+    rule sections stay only if the mapper finds nothing there.
+    """
     sections: list[Section] = []
     unresolved: list[SheetGrid] = []
+    partial: dict[str, list[Section]] = {}
     for grid in grids:
         found = _rule_candidates(grid)
-        if found:
+        if found and _partly_read(found, grid):
+            partial[grid.name] = found
+            unresolved.append(grid)
+        elif found:
             sections.extend(found)
         elif any(not _blank(c) for row in grid.rows[:PREVIEW_ROWS] for c in row):
             unresolved.append(grid)
     problems: list[str] = []
     if unresolved:
         if mapper is None:
-            problems.extend(f"{g.name}: could not find the table" for g in unresolved)
+            problems.extend(
+                f"{g.name}: could not find the table" for g in unresolved if g.name not in partial
+            )
+            sections.extend(s for found in partial.values() for s in found)
         else:
             output = await mapper(
                 SheetMappingInput(
@@ -315,7 +378,27 @@ async def map_workbook(
             )
             mapped, problems = _from_model(output, {g.name: g for g in unresolved})
             sections.extend(mapped)
+            read = {s.sheet for s in mapped}
+            sections.extend(s for name, found in partial.items() if name not in read for s in found)
     return sections, problems
+
+
+_WEAK_TYPES: Final[frozenset[ImportType]] = frozenset({"items", "supplier_contacts"})
+_UNEXPLAINED_COLUMNS: Final = 3
+
+
+def _partly_read(found: Sequence[Section], grid: SheetGrid) -> bool:
+    if any(s.import_type not in _WEAK_TYPES for s in found):
+        return False
+    used = {i for s in found for i in s.index.values()}
+    rows = {s.header_row for s in found}
+    unexplained = {
+        i
+        for at in rows
+        for i, cell in enumerate(grid.rows[at])
+        if i not in used and not _blank(cell)
+    }
+    return len(unexplained) >= _UNEXPLAINED_COLUMNS
 
 
 # --- Validating and importing ---------------------------------------------------------------
@@ -331,12 +414,16 @@ class SectionReport(BaseModel):
     rows_total: int
     rows_ok: int
     rows_failed: int
+    # Totals/subtotals, and the assemblies of an exploded multi-level BOM.
+    rows_skipped: int = 0
     errors: list[str]
     confidence: float
     question: str | None
     created: dict[str, int] = {}
     updated: dict[str, int] = {}
     skipped: dict[str, int] = {}
+    # How the section was read, for the buyer (BOM exploded, stock left out...).
+    notes: list[str] = []
 
 
 class WorkbookImportReport(BaseModel):
@@ -353,9 +440,13 @@ class WorkbookImportReport(BaseModel):
 class _Parsed:
     section: Section
     table: ParsedTable
+    notes: list[str] = field(default_factory=list[str])
     report: SectionReport = field(init=False)
 
     def __post_init__(self) -> None:
+        self.refresh()
+
+    def refresh(self) -> None:
         t = self.table
         failed = t.total_rows - len(t.rows)
         self.report = SectionReport(
@@ -368,12 +459,14 @@ class _Parsed:
             rows_total=t.total_rows,
             rows_ok=len(t.rows),
             rows_failed=failed,
+            rows_skipped=t.skipped_rows,
             errors=[
                 f"row {e.row}: {e.field + ': ' if e.field else ''}{e.message}"
                 for e in t.errors[:10]
             ],
             confidence=round(self.section.confidence, 2),
             question=self.section.question,
+            notes=list(self.notes),
         )
 
     def doubts(self) -> list[str]:
@@ -398,13 +491,139 @@ class _Parsed:
 def parse_section(
     section: Section, grid: SheetGrid, decimal: DecimalSeparator | None
 ) -> ParsedTable:
-    header = grid.rows[section.header_row]
+    return _parse_section(section, grid, decimal)[0]
+
+
+def _parse_section(
+    section: Section, grid: SheetGrid, decimal: DecimalSeparator | None
+) -> tuple[ParsedTable, list[str]]:
+    """The section's validated rows and notes on how it was read."""
+    header: list[object] = list(grid.rows[section.header_row])
     end = len(grid.rows) if section.last_row is None else section.last_row + 1
-    rows = [
+    rows: list[tuple[int, Sequence[object]]] = [
         (number + 1, grid.rows[number])
         for number in range(section.first_row, min(end, len(grid.rows)))
     ]
-    return parse_mapped(section.import_type, header, section.index, rows, decimal=decimal)
+    index = dict(section.index)
+    notes: list[str] = []
+    if section.import_type == "bom" and "product" not in index:
+        product = _bom_product(index, rows) or _title_product(grid.rows[: section.header_row])
+        if product is not None:
+            # The product as one more column, so every row is validated as usual.
+            column = max(grid.width, len(header))
+            header = [*header, *([None] * (column - len(header))), f"(product {product})"]
+            rows = [(n, [*r, *([None] * (column - len(r))), product]) for n, r in rows]
+            index["product"] = column
+            notes.append(f"Product {product} taken from the sheet's title / level-0 row.")
+    table = parse_mapped(section.import_type, header, index, rows, decimal=decimal)
+    if section.import_type == "bom" and "level" in index and not table.missing_required:
+        notes.extend(_explode_levels(table, index["level"], rows))
+    return table, notes
+
+
+def _level(cell: object) -> int | None:
+    """A BOM level: 0, ".1", "..2" (SAP), 1, or outline numbering ("1.2.1" is 3)."""
+    if isinstance(cell, bool) or cell is None:
+        return None
+    if isinstance(cell, int):
+        return cell if cell >= 0 else None
+    if isinstance(cell, float):
+        return int(cell) if cell.is_integer() and cell >= 0 else None
+    text = str(cell).strip()
+    if (m := re.fullmatch(r"\.*(\d{1,2})", text)) is not None:
+        return int(m.group(1))
+    if re.fullmatch(r"\d{1,2}(?:\.\d{1,3})+", text) is not None:
+        return text.count(".") + 1
+    return None
+
+
+def _bom_product(
+    index: Mapping[str, int], rows: Sequence[tuple[int, Sequence[object]]]
+) -> str | None:
+    """The part number of the first level-0 row, if the BOM has levels."""
+    level_at, part_at = index.get("level"), index.get("part_number")
+    if level_at is None or part_at is None:
+        return None
+    for _, raw in rows:
+        if level_at < len(raw) and part_at < len(raw) and _level(raw[level_at]) == 0:
+            part = raw[part_at]
+            if not _blank(part):
+                return str(part).strip()
+    return None
+
+
+def _explode_levels(
+    table: ParsedTable, level_at: int, rows: Sequence[tuple[int, Sequence[object]]]
+) -> list[str]:
+    """Replace a multi-level BOM's rows with its leaves, quantities per one product.
+
+    A row is an assembly when the next row is one level deeper. A leaf's
+    quantity is its own times every assembly's above it, divided by the base
+    quantity of its level-0 row (the product; 1 when there is none). A leaf
+    under an invalid assembly is reported, not imported.
+    """
+    parsed = dict(table.rows)
+    failed = {e.row for e in table.errors}
+    entries: list[tuple[int, int, dict[str, object] | None]] = []
+    for offset, raw in rows:
+        if offset not in parsed and offset not in failed:
+            continue  # blank, total
+        level = _level(raw[level_at] if level_at < len(raw) else None)
+        if level is None:
+            if offset in parsed:
+                del parsed[offset]
+                table.errors.append(RowError(offset, "level", "not a BOM level"))
+            continue
+        entries.append((offset, level, parsed.get(offset)))
+
+    leaves: list[tuple[int, dict[str, object]]] = []
+    stack: list[tuple[int, Decimal | None, int]] = []  # level, quantity per base, row
+    product: str | None = None
+    base = Decimal(1)
+    assemblies = 0
+    for position, (offset, level, values) in enumerate(entries):
+        if level == 0:
+            stack.clear()
+            product = str(values["part_number"]) if values is not None else None
+            quantity = values.get("qty_per_unit") if values is not None else None
+            base = quantity if isinstance(quantity, Decimal) and quantity > 0 else Decimal(1)
+            if values is not None:
+                table.skipped_rows += 1
+                table.total_rows -= 1
+            continue
+        while stack and stack[-1][0] >= level:
+            stack.pop()
+        above = stack[-1] if stack else None
+        own = values.get("qty_per_unit") if values is not None else None
+        per_parent = Decimal(1) if above is None else above[1]
+        quantity = own * per_parent if isinstance(own, Decimal) and per_parent is not None else None
+        stack.append((level, quantity, offset))
+        is_assembly = position + 1 < len(entries) and entries[position + 1][1] > level
+        if is_assembly:
+            if values is not None:
+                assemblies += 1
+                table.skipped_rows += 1
+                table.total_rows -= 1
+            continue
+        if values is None:
+            continue  # already reported
+        if quantity is None:
+            parent = above[2] if above is not None else offset
+            table.errors.append(RowError(offset, None, f"its assembly (row {parent}) is invalid"))
+            continue
+        leaf = dict(values)
+        leaf["qty_per_unit"] = (quantity / base).normalize()
+        if product is not None:
+            leaf["product"] = product
+        leaves.append((offset, leaf))
+    table.rows = leaves
+    levels = max((level for _, level, _ in entries), default=0)
+    if levels < 2 and not assemblies:
+        return []
+    return [
+        f"Multi-level BOM ({levels} levels) exploded: {len(leaves)} parts to buy, "
+        f"{assemblies} assemblies not imported (built, not bought)."
+    ]
 
 
 async def import_workbook(
@@ -437,14 +656,25 @@ async def import_workbook(
     context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
     sections, problems = await map_workbook(grids, filename, mapper=mapper, context=context)
     by_name = {g.name: g for g in grids}
+    numbers = {id(s): _number_cells(s, by_name[s.sheet]) for s in sections}
+    in_workbook = (
+        decimal_evidence(c for cells in numbers.values() for c in cells)
+        or _dotted_dates(sections, by_name)
+        or decimal
+    )
     parsed: list[_Parsed] = []
     for section in sections:
         try:
-            table = parse_section(section, by_name[section.sheet], decimal)
+            table, notes = _parse_section(
+                section,
+                by_name[section.sheet],
+                decimal_evidence(numbers[id(section)]) or in_workbook,
+            )
         except ImportFileError as exc:
             problems.append(f"{section.sheet}: {exc}")
             continue
-        parsed.append(_Parsed(section, table))
+        parsed.append(_Parsed(section, table, [*notes, *_stock_notes(section, table)]))
+    _names_for_codes(parsed)
     if not parsed:
         return WorkbookImportReport(
             upload_id=upload_id,
@@ -491,6 +721,82 @@ async def import_workbook(
         questions=[],
         problems=problems,
     )
+
+
+def _number_cells(section: Section, grid: SheetGrid) -> list[object]:
+    columns = [
+        i
+        for spec in SPECS[section.import_type]
+        if spec.kind in ("number", "int") and (i := section.index.get(spec.name)) is not None
+    ]
+    end = len(grid.rows) if section.last_row is None else section.last_row + 1
+    return [row[i] for row in grid.rows[section.first_row : end] for i in columns if i < len(row)]
+
+
+_DOTTED_DATE: Final = re.compile(r"\d{1,2}\.\d{1,2}\.\d{2}(?:\d{2})?")
+
+
+def _dotted_dates(
+    sections: Sequence[Section], grids: Mapping[str, SheetGrid]
+) -> DecimalSeparator | None:
+    """A last hint: day-first dotted dates (08.10.2026) come with decimal commas."""
+    for section in sections:
+        columns = [
+            i
+            for spec in SPECS[section.import_type]
+            if spec.kind == "date" and (i := section.index.get(spec.name)) is not None
+        ]
+        for row in grids[section.sheet].rows[section.first_row :]:
+            for i in columns:
+                cell = row[i] if i < len(row) else None
+                if isinstance(cell, str) and _DOTTED_DATE.fullmatch(cell.strip()):
+                    return ","
+    return None
+
+
+# Stock that cannot go into a build: left out of on-hand stock.
+_UNAVAILABLE_STOCK: Final = frozenset(
+    {
+        "em contr qualidade", "em controle de qualidade", "estoque em qualidade",
+        "quality inspection", "in quality inspection", "qi stock", "estoque bloqueado",
+        "bloqueado", "blocked", "blocked stock", "bloccato", "stock bloccato",
+        "in controllo qualita", "controllo qualita",
+    }
+)  # fmt: skip
+
+
+def _stock_notes(section: Section, table: ParsedTable) -> list[str]:
+    if section.import_type != "inventory":
+        return []
+    left_out = [c for c in table.unknown_columns if norm(c) in _UNAVAILABLE_STOCK]
+    if not left_out:
+        return []
+    return [
+        f"Only unrestricted stock counted as on hand ({table.columns.get('on_hand')}); "
+        f"left out: {', '.join(left_out)}."
+    ]
+
+
+def _names_for_codes(parsed: Sequence[_Parsed]) -> None:
+    """Rows naming a supplier by its ERP code get the name another sheet gives it."""
+    names: dict[str, str] = {}
+    for item in parsed:
+        for _, row in item.table.rows:
+            code, name = row.get("supplier_code"), row.get("supplier")
+            if isinstance(code, str) and isinstance(name, str) and code.lower() != name.lower():
+                names.setdefault(code.lower(), name)
+    if not names:
+        return
+    for item in parsed:
+        renamed = 0
+        for _, row in item.table.rows:
+            name = row.get("supplier")
+            if isinstance(name, str) and name.lower() in names:
+                row["supplier"] = names[name.lower()]
+                renamed += 1
+        if renamed:
+            item.notes.append(f"{renamed} rows named suppliers by code; matched to their names.")
+            item.refresh()
 
 
 def default_sheet_mapper(config: RunnerConfig | None = None) -> SheetMapper:
