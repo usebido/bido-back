@@ -397,7 +397,7 @@ def incoming_for(
                 related,
             )
             continue
-        eligible = expected is not None and scope.as_of < expected <= need_by
+        eligible = expected is not None and scope.as_of <= expected <= need_by
         if not eligible:
             add_issue(
                 issues,

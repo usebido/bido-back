@@ -362,3 +362,10 @@ def test_qualified_supplier_without_purchase_history_keeps_an_unknown_price() ->
     assert supplier.last_price is None
     assert supplier.qualification_status == "Approved"
     assert supplier.name == "New Supplier" and supplier.email == "new@example.test"
+
+
+def test_confirmed_pending_delivery_on_snapshot_day_is_still_eligible() -> None:
+    rows = motor_records()
+    delivery = next(r for r in rows if r.kind == "delivery_schedule")
+    delivery.values["expected_at"] = SCOPE.as_of.isoformat()
+    assert quantities(rows) == EXPECTED
