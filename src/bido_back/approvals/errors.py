@@ -43,3 +43,16 @@ class ApprovalRequesterMissing(ApprovalError):
 
 class ApprovalConflict(ApprovalError):
     """The same tool call was proposed again with a different payload."""
+
+
+class ApprovalRecipientsUnconfirmed(ApprovalError):
+    """Approving would send email to domains nobody confirmed (outbound guard).
+
+    Carries the domains only: the caller confirms them with the decision.
+    """
+
+    def __init__(self, domains: list[str]) -> None:
+        self.domains = domains
+        super().__init__(
+            "confirm these recipient domains to approve (confirmed_domains): " + ", ".join(domains)
+        )

@@ -37,6 +37,7 @@ from bido_back.db.models import Contact, Invite, Proposal, Supplier, SupplierCon
 from bido_back.mandates import service as mandates
 from bido_back.mandates.schemas import ProposeMandateRequest
 from bido_back.negotiation import service as negotiation_service
+from bido_back.outbound.domains import RecipientCheck
 from bido_back.purchasing import service as purchasing_service
 from bido_back.purchasing.schemas import AnalysisRequest
 from bido_back.purchasing.workbook import WorkbookFileError, WorkbookImportReport, import_workbook
@@ -138,6 +139,10 @@ class ProposeMandateOut(BaseModel):
     initial_emails: int
     deadline: datetime
     note: str
+    # Each address and its domain check (test, real_domain, no_mail, unknown).
+    recipients: list[RecipientCheck]
+    # Domains the buyer must confirm in the approval before anything is sent.
+    domains_to_confirm: list[str]
 
 
 class MandateStateOut(BaseModel):
@@ -322,7 +327,13 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             note=(
                 "Nothing was sent. One approval covers the initial emails and the "
                 "negotiation's limits; once approved, follow-ups and counter-offers within "
-                "those limits go out automatically until the deadline or until closed."
+                "those limits go out automatically until the deadline or until closed. "
+                "Emails go only to test domains or domains the buyer confirms in that "
+                "approval: list every recipient and warn about domains of real companies."
+            ),
+            recipients=proposed.recipients,
+            domains_to_confirm=sorted(
+                {r.domain for r in proposed.recipients if not r.will_send and r.domain}
             ),
         )
 

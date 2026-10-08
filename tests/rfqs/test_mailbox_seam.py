@@ -10,8 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bido_back import mailbox
 from bido_back.api.rfqs import rfq_http_error
 from bido_back.email.smtp import SmtpEmailSender
+from bido_back.outbound.sender import GuardedSender
 from bido_back.rfqs.errors import MailboxNotConfigured, MailboxNotConnected
-from bido_back.rfqs.mailbox import default_mailbox_sender, mailbox_senders_for
+from bido_back.rfqs.mailbox import (
+    default_mailbox_sender,
+    mailbox_senders_for,
+    unguarded_senders_for,
+)
 from bido_back.settings import Settings
 
 UNUSED_SESSION = cast(AsyncSession, object())
@@ -27,7 +32,9 @@ async def test_smtp_transport_sends_every_rfq_email_through_mailpit_locally() ->
 
     sender = await factory(UNUSED_SESSION, uuid4(), uuid4())
 
-    assert isinstance(sender, SmtpEmailSender)
+    # Every factory is wrapped by the outbound recipient guard.
+    assert isinstance(sender, GuardedSender)
+    assert isinstance(sender.inner, SmtpEmailSender)
 
 
 @pytest.mark.parametrize("environment", ["dev", "prd"])
@@ -40,7 +47,7 @@ def test_non_mailbox_transports_are_refused_outside_local_and_test(
 
 
 def test_mailbox_is_the_default_transport() -> None:
-    assert mailbox_senders_for(settings(environment="prd")) is default_mailbox_sender
+    assert unguarded_senders_for(settings(environment="prd")) is default_mailbox_sender
 
 
 @pytest.mark.parametrize(

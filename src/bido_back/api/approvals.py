@@ -3,17 +3,20 @@
 `GET /v1/approvals?status=pending` lists the tenant's approvals with, for
 `send_rfq_email`, the exact email (the stored, hashed arguments) to review.
 
-The body carries only the decision. Who decides comes from `get_principal`;
-what is decided is the payload already stored in `approvals`; everything is
-checked by `bido_back.approvals.decide_approval`. Nothing here executes the
-action, and Agno's own continue endpoints are never exposed.
+The body carries the decision and, for an email, the recipient domains the
+person confirms (the outbound guard: emails go only to test domains or
+confirmed ones; an unconfirmed domain answers 409 listing them). Who
+decides comes from `get_principal`; what is decided is the payload already
+stored in `approvals`; everything is checked by
+`bido_back.approvals.decide_approval`. Nothing here executes the action, and
+Agno's own continue endpoints are never exposed.
 """
 
 from typing import Annotated, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bido_back.api.deps import get_db, get_job_queue, get_principal
@@ -24,6 +27,7 @@ from bido_back.approvals import (
     ApprovalIntegrityError,
     ApprovalNotFound,
     ApprovalNotPending,
+    ApprovalRecipientsUnconfirmed,
     decide_approval,
 )
 from bido_back.auth import Principal
@@ -41,6 +45,9 @@ class DecisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     decision: Literal["approve", "reject"]
+    # Recipient domains of this email the person confirms (outbound guard).
+    # Only domains the approved email actually writes to are recorded.
+    confirmed_domains: list[str] = Field(default_factory=list[str], max_length=50)
 
 
 class DecisionResponse(BaseModel):
@@ -53,6 +60,7 @@ _HTTP_STATUS: dict[type[ApprovalError], int] = {
     ApprovalNotFound: status.HTTP_404_NOT_FOUND,
     ApprovalNotPending: status.HTTP_409_CONFLICT,
     ApprovalIntegrityError: status.HTTP_409_CONFLICT,
+    ApprovalRecipientsUnconfirmed: status.HTTP_409_CONFLICT,
 }
 
 
@@ -112,12 +120,14 @@ def approvals_router() -> APIRouter:
                     **AWARD_REJECT_HOOKS,
                     **MANDATE_REJECT_HOOKS,
                 },
+                confirmed_domains=body.confirmed_domains,
             )
         except (
             ApprovalForbidden,
             ApprovalNotFound,
             ApprovalNotPending,
             ApprovalIntegrityError,
+            ApprovalRecipientsUnconfirmed,
         ) as exc:
             raise HTTPException(_HTTP_STATUS[type(exc)], str(exc)) from None
         return DecisionResponse(approval_id=outcome.approval_id, status=outcome.status)

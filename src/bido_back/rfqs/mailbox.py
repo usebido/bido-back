@@ -49,7 +49,15 @@ async def default_mailbox_sender(
 
 
 def mailbox_senders_for(settings: Settings) -> MailboxSenderFactory:
-    """The sender factory for `settings.email_transport` (see the module docstring)."""
+    """The sender factory for `settings.email_transport` (see the module docstring),
+    guarded: every send re-checks the recipients against the tenant's outbound rule
+    (`bido_back.outbound`)."""
+    from bido_back.outbound.sender import guarded
+
+    return guarded(unguarded_senders_for(settings))
+
+
+def unguarded_senders_for(settings: Settings) -> MailboxSenderFactory:
     if settings.email_transport == "mailbox":
         return default_mailbox_sender
     if settings.environment not in _NON_MAILBOX_ENVIRONMENTS:

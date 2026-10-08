@@ -16,7 +16,11 @@ from bido_back.agents.catalog.contracts import (
     NegotiationEmailOutput,
 )
 from bido_back.agents.context import ToolContext
-from bido_back.approvals import ApprovalExecutor, decide_approval
+from bido_back.approvals import (
+    ApprovalExecutor,
+    ApprovalRecipientsUnconfirmed,
+    decide_approval,
+)
 from bido_back.db import tenant_session
 from bido_back.db.models import Approval, MandateSend, NegotiationMandate, RfqLine
 from bido_back.mandates import service as mandates
@@ -61,7 +65,9 @@ class MandateWorld(World):
         register_mandate_act_tools(self.registry, MandateActDeps(db=engine, jobs=self.jobs))
         self.executor = ApprovalExecutor(engine, self.registry)
 
-    async def setup(self, *, silent: bool = False) -> "MandateWorld":  # noqa: ARG002
+    async def setup(  # noqa: ARG002
+        self, *, silent: bool = False, lyon_email: str = "sales@lyon.example.test"
+    ) -> "MandateWorld":
         principal = buyer(self.people)
         rfq = await rfq_service.create_rfq_from_text(
             self.engine, principal, "Need MLCC and connectors", FakeIntake()
@@ -76,7 +82,12 @@ class MandateWorld(World):
                     language=language,
                     country=country,
                     type="authorized_distributor",
-                    contacts=[ContactIn(name=name, email=f"sales@{name}.example.test")],
+                    contacts=[
+                        ContactIn(
+                            name=name,
+                            email=lyon_email if name == "lyon" else f"sales@{name}.example.test",
+                        )
+                    ],
                 ),
             )
             invite = await rfq_service.add_invite(
@@ -324,3 +335,61 @@ async def test_the_buyer_can_approve_their_own_mandate(world: MandateWorld) -> N
             await session.scalars(select(Approval).where(Approval.tool == SEND_RFQ_EMAIL))
         )
     assert {(a.status, a.self_approved) for a in initial} == {("executed", True)}
+
+
+class RealDomains:
+    async def has_mx(self, domain: str) -> bool | None:
+        return True
+
+
+async def test_a_real_company_domain_needs_confirmation_before_the_mandate_starts(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    world = await MandateWorld(app_engine, rfq_rows).setup(lyon_email="vendas@lyon-composants.fr")
+    proposed = await mandates.propose_mandate(
+        world.engine,
+        buyer(world.people),
+        world.rfq_id,
+        ProposeMandateRequest(deadline=DEADLINE),
+        writer=FakeWriter(),
+        mailboxes=world.mailboxes,
+        resolver=RealDomains(),
+    )
+    by_address = {r.address: (r.status, r.will_send) for r in proposed.recipients}
+    assert by_address == {
+        "sales@rhein.example.test": ("test", True),
+        "vendas@lyon-composants.fr": ("real_domain", False),
+    }
+
+    # The queue shows what the mandate covers and who would get email.
+    queue = await rfq_service.list_approvals(
+        world.engine, buyer(world.people), "pending", resolver=RealDomains()
+    )
+    [item] = [i for i in queue if i.id == proposed.approval_id]
+    assert item.mandate is not None
+    assert item.mandate.rfq_title
+    assert {s.supplier_name for s in item.mandate.suppliers} == {"Rhein", "Lyon"}
+    assert [line.max_unit_price for line in item.mandate.lines] == [
+        Decimal("0.06"),
+        Decimal("1.5"),
+    ]
+    assert item.recipient_checks is not None
+    assert {c.domain for c in item.recipient_checks if not c.will_send} == {"lyon-composants.fr"}
+
+    with pytest.raises(ApprovalRecipientsUnconfirmed) as raised:
+        await decide_approval(
+            world.engine, approver(world.people), proposed.approval_id, "approve", jobs=world.jobs
+        )
+    assert raised.value.domains == ["lyon-composants.fr"]
+    assert world.mailboxes.sender.sent == []
+
+    await decide_approval(
+        world.engine,
+        approver(world.people),
+        proposed.approval_id,
+        "approve",
+        jobs=world.jobs,
+        confirmed_domains=["lyon-composants.fr"],
+    )
+    await world.run_jobs()
+    assert len(world.mailboxes.sender.sent) == 2

@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 from bido_back.agents.catalog.contracts import LineCategory
 from bido_back.awards.views import AwardApprovalView, ThreadEmailApprovalView
+from bido_back.outbound.domains import RecipientCheck
 
 # Deliberately strict and single-line: these end up in email headers.
 EmailAddress = Annotated[
@@ -244,6 +245,36 @@ class NegotiationEmailDraft(BaseModel):
     body: str
 
 
+class MandateLineView(BaseModel):
+    rfq_line_id: UUID
+    position: int
+    description: str
+    target_unit_price: Decimal
+    max_unit_price: Decimal
+    max_lead_time_days: int | None
+
+
+class MandateSupplierView(BaseModel):
+    invite_id: UUID
+    supplier_name: str
+    to: list[str]
+
+
+class MandateApprovalView(BaseModel):
+    """What approving a negotiation mandate covers, to review before deciding."""
+
+    rfq_id: UUID
+    rfq_ref: str
+    rfq_title: str | None
+    currency: str
+    deadline: datetime
+    max_rounds: int
+    max_messages_per_supplier_per_day: int
+    initial_emails: int
+    suppliers: list[MandateSupplierView]
+    lines: list[MandateLineView]
+
+
 class ApprovalQueueItem(BaseModel):
     id: UUID
     tool: str
@@ -260,6 +291,12 @@ class ApprovalQueueItem(BaseModel):
     award: AwardApprovalView | None = None
     # Set for `send_purchase_order` and `send_award_notice`: the exact email.
     thread_email: ThreadEmailApprovalView | None = None
+    # For pending acts that send email (including a mandate's suppliers): each
+    # recipient, whether its domain receives mail (a real company), whether it
+    # is confirmed, and whether it would go out (outbound guard).
+    recipient_checks: list[RecipientCheck] | None = None
+    # Set for `approve_negotiation_mandate`: suppliers, addresses, per-line limits.
+    mandate: MandateApprovalView | None = None
 
 
 ActivityKind = Literal["agent", "email", "user", "system"]

@@ -106,6 +106,15 @@ no duplicate side effects are the properties every change must preserve.
   orders are never covered by a mandate. Never widen what a mandate may approve
   without a code check behind it, and never let the buyer's maximum price or
   another supplier's name or price reach a writer agent's input.
+- **Email goes only to test domains or confirmed domains.** With
+  `tenants.outbound_requires_confirmed_domains` (the default), Bido writes from
+  a buyer's mailbox only to reserved test domains (`example.com`, `.test`, ...)
+  or to domains a person of the tenant confirmed (`bido_back.outbound`): with
+  the approval (`confirmed_domains`), or via `/v1/outbound/domains`. The
+  approval guard refuses unconfirmed recipients (409), mandates hold them, and
+  the mailbox sender re-checks every email before it leaves. The decision uses
+  the domain only; DNS (MX) is shown to people, never trusted to allow a send.
+  Never add a send path that bypasses `rfqs.mailbox.mailbox_senders_for`.
 - **Side effects go through the outbox** with a unique idempotency key, written
   in the same transaction as the state change. Workers and providers redeliver;
   handlers must be idempotent.

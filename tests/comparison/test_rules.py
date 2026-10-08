@@ -271,3 +271,47 @@ def test_one_recommendation_per_line_and_tier() -> None:
     result = compare(line, offer(line, "Lyon", "0.010"))
 
     assert [(r.tier, r.quantity) for r in result.recommendations] == [(0, D(1000)), (1, D(10000))]
+
+
+def test_a_broker_never_wins_against_an_authorized_offer() -> None:
+    line = requested()
+    result = compare(
+        line,
+        offer(line, "Broker", "0.004", supplier_type="reseller"),
+        offer(line, "Lyon", "0.010"),
+        offer(line, "Maker", "0.012", supplier_type="manufacturer"),
+    )
+
+    [rec] = result.recommendations
+    assert rec.supplier_name == "Lyon"
+    assert rec.advisories == []
+    assert {e.supplier_name: e.reasons for e in rec.excluded} == {
+        "Broker": ["reseller_not_preferred"]
+    }
+    # Still in the comparison, with its price.
+    assert any(s.supplier_name == "Broker" for s in result.suppliers)
+
+
+def test_a_broker_can_win_against_unverified_distributors() -> None:
+    # Only authorized distributors and manufacturers push brokers out.
+    line = requested()
+    result = compare(
+        line,
+        offer(line, "Broker", "0.004", supplier_type="reseller"),
+        offer(line, "Somebody", "0.010", supplier_type="distributor"),
+    )
+
+    [rec] = result.recommendations
+    assert rec.supplier_name == "Broker"
+    assert rec.advisories == ["only_unauthorized_offers"]
+
+
+def test_a_broker_alone_wins_and_says_so() -> None:
+    line = requested()
+    result = compare(line, offer(line, "Broker", "0.004", supplier_type="reseller"))
+
+    [rec] = result.recommendations
+    assert rec.supplier_name == "Broker"
+    assert rec.reasons == ["only_eligible_offer"]
+    assert rec.advisories == ["only_unauthorized_offers"]
+    assert "Only unauthorized resellers offered this line" in rec.justification
