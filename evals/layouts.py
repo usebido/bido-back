@@ -43,6 +43,8 @@ class Fixture:
     unique_po_lines: int
     # The right mapping for sheets the rules cannot read (scripted mapper in mock mode).
     mapping: tuple[SheetSection, ...] = field(default_factory=tuple[SheetSection, ...])
+    # The import must ask before writing (the buyer confirms in a later message).
+    asks_confirmation: bool = False
 
 
 # --- Writing -----------------------------------------------------------------------------
@@ -588,6 +590,7 @@ def fixtures(today: date) -> list[Fixture]:
                 contacts=True,
                 analysable=True,
                 unique_po_lines=len(ds.purchases),
+                asks_confirmation=gaps,
             )
         )  # fmt: skip
     return out

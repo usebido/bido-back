@@ -33,6 +33,7 @@ from bido_back.db.models import (
 )
 from bido_back.rfqs import service
 from bido_back.rfqs.schemas import RfqCreated, SupplierView
+from bido_back.storage import BlobStorage
 from tests.approvals.conftest import People, people
 from tests.db.conftest import app_engine, migrator_engine, two_tenants
 from tests.rfqs.conftest import FakeIntake, FakeMailboxes, fake_agents, rfq_rows
@@ -81,6 +82,7 @@ def make_tools(
     attachment_ids: tuple[UUID, ...] = (),
     earlier_attachment_ids: tuple[UUID, ...] = (),
     earlier_attachments_text: str | None = None,
+    storage: BlobStorage | None = None,
 ) -> Tools:
     mailboxes = FakeMailboxes()
     agents = fake_agents()
@@ -94,6 +96,7 @@ def make_tools(
             attachment_ids=attachment_ids,
             earlier_attachment_ids=earlier_attachment_ids,
             earlier_attachments_text=_text_of(earlier_attachments_text),
+            storage=storage,
             today=lambda: date(2026, 10, 7),
         )
     )

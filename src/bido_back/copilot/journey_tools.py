@@ -235,6 +235,9 @@ def _conversation_upload(
 def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
     db = deps.db
 
+    # Uploads this message's import asked about: the buyer has not answered yet.
+    asked: set[UUID] = set()
+
     async def import_spreadsheet(
         ctx: ToolContext, args: ImportSpreadsheetIn
     ) -> WorkbookImportReport:
@@ -244,17 +247,25 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         )
         if deps.storage is None:
             raise ToolError("file storage is not available")
+        # Only the buyer confirms, after seeing the questions: never in the message
+        # that attached the file, nor after this message's import asked.
+        confirmed = (
+            args.confirmed and upload_id not in deps.attachment_ids and upload_id not in asked
+        )
         try:
-            return await import_workbook(
+            report = await import_workbook(
                 db,
                 deps.storage,
                 principal,
                 upload_id,
                 mapper=deps.sheet_mapper,
-                confirmed=args.confirmed,
+                confirmed=confirmed,
             )
         except WorkbookFileError as exc:
             raise ToolError(str(exc)) from None
+        if report.status == "needs_confirmation":
+            asked.add(upload_id)
+        return report
 
     async def add_supplier_contact(ctx: ToolContext, args: AddContactIn) -> AddContactOut:
         principal = _principal(ctx)

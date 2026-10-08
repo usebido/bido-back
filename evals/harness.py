@@ -35,6 +35,7 @@ from bido_back.agents.catalog.contracts import (
 )
 from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
+from bido_back.agents.tools import AnyTool
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import (
@@ -448,6 +449,12 @@ async def scenario_copilot(env: Env, fixture: Fixture, result: RunResult) -> Non
         status = (
             cast(dict[str, object], imported).get("status") if isinstance(imported, dict) else None
         )
+        if fixture.asks_confirmation:
+            result.check(
+                "asked_before_importing",
+                status == "needs_confirmation",
+                f"the first message ended with the import {status!r}, not a question",
+            )
         if status == "needs_confirmation":
             result.notes["asked_confirmation"] = True
             # As buyers do: the answer comes as text alone, without the file again.
@@ -556,24 +563,28 @@ async def _mock_conversation(
     from bido_back.copilot.tools import CopilotToolDeps, copilot_tools
     from bido_back.rfqs.agents import default_rfq_agents
 
-    tools = {
-        t.name: t
-        for t in copilot_tools(
-            CopilotToolDeps(
-                db=env.engine,
-                agents=default_rfq_agents(),
-                mailboxes=_no_mailbox,
-                attachment_ids=(upload_id,),
-                storage=env.storage,
-                sheet_mapper=scripted_mapper(fixture),
-                today=lambda: env.today,
+    def tools_for(*, attached: bool) -> dict[str, AnyTool]:
+        # One message attaches the file; the buyer's answer comes in the next one.
+        return {
+            t.name: t
+            for t in copilot_tools(
+                CopilotToolDeps(
+                    db=env.engine,
+                    agents=default_rfq_agents(),
+                    mailboxes=_no_mailbox,
+                    attachment_ids=(upload_id,) if attached else (),
+                    earlier_attachment_ids=() if attached else (upload_id,),
+                    storage=env.storage,
+                    sheet_mapper=scripted_mapper(fixture),
+                    today=lambda: env.today,
+                )
             )
-        )
-    }
+        }
+
     ctx = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
     calls: list[tuple[str, bool]] = []
 
-    async def call(name: str, **args: object) -> Any:
+    async def call(tools: dict[str, AnyTool], name: str, **args: object) -> Any:
         tool = tools[name]
         try:
             out = await tool.invoke(ctx, tool.parse_input(args))
@@ -583,14 +594,19 @@ async def _mock_conversation(
         calls.append((name, True))
         return out
 
-    await call("import_spreadsheet", upload_id=str(upload_id), confirmed=True)
+    tools = tools_for(attached=True)
+    report = await call(tools, "import_spreadsheet", upload_id=str(upload_id))
+    if report is not None and report.status == "needs_confirmation":
+        tools = tools_for(attached=False)
+        await call(tools, "import_spreadsheet", upload_id=str(upload_id), confirmed=True)
     analysis = await call(
+        tools,
         "run_purchase_analysis",
         product=fixture.dataset.product,
         quantity=int(fixture.quantity) if fixture.quantity is not None else None,
     )
     if analysis is not None:
-        await call("create_rfq_from_analysis", analysis_id=str(analysis.analysis_id))
+        await call(tools, "create_rfq_from_analysis", analysis_id=str(analysis.analysis_id))
     turns.append(Turn("", calls, {}))
 
 

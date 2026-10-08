@@ -10,11 +10,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from bido_back.agents.tools import ToolError
 from bido_back.db import tenant_session
 from bido_back.db.models import Approval, Contact, Proposal
+from bido_back.onboarding import service as onboarding
 from tests.approvals.conftest import People
+from tests.purchasing.conftest import FakeStorage, purchasing_rows, xlsx
 
 from .conftest import buyer_of, context_of, invite, make_rfq, make_tools, seed_quote, supplier
 
 pytestmark = pytest.mark.db
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+__all__ = ["purchasing_rows"]
 
 
 async def test_contacts_from_the_chat_are_saved_once(
@@ -178,3 +183,35 @@ async def test_the_mandate_takes_limits_the_buyer_gives_for_lines_without_them(
         line["position"]: Decimal(str(line["max_unit_price"])) for line in approval.args["lines"]
     }
     assert limits == {1: Decimal("0.0050"), 2: Decimal("0.0120")}
+
+
+async def test_only_the_buyer_confirms_an_import(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    principal = buyer_of(purchasing_rows)
+    ctx = context_of(principal)
+    storage = FakeStorage()
+    upload = await onboarding.store_upload(
+        app_engine,
+        storage,
+        principal,
+        filename="stock.xlsx",
+        content_type=XLSX,
+        data=xlsx([["Código", "Estoque"], ["A-1", 10], ["A-2", "n/d"], ["A-3", "n/d"]]),
+    )
+
+    # The message that attaches the file cannot confirm its own questions.
+    first = make_tools(app_engine, attachment_ids=(upload.id,), storage=storage)
+    report = await first.call(ctx, "import_spreadsheet", upload_id=str(upload.id), confirmed=True)
+    assert report.status == "needs_confirmation"
+
+    # The buyer's next message: an earlier file, confirmed, but not twice in one go.
+    later = make_tools(app_engine, earlier_attachment_ids=(upload.id,), storage=storage)
+    again = await later.call(ctx, "import_spreadsheet", upload_id=str(upload.id))
+    assert again.status == "needs_confirmation"
+    held = await later.call(ctx, "import_spreadsheet", upload_id=str(upload.id), confirmed=True)
+    assert held.status == "needs_confirmation"
+
+    answer = make_tools(app_engine, earlier_attachment_ids=(upload.id,), storage=storage)
+    done = await answer.call(ctx, "import_spreadsheet", upload_id=str(upload.id), confirmed=True)
+    assert done.status == "imported"
