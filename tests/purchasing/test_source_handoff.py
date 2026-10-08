@@ -696,6 +696,66 @@ def test_suggestions_win_over_history_and_disqualified_suppliers_take_no_slot() 
     ]
 
 
+async def test_each_rfq_line_links_its_assessment_suppliers_to_the_invited_ones(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = buyer(purchasing_rows)
+    known = await add_supplier(app_engine, who, "MetalNova Teste", "vendas@metalnova.example.test")
+    assessment_id = await saved(
+        app_engine,
+        who,
+        assessment(
+            line(
+                "000101",
+                suppliers=[
+                    supplier("MetalNova Teste", "vendas@metalnova.example.test", code="F001"),
+                    supplier("PrecisaoSul Teste", "vendas@precisaosul.example.test", code="F002"),
+                    supplier("Sem Email Teste", None, code="F009"),
+                ],
+            ),
+            line("000106", suppliers=[supplier("MetalNova Teste", None, code="F001")]),
+        ),
+    )
+
+    result = await draft_from_snapshot(app_engine, who, assessment_id, request())
+
+    created = next(s.supplier_id for s in result.invited if s.supplier_created)
+    async with tenant_session(app_engine, who.tenant_id) as session:
+        evidence = [
+            row.source_evidence
+            for row in await session.scalars(
+                select(RfqLine).where(RfqLine.rfq_id == result.rfq_id).order_by(RfqLine.position)
+            )
+        ]
+    metalnova = {"supplier_id": str(known), "supplier_code": "F001", "name": "MetalNova Teste"}
+    assert [e["supplier_links"] for e in evidence] == [
+        [
+            {**metalnova, "email": "vendas@metalnova.example.test"},
+            {
+                "supplier_id": str(created),
+                "supplier_code": "F002",
+                "name": "PrecisaoSul Teste",
+                "email": "vendas@precisaosul.example.test",
+            },
+        ],
+        # Found by name on this line: linked to the same supplier; the skipped one is not.
+        [{**metalnova, "email": None}],
+    ]
+    assert all({"assessment_id", "line"} <= set(e) for e in evidence)
+
+
+async def test_no_limits_come_from_a_single_purchase(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = buyer(purchasing_rows)
+    single = estimate("BRL", "41.28", "43.34").model_copy(update={"observations": 1})
+    assessment_id = await saved(app_engine, who, assessment(line("000101", price=single)))
+
+    result = await draft_from_snapshot(app_engine, who, assessment_id, request())
+
+    assert result.lines_without_limits == [1]
+
+
 # --- API -------------------------------------------------------------------------------
 
 

@@ -22,7 +22,7 @@ from bido_back.copilot.titles import (
     stored_title,
 )
 from bido_back.db import tenant_session
-from bido_back.db.models import CopilotConversation
+from bido_back.db.models import CopilotConversation, CopilotProposal
 from tests.agents.test_runner import Script, reply, script, text, tool_use
 from tests.approvals.conftest import People
 from tests.db.conftest import agno_engine
@@ -250,24 +250,32 @@ async def test_a_failing_titler_keeps_the_first_message(
 async def test_an_rfq_names_the_conversation_once(
     api: Api, app_engine: AsyncEngine, copilot_rows: People, script: Script
 ) -> None:
-    titler = FakeTitler([proposal("Nunca usado", settled=False)])
+    titler = FakeTitler([proposal("Pedido de MLCC", settled=False)])
     api.titler = titler
     conversation = str(uuid4())
+    rfq = {"text": "MLCC and connectors", "currency": "EUR"}
     script(
-        reply(tool_use("fc_1", "create_rfq", text="MLCC and connectors", currency="EUR")),
+        reply(tool_use("fc_1", "create_rfq", **rfq)),
+        reply(text("Posso criar este RFQ. Confirma?")),
+    )
+    # Proposed, not created: no RFQ milestone yet (the titler names the conversation).
+    proposed = await send(api, conversation, "cria um RFQ de MLCC e conectores")
+    assert titles(proposed) == ["Pedido de MLCC"]
+    async with tenant_session(app_engine, api.principal.tenant_id) as session:
+        [pending] = list(await session.scalars(select(CopilotProposal)))
+
+    script(
+        reply(tool_use("fc_1", "create_rfq", **rfq, proposal_id=str(pending.id))),
         reply(text("Criei o RFQ.")),
         reply(tool_use("fc_2", "create_rfq", text="Another RFQ", currency="EUR")),
-        reply(text("Criei outro RFQ.")),
+        reply(text("Posso criar outro. Confirma?")),
     )
-
-    first = await send(api, conversation, "cria um RFQ de MLCC e conectores")
+    first = await send(api, conversation, "sim")
     second = await send(api, conversation, "cria outro")
 
     [title] = titles(first)
     assert isinstance(title, str) and title.startswith("RFQ-")
     assert titles(second) == []
-    # A milestone settles the title: the titler never ran.
-    assert titler.seen == []
     row = await stored(app_engine, api.principal, conversation)
     assert (row.title, row.title_source, row.title_milestones) == (title, "milestone", ["rfq"])
 

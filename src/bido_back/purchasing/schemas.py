@@ -217,6 +217,32 @@ class RfqFromAnalysisRequest(_Strict):
     )
 
 
+class PlannedRfqLine(BaseModel):
+    description: str
+    part_number: str | None
+    quantity: Decimal
+    unit: str
+    need_by: date | None
+
+
+class PlannedSupplier(BaseModel):
+    supplier_id: UUID
+    name: str
+    # The contact the draft invite would use; None = the supplier would be skipped.
+    email: str | None
+
+
+class RfqFromAnalysisPlan(BaseModel):
+    """What `create_rfq_from_analysis` would create, for the buyer to confirm first."""
+
+    analysis_id: UUID
+    title: str
+    currency: str
+    currency_source: CurrencySource | None
+    lines: list[PlannedRfqLine]
+    suppliers: list[PlannedSupplier]
+
+
 class InvitedSupplier(BaseModel):
     supplier_id: UUID
     name: str

@@ -33,7 +33,14 @@ from bido_back.auth import Principal
 from bido_back.comparison.compute import DecisionOffer, ExcludedOffer, OfferAlternative
 from bido_back.comparison.loader import load_comparison
 from bido_back.comparison.policy import ComparisonPolicy, SupplierPerformance
-from bido_back.copilot import queries
+from bido_back.copilot import proposals, queries
+from bido_back.copilot.proposals import (
+    PROPOSAL_ARG,
+    AwaitingConfirmation,
+    ProposalPreview,
+    ProposedLine,
+    ProposedSupplier,
+)
 from bido_back.db import tenant_session
 from bido_back.db.models import Contact, Invite, Proposal, Supplier, SupplierContact
 from bido_back.mandates import service as mandates
@@ -44,15 +51,21 @@ from bido_back.outbound.domains import RecipientCheck
 from bido_back.purchasing import service as purchasing_service
 from bido_back.purchasing.schemas import AnalysisRequest, CurrencyTotalView
 from bido_back.purchasing.sources.contracts import PlanningScope, SourceAssessment
+from bido_back.purchasing.sources.handoff import (
+    AssessmentInvitedSupplier,
+    AssessmentSkippedSupplier,
+)
 from bido_back.purchasing.sources.mapping import default_mapper
 from bido_back.purchasing.sources.service import SourceAccessError, analyze_uploads
 from bido_back.purchasing.sources.snapshots import (
+    AssessmentRfqPlan,
     AssessmentRfqRequest,
-    AssessmentRfqResult,
     AssessmentSnapshotSummary,
     draft_from_snapshot,
     get_snapshot,
     list_snapshots,
+    plan_from_snapshot,
+    rfq_lines,
 )
 from bido_back.purchasing.workbook import WorkbookFileError, WorkbookImportReport, import_workbook
 from bido_back.rfqs import suppliers as supplier_service
@@ -63,7 +76,7 @@ from bido_back.rfqs.errors import (
     RfqError,
 )
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest, EmailAddress
-from bido_back.rfqs.service import preliminary_hold
+from bido_back.rfqs.service import preliminary_hold, preliminary_title
 
 if TYPE_CHECKING:
     from bido_back.copilot.tools import CopilotToolDeps
@@ -164,6 +177,39 @@ class ListAssessmentsOut(BaseModel):
 
 class CreateAssessmentRfqIn(AssessmentRfqRequest):
     assessment_id: UUID
+    proposal_id: UUID | None = Field(default=None, description=PROPOSAL_ARG)
+
+
+class AssessmentRfqOut(AwaitingConfirmation):
+    # Set once the RFQ exists (not while awaiting the buyer's confirmation).
+    assessment_id: UUID | None = None
+    rfq_id: UUID | None = None
+    ref: str | None = None
+    lines: int | None = None
+    reused: bool | None = None
+    title: str | None = None
+    preliminary: bool | None = None
+    # Preliminary only: assessed lines left out (no quantity or unit yet), by part number.
+    skipped: list[str] = Field(default_factory=list[str])
+    # The suppliers on the draft as DRAFT invites (nothing is sent), the assessed ones it
+    # could not invite with why, and the lines without default limits.
+    invited: list[AssessmentInvitedSupplier] = Field(
+        default_factory=list[AssessmentInvitedSupplier]
+    )
+    skipped_suppliers: list[AssessmentSkippedSupplier] = Field(
+        default_factory=list[AssessmentSkippedSupplier]
+    )
+    lines_without_limits: list[int] = Field(default_factory=list[int])
+
+
+def _rfq_request(args: CreateAssessmentRfqIn) -> AssessmentRfqRequest:
+    """The handoff request of a tool input (proposed, or stored and confirmed), losing
+    nothing: copying fields one by one silently dropped the ones added later
+    (pending_validation, once), and the request forbids unknown fields, so a field the
+    handoff does not take fails instead of disappearing."""
+    return AssessmentRfqRequest.model_validate(
+        args.model_dump(exclude={"assessment_id", "proposal_id"})
+    )
 
 
 class AddContactOut(BaseModel):
@@ -334,6 +380,78 @@ def _conversation_upload(
     raise ToolError("that id is not one of the files attached in this conversation")
 
 
+def _assessment_preview(
+    assessment: SourceAssessment, args: CreateAssessmentRfqIn, plan: AssessmentRfqPlan
+) -> ProposalPreview:
+    """What `create_rfq_from_assessment` would create from the saved assessment: its lines
+    (`rfq_lines`) with their default limits, and the suppliers it would invite or skip
+    (`plan_from_snapshot`). The same rules as `draft_from_snapshot`, which checks again
+    when it runs."""
+    preliminary = args.pending_validation is not None
+    lines, skipped = rfq_lines(assessment)
+    limits = {limit.position: limit for limit in plan.limits}
+    open_issues = [issue.message for issue in assessment.issues if issue.severity == "blocker"]
+    if assessment.status != "assessed":
+        open_issues.insert(0, "the assessment still needs review")
+    for line in assessment.lines:
+        if not line.ready or not line.unit or line.calculated_to_buy is None:
+            open_issues.append(f"{line.part_number}: quantity, unit or evidence not validated")
+        open_issues.extend(
+            f"{line.part_number}: {issue.message}"
+            for issue in line.issues
+            if issue.severity == "blocker"
+        )
+    # Open issues stop a complete RFQ; a preliminary one carries them (its mark keeps it
+    # from being prepared for sending), so for it they are what the buyer still settles.
+    issues = [] if preliminary else open_issues
+    if not lines:
+        issues.append("the assessment has no validated positive purchase requirements")
+    issues.extend(plan.issues)
+    return ProposalPreview(
+        action="create_rfq_from_assessment",
+        # Set when the assessment already has its draft: confirming returns it as it is.
+        rfq=plan.ref,
+        title=(
+            preliminary_title(args.title, args.pending_validation)[:300]
+            if args.pending_validation is not None
+            else args.title
+        ),
+        currency=args.base_currency,
+        lines=[
+            ProposedLine(
+                position=position,
+                description=line.description or line.part_number,
+                part_number=line.part_number,
+                quantities=[line.calculated_to_buy],
+                unit=line.unit or "",
+                need_by=line.need_by,
+                delivery_location=line.location,
+                target_unit_price=found.target_unit_price if found else None,
+                max_unit_price=found.max_unit_price if found else None,
+                limits_basis=found.basis if found else None,
+            )
+            for position, line in enumerate(lines, start=1)
+            if line.calculated_to_buy is not None
+            for found in [limits.get(position)]
+        ],
+        suppliers=[
+            ProposedSupplier(
+                name=supplier.name,
+                email=supplier.email,
+                part_numbers=supplier.part_numbers,
+                new_supplier=supplier.supplier_created,
+                new_contact=supplier.contact_created,
+            )
+            for supplier in plan.invited
+        ],
+        skipped=skipped if preliminary else [],
+        skipped_suppliers=plan.skipped_suppliers,
+        lines_without_limits=plan.lines_without_limits,
+        questions=open_issues if preliminary else [],
+        issues=issues,
+    )
+
+
 def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
     db = deps.db
 
@@ -431,16 +549,52 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
 
     async def create_rfq_from_assessment(
         ctx: ToolContext, args: CreateAssessmentRfqIn
-    ) -> AssessmentRfqResult:
-        # Every request field passes through (pending_validation, max_suppliers_per_line...):
-        # copying them one by one silently dropped the ones added later.
-        request = AssessmentRfqRequest.model_validate(
-            args.model_dump(include=set(AssessmentRfqRequest.model_fields))
-        )
+    ) -> AssessmentRfqOut:
+        principal = _principal(ctx)
+        if deps.conversation_id is None:
+            raise ToolError("this action needs a conversation to ask the buyer in")
+        if args.proposal_id is None:
+            try:
+                assessment, plan = await plan_from_snapshot(
+                    db, principal, args.assessment_id, _rfq_request(args)
+                )
+            except purchasing_service.PurchasingError as exc:
+                raise ToolError(str(exc)) from None
+            preview = _assessment_preview(assessment, args, plan)
+            proposal_id = await proposals.propose(
+                db,
+                principal,
+                conversation_id=deps.conversation_id,
+                run_id=ctx.run_id,
+                action="create_rfq_from_assessment",
+                args=args.model_dump(mode="json", exclude={"proposal_id"}),
+                preview={"shown": preview.model_dump(mode="json")},
+            )
+            return AssessmentRfqOut(
+                awaiting_confirmation=True, proposal_id=proposal_id, preview=preview
+            )
         try:
-            return await draft_from_snapshot(db, _principal(ctx), args.assessment_id, request)
-        except purchasing_service.PurchasingError as exc:
+            claimed = await proposals.claim(
+                db,
+                principal,
+                conversation_id=deps.conversation_id,
+                run_id=ctx.run_id,
+                action="create_rfq_from_assessment",
+                proposal_id=args.proposal_id,
+            )
+        except proposals.ProposalRefused as exc:
             raise ToolError(str(exc)) from None
+        stored = CreateAssessmentRfqIn.model_validate(claimed.args)
+        try:
+            result = await draft_from_snapshot(
+                db, principal, stored.assessment_id, _rfq_request(stored)
+            )
+        except purchasing_service.PurchasingError as exc:
+            await proposals.release(db, principal, args.proposal_id)
+            raise ToolError(str(exc)) from None
+        return AssessmentRfqOut.model_validate(
+            {**result.model_dump(), "proposal_id": args.proposal_id}
+        )
 
     async def add_supplier_contact(ctx: ToolContext, args: AddContactIn) -> AddContactOut:
         principal = _principal(ctx)
@@ -801,14 +955,17 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             "create_rfq_from_assessment",
             "Create one draft RFQ from validated saved source quantities, units, dates and "
             "evidence. Blocks unresolved assessments unless pending_validation makes it "
-            "PRELIMINARY. Requires the buyer's RFQ currency. Invites each line's assessed "
-            "suppliers (suggested first) as DRAFT invites, creating a supplier only from the "
-            "files' company name and email, and sets each line's default target/maximum from "
-            "the internal estimate. Returns invited, skipped_suppliers (with why) and "
-            "lines_without_limits. Nothing is sent or approved: the buyer approves suppliers "
-            "and limits in the negotiation mandate.",
+            "PRELIMINARY. Requires the buyer's RFQ currency. It also invites each line's "
+            "assessed suppliers (suggested first) as DRAFT invites, creating a supplier only "
+            "from the files' company name and email, and gives each line a default "
+            "target/maximum from the internal estimate; skipped_suppliers and "
+            "lines_without_limits say what is missing. Nothing is sent or approved: the buyer "
+            "approves suppliers and limits in the negotiation mandate. Two calls: the first "
+            "(no proposal_id) does nothing and answers a preview with a proposal_id; show it "
+            "to the buyer and ask. Call again with that proposal_id only after they confirm "
+            "in their own later message.",
             CreateAssessmentRfqIn,
-            AssessmentRfqResult,
+            AssessmentRfqOut,
             "draft",
             create_rfq_from_assessment,
         ),
