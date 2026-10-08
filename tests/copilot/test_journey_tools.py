@@ -8,8 +8,9 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.tools import ToolError
+from bido_back.auth import Principal
 from bido_back.db import tenant_session
-from bido_back.db.models import Approval, Contact, Proposal
+from bido_back.db.models import Approval, Contact, Item, Proposal
 from bido_back.onboarding import service as onboarding
 from tests.approvals.conftest import People
 from tests.purchasing.conftest import FakeStorage, purchasing_rows, xlsx
@@ -52,6 +53,50 @@ async def test_only_this_conversations_attachments_can_be_imported(
         await tools.call(
             context_of(buyer_of(copilot_rows)), "import_spreadsheet", upload_id=str(uuid4())
         )
+
+
+async def test_inspection_requires_conversation_tenant_and_upload_owner(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    storage = FakeStorage()
+    upload = await onboarding.store_upload(
+        app_engine,
+        storage,
+        principal,
+        filename="source.xlsx",
+        content_type=XLSX,
+        data=xlsx([["Material", "OTIF %"], ["000010", 95]]),
+    )
+    tools = make_tools(app_engine, attachment_ids=(upload.id,), storage=storage)
+    summary = await tools.call(
+        context_of(principal), "inspect_spreadsheet", upload_id=str(upload.id)
+    )
+    page = await tools.call(
+        context_of(principal),
+        "inspect_spreadsheet",
+        upload_id=str(upload.id),
+        sheet=summary.sheets[0].name,
+    )
+    assert [(c.row, c.column, c.value) for c in page.cells] == [
+        (1, 1, "Material"),
+        (1, 2, "OTIF %"),
+        (2, 1, "000010"),
+        (2, 2, "95"),
+    ]
+    assert {c.import_type for c in page.import_catalog} >= {"inventory", "purchase_history"}
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        assert await session.scalar(select(Item.id).limit(1)) is None
+
+    unrelated = make_tools(app_engine, storage=storage)
+    with pytest.raises(ToolError, match="attached in this conversation"):
+        await unrelated.call(context_of(principal), "inspect_spreadsheet", upload_id=str(upload.id))
+    for who in (
+        Principal(tenant_id=copilot_rows.tenant, user_id=copilot_rows.approver),
+        Principal(tenant_id=copilot_rows.other_tenant, user_id=copilot_rows.other_approver),
+    ):
+        with pytest.raises(ToolError, match="not found"):
+            await tools.call(context_of(who), "inspect_spreadsheet", upload_id=str(upload.id))
 
 
 async def test_a_file_from_an_earlier_turn_can_be_imported(

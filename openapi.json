@@ -7170,6 +7170,13 @@
             ],
             "title": "Type"
           },
+          "unknown_columns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unknown Columns",
+            "type": "array"
+          },
           "updated": {
             "additionalProperties": {
               "type": "integer"
@@ -8472,6 +8479,14 @@
               "type": "string"
             },
             "title": "Suppliers Without Email",
+            "type": "array"
+          },
+          "unimported_sheets": {
+            "description": "Nonempty sheets with no parsed section; their data was not imported",
+            "items": {
+              "type": "string"
+            },
+            "title": "Unimported Sheets",
             "type": "array"
           },
           "upload_id": {
