@@ -1,23 +1,28 @@
 """The RFQ document: one PDF per supplier, attached to that supplier's RFQ email.
 
-It follows the RFQ sheet the buyer sees in the app (bido-front `PdfPreview`):
-the Bido wordmark and "Request for quotation", the RFQ title, number and date,
-the addressee and the delivery place, a band with the reply-by and need-by
-dates, the item table (description with part no. / MPN under it, quantity,
-unit, need-by), the terms and what to include in the quote.
+It follows the RFQ sheet the buyer sees in the app (bido-front `PdfPreview`),
+but it goes out in the BUYER COMPANY's name, as large companies' RFQs do: the
+company's logo (or its name as a text header), legal name, tax id and address
+on top, "Request for quotation", the RFQ title, number and date, the addressee
+and the delivery place, a band with the reply-by and need-by dates, the item
+table (description with part no. / MPN under it, quantity, unit, need-by), the
+terms, what to include in the quote, and the company's footer text. Bido shows
+only as a small "sent via Bido" line in the footer.
 
 One rule the app's sheet does not have: a supplier's PDF is addressed to that
 supplier ONLY. The app lists every invited supplier under "To" for the buyer;
 the PDF never names another invitee.
 
-`RfqDocument` is everything the PDF shows, as data. `prepare_send` puts it in
-the approved send arguments, so the approval covers the PDF; at send time the
+`RfqDocument` is everything the PDF shows, as data, the company branding
+(`DocumentBranding`, logo bytes included) too. `prepare_send` puts it in the
+approved send arguments, so the approval and its payload hash cover the PDF
+and its branding; at send time the
 PDF is rendered again from those approved arguments (never from the live RFQ),
 and the send refuses when the RFQ no longer matches them (`stale_reasons`).
 
 Rendering is HTML + CSS through WeasyPrint. Every value is HTML-escaped, and
-the fetcher allows `data:` URIs only (the embedded logo): the PDF never reaches
-the network or the file system.
+the fetcher allows `data:` URIs only (the embedded company logo): the PDF never
+reaches the network or the file system.
 """
 
 import base64
@@ -27,11 +32,9 @@ import unicodedata
 from collections.abc import Sequence
 from datetime import date
 from decimal import Decimal
-from functools import cache
-from importlib import resources
-from typing import Final
+from typing import Final, Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from weasyprint import HTML  # pyright: ignore[reportMissingTypeStubs]
 from weasyprint.urls import URLFetcher  # pyright: ignore[reportMissingTypeStubs]
 
@@ -63,6 +66,8 @@ _LABELS: Final[dict[str, dict[str, str]]] = {
         "include": "Please include in your quote",
         "reference": "Please keep {ref} in the subject of your reply.",
         "from": "From",
+        "tax_id": "Tax ID",
+        "sent_via": "Sent via Bido",
     },
     "pt": {
         "title": "Solicitação de cotação",
@@ -85,6 +90,8 @@ _LABELS: Final[dict[str, dict[str, str]]] = {
         "include": "Por favor, informe na sua proposta",
         "reference": "Mantenha {ref} no assunto da sua resposta.",
         "from": "De",
+        "tax_id": "CNPJ",
+        "sent_via": "Enviado pelo Bido",
     },
     "de": {
         "title": "Angebotsanfrage",
@@ -107,6 +114,8 @@ _LABELS: Final[dict[str, dict[str, str]]] = {
         "include": "Bitte geben Sie in Ihrem Angebot an",
         "reference": "Bitte behalten Sie {ref} im Betreff Ihrer Antwort.",
         "from": "Von",
+        "tax_id": "USt-IdNr.",
+        "sent_via": "Versendet über Bido",
     },
     "fr": {
         "title": "Demande de prix",
@@ -129,6 +138,8 @@ _LABELS: Final[dict[str, dict[str, str]]] = {
         "include": "Merci d'indiquer dans votre offre",
         "reference": "Merci de garder {ref} dans l'objet de votre réponse.",
         "from": "De",
+        "tax_id": "N° TVA",
+        "sent_via": "Envoyé via Bido",
     },
     "es": {
         "title": "Solicitud de cotización",
@@ -151,6 +162,8 @@ _LABELS: Final[dict[str, dict[str, str]]] = {
         "include": "Por favor, indique en su oferta",
         "reference": "Mantenga {ref} en el asunto de su respuesta.",
         "from": "De",
+        "tax_id": "NIF",
+        "sent_via": "Enviado mediante Bido",
     },
     "it": {
         "title": "Richiesta di offerta",
@@ -173,12 +186,78 @@ _LABELS: Final[dict[str, dict[str, str]]] = {
         "include": "Si prega di indicare nella vostra offerta",
         "reference": "Mantenete {ref} nell'oggetto della risposta.",
         "from": "Da",
+        "tax_id": "P. IVA",
+        "sent_via": "Inviato tramite Bido",
     },
 }
 
 
 def labels(language: str) -> dict[str, str]:
     return _LABELS.get(language, _LABELS["en"])
+
+
+# --- The buyer company's branding ---------------------------------------------------------
+
+LogoMediaType = Literal["image/png", "image/jpeg", "image/svg+xml"]
+# About 500 KB of logo once decoded.
+_MAX_LOGO_BASE64: Final = 700_000
+
+
+class DocumentBranding(BaseModel):
+    """Whose RFQ this is: the buyer company. Part of the approved arguments (logo too)."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    company_name: str = Field(min_length=1, max_length=300)
+    legal_name: str | None = Field(default=None, max_length=300)
+    tax_id: str | None = Field(default=None, max_length=60)
+    address: str | None = Field(default=None, max_length=600)
+    footer_text: str | None = Field(default=None, max_length=2000)
+    accent_color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
+    logo_media_type: LogoMediaType | None = None
+    logo_base64: str | None = Field(default=None, max_length=_MAX_LOGO_BASE64)
+
+    @model_validator(mode="after")
+    def _logo_is_complete(self) -> Self:
+        if (self.logo_media_type is None) != (self.logo_base64 is None):
+            raise ValueError("a logo needs both its media type and its bytes")
+        if self.logo_base64 is not None:
+            base64.b64decode(self.logo_base64, validate=True)
+        return self
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        company_name: str,
+        logo: bytes | None = None,
+        logo_media_type: LogoMediaType | None = None,
+        legal_name: str | None = None,
+        tax_id: str | None = None,
+        address: str | None = None,
+        footer_text: str | None = None,
+        accent_color: str | None = None,
+    ) -> Self:
+        """Branding from plain values; `logo` is the image's bytes."""
+        return cls(
+            company_name=company_name,
+            legal_name=legal_name,
+            tax_id=tax_id,
+            address=address,
+            footer_text=footer_text,
+            accent_color=accent_color,
+            logo_media_type=logo_media_type if logo is not None else None,
+            logo_base64=base64.b64encode(logo).decode("ascii") if logo is not None else None,
+        )
+
+    @property
+    def logo(self) -> bytes | None:
+        return base64.b64decode(self.logo_base64) if self.logo_base64 is not None else None
+
+
+def default_branding(company_name: str) -> DocumentBranding:
+    """What exists today: the company's name, no logo (a text header)."""
+    return DocumentBranding(company_name=company_name)
 
 
 # --- What the PDF shows -----------------------------------------------------------------
@@ -219,6 +298,8 @@ class RfqDocument(BaseModel):
     quote_validity_days: int | None = None
     lines: list[DocumentLine] = Field(min_length=1)
     asks: list[str] = Field(default_factory=list[str])
+    # The buyer company the RFQ goes out from.
+    branding: DocumentBranding
 
 
 def _quantity(value: Decimal) -> str:
@@ -226,9 +307,16 @@ def _quantity(value: Decimal) -> str:
 
 
 def build_document(
-    data: RenderInput, *, supplier_name: str, currency: str | None, issued_on: date
+    data: RenderInput,
+    *,
+    supplier_name: str,
+    currency: str | None,
+    issued_on: date,
+    branding: DocumentBranding | None = None,
 ) -> RfqDocument:
-    """The document for one supplier, from the same input as that supplier's email."""
+    """The document for one supplier, from the same input as that supplier's email.
+
+    Without `branding`, the company's name only (no logo)."""
     return RfqDocument(
         language=data.language,
         rfq_ref=data.rfq_ref,
@@ -257,6 +345,7 @@ def build_document(
             for line in data.lines
         ],
         asks=asks(data),
+        branding=branding or default_branding(data.buyer_company),
     )
 
 
@@ -348,22 +437,18 @@ def document_filename(document: RfqDocument) -> str:
 # --- HTML + CSS -----------------------------------------------------------------------------
 
 
-@cache
-def _logo_data_uri() -> str:
-    data = resources.files("bido_back.rfqs").joinpath("assets/bido-logo.png").read_bytes()
-    return "data:image/png;base64," + base64.b64encode(data).decode("ascii")
-
-
 _CSS: Final = """
-@page { size: A4; margin: 18mm 16mm 18mm 16mm;
-  @bottom-left { content: element(footer-left); }
+@page { size: A4; margin: 18mm 16mm 22mm 16mm;
+  @bottom-left { content: element(page-footer); width: 80%; }
   @bottom-right { content: counter(page) " / " counter(pages); font-size: 7.5pt; color: #9aa1ad; } }
 * { box-sizing: border-box; }
 body { font-family: "Inter", "DejaVu Sans", "Liberation Sans", Arial, sans-serif;
   font-size: 9.5pt; color: #1f2430; line-height: 1.35; margin: 0; }
-.header { display: flex; justify-content: space-between; align-items: center; }
-.header img { height: 30px; }
-.header .doc-title { font-size: 17pt; font-weight: 400; }
+.header { display: flex; justify-content: space-between; align-items: center; gap: 18px; }
+.header img { max-height: 40px; max-width: 200px; }
+.header .company { font-size: 15pt; font-weight: 700; }
+.header .doc-title { font-size: 17pt; font-weight: 400; text-align: right; }
+.company-details { margin-top: 6px; font-size: 7.5pt; color: #6b7280; }
 .parties { display: flex; justify-content: space-between; gap: 18px;
   border-top: 1px solid #e3e6ec; margin-top: 14px; padding-top: 12px; }
 .parties .left { flex: 1; }
@@ -376,7 +461,7 @@ body { font-family: "Inter", "DejaVu Sans", "Liberation Sans", Arial, sans-serif
 .meta td { padding: 1.5px 0 1.5px 14px; text-align: right; }
 .meta td.v { color: #1f2430; }
 .band { text-align: right; margin-top: 14px; }
-.band-inner { display: inline-block; background: #f0ecff; border-radius: 4px;
+.band-inner { display: inline-block; background: #f3f4f6; border-radius: 4px;
   padding: 9px 16px 9px 14px; text-align: left; }
 .band-inner > div { display: inline-block; vertical-align: top; margin-right: 26px; }
 .band-inner > div:last-child { margin-right: 0; }
@@ -398,8 +483,52 @@ table.items tr { page-break-inside: avoid; }
 .asks ul { margin: 6px 0 0 0; padding-left: 16px; }
 .asks li { margin-bottom: 2px; }
 .reference { margin-top: 14px; color: #6b7280; font-size: 8.5pt; }
-.footer-left { position: running(footer-left); font-size: 7.5pt; color: #9aa1ad; }
+.page-footer { position: running(page-footer); font-size: 7.5pt; color: #9aa1ad; }
+.page-footer .text { color: #6b7280; margin-bottom: 2px; }
 """
+
+
+def _accent_css(accent: str | None) -> str:
+    """The company's accent: title, header name and the date band (a light tint)."""
+    if accent is None:
+        return ""
+    return (
+        f".header .company, .header .doc-title {{ color: {accent}; }}"
+        f".band-inner {{ background: {accent}14; border-left: 3px solid {accent}; }}"
+    )
+
+
+def _header(document: RfqDocument, words: dict[str, str]) -> str:
+    brand = document.branding
+    logo = brand.logo_base64
+    left = (
+        f'<img src="data:{_e(brand.logo_media_type)};base64,{logo}" alt="{_e(brand.company_name)}">'
+        if logo is not None
+        else f'<span class="company">{_e(brand.company_name)}</span>'
+    )
+    details: list[str] = []
+    if brand.legal_name and brand.legal_name != brand.company_name:
+        details.append(brand.legal_name)
+    if brand.tax_id:
+        details.append(f"{words['tax_id']} {brand.tax_id}")
+    if brand.address:
+        details.append(brand.address)
+    if logo is not None and not brand.legal_name:
+        details.insert(0, brand.company_name)
+    detail_html = f'<div class="company-details">{_e(" · ".join(details))}</div>' if details else ""
+    return (
+        f'<div class="header"><div>{left}{detail_html}</div>'
+        f'<span class="doc-title">{_e(words["title"])}</span></div>'
+    )
+
+
+def _footer(document: RfqDocument, words: dict[str, str]) -> str:
+    brand = document.branding
+    text = f'<div class="text">{_e(brand.footer_text)}</div>' if brand.footer_text else ""
+    return (
+        f'<div class="page-footer">{text}{_e(document.rfq_ref)} · {_e(brand.company_name)}'
+        f" · {_e(words['sent_via'])}</div>"
+    )
 
 
 def _e(value: object) -> str:
@@ -515,16 +644,14 @@ def document_html(document: RfqDocument) -> str:
     )
     reference_text = words["reference"].format(ref=document.rfq_ref)
     reference = f'<div class="reference">{_e(reference_text)}</div>'
-    footer = f'<div class="footer-left">{_e(document.rfq_ref)} · {_e(document.buyer_company)}</div>'
 
     return (
         f'<!doctype html><html lang="{_e(lang)}"><head><meta charset="utf-8">'
-        f"<title>{_e(document.rfq_ref)}</title><style>{_CSS}</style></head><body>"
-        + footer
-        + '<div class="header">'
-        f'<img src="{_logo_data_uri()}" alt="Bido">'
-        f'<span class="doc-title">{_e(words["title"])}</span></div>'
-        '<div class="parties"><div class="left">'
+        f"<title>{_e(document.rfq_ref)}</title>"
+        f"<style>{_CSS}{_accent_css(document.branding.accent_color)}</style></head><body>"
+        + _footer(document, words)
+        + _header(document, words)
+        + '<div class="parties"><div class="left">'
         + "".join(parties)
         + f'</div><div class="meta"><table>{meta}</table></div></div>'
         + band
@@ -537,14 +664,14 @@ def document_html(document: RfqDocument) -> str:
 
 
 def _from_line(document: RfqDocument) -> str:
-    name, company = document.buyer_name.strip(), document.buyer_company.strip()
+    name, company = document.buyer_name.strip(), document.branding.company_name.strip()
     if not name or name.casefold() == company.casefold():
         return company
     return f"{name} · {company}" if company else name
 
 
 def _fetcher() -> URLFetcher:
-    """Only `data:` URIs (the embedded logo): nothing from the network or the disk."""
+    """Only `data:` URIs (the embedded company logo): nothing from the network or the disk."""
     return URLFetcher(allowed_protocols={"data"}, fail_on_errors=False)
 
 

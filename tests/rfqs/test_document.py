@@ -7,15 +7,18 @@ from uuid import UUID
 
 import pdfplumber
 import pytest
+from PIL import Image
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.context import ToolContext
+from bido_back.agents.events import args_hash
 from bido_back.approvals import ActToolRegistry, ApprovalExecutor, decide_approval
 from bido_back.db import tenant_session
 from bido_back.db.models import Approval, Invite, RfqLine
 from bido_back.rfqs import service
 from bido_back.rfqs.document import (
+    DocumentBranding,
     DocumentLine,
     RfqDocument,
     document_filename,
@@ -69,6 +72,7 @@ def _doc(**overrides: object) -> RfqDocument:
             )
         ],
         "asks": ["Prazo de entrega", "Lote mínimo (MOQ)"],
+        "branding": DocumentBranding(company_name="Indústria Demo Ltda."),
     }
     return RfqDocument.model_validate({**base, **overrides})
 
@@ -99,6 +103,64 @@ def test_pdf_shows_the_rfq_in_the_suppliers_language() -> None:
 
     german = _text(render_pdf(_doc(language="de")))
     assert "Angebotsanfrage" in german and "31.10.2026" in german
+
+
+def _png() -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", (40, 12), (10, 127, 90)).save(out, format="PNG")
+    return out.getvalue()
+
+
+_PNG = _png()
+
+
+def test_pdf_goes_out_in_the_buyer_companys_name() -> None:
+    plain = document_html(_doc())
+    assert '<span class="company">Indústria Demo Ltda.</span>' in plain  # text header, no logo
+    assert "<img" not in plain  # no Bido logo anywhere
+    text = _text(render_pdf(_doc()))
+    assert "Indústria Demo Ltda." in text and "Enviado pelo Bido" in text
+
+    branded = _doc(
+        branding=DocumentBranding.create(
+            company_name="Demo",
+            legal_name="Indústria Demo Ltda.",
+            tax_id="12.345.678/0001-90",
+            address="Av. Paulista 1000, São Paulo",
+            footer_text="Condições gerais de compra: demo.example/cgc",
+            accent_color="#0a7f5a",
+            logo=_PNG,
+            logo_media_type="image/png",
+        )
+    )
+    markup = document_html(branded)
+    assert 'src="data:image/png;base64,' in markup and "#0a7f5a" in markup
+    text = _text(render_pdf(branded))
+    for expected in (
+        "Indústria Demo Ltda.",
+        "CNPJ 12.345.678/0001-90",
+        "Av. Paulista 1000, São Paulo",
+        "Condições gerais de compra",
+    ):
+        assert expected in text, expected
+
+
+def test_branding_is_validated_and_covered_by_the_approval_hash() -> None:
+    with pytest.raises(ValueError):
+        DocumentBranding(company_name="X", accent_color="red")
+    with pytest.raises(ValueError):
+        DocumentBranding(company_name="X", logo_base64="AAAA")  # no media type
+    with pytest.raises(ValueError):
+        DocumentBranding(company_name="X", logo_media_type="image/png", logo_base64="%%%")
+    plain, branded = _doc(), _doc(branding=DocumentBranding(company_name="Other Co"))
+    assert args_hash(plain.model_dump(mode="json")) != args_hash(branded.model_dump(mode="json"))
+    with_logo = _doc(
+        branding=DocumentBranding.create(
+            company_name="Indústria Demo Ltda.", logo=_PNG, logo_media_type="image/png"
+        )
+    )
+    assert args_hash(plain.model_dump(mode="json")) != args_hash(with_logo.model_dump(mode="json"))
+    assert with_logo.branding.logo == _PNG
 
 
 def test_pdf_names_only_its_own_supplier() -> None:

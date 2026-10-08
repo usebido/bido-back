@@ -71,7 +71,14 @@ from bido_back.onboarding.standard import TemplateContent
 from bido_back.outbound.domains import RecipientCheck, check_recipients, recipients_in_args
 from bido_back.rfqs.agents import EmailWriterAgent, IntakeAgent
 from bido_back.rfqs.currency import CurrencyChange, change_currency, resolve_currency
-from bido_back.rfqs.document import RfqDocument, build_document, document_filename, render_pdf
+from bido_back.rfqs.document import (
+    DocumentBranding,
+    RfqDocument,
+    build_document,
+    default_branding,
+    document_filename,
+    render_pdf,
+)
 from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound, ReplyByRequired
 from bido_back.rfqs.language import supplier_email_language
 from bido_back.rfqs.mailbox import MailboxSenderFactory
@@ -723,6 +730,8 @@ class _SendContext:
     template: ResolvedTemplate
     buyer_name: str
     buyer_company: str
+    # Whose name the RFQ document goes out in. Today: the company's name, no logo.
+    branding: DocumentBranding
 
 
 def _render_line(line: RfqLine) -> RenderLine:
@@ -768,6 +777,7 @@ async def _send_context(session: AsyncSession, principal: Principal, rfq: Rfq) -
         template=await resolve_for_rfq(session, rfq, lines),
         buyer_name=await buyer_display_name(session, user, tenant.name),
         buyer_company=tenant.name,
+        branding=default_branding(tenant.name),
     )
 
 
@@ -910,6 +920,7 @@ async def preview_document(
             supplier_name=supplier.name,
             currency=rfq.base_currency,
             issued_on=today or utc_today(),
+            branding=ctx.branding,
         )
     pdf = await asyncio.to_thread(render_pdf, document)
     return RfqDocumentFile(filename=document_filename(document), content=pdf)
@@ -1001,6 +1012,7 @@ async def prepare_send(
                 supplier_name=supplier.name,
                 currency=rfq.base_currency,
                 issued_on=today or utc_today(),
+                branding=ctx.branding,
             ),
         )
         payload = cast(dict[str, JsonValue], args.model_dump(mode="json"))
