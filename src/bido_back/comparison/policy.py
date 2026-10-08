@@ -30,10 +30,21 @@ class ComparisonPolicy(BaseModel):
     require_complete_costs: bool = False
 
 
+HistoryBasis = Literal["imported_history", "source_assessment"]
+
+
 class SupplierPerformance(BaseModel):
-    """Observed purchase-line outcomes for this supplier and requested item only."""
+    """Observed purchase-line outcomes for this supplier and requested item only.
+
+    `basis` says where they come from: purchase orders imported into Bido
+    (`imported_history`, evidenced by `evidence_po_line_ids`), or, when none is
+    in the policy window, the supplier statistics measured by the source
+    assessment the RFQ line was drafted from (`source_assessment`, evidenced by
+    the line's `source_evidence`). The two are never mixed.
+    """
 
     scope: Literal["requested_item"] = "requested_item"
+    basis: HistoryBasis = "imported_history"
     observations: int = 0
     delivery_samples: int = 0
     on_time_rate: Decimal | None = None
