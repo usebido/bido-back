@@ -60,8 +60,8 @@ from decimal import Decimal
 from typing import Final, Literal, Protocol, cast
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel
-from sqlalchemy import select
+from pydantic import BaseModel, Field
+from sqlalchemy import exists, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.agents.catalog.contracts import (
@@ -74,7 +74,7 @@ from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
-from bido_back.db.models import TemplateUpload
+from bido_back.db.models import Contact, Supplier, SupplierContact, TemplateUpload
 from bido_back.logs import safe_reason
 from bido_back.purchasing.importers import (
     MAX_ROWS,
@@ -568,6 +568,8 @@ def _partly_read(found: Sequence[Section], grid: SheetGrid) -> bool:
 
 # --- Validating and importing ---------------------------------------------------------------
 
+MAX_SUPPLIERS_WITHOUT_EMAIL: Final = 50
+
 
 class SectionReport(BaseModel):
     sheet: str
@@ -599,6 +601,14 @@ class WorkbookImportReport(BaseModel):
     # What to ask the buyer before importing; empty when imported.
     questions: list[str]
     problems: list[str]
+    suppliers_without_email: list[str] = Field(
+        default_factory=list[str],
+        description=(
+            "After an import: the buyer's suppliers that still have no contact email, by "
+            f"name (at most {MAX_SUPPLIERS_WITHOUT_EMAIL}). They cannot be invited to an RFQ "
+            "until one is added: tell the buyer now, not when the RFQ is created"
+        ),
+    )
 
 
 @dataclass(slots=True)
@@ -920,6 +930,7 @@ async def import_workbook(
             created, updated, skipped = await apply_parsed(session, principal.tenant_id, item.table)
             item.report.created, item.report.updated = created, updated
             item.report.skipped = skipped
+        without_email = await suppliers_without_email(session)
     _log_import("imported", upload_id, parsed, problems, sheets=len(grids), confirmed=confirmed)
     return WorkbookImportReport(
         upload_id=upload_id,
@@ -928,7 +939,29 @@ async def import_workbook(
         sections=[p.report for p in parsed],
         questions=[],
         problems=problems,
+        suppliers_without_email=without_email,
     )
+
+
+async def suppliers_without_email(session: AsyncSession) -> list[str]:
+    """The tenant's suppliers with no usable contact email, by name (bounded).
+
+    A supplier master (SAP XK03) or a purchase history brings suppliers without
+    contacts; an RFQ can only invite a supplier through a contact's email.
+    """
+    has_email = exists().where(
+        SupplierContact.supplier_id == Supplier.id,
+        SupplierContact.contact_id == Contact.id,
+        Contact.email.is_not(None),
+        Contact.pseudonymized_at.is_(None),
+    )
+    names = await session.scalars(
+        select(Supplier.name)
+        .where(~has_email)
+        .order_by(Supplier.name)
+        .limit(MAX_SUPPLIERS_WITHOUT_EMAIL)
+    )
+    return list(names)
 
 
 def _parse_sections(
