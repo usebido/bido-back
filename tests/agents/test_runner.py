@@ -105,20 +105,106 @@ def final(*before: Item, **output: object) -> Response:
     return reply(*before, text(json.dumps(output)))
 
 
+def _chunks(value: str, size: int = 3) -> list[str]:
+    """Split text the way a streamed reply arrives: a few words at a time."""
+    words = value.split(" ")
+    return [
+        " ".join(words[i : i + size]) + (" " if i + size < len(words) else "")
+        for i in range(0, len(words), size)
+    ]
+
+
+def stream_events(response: Response) -> list[Any]:
+    """The Responses API stream events that would carry `response`.
+
+    Built with model_construct: Agno reads only `type` and the fields used
+    below (agno/models/openai/responses.py `_parse_provider_response_delta`).
+    """
+    from openai.types import responses as r
+
+    events: list[Any] = [
+        r.ResponseCreatedEvent.model_construct(type="response.created", response=response)
+    ]
+    for index, item in enumerate(response.output):
+        events.append(
+            r.ResponseOutputItemAddedEvent.model_construct(
+                type="response.output_item.added", item=item, output_index=index
+            )
+        )
+        if item.type == "message":
+            for content in item.content:
+                if content.type == "output_text":
+                    events.extend(
+                        r.ResponseTextDeltaEvent.model_construct(
+                            type="response.output_text.delta", delta=piece, item_id=item.id
+                        )
+                        for piece in _chunks(content.text)
+                    )
+        elif item.type == "reasoning":
+            events.extend(
+                r.ResponseReasoningSummaryTextDeltaEvent.model_construct(
+                    type="response.reasoning_summary_text.delta", delta=summary.text
+                )
+                for summary in item.summary
+            )
+        events.append(
+            r.ResponseOutputItemDoneEvent.model_construct(
+                type="response.output_item.done", item=item, output_index=index
+            )
+        )
+    events.append(
+        r.ResponseCompletedEvent.model_construct(type="response.completed", response=response)
+    )
+    return events
+
+
+class _StubStream:
+    def __init__(self, events: list[Any], fail_after: Exception | None = None) -> None:
+        self._events = events
+        self._fail_after = fail_after
+
+    def __aiter__(self) -> "_StubStream":
+        return self
+
+    async def __anext__(self) -> Any:
+        if self._events:
+            return self._events.pop(0)
+        if self._fail_after is not None:
+            error, self._fail_after = self._fail_after, None
+            raise error
+        raise StopAsyncIteration
+
+
+class StreamFailure(Exception):
+    """Scripted as a response: the stream starts with `partial` text, then raises `error`."""
+
+    def __init__(self, partial: str, error: Exception) -> None:
+        super().__init__(str(error))
+        self.partial = partial
+        self.error = error
+
+
 class _StubResponses:
     def __init__(self, responses: Sequence[Response | Exception]) -> None:
         self._responses = list(responses)
         self.calls: list[dict[str, Any]] = []
 
-    async def create(self, **kwargs: Any) -> Response:
-        # With an output schema Agno requests whole responses, never a stream.
-        assert not kwargs.get("stream"), "streamed requests are not scripted"
+    async def create(self, **kwargs: Any) -> Response | _StubStream:
+        # Structured-output agents get whole responses; free-text (stream_text)
+        # agents stream, and the scripted response is replayed as stream events.
         self.calls.append(kwargs)
         if not self._responses:
             raise AssertionError("the stub ran out of scripted responses")
         response = self._responses.pop(0)
+        if isinstance(response, StreamFailure):
+            assert kwargs.get("stream"), "a stream failure needs a streamed request"
+            events = stream_events(reply(text(response.partial)))
+            # Drop the completion: the stream breaks before it.
+            return _StubStream(events[:-2], fail_after=response.error)
         if isinstance(response, Exception):
             raise response
+        if kwargs.get("stream"):
+            return _StubStream(stream_events(response))
         return response
 
 
@@ -674,3 +760,107 @@ def test_storage_is_agno_postgres_in_schema_agno() -> None:
     assert built.db.db_schema == "agno"
     assert built.db.create_schema is False
     assert built.db.db_engine.url.drivername == "postgresql+asyncpg"
+
+
+# --- Free-text streaming (stream_text) --------------------------------------
+
+
+class Reply(BaseModel):
+    answer: str
+
+
+def chat_agent(max_turns: int = 4) -> AgentDefinition[Reply]:
+    return AgentDefinition(
+        name="example",
+        prompt_file="example.v1.md",
+        prompt_version=1,
+        model=MODEL,
+        output_model=Reply,
+        tools=(LOOKUP, SEND),
+        max_turns=max_turns,
+        effort="low",
+        stream_text=True,
+    )
+
+
+def test_stream_text_needs_a_single_str_output_field() -> None:
+    with pytest.raises(ValueError, match="exactly one field"):
+        AgentDefinition(
+            name="example",
+            prompt_file="example.v1.md",
+            prompt_version=1,
+            model=MODEL,
+            output_model=Answer,
+            stream_text=True,
+        )
+    assert chat_agent().text_field() == "answer"
+
+
+async def test_stream_text_streams_deltas_in_order_and_completes_with_the_whole_text(
+    script: Script,
+) -> None:
+    stub = script(reply(thinking("Short answer."), text("SKU-1 costs 12.50 euros per piece.")))
+
+    events = [e async for e in run(chat_agent(), TASK, ctx(), config=CONFIG)]
+
+    assert stub.calls[0]["stream"] is True
+    # No structured output requested from the provider.
+    assert "text" not in stub.calls[0] or "format" not in stub.calls[0]["text"]
+    deltas = [e.text for e in events if isinstance(e, TextDelta)]
+    assert len(deltas) > 1
+    assert "".join(deltas) == "SKU-1 costs 12.50 euros per piece."
+    terminal = events[-1]
+    assert isinstance(terminal, RunCompleted)
+    assert terminal.output == {"answer": "SKU-1 costs 12.50 euros per piece."}
+    assert [e.seq for e in events] == list(range(len(events)))
+    # Every delta comes before the terminal event.
+    assert max(i for i, e in enumerate(events) if isinstance(e, TextDelta)) < len(events) - 1
+
+
+async def test_stream_text_tool_call_mid_stream_separates_the_text(script: Script) -> None:
+    script(
+        reply(text("Let me check the price."), tool_use("fc_1", "lookup_price", sku="SKU-1")),
+        reply(text("It is 12.50 euros.")),
+    )
+    context = ctx()
+
+    result = await run_to_completion(chat_agent(), TASK, context, config=CONFIG)
+
+    assert isinstance(result, Completed)
+    assert result.output.answer == "Let me check the price.\n\nIt is 12.50 euros."
+    kinds = [type(e) for e in result.events]
+    assert kinds.index(ToolCalled) > kinds.index(TextDelta)
+    assert lookup_calls == [(context.tenant_id, LookupIn(sku="SKU-1"))]
+    deltas = "".join(e.text for e in result.events if isinstance(e, TextDelta))
+    assert deltas == result.output.answer
+
+
+async def test_stream_text_act_tool_is_never_executed(script: Script) -> None:
+    script(reply(tool_use("fc_1", "send_payment", supplier_id="sup-1", amount_cents=500)))
+    sink = RecordingSink()
+
+    result = await run_to_completion(chat_agent(), TASK, ctx(), approvals=sink, config=CONFIG)
+
+    assert isinstance(result, NeedsApproval)
+    assert send_calls == []
+    assert [p.tool for p in sink.proposals] == ["send_payment"]
+
+
+async def test_stream_text_error_mid_stream_fails_after_the_partial_text(script: Script) -> None:
+    script(StreamFailure("Working on it", RuntimeError("connection reset")))
+
+    events = [e async for e in run(chat_agent(), TASK, ctx(), config=CONFIG)]
+
+    assert any(isinstance(e, TextDelta) for e in events)
+    assert not any(isinstance(e, RunCompleted) for e in events)
+    terminal = events[-1]
+    assert terminal.type == "run_failed"
+
+
+async def test_stream_text_empty_answer_fails(script: Script) -> None:
+    script(reply(thinking("Nothing to say.")))
+
+    result = await run_to_completion(chat_agent(), TASK, ctx(), config=CONFIG)
+
+    assert isinstance(result, Failed)
+    assert result.failure.code == "invalid_output"

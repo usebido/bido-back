@@ -25,7 +25,10 @@ How our rules map onto Agno:
   so OpenAI keeps no conversation state, and each turn replays the full
   context, including the encrypted reasoning items of earlier turns.
 - The final answer uses Agno's `output_schema` (native strict structured
-  output on OpenAI) and is validated again with our output model.
+  output on OpenAI) and is validated again with our output model. Agents with
+  `stream_text` run without an output schema instead: the model's text streams
+  as `TextDelta` events, and the whole text fills the output model's one str
+  field (validated the same way).
 - Every Agno user_id / session_id is namespaced by tenant (`agno_ids`).
 - Agno telemetry is off: `AGNO_TELEMETRY=false` is forced in the process
   environment (bido_back/agents/__init__.py, and again per run here, because
@@ -345,7 +348,8 @@ def build_agent(
         # Prompts are literal text: no `{var}` substitution from session state.
         resolve_in_context=False,
         tools=[_to_function(tool, context, state) for tool in definition.tools],
-        output_schema=definition.output_model,
+        # A free-text agent streams its answer; Agno never streams with a schema.
+        output_schema=None if definition.stream_text else definition.output_model,
         add_history_to_context=history,
         num_history_runs=definition.history_runs if history else None,
         metadata={
@@ -403,6 +407,10 @@ class _Translator:
         self._emit = emit
         self._turns = 0
         self._announced: set[str] = set()
+        # Free text written to the user so far (stream_text agents), and whether
+        # a tool call interrupted it (the next text starts a new paragraph).
+        self._text: list[str] = []
+        self._text_interrupted = False
         # Reasoning already emitted in the current run segment (see _on_completed).
         self._segment_reasoning = ""
         # Set by consume(): how the segment ended.
@@ -449,8 +457,14 @@ class _Translator:
                 self._segment_reasoning += item.reasoning_content
                 events.append(emit(ReasoningStep, text=item.reasoning_content))
             if item.content_type == "str" and isinstance(item.content, str) and item.content:
-                events.append(emit(TextDelta, text=item.content))
+                chunk = item.content
+                if self._text_interrupted and self._text:
+                    chunk = "\n\n" + chunk.lstrip("\n")
+                self._text_interrupted = False
+                self._text.append(chunk)
+                events.append(emit(TextDelta, text=chunk))
         elif isinstance(item, ToolCallStartedEvent):
+            self._text_interrupted = True
             events.extend(self._on_tool_started(item))
         elif isinstance(item, ToolCallCompletedEvent):
             events.extend(self._on_tool_completed(item))
@@ -463,6 +477,11 @@ class _Translator:
         elif isinstance(item, RunCancelledEvent):
             self.failure = ("cancelled", "the run was cancelled")
         return events
+
+    @property
+    def text(self) -> str:
+        """Everything streamed as TextDelta, in order (the free-text answer)."""
+        return "".join(self._text)
 
     def _on_tool_started(self, item: ToolCallStartedEvent) -> list[Event]:
         execution = item.tool
@@ -609,7 +628,10 @@ async def _drive(
             continue
 
         if translator.completed:
-            yield _finish(definition, translator.final_content, emit)
+            if definition.stream_text:
+                yield _finish_text(definition, translator, emit)
+            else:
+                yield _finish(definition, translator.final_content, emit)
             return
 
         yield emit(RunFailed, code="internal_error", message="the run ended without a result")
@@ -690,6 +712,23 @@ def _finish(definition: AgentDefinition[Any], content: object, emit: _Emitter) -
         return emit(RunFailed, code="invalid_output", message=validation_errors(exc))
     except ValueError as exc:
         return emit(RunFailed, code="invalid_output", message=str(exc))
+    return emit(RunCompleted, output=output.model_dump(mode="json"))
+
+
+def _finish_text(
+    definition: AgentDefinition[Any], translator: _Translator, emit: _Emitter
+) -> Event:
+    # The streamed deltas are what the user saw; the final content is only a
+    # fallback for a provider that sent the text in one piece.
+    text = translator.text
+    if not text.strip() and isinstance(translator.final_content, str):
+        text = translator.final_content
+    if not text.strip():
+        return emit(RunFailed, code="invalid_output", message="the model returned no answer")
+    try:
+        output = definition.output_model.model_validate({definition.text_field(): text})
+    except ValidationError as exc:
+        return emit(RunFailed, code="invalid_output", message=validation_errors(exc))
     return emit(RunCompleted, output=output.model_dump(mode="json"))
 
 
