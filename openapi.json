@@ -923,6 +923,13 @@
             "title": "Evidence",
             "type": "array"
           },
+          "flags": {
+            "items": {
+              "$ref": "#/components/schemas/LineFlag"
+            },
+            "title": "Flags",
+            "type": "array"
+          },
           "inbound": {
             "items": {
               "$ref": "#/components/schemas/InboundEvidence"
@@ -993,6 +1000,16 @@
           "part_number": {
             "title": "Part Number",
             "type": "string"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PriceBenchmark"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "ready": {
             "default": false,
@@ -5246,6 +5263,52 @@
         "title": "LineDecisionView",
         "type": "object"
       },
+      "LineFlag": {
+        "properties": {
+          "code": {
+            "enum": [
+              "no_history",
+              "single_source",
+              "price_up",
+              "supplier_late",
+              "quality_issue",
+              "broker_source",
+              "mixed_currency",
+              "covered_by_stock"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "supplier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "LineFlag",
+        "type": "object"
+      },
       "LineLimitsUpdate": {
         "additionalProperties": false,
         "properties": {
@@ -6899,6 +6962,134 @@
           "approval_id"
         ],
         "title": "PreparedInvite",
+        "type": "object"
+      },
+      "PriceBenchmark": {
+        "description": "Bido's internal price estimate from reconciled completed purchases.\n\nAn internal reference before any supplier contact: never a quotation, an accepted\nprice or an approved negotiation limit until the buyer approves it.",
+        "properties": {
+          "avg_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Avg Price",
+            "type": "string"
+          },
+          "basis": {
+            "const": "received_orders",
+            "default": "received_orders",
+            "title": "Basis",
+            "type": "string"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "estimated_cost_at_last": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Cost At Last"
+          },
+          "estimated_cost_at_target": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Cost At Target"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "last_ordered_at": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Ordered At"
+          },
+          "last_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Last Price",
+            "type": "string"
+          },
+          "last_supplier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Supplier"
+          },
+          "max_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Max Price",
+            "type": "string"
+          },
+          "min_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Min Price",
+            "type": "string"
+          },
+          "observations": {
+            "minimum": 1.0,
+            "title": "Observations",
+            "type": "integer"
+          },
+          "target_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Target Price",
+            "type": "string"
+          },
+          "trend_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trend Pct"
+          },
+          "window_days": {
+            "minimum": 1.0,
+            "title": "Window Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "currency",
+          "observations",
+          "window_days",
+          "last_price",
+          "avg_price",
+          "min_price",
+          "target_price",
+          "max_price"
+        ],
+        "title": "PriceBenchmark",
         "type": "object"
       },
       "ProductView": {
@@ -9671,6 +9862,13 @@
             ],
             "title": "Status",
             "type": "string"
+          },
+          "totals": {
+            "items": {
+              "$ref": "#/components/schemas/SpendTotal"
+            },
+            "title": "Totals",
+            "type": "array"
           }
         },
         "title": "SourceAssessment",
@@ -9728,6 +9926,36 @@
           "column"
         ],
         "title": "SourceRef",
+        "type": "object"
+      },
+      "SpendTotal": {
+        "properties": {
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "lines": {
+            "title": "Lines",
+            "type": "integer"
+          },
+          "total_at_last_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total At Last Price",
+            "type": "string"
+          },
+          "total_at_target": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total At Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "currency",
+          "lines",
+          "total_at_target",
+          "total_at_last_price"
+        ],
+        "title": "SpendTotal",
         "type": "object"
       },
       "StartScanRequest": {
@@ -10022,6 +10250,30 @@
       },
       "SupplierEvidence": {
         "properties": {
+          "avg_lead_time_days": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Lead Time Days"
+          },
+          "avg_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Price"
+          },
           "currency": {
             "anyOf": [
               {
@@ -10032,6 +10284,11 @@
               }
             ],
             "title": "Currency"
+          },
+          "delivery_observations": {
+            "default": 0,
+            "title": "Delivery Observations",
+            "type": "integer"
           },
           "email": {
             "anyOf": [
@@ -10072,6 +10329,18 @@
             "title": "Last Price Basis",
             "type": "string"
           },
+          "last_received_at": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Received At"
+          },
           "lead_time_days": {
             "anyOf": [
               {
@@ -10084,6 +10353,18 @@
             ],
             "title": "Lead Time Days"
           },
+          "min_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Price"
+          },
           "name": {
             "anyOf": [
               {
@@ -10094,6 +10375,18 @@
               }
             ],
             "title": "Name"
+          },
+          "on_time_rate": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "On Time Rate"
           },
           "ordered_at": {
             "anyOf": [
@@ -10106,6 +10399,11 @@
               }
             ],
             "title": "Ordered At"
+          },
+          "orders": {
+            "default": 0,
+            "title": "Orders",
+            "type": "integer"
           },
           "otif_pct": {
             "anyOf": [
@@ -10130,6 +10428,11 @@
             ],
             "title": "Qualification Status"
           },
+          "quality_observations": {
+            "default": 0,
+            "title": "Quality Observations",
+            "type": "integer"
+          },
           "quality_pct": {
             "anyOf": [
               {
@@ -10141,6 +10444,35 @@
               }
             ],
             "title": "Quality Pct"
+          },
+          "quality_rate": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quality Rate"
+          },
+          "quantity": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quantity"
+          },
+          "suggested": {
+            "default": false,
+            "title": "Suggested",
+            "type": "boolean"
           },
           "supplier_code": {
             "anyOf": [
