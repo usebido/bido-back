@@ -957,6 +957,20 @@
             "title": "Base Currency",
             "type": "string"
           },
+          "pending_validation": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Create a PRELIMINARY draft although evidence issues remain, naming what it waits for (e.g. 'engineering validation of the BOM'). Lines without a quantity or unit are left out and listed in `skipped`. A preliminary RFQ cannot be prepared for sending until the mark is removed.",
+            "title": "Pending Validation"
+          },
           "response_due": {
             "anyOf": [
               {
@@ -994,6 +1008,11 @@
             "title": "Lines",
             "type": "integer"
           },
+          "preliminary": {
+            "default": false,
+            "title": "Preliminary",
+            "type": "boolean"
+          },
           "ref": {
             "title": "Ref",
             "type": "string"
@@ -1005,6 +1024,18 @@
           "rfq_id": {
             "format": "uuid",
             "title": "Rfq Id",
+            "type": "string"
+          },
+          "skipped": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Skipped",
+            "type": "array"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
             "type": "string"
           }
         },
@@ -8120,6 +8151,19 @@
             "minimum": 1.0,
             "title": "Max Suppliers Per Line",
             "type": "integer"
+          },
+          "pending_validation": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pending Validation"
           },
           "response_due": {
             "anyOf": [

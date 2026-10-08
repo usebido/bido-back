@@ -1181,7 +1181,10 @@ async def _checked_analysis(
 
 
 def _analysis_rfq_title(record: Analysis, request: RfqFromAnalysisRequest) -> str:
-    return request.title or f"{record.product}: {record.quantity.normalize():f} un"
+    title = request.title or f"{record.product}: {record.quantity.normalize():f} un"
+    if request.pending_validation is not None:
+        title = rfq_service.preliminary_title(title, request.pending_validation)
+    return title
 
 
 def _wanted_suppliers(rows: Sequence[tuple[AnalysisLine, Item]], per_line: int) -> dict[UUID, str]:

@@ -502,10 +502,12 @@ class CreateRfqIn(BaseModel):
         default=None,
         max_length=200,
         description=(
-            "What the RFQ still waits for, when the buyer wants to move on before it "
-            "(e.g. 'engineering validation of the BOM'). Marks the RFQ PRELIMINARY: it "
-            "cannot be prepared for sending until the buyer confirms and the mark is removed "
-            "with set_rfq_terms(title=...)"
+            "What the RFQ still waits for, when the buyer or the data says it waits for "
+            "someone's sign-off (e.g. 'engineering validation of the drawing'). Marks the RFQ "
+            "PRELIMINARY: it cannot be prepared for sending until the buyer confirms and the "
+            "mark is removed with set_rfq_terms(title=...). For an RFQ from an assessment or "
+            "an analysis, pass it to create_rfq_from_assessment / create_rfq_from_analysis "
+            "instead: they keep the quantities and units"
         ),
     )
     include_attachments: bool = Field(
@@ -937,6 +939,16 @@ class PurchaseAnalysisOut(BaseModel):
 class RfqFromAnalysisIn(BaseModel):
     analysis_id: UUID = Field(description="The analysis_id returned by run_purchase_analysis")
     currency: str | None = Field(default=None, description=_CURRENCY_ARG)
+    pending_validation: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description=(
+            "Only when the buyer or the data says the RFQ waits for someone's sign-off: what "
+            "it waits for. Marks the RFQ PRELIMINARY: it cannot be prepared for sending until "
+            "the mark is removed with set_rfq_terms(title=...)"
+        ),
+    )
     proposal_id: UUID | None = Field(default=None, description=PROPOSAL_ARG)
 
 
@@ -1042,7 +1054,7 @@ def _analysis_request(args: RfqFromAnalysisIn) -> RfqFromAnalysisRequest:
         currency = known_currency(args.currency) if args.currency else None
     except RfqError as exc:
         raise _service_error(exc) from None
-    return RfqFromAnalysisRequest(currency=currency)
+    return RfqFromAnalysisRequest(currency=currency, pending_validation=args.pending_validation)
 
 
 def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:

@@ -68,7 +68,7 @@ from bido_back.rfqs.errors import (
     RfqError,
 )
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest, EmailAddress
-from bido_back.rfqs.service import preliminary_hold
+from bido_back.rfqs.service import preliminary_hold, preliminary_title
 
 if TYPE_CHECKING:
     from bido_back.copilot.tools import CopilotToolDeps
@@ -170,6 +170,10 @@ class AssessmentRfqOut(AwaitingConfirmation):
     ref: str | None = None
     lines: int | None = None
     reused: bool | None = None
+    title: str | None = None
+    preliminary: bool | None = None
+    # Preliminary only: assessed lines left out (no quantity or unit yet), by part number.
+    skipped: list[str] = Field(default_factory=list[str])
 
 
 class AddContactOut(BaseModel):
@@ -343,27 +347,42 @@ def _conversation_upload(
 def _assessment_preview(
     assessment: SourceAssessment, args: CreateAssessmentRfqIn
 ) -> ProposalPreview:
-    """What `create_rfq_from_assessment` would create from the saved assessment, and what
-    would stop it (`draft_from_snapshot` checks again when it runs)."""
-    to_buy = [
+    """What `create_rfq_from_assessment` would create from the saved assessment (the same
+    rules as `draft_from_snapshot`, which checks again when it runs)."""
+    preliminary = args.pending_validation is not None
+    lines = [
         line
         for line in assessment.lines
-        if line.calculated_to_buy is not None and line.calculated_to_buy > 0
+        if line.calculated_to_buy is not None and line.calculated_to_buy > 0 and line.unit
     ]
-    issues = [issue.message for issue in assessment.issues if issue.severity == "blocker"]
+    skipped = [
+        line.part_number
+        for line in assessment.lines
+        if line.calculated_to_buy is None or not line.unit
+    ]
+    open_issues = [issue.message for issue in assessment.issues if issue.severity == "blocker"]
+    if assessment.status != "assessed":
+        open_issues.insert(0, "the assessment still needs review")
     for line in assessment.lines:
         if not line.ready or not line.unit or line.calculated_to_buy is None:
-            issues.append(f"{line.part_number}: quantity, unit or evidence not validated")
-        issues.extend(
+            open_issues.append(f"{line.part_number}: quantity, unit or evidence not validated")
+        open_issues.extend(
             f"{line.part_number}: {issue.message}"
             for issue in line.issues
             if issue.severity == "blocker"
         )
-    if assessment.status != "assessed":
-        issues.insert(0, "the assessment still needs review")
+    # Open issues stop a complete RFQ; a preliminary one carries them (its mark keeps it
+    # from being prepared for sending), so for it they are what the buyer still settles.
+    issues = [] if preliminary else open_issues
+    if not lines:
+        issues.append("the assessment has no validated positive purchase requirements")
     return ProposalPreview(
         action="create_rfq_from_assessment",
-        title=args.title,
+        title=(
+            preliminary_title(args.title, args.pending_validation)[:300]
+            if args.pending_validation is not None
+            else args.title
+        ),
         currency=args.base_currency,
         lines=[
             ProposedLine(
@@ -375,9 +394,11 @@ def _assessment_preview(
                 need_by=line.need_by,
                 delivery_location=line.location,
             )
-            for position, line in enumerate(to_buy, start=1)
+            for position, line in enumerate(lines, start=1)
             if line.calculated_to_buy is not None
         ],
+        skipped=skipped if preliminary else [],
+        questions=open_issues if preliminary else [],
         issues=issues,
     )
 
@@ -521,6 +542,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
                     title=stored.title,
                     base_currency=stored.base_currency,
                     response_due=stored.response_due,
+                    pending_validation=stored.pending_validation,
                 ),
             )
         except purchasing_service.PurchasingError as exc:

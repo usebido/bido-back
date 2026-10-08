@@ -73,6 +73,10 @@ class ProposalPreview(BaseModel):
     currency: str | None = None
     lines: list[ProposedLine] = Field(default_factory=list[ProposedLine])
     suppliers: list[ProposedSupplier] = Field(default_factory=list[ProposedSupplier])
+    skipped: list[str] = Field(
+        default_factory=list[str],
+        description="Lines left out (a preliminary RFQ: no quantity or unit yet), by part number",
+    )
     questions: list[str] = Field(default_factory=list[str])
     issues: list[str] = Field(
         default_factory=list[str], description="What would stop it, if anything"
