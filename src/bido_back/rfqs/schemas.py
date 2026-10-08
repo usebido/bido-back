@@ -133,6 +133,14 @@ class RfqHeader(BaseModel):
     quote_validity_days: int | None = Field(
         default=None, description="How many days a quote must stay valid, at least"
     )
+    logo_asset_id: UUID | None = Field(
+        default=None,
+        description="The company logo this RFQ's document shows; null = the company default",
+    )
+    footer_override: str | None = Field(
+        default=None,
+        description="Terms printed on this RFQ's document; null = the company default footer",
+    )
 
 
 RfqStage = Literal["draft", "bidding", "review", "awarded", "completed", "cancelled"]
@@ -236,6 +244,12 @@ class UpdateRfqRequest(BaseModel):
     need_by: date | None = None
     # The RFQ's base currency; its negotiation limits are converted along with it.
     currency: CurrencyCode | None = None
+    # The document's branding: a logo from the company library (`/v1/company/logos`)
+    # and terms replacing the company's default footer; null = back to the default.
+    logo_asset_id: UUID | None = None
+    footer_override: (
+        Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] | None
+    ) = None
 
 
 # --- Suppliers and contacts ---------------------------------------------------------

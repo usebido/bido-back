@@ -29,7 +29,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Final, cast
+from typing import Final, Literal, cast
 from uuid import UUID, uuid4
 
 from pydantic import JsonValue
@@ -52,6 +52,9 @@ from bido_back.agents.context import ToolContext
 from bido_back.agents.events import args_hash
 from bido_back.approvals import ApprovalConflict, PostgresApprovalSink
 from bido_back.auth import Principal
+from bido_back.branding.images import logo_for_document
+from bido_back.branding.service import NotFound as BrandingNotFound
+from bido_back.branding.service import check_logo_exists, logo_bytes, rfq_branding_rows
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
@@ -111,6 +114,7 @@ from bido_back.rfqs.send import (
     send_proposal_ids,
     subject_marker,
 )
+from bido_back.storage import BlobStorage
 from bido_back.templates.localize import localize
 from bido_back.templates.render import RenderedRfq, RenderInput, RenderLine, render_rfq
 from bido_back.templates.schemas import RfqEmailPreview
@@ -198,6 +202,8 @@ def _summary_fields(rfq: Rfq) -> dict[str, object]:
         "send_blockers": send_blockers(rfq.status, rfq.response_due, utc_today()),
         "payment_terms": rfq.payment_terms,
         "quote_validity_days": rfq.quote_validity_days,
+        "logo_asset_id": rfq.logo_asset_id,
+        "footer_override": rfq.footer_override,
     }
 
 
@@ -570,7 +576,21 @@ async def edit_rfq(
             currency_change = await change_currency(
                 session, rfq, changes["currency"], today or datetime.now(UTC).date()
             )
-        for field in ("title", "response_due", "payment_terms", "quote_validity_days"):
+        if changes.get("logo_asset_id") is not None:
+            try:
+                await check_logo_exists(session, changes["logo_asset_id"])
+            except BrandingNotFound:
+                raise NotFound(f"logo {changes['logo_asset_id']} not found") from None
+        if "footer_override" in changes:
+            changes["footer_override"] = changes["footer_override"] or None
+        for field in (
+            "title",
+            "response_due",
+            "payment_terms",
+            "quote_validity_days",
+            "logo_asset_id",
+            "footer_override",
+        ):
             if field in changes:
                 setattr(rfq, field, changes[field])
         line_fields = {
@@ -730,7 +750,8 @@ class _SendContext:
     template: ResolvedTemplate
     buyer_name: str
     buyer_company: str
-    # Whose name the RFQ document goes out in. Today: the company's name, no logo.
+    # Whose name the RFQ document goes out in: the company's branding (/v1/company), with
+    # the RFQ's own logo and terms when it chose them. Part of the approved document.
     branding: DocumentBranding
 
 
@@ -765,7 +786,9 @@ def _email_line(line: RfqLine) -> RfqEmailLine:
     )
 
 
-async def _send_context(session: AsyncSession, principal: Principal, rfq: Rfq) -> _SendContext:
+async def _send_context(
+    session: AsyncSession, principal: Principal, rfq: Rfq, storage: BlobStorage | None
+) -> _SendContext:
     lines = await _lines(session, rfq.id)
     tenant = await session.get(Tenant, principal.tenant_id)
     user = await session.get(User, principal.user_id)
@@ -777,7 +800,45 @@ async def _send_context(session: AsyncSession, principal: Principal, rfq: Rfq) -
         template=await resolve_for_rfq(session, rfq, lines),
         buyer_name=await buyer_display_name(session, user, tenant.name),
         buyer_company=tenant.name,
-        branding=default_branding(tenant.name),
+        branding=await _document_branding(session, principal, rfq, tenant.name, storage),
+    )
+
+
+async def _document_branding(
+    session: AsyncSession,
+    principal: Principal,
+    rfq: Rfq,
+    tenant_name: str,
+    storage: BlobStorage | None,
+) -> DocumentBranding:
+    """The company's branding for this RFQ's document; the tenant name alone without any.
+
+    A logo that cannot be read or made small enough is left out, never failing the send.
+    """
+    rows = await rfq_branding_rows(session, principal.tenant_id, rfq)
+    row = rows.branding
+    logo: tuple[bytes, Literal["image/png", "image/jpeg", "image/svg+xml"]] | None = None
+    if rows.logo is not None:
+        data = await logo_bytes(storage, rows.logo)
+        logo = logo_for_document(data, rows.logo.content_type) if data is not None else None
+        if logo is None:
+            logger.warning("rfq logo left out of the document logo=%s", rows.logo.id)
+    if row is None and logo is None and rows.footer is None:
+        return default_branding(tenant_name)
+    details = [part for part in (row.phone, row.website) if part] if row else []
+    address = row.address if row else None
+    if details:
+        address = "\n".join([address, *details]) if address else "\n".join(details)
+    address = address[:600] if address else None
+    return DocumentBranding.create(
+        company_name=((row.trade_name or row.legal_name) if row else None) or tenant_name,
+        legal_name=row.legal_name if row else None,
+        tax_id=row.tax_id if row else None,
+        address=address,
+        footer_text=rows.footer[:2000] if rows.footer else None,
+        accent_color=row.accent_color if row else None,
+        logo=logo[0] if logo else None,
+        logo_media_type=logo[1] if logo else None,
     )
 
 
@@ -830,7 +891,13 @@ async def _render_for(
 
 
 async def preview_email(
-    db: Db, principal: Principal, rfq_id: UUID, invite_id: UUID, writer: EmailWriterAgent
+    db: Db,
+    principal: Principal,
+    rfq_id: UUID,
+    invite_id: UUID,
+    writer: EmailWriterAgent,
+    *,
+    storage: BlobStorage | None = None,
 ) -> RfqEmailPreview:
     """The email this invite would get, as `prepare_send` would propose it. Sends nothing."""
     async with tenant_session(db, principal.tenant_id) as session:
@@ -845,7 +912,7 @@ async def preview_email(
         if row is None:
             raise NotFound(f"invite {invite_id} not found")
         _, supplier = row
-        ctx = await _send_context(session, principal, rfq)
+        ctx = await _send_context(session, principal, rfq, storage)
     context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
     rendered, _ = await _render_for(ctx, supplier, writer, context, {})
     return RfqEmailPreview(
@@ -874,6 +941,7 @@ async def preview_document(
     writer: EmailWriterAgent,
     *,
     today: date | None = None,
+    storage: BlobStorage | None = None,
 ) -> RfqDocumentFile:
     """The PDF this invite's email carries. Sends nothing.
 
@@ -905,7 +973,9 @@ async def preview_document(
         document: RfqDocument | None = (
             SendRfqEmailArgs.model_validate(proposed).document if proposed is not None else None
         )
-        ctx = None if document is not None else await _send_context(session, principal, rfq)
+        ctx = (
+            None if document is not None else await _send_context(session, principal, rfq, storage)
+        )
     if document is None:
         if ctx is None:  # pragma: no cover - set whenever there is no proposed document
             raise NotFound(f"rfq {rfq_id} not found")
@@ -935,6 +1005,7 @@ async def prepare_send(
     *,
     require_mailbox: bool = True,
     today: date | None = None,
+    storage: BlobStorage | None = None,
 ) -> PrepareSendResponse:
     """Render one email per draft invite and record each as a pending approval.
 
@@ -983,7 +1054,7 @@ async def prepare_send(
             .group_by(Approval.tool_call_id)
         )
         attempts = {call_id: count for call_id, count in rejected_counts}
-        ctx = await _send_context(session, principal, rfq)
+        ctx = await _send_context(session, principal, rfq, storage)
         if drafts:
             # Every email of this RFQ, now and later, uses this template version.
             record_template(rfq, ctx.template)

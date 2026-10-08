@@ -270,6 +270,58 @@ class Rfq(Base):
     comparison_policy: Mapped[dict[str, JsonValue]] = mapped_column(
         JSONB, server_default=text("'{}'::jsonb")
     )
+    # The buyer's branding on this RFQ's document (migration 0031): a logo from the
+    # company's library (None = the company default) and terms that replace the
+    # company's default footer (None = the default).
+    logo_asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("company_logos.id", ondelete="SET NULL")
+    )
+    footer_override: Mapped[str | None] = mapped_column(Text)
+
+
+class CompanyBranding(Base):
+    """How the buyer's company presents itself on RFQ documents (migration 0031).
+
+    One row per tenant, created on first save; every field is optional.
+    """
+
+    __tablename__ = "company_branding"
+
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    legal_name: Mapped[str | None] = mapped_column(Text)
+    trade_name: Mapped[str | None] = mapped_column(Text)
+    tax_id: Mapped[str | None] = mapped_column(Text)
+    address: Mapped[str | None] = mapped_column(Text)
+    phone: Mapped[str | None] = mapped_column(Text)
+    website: Mapped[str | None] = mapped_column(Text)
+    default_footer: Mapped[str | None] = mapped_column(Text)
+    accent_color: Mapped[str | None] = mapped_column(Text)
+    default_logo_asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("company_logos.id", ondelete="SET NULL")
+    )
+    updated_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CompanyLogo(Base):
+    """One image in the company's logo library (migration 0031).
+
+    The bytes live in blob storage under `branding/<tenant>/<id>.<ext>`; an SVG is
+    stored sanitized (no scripts, event handlers or external references).
+    """
+
+    __tablename__ = "company_logos"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    name: Mapped[str] = mapped_column(Text)
+    content_type: Mapped[str] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+    storage_key: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class RfqLine(Base):
