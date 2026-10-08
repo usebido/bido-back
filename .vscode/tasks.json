@@ -184,6 +184,13 @@
       "problemMatcher": []
     },
     {
+      "label": "aws dev: restart",
+      "detail": "Restart the api and worker (new tasks pick up changed secrets/config), then wait until stable",
+      "type": "shell",
+      "command": "aws ecs update-service --profile ${input:awsProfile} --region us-east-2 --cluster bido-dev --service api --force-new-deployment --query service.serviceName --output text && aws ecs update-service --profile ${input:awsProfile} --region us-east-2 --cluster bido-dev --service worker --force-new-deployment --query service.serviceName --output text && aws ecs wait services-stable --profile ${input:awsProfile} --region us-east-2 --cluster bido-dev --services api worker && echo 'api and worker restarted and stable'",
+      "problemMatcher": []
+    },
+    {
       "label": "aws dev: deploy main",
       "detail": "Run the Deploy (dev) workflow on main and watch it (GitHub CLI)",
       "type": "shell",
