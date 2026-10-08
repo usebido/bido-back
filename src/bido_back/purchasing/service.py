@@ -1015,6 +1015,7 @@ async def create_rfq_from_analysis(
                     description=item.description,
                     quantity=line.to_buy,
                     unit=line.unit,
+                    part_number=item.part_number,
                     mpn=item.mpn,
                     manufacturer=item.manufacturer,
                     category=rfq_category(item.category),

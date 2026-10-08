@@ -132,7 +132,8 @@ class PricePoint:
 
 
 async def price_history(session: AsyncSession, mpn: str, limit: int) -> list[PricePoint]:
-    """Quoted unit prices for an MPN across all of the tenant's RFQs, newest first."""
+    """Quoted unit prices for an MPN (or the buyer's part number) across the tenant's RFQs,
+    newest first."""
     rows = await session.execute(
         select(ProposalLine, Proposal, Rfq.ref, Supplier.name)
         .join(Proposal, Proposal.id == ProposalLine.proposal_id)
@@ -142,7 +143,11 @@ async def price_history(session: AsyncSession, mpn: str, limit: int) -> list[Pri
         .outerjoin(RfqLine, RfqLine.id == ProposalLine.rfq_line_id)
         .where(
             ProposalLine.unit_price.is_not(None),
-            or_(_mpn_matches(ProposalLine.offered_mpn, mpn), _mpn_matches(RfqLine.mpn, mpn)),
+            or_(
+                _mpn_matches(ProposalLine.offered_mpn, mpn),
+                _mpn_matches(RfqLine.mpn, mpn),
+                _mpn_matches(RfqLine.part_number, mpn),
+            ),
         )
         .order_by(Proposal.created_at.desc(), ProposalLine.min_quantity)
         .limit(limit)

@@ -92,6 +92,10 @@ class CopilotToolDeps:
     # Reads the text of those earlier files, for create_rfq when this message
     # has none. Only called when needed; None = there is nothing to read.
     earlier_attachments_text: Callable[[], Awaitable[str]] | None = None
+    # What the buyer wrote in this conversation, oldest first, for create_rfq: the
+    # intake agent takes part numbers and terms from these, not from the summary.
+    # Only called when needed; None = only the tool's text.
+    buyer_messages: Callable[[], Awaitable[list[str]]] | None = None
     storage: BlobStorage | None = None
     sheet_mapper: SheetMapper | None = None
     today: Callable[[], date] = lambda: datetime.now(UTC).date()
@@ -149,10 +153,14 @@ class ListRfqsOut(BaseModel):
 class LineItem(BaseModel):
     position: int
     description: str
+    # The buyer's own code: show it as the line's reference. `mpn` is the manufacturer's.
+    part_number: str | None
     mpn: str | None
     quantities: list[Decimal]
     unit: str
     need_by: date | None
+    incoterm: str | None
+    delivery_location: str | None
 
 
 class InviteItem(BaseModel):
@@ -341,7 +349,12 @@ class UpdateTemplateIn(BaseModel):
 
 class CreateRfqIn(BaseModel):
     text: str = Field(
-        min_length=1, max_length=8_000, description="What to quote: items, quantities, dates"
+        min_length=1,
+        max_length=8_000,
+        description=(
+            "What to quote: items, quantities, dates, Incoterm and delivery location. Copy the "
+            "buyer's part numbers exactly as they wrote them; never turn them into MPNs"
+        ),
     )
     include_attachments: bool = Field(
         default=True,
@@ -598,10 +611,13 @@ def _line_item(line: RfqLine) -> LineItem:
     return LineItem(
         position=line.position,
         description=line.description,
+        part_number=line.part_number,
         mpn=line.mpn,
         quantities=rfq_service.quantities_from_json(line.quantities),
         unit=line.unit,
         need_by=line.need_by,
+        incoterm=line.incoterm,
+        delivery_location=line.delivery_location,
     )
 
 
@@ -918,9 +934,10 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 attached = await deps.earlier_attachments_text()
             if attached:
                 text = f"{text}\n\n{attached}"
+        own_words = await deps.buyer_messages() if deps.buyer_messages is not None else []
         try:
             created = await rfq_service.create_rfq_from_text(
-                db, principal, text, deps.agents.intake
+                db, principal, text, deps.agents.intake, buyer_messages=own_words
             )
         except RfqError as exc:
             raise _service_error(exc) from None
@@ -933,10 +950,13 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 LineItem(
                     position=line.position,
                     description=line.description,
+                    part_number=line.part_number,
                     mpn=line.mpn,
                     quantities=list(line.quantities),
                     unit=line.unit,
                     need_by=line.need_by,
+                    incoterm=line.incoterm,
+                    delivery_location=line.delivery_location,
                 )
                 for line in created.lines
             ],
@@ -1093,10 +1113,13 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 LineItem(
                     position=line.position,
                     description=line.description,
+                    part_number=line.part_number,
                     mpn=line.mpn,
                     quantities=list(line.quantities),
                     unit=line.unit,
                     need_by=line.need_by,
+                    incoterm=line.incoterm,
+                    delivery_location=line.delivery_location,
                 )
                 for line in rfq.lines
             ],

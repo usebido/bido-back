@@ -6481,6 +6481,17 @@
             ],
             "title": "Need By"
           },
+          "part_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Part Number"
+          },
           "position": {
             "title": "Position",
             "type": "integer"
@@ -6513,6 +6524,7 @@
           "id",
           "position",
           "description",
+          "part_number",
           "mpn",
           "manufacturer",
           "category",
@@ -8175,6 +8187,17 @@
               }
             ],
             "title": "Need By"
+          },
+          "part_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Part Number"
           },
           "qualification": {
             "anyOf": [

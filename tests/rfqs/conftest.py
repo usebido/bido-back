@@ -59,10 +59,12 @@ INTAKE_OUTPUT = RfqIntakeOutput(
     lines=[
         RfqLineDraft(
             description="MLCC 100nF 50V X7R 0603",
+            part_number="CAP-0603-104",
             mpn="GRM188R71H104KA93D",
             manufacturer="Murata",
             quantities=[Decimal(4000), Decimal(10000)],
             incoterm="DAP",
+            delivery_location="Curitiba",
         ),
         RfqLineDraft(
             description="Board-to-board connector 40 pin",
