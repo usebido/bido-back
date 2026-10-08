@@ -617,6 +617,28 @@ async def add_invite(
         return _invite_view(invite, supplier.name)
 
 
+async def remove_invite(db: Db, principal: Principal, rfq_id: UUID, invite_id: UUID) -> RfqDetail:
+    """Take a supplier off a draft RFQ before any email was prepared for it.
+
+    Only a `draft` invite on a `draft` RFQ can go: once an email is pending approval or
+    sent, the supplier stays on the record.
+    """
+    async with tenant_session(db, principal.tenant_id) as session:
+        rfq = await _rfq(session, rfq_id, lock=True)
+        if rfq.status != "draft":
+            raise InvalidState(f"rfq {rfq_id} is {rfq.status}; its invites are frozen")
+        invite = await session.scalar(
+            select(Invite).where(Invite.id == invite_id, Invite.rfq_id == rfq_id)
+        )
+        if invite is None:
+            raise NotFound(f"invite {invite_id} not found")
+        if invite.status not in _EDITABLE_INVITES:
+            raise InvalidState(f"invite {invite_id} is {invite.status}; it cannot be removed")
+        await session.delete(invite)
+        await session.flush()
+        return await _detail(session, rfq)
+
+
 # --- Preparing the send ---------------------------------------------------------------
 
 

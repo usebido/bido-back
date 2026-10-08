@@ -69,6 +69,12 @@ async def test_routes_require_authentication() -> None:
             await http.get("/v1/approvals"),
             await http.get(f"/v1/rfqs/{uuid4()}/comparison"),
             await http.get("/v1/me"),
+            await http.patch(f"/v1/rfqs/{uuid4()}", json={"title": "x"}),
+            await http.post(
+                f"/v1/rfqs/{uuid4()}/lines", json={"description": "x", "quantities": [1]}
+            ),
+            await http.delete(f"/v1/rfqs/{uuid4()}/lines/{uuid4()}"),
+            await http.delete(f"/v1/rfqs/{uuid4()}/invites/{uuid4()}"),
         ]
     assert [r.status_code for r in responses] == [401] * len(responses)
 
@@ -300,3 +306,109 @@ async def test_create_needs_a_currency_it_can_tell(api: Api, rfq_rows: People) -
         "BRL",
         "stated",
     )
+
+
+async def _invite(http: httpx.AsyncClient, rfq_id: str, name: str, email: str) -> dict[str, object]:
+    supplier = (
+        await http.post("/v1/suppliers", json={"name": name, "contacts": [{"email": email}]})
+    ).json()
+    invite = await http.post(
+        f"/v1/rfqs/{rfq_id}/invites",
+        json={"supplier_id": supplier["id"], "contact_id": supplier["contacts"][0]["id"]},
+    )
+    assert invite.status_code == 201, invite.text
+    return invite.json()
+
+
+@pytest.mark.db
+async def test_draft_rfq_is_editable_over_http_until_an_email_is_prepared(
+    api: Api, rfq_rows: People
+) -> None:
+    http = api.http
+    rfq = (
+        await http.post("/v1/rfqs", json={"text": "Need MLCC and connectors", "currency": "EUR"})
+    ).json()
+    rfq_id = rfq["id"]
+
+    # The RFQ itself: only the fields present change.
+    patched = await http.patch(
+        f"/v1/rfqs/{rfq_id}",
+        json={
+            "title": "Connectors Q4",
+            "response_due": "2099-01-15",
+            "payment_terms": "30 days net",
+            "quote_validity_days": 45,
+            "incoterm": "DAP",
+            "delivery_location": "Vila Solana 732",
+        },
+    )
+    assert patched.status_code == 200, patched.text
+    body = patched.json()
+    assert (body["title"], body["response_due"]) == ("Connectors Q4", "2099-01-15")
+    assert (body["payment_terms"], body["quote_validity_days"]) == ("30 days net", 45)
+    assert {(line["incoterm"], line["delivery_location"]) for line in body["lines"]} == {
+        ("DAP", "Vila Solana 732")
+    }
+    assert (await http.patch(f"/v1/rfqs/{rfq_id}", json={"title": None})).status_code == 409
+    assert (await http.patch(f"/v1/rfqs/{rfq_id}", json={"price": 1})).status_code == 422
+
+    # Lines: add at the end, remove, never the last one.
+    added = await http.post(
+        f"/v1/rfqs/{rfq_id}/lines",
+        json={
+            "description": "Steel sheet 3mm",
+            "part_number": "100000101",
+            "quantities": [7500],
+            "unit": "kg",
+            "need_by": "2099-01-31",
+        },
+    )
+    assert added.status_code == 201, added.text
+    lines = added.json()["lines"]
+    assert [line["position"] for line in lines] == [1, 2, 3]
+    assert (lines[-1]["part_number"], lines[-1]["unit"], lines[-1]["quantities"]) == (
+        "100000101",
+        "kg",
+        ["7500"],
+    )
+    removed = await http.delete(f"/v1/rfqs/{rfq_id}/lines/{lines[0]['id']}")
+    assert removed.status_code == 200, removed.text
+    assert [line["position"] for line in removed.json()["lines"]] == [1, 2]
+    assert (await http.delete(f"/v1/rfqs/{rfq_id}/lines/{uuid4()}")).status_code == 404
+    remaining = removed.json()["lines"]
+    assert (await http.delete(f"/v1/rfqs/{rfq_id}/lines/{remaining[0]['id']}")).status_code == 200
+    last = await http.delete(f"/v1/rfqs/{rfq_id}/lines/{remaining[1]['id']}")
+    assert last.status_code == 409
+
+    # Invites: a draft invite can be taken off.
+    dropped = await _invite(http, rfq_id, "Rhein", "jonas@rhein.example.test")
+    kept = await _invite(http, rfq_id, "Main", "ana@main.example.test")
+    after = await http.delete(f"/v1/rfqs/{rfq_id}/invites/{dropped['id']}")
+    assert after.status_code == 200, after.text
+    assert [i["id"] for i in after.json()["invites"]] == [kept["id"]]
+    assert (await http.delete(f"/v1/rfqs/{rfq_id}/invites/{dropped['id']}")).status_code == 404
+
+    # Once an email is prepared, its approval's content can never go stale: every edit is 409.
+    sent = await http.post(f"/v1/rfqs/{rfq_id}/send")
+    assert sent.status_code == 200, sent.text
+    [prepared] = sent.json()["approvals"]
+    frozen = [
+        await http.patch(f"/v1/rfqs/{rfq_id}", json={"title": "Changed"}),
+        await http.post(f"/v1/rfqs/{rfq_id}/lines", json={"description": "x", "quantities": [1]}),
+        await http.delete(f"/v1/rfqs/{rfq_id}/lines/{remaining[1]['id']}"),
+        await http.delete(f"/v1/rfqs/{rfq_id}/invites/{kept['id']}"),
+    ]
+    assert [r.status_code for r in frozen] == [409, 409, 409, 409]
+    detail = (await http.get(f"/v1/rfqs/{rfq_id}")).json()
+    assert detail["title"] == "Connectors Q4"
+    assert [i["status"] for i in detail["invites"]] == ["pending_approval"]
+    queue = (await http.get("/v1/approvals", params={"status": "pending"})).json()
+    assert [i["id"] for i in queue] == [prepared["approval_id"]]
+
+    # Another tenant can neither see nor edit it.
+    api.principal = Principal(tenant_id=rfq_rows.other_tenant, user_id=rfq_rows.other_approver)
+    assert (await http.patch(f"/v1/rfqs/{rfq_id}", json={"title": "x"})).status_code == 404
+    assert (
+        await http.post(f"/v1/rfqs/{rfq_id}/lines", json={"description": "x", "quantities": [1]})
+    ).status_code == 404
+    assert (await http.delete(f"/v1/rfqs/{rfq_id}/invites/{kept['id']}")).status_code == 404
