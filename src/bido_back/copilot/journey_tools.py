@@ -432,17 +432,13 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
     async def create_rfq_from_assessment(
         ctx: ToolContext, args: CreateAssessmentRfqIn
     ) -> AssessmentRfqResult:
+        # Every request field passes through (pending_validation, max_suppliers_per_line...):
+        # copying them one by one silently dropped the ones added later.
+        request = AssessmentRfqRequest.model_validate(
+            args.model_dump(include=set(AssessmentRfqRequest.model_fields))
+        )
         try:
-            return await draft_from_snapshot(
-                db,
-                _principal(ctx),
-                args.assessment_id,
-                AssessmentRfqRequest(
-                    title=args.title,
-                    base_currency=args.base_currency,
-                    response_due=args.response_due,
-                ),
-            )
+            return await draft_from_snapshot(db, _principal(ctx), args.assessment_id, request)
         except purchasing_service.PurchasingError as exc:
             raise ToolError(str(exc)) from None
 
@@ -804,8 +800,13 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         Tool(
             "create_rfq_from_assessment",
             "Create one draft RFQ from validated saved source quantities, units, dates and "
-            "evidence. Blocks unresolved assessments. Requires the buyer's RFQ currency. "
-            "No suppliers are invited and nothing is sent; use invite_suppliers next.",
+            "evidence. Blocks unresolved assessments unless pending_validation makes it "
+            "PRELIMINARY. Requires the buyer's RFQ currency. Invites each line's assessed "
+            "suppliers (suggested first) as DRAFT invites, creating a supplier only from the "
+            "files' company name and email, and sets each line's default target/maximum from "
+            "the internal estimate. Returns invited, skipped_suppliers (with why) and "
+            "lines_without_limits. Nothing is sent or approved: the buyer approves suppliers "
+            "and limits in the negotiation mandate.",
             CreateAssessmentRfqIn,
             AssessmentRfqResult,
             "draft",
