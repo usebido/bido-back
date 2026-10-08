@@ -364,7 +364,7 @@ async def test_without_a_reply_by_date_the_model_is_told_to_ask_for_one(
         assert "reply-by date" in tools.tools[name].description
         assert "set_rfq_terms" in tools.tools[name].description
 
-    created = await tools.call(ctx, "create_rfq", text="MLCC and connectors")
+    created = await tools.call(ctx, "create_rfq", text="MLCC and connectors", currency="EUR")
     await tools.call(ctx, "invite_suppliers", rfq=created.ref, supplier_ids=[str(rhein.id)])
     async with tenant_session(app_engine, principal.tenant_id) as session:
         await session.execute(update(Rfq).where(Rfq.id == created.id).values(response_due=None))
