@@ -392,7 +392,9 @@ async def test_the_deadline_closes_with_the_best_offers_and_stops_follow_ups(
     app_engine: AsyncEngine, rfq_rows: People
 ) -> None:
     world = await World(app_engine, rfq_rows).setup(silent=True)
-    deadline = datetime.now(UTC) + timedelta(days=5)
+    # Long enough that a chase is due before it whatever weekday the test runs
+    # on (the first chase is 2 business days after the send).
+    deadline = datetime.now(UTC) + timedelta(days=10)
     await world.configure(deadline=deadline)
     await world.offer("rhein", ("0.050", "1.20"))
     await world.offer("lyon", ("0.038", "1.10"))
@@ -404,7 +406,7 @@ async def test_the_deadline_closes_with_the_best_offers_and_stops_follow_ups(
 
     # A chase for the silent supplier is due before the deadline.
     chases = FakeFollowupWriter()
-    later = datetime.now(UTC) + timedelta(days=4)
+    later = datetime.now(UTC) + timedelta(days=7)
     await followup_service.sweep_tenant(world.engine, world.people.tenant, writer=chases, now=later)
     assert [t.kind for t in chases.calls] == ["chase"]
 

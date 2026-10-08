@@ -12,9 +12,11 @@
     `{call_id, tool, ok, output | error}`: a lookup or a draft action.
   - `artifact` `{kind, data}`: a card to render. Kinds: `rfq_draft`,
     `approvals` (emails waiting for approval), `comparison`, `rfq_template`.
-  - `text_delta` `{text}` (reserved: the reply comes whole in `answer` today),
-    `approval_requested` (reserved: the copilot has no act tool).
-  - `answer` `{text}`: the reply.
+  - `text_delta` `{text}`: the next piece of the reply, as the model writes it.
+    Append them in order; text written before a tool call and after it is
+    separated by a blank line.
+  - `approval_requested` (reserved: the copilot has no act tool).
+  - `answer` `{text}`: the whole reply (the deltas joined), after the last delta.
   - `run_failed` `{code, message}`: the run stopped without an answer.
   - `done` `{ok, conversation_id, actions}`: always last. `actions` lists the
     draft tools that ran (created RFQs, invites, prepared sends, template

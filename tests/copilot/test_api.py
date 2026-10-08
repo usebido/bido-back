@@ -34,7 +34,7 @@ from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.settings import Settings
 from bido_back.storage import BlobStorage
-from tests.agents.test_runner import Script, final, reply, script, tool_use
+from tests.agents.test_runner import Script, reply, script, text, tool_use
 from tests.approvals.conftest import People
 from tests.db.conftest import agno_engine
 from tests.onboarding.conftest import FakeStorage
@@ -129,7 +129,7 @@ async def test_a_lookup_streams_in_order(
     rfq = await make_rfq(app_engine, api.principal)
     stub = script(
         reply(tool_use("fc_1", "list_rfqs", limit=5)),
-        final(answer=f"You have one RFQ: {rfq.ref}."),
+        reply(text(f"You have one RFQ: {rfq.ref}.")),
     )
 
     response = await api.http.post("/v1/copilot/messages", json={"message": "my RFQs?"})
@@ -137,17 +137,27 @@ async def test_a_lookup_streams_in_order(
     assert response.status_code == 200, response.text
     assert response.headers["content-type"].startswith("text/event-stream")
     events = parse_sse(response.text)
-    assert [e["type"] for e in events] == [
+    types = [e["type"] for e in events]
+    # The reply streams as text deltas, then comes whole in `answer`.
+    deltas = [e for e in events if e["type"] == "text_delta"]
+    assert len(deltas) > 1
+    assert [t for t in types if t != "text_delta"] == [
         "conversation",
         "tool_called",
         "tool_result",
         "answer",
         "done",
     ]
-    assert events[2]["output"]["rfqs"][0]["ref"] == rfq.ref
-    assert events[3]["text"] == "You have one RFQ: RFQ-1."
-    assert events[4]["ok"] is True and events[4]["actions"] == []
-    assert events[4]["conversation_id"] == events[0]["conversation_id"]
+    assert types.index("tool_result") < types.index("text_delta")
+    assert max(i for i, t in enumerate(types) if t == "text_delta") < types.index("answer")
+    by_type = {e["type"]: e for e in events}
+    assert by_type["tool_result"]["output"]["rfqs"][0]["ref"] == rfq.ref
+    assert by_type["answer"]["text"] == "You have one RFQ: RFQ-1."
+    assert "".join(d["text"] for d in deltas) == by_type["answer"]["text"]
+    assert by_type["done"]["ok"] is True and by_type["done"]["actions"] == []
+    assert by_type["done"]["conversation_id"] == events[0]["conversation_id"]
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-accel-buffering"] == "no"
     # The model saw the buyer's message as our input contract.
     first_input = json.dumps(stub.calls[0]["input"])
     assert "my RFQs?" in first_input
@@ -162,7 +172,7 @@ async def test_preparing_a_send_creates_approvals_not_emails(
     script(
         reply(tool_use("fc_1", "invite_suppliers", rfq=rfq.ref, supplier_ids=[str(rhein.id)])),
         reply(tool_use("fc_2", "prepare_send", rfq=rfq.ref)),
-        final(answer="The email to Rhein is waiting for an approver."),
+        reply(text("The email to Rhein is waiting for an approver.")),
     )
 
     response = await api.http.post(
@@ -196,6 +206,22 @@ async def test_a_failed_run_still_ends_with_done(
 
 
 @pytest.mark.db
+async def test_a_stream_that_breaks_mid_answer_fails_then_ends_with_done(
+    api: Api, copilot_rows: People, script: Script
+) -> None:
+    from tests.agents.test_runner import StreamFailure
+
+    script(StreamFailure("Let me look at", RuntimeError("connection reset")))
+
+    response = await api.http.post("/v1/copilot/messages", json={"message": "hi"})
+
+    types = [e["type"] for e in parse_sse(response.text)]
+    assert "text_delta" in types
+    assert "answer" not in types
+    assert types[-2:] == ["run_failed", "done"]
+
+
+@pytest.mark.db
 async def test_unknown_attachment_is_404_before_streaming(api: Api, copilot_rows: People) -> None:
     response = await api.http.post(
         "/v1/copilot/messages", json={"message": "read this", "attachment_ids": [str(uuid4())]}
@@ -212,7 +238,7 @@ async def test_a_conversation_keeps_its_history_for_its_owner_only(
         agno_database_url=agno_engine.url.render_as_string(hide_password=False),
     )
     conversation = str(uuid4())
-    stub = script(final(answer="Olá! Como posso ajudar?"), final(answer="Você perguntou 'oi'."))
+    stub = script(reply(text("Olá! Como posso ajudar?")), reply(text("Você perguntou 'oi'.")))
 
     for message in ("oi", "o que eu perguntei?"):
         response = await api.http.post(

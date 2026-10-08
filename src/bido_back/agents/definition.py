@@ -31,7 +31,10 @@ class AgentDefinition[OutT: BaseModel]:
     prompt_version: int
     model: str
     # The run's final answer. The model is asked for it as structured output,
-    # and the runner validates it again before reporting RunCompleted.
+    # and the runner validates it again before reporting RunCompleted. With
+    # `stream_text`, the model writes free text instead (streamed as TextDelta
+    # events) and the runner puts the whole text in the output model's single
+    # str field.
     output_model: type[OutT]
     tools: Sequence[AnyTool] = field(default_factory=tuple[AnyTool, ...])
     # Every model request counts as one turn, including the final-output turn.
@@ -44,6 +47,10 @@ class AgentDefinition[OutT: BaseModel]:
     # How many earlier runs of the same session the model sees. 0 = none.
     # Needs run storage (agno_database_url); ignored without it.
     history_runs: int = 0
+    # Free-text final answer, streamed token by token, instead of structured
+    # output. Only for conversational agents whose output model is one str
+    # field (the copilot); agents whose output feeds code keep structured output.
+    stream_text: bool = False
 
     def __post_init__(self) -> None:
         match = _PROMPT_FILE.match(self.prompt_file)
@@ -58,9 +65,23 @@ class AgentDefinition[OutT: BaseModel]:
             raise ValueError("max_turns must be >= 1")
         if self.history_runs < 0:
             raise ValueError("history_runs must be >= 0")
+        if self.stream_text:
+            self.text_field()  # validates the output model's shape
         names = [tool.name for tool in self.tools]
         if len(names) != len(set(names)):
             raise ValueError(f"duplicate tool names in agent {self.name!r}: {names}")
+
+    def text_field(self) -> str:
+        """The output model's single str field, which a streamed text answer fills."""
+        fields = self.output_model.model_fields
+        if len(fields) != 1:
+            raise ValueError(
+                f"agent {self.name!r}: stream_text needs an output model with exactly one field"
+            )
+        name, info = next(iter(fields.items()))
+        if info.annotation is not str:
+            raise ValueError(f"agent {self.name!r}: stream_text needs a str output field")
+        return name
 
     def tool(self, name: str) -> AnyTool | None:
         for tool in self.tools:
