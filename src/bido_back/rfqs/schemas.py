@@ -338,6 +338,12 @@ class RfqEmailDraft(BaseModel):
     cc: list[str]
     subject: str
     body: str
+    # The same email as HTML (the item table as a real table), when the proposal
+    # has one: the approver previews what the supplier's mail client shows.
+    html_body: str | None = None
+    # File name of the RFQ document PDF attached to this email, when there is
+    # one (`GET /v1/rfqs/{rfq_id}/invites/{invite_id}/document.pdf` renders it).
+    attachment_name: str | None = None
 
 
 class NegotiationEmailDraft(BaseModel):

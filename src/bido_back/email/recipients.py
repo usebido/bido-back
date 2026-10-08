@@ -56,6 +56,61 @@ def is_test_domain(domain: str) -> bool:
     return d in _RESERVED_EXACT or d.endswith(_RESERVED_SUFFIXES)
 
 
+# Free/consumer mailbox providers: anyone can own an address there, so a
+# confirmation never covers the whole domain, only the exact address. The one
+# list of them; `yahoo` and `gmx` match every country domain (yahoo.com.br,
+# gmx.de, ...).
+_CONSUMER_EXACT: Final = frozenset(
+    {
+        "gmail.com",
+        "googlemail.com",
+        "outlook.com",
+        "outlook.com.br",
+        "hotmail.com",
+        "hotmail.com.br",
+        "live.com",
+        "msn.com",
+        "icloud.com",
+        "me.com",
+        "mac.com",
+        "aol.com",
+        "proton.me",
+        "protonmail.com",
+        "pm.me",
+        "zoho.com",
+        "yandex.com",
+        "mail.com",
+        "uol.com.br",
+        "bol.com.br",
+        "terra.com.br",
+        "ig.com.br",
+    }
+)
+_CONSUMER_LABELS: Final = ("yahoo", "ymail", "gmx", "hotmail", "outlook", "live")
+
+
+def is_consumer_domain(domain: str) -> bool:
+    """A free mailbox provider (gmail.com, outlook.com, yahoo.*, ...), not a company."""
+    d = domain.lower().rstrip(".")
+    if d in _CONSUMER_EXACT:
+        return True
+    # yahoo.com.br, gmx.de, hotmail.fr, live.co.uk: the provider label comes
+    # first and only country/generic suffixes follow.
+    first, _, rest = d.partition(".")
+    return first in _CONSUMER_LABELS and bool(rest) and len(rest) <= 6
+
+
+def confirmation_key(address: str) -> str | None:
+    """What a person confirms to let email go to `address`: its domain, or for a
+    consumer provider the exact (lower-cased) address. None if not an address."""
+    domain = domain_of(address)
+    if domain is None:
+        return None
+    if is_consumer_domain(domain):
+        return address.strip().lower()
+    return domain
+
+
 class MxResolver(Protocol):
     async def has_mx(self, domain: str) -> bool | None:
         """True: publishes MX. False: no such domain, or no MX. None: unknown."""

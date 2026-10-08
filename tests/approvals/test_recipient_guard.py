@@ -205,3 +205,104 @@ async def test_acts_without_email_are_not_checked(app_engine: AsyncEngine, peopl
     )
 
     assert outcome.status == "approved"
+
+
+# --- Free mailbox providers: the exact address, never the domain ----------------------------
+
+
+async def test_a_consumer_address_is_confirmed_alone_never_its_domain(
+    app_engine: AsyncEngine, people: People
+) -> None:
+    async with tenant_session(app_engine, people.tenant) as session:
+        blocked = await unconfirmed_domains(
+            session, people.tenant, ["Joao.Supplier@Gmail.com", "b@rame-italia.it"]
+        )
+        # The block names the address at gmail.com, the domain elsewhere.
+        assert blocked == ["joao.supplier@gmail.com", "rame-italia.it"]
+        # A bare consumer domain cannot be confirmed: it would open every address there.
+        assert await confirm_domains(session, people.tenant, people.owner, ["gmail.com"]) == []
+        assert await confirm_domains(
+            session, people.tenant, people.owner, ["joao.supplier@GMAIL.com"]
+        ) == ["joao.supplier@gmail.com"]
+    async with tenant_session(app_engine, people.tenant) as session:
+        assert await unconfirmed_domains(session, people.tenant, ["joao.supplier@gmail.com"]) == []
+        # Another gmail.com address is still blocked.
+        assert await unconfirmed_domains(session, people.tenant, ["someone.else@gmail.com"]) == [
+            "someone.else@gmail.com"
+        ]
+
+
+async def test_a_consumer_domain_confirmed_before_the_rule_matches_nothing(
+    app_engine: AsyncEngine, people: People
+) -> None:
+    async with tenant_session(app_engine, people.tenant) as session:
+        session.add(
+            OutboundDomainConfirmation(
+                tenant_id=people.tenant, domain="gmail.com", confirmed_by=people.owner
+            )
+        )
+    async with tenant_session(app_engine, people.tenant) as session:
+        assert await unconfirmed_domains(session, people.tenant, ["x@gmail.com"]) == ["x@gmail.com"]
+
+
+async def test_check_recipients_says_what_to_confirm(
+    app_engine: AsyncEngine, people: People
+) -> None:
+    class GmailHasMx:
+        async def has_mx(self, domain: str) -> bool | None:
+            return True
+
+    async with tenant_session(app_engine, people.tenant) as session:
+        checks = await check_recipients(
+            session,
+            people.tenant,
+            ["a@supplier.test", "b@rame-italia.it", "C@Gmail.com", "d@yahoo.com.br"],
+            GmailHasMx(),
+        )
+    assert [(c.confirm_scope, c.confirm_key) for c in checks] == [
+        (None, None),
+        ("domain", "rame-italia.it"),
+        ("address", "c@gmail.com"),
+        ("address", "d@yahoo.com.br"),
+    ]
+
+
+async def test_approving_to_a_gmail_supplier_confirms_only_that_address(
+    app_engine: AsyncEngine, people: People
+) -> None:
+    approval_id = await propose(
+        app_engine,
+        people.tenant,
+        people.owner,
+        email_args("fornecedor.a@gmail.com"),
+        tool="send_rfq_email",
+    )
+    jobs = FakeJobQueue()
+
+    # Confirming the bare domain does not unlock it.
+    with pytest.raises(ApprovalRecipientsUnconfirmed) as raised:
+        await decide_approval(
+            app_engine,
+            owner(people),
+            approval_id,
+            "approve",
+            jobs=jobs,
+            confirmed_domains=["gmail.com"],
+        )
+    assert raised.value.domains == ["fornecedor.a@gmail.com"]
+
+    outcome = await decide_approval(
+        app_engine,
+        owner(people),
+        approval_id,
+        "approve",
+        jobs=jobs,
+        confirmed_domains=["Fornecedor.A@gmail.com"],
+    )
+    assert outcome.status == "approved"
+    async with tenant_session(app_engine, people.tenant) as session:
+        rows = list(await session.scalars(select(OutboundDomainConfirmation)))
+        assert [r.domain for r in rows] == ["fornecedor.a@gmail.com"]
+        assert await unconfirmed_domains(session, people.tenant, ["fornecedor.b@gmail.com"]) == [
+            "fornecedor.b@gmail.com"
+        ]

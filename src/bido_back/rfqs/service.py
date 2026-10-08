@@ -1134,6 +1134,20 @@ async def prepare_send(
 # --- The approval queue ---------------------------------------------------------------
 
 
+def _rfq_email_extras(args: SendRfqEmailArgs | SendFollowupEmailArgs) -> dict[str, str]:
+    """HTML body and PDF name of an RFQ email, when the proposal carries them."""
+    from bido_back.rfqs.document import document_filename
+
+    extras: dict[str, str] = {}
+    html = getattr(args, "html_body", None)
+    if isinstance(html, str) and html:
+        extras["html_body"] = html
+    document = getattr(args, "document", None)
+    if document is not None:
+        extras["attachment_name"] = document_filename(document)
+    return extras
+
+
 async def list_approvals(
     db: Db,
     principal: Principal,
@@ -1216,6 +1230,7 @@ async def list_approvals(
                 cc=list(args.cc),
                 subject=args.subject,
                 body=args.body,
+                **_rfq_email_extras(args),
             )
         negotiation: NegotiationEmailDraft | None = None
         negotiation_args = negotiations.get(approval.id)

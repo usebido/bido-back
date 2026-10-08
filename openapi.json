@@ -7963,6 +7963,32 @@
             "title": "Address",
             "type": "string"
           },
+          "confirm_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirm Key"
+          },
+          "confirm_scope": {
+            "anyOf": [
+              {
+                "enum": [
+                  "domain",
+                  "address"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confirm Scope"
+          },
           "confirmed": {
             "title": "Confirmed",
             "type": "boolean"
@@ -8838,6 +8864,17 @@
       "RfqEmailDraft": {
         "description": "The exact email an approver approves (the stored, hashed arguments).",
         "properties": {
+          "attachment_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachment Name"
+          },
           "body": {
             "title": "Body",
             "type": "string"
@@ -8848,6 +8885,17 @@
             },
             "title": "Cc",
             "type": "array"
+          },
+          "html_body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Html Body"
           },
           "invite_id": {
             "format": "uuid",

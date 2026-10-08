@@ -38,6 +38,8 @@ class OutboundDomains(BaseModel):
 class ConfirmDomainsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Company domains, or exact addresses at free mailbox providers (gmail.com,
+    # outlook.com, ...); a bare free-provider domain is ignored.
     domains: list[str] = Field(min_length=1, max_length=50)
 
 
