@@ -75,7 +75,9 @@ class Tools:
         return await tool.invoke(ctx, tool.parse_input(args))
 
 
-def make_tools(engine: AsyncEngine, attachments_text: str = "") -> Tools:
+def make_tools(
+    engine: AsyncEngine, attachments_text: str = "", attachment_ids: tuple[UUID, ...] = ()
+) -> Tools:
     mailboxes = FakeMailboxes()
     agents = fake_agents()
     assert isinstance(agents.intake, FakeIntake)
@@ -85,6 +87,7 @@ def make_tools(engine: AsyncEngine, attachments_text: str = "") -> Tools:
             agents=agents,
             mailboxes=mailboxes,
             attachments_text=attachments_text,
+            attachment_ids=attachment_ids,
             today=lambda: date(2026, 10, 7),
         )
     )

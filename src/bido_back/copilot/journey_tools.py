@@ -200,8 +200,13 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         ctx: ToolContext, args: ImportSpreadsheetIn
     ) -> WorkbookImportReport:
         principal = _principal(ctx)
-        if args.upload_id not in deps.attachment_ids:
-            raise ToolError("that id is not one of this message's attachments")
+        upload_id = args.upload_id
+        if upload_id not in deps.attachment_ids:
+            # Models sometimes copy an id wrongly. With a single attachment there
+            # is only one file it can mean.
+            if len(deps.attachment_ids) != 1:
+                raise ToolError("that id is not one of this message's attachments")
+            upload_id = next(iter(deps.attachment_ids))
         if deps.storage is None:
             raise ToolError("file storage is not available")
         try:
@@ -209,7 +214,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
                 db,
                 deps.storage,
                 principal,
-                args.upload_id,
+                upload_id,
                 mapper=deps.sheet_mapper,
                 confirmed=args.confirmed,
             )

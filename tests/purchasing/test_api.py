@@ -10,7 +10,7 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.agents.context import ToolContext
-from bido_back.agents.tools import AnyTool
+from bido_back.agents.tools import AnyTool, ToolError
 from bido_back.api.deps import ApiResources, get_db, get_principal, get_storage
 from bido_back.api.onboarding import onboarding_router
 from bido_back.api.purchasing import purchasing_router
@@ -159,3 +159,28 @@ async def test_copilot_tools(app_engine: AsyncEngine, purchasing_rows: People) -
     assert isinstance(out, RfqFromAnalysisOut)
     assert out.status == "draft" and out.invited_suppliers == ["Cuscinetti Precisione S.r.l."]
     assert isinstance(RfqFromAnalysisIn(analysis_id=UUID(int=1)), RfqFromAnalysisIn)
+
+
+@pytest.mark.db
+async def test_a_miscopied_analysis_id_uses_the_latest_open_analysis(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = buyer(purchasing_rows)
+    await make_supplier(app_engine, who, "Cuscinetti Precisione S.r.l.")
+    await seed(app_engine, who)
+    tools = copilot_tools(
+        CopilotToolDeps(
+            db=app_engine, agents=fake_agents(), mailboxes=FakeMailboxes(), today=lambda: TODAY
+        )
+    )
+    ctx = ToolContext(tenant_id=who.tenant_id, user_id=who.user_id, run_id=uuid4())
+    analyse = tool(tools, "run_purchase_analysis")
+    draft = tool(tools, "create_rfq_from_analysis")
+    await analyse.invoke(ctx, analyse.parse_input({"product": "motor"}))
+
+    out = await draft.invoke(ctx, draft.parse_input({"analysis_id": str(uuid4())}))
+
+    assert isinstance(out, RfqFromAnalysisOut) and out.status == "draft"
+    # The fallback is used up: that analysis now has its RFQ.
+    with pytest.raises(ToolError, match="not found"):
+        await draft.invoke(ctx, draft.parse_input({"analysis_id": str(uuid4())}))

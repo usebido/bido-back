@@ -29,12 +29,13 @@ model.
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Final, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.agents.context import ToolContext
@@ -46,7 +47,7 @@ from bido_back.comparison.loader import load_comparison
 from bido_back.copilot import queries
 from bido_back.copilot.journey_tools import journey_tools
 from bido_back.db import tenant_session
-from bido_back.db.models import Invite, Rfq, RfqLine, RfqTemplate
+from bido_back.db.models import Analysis, Invite, Rfq, RfqLine, RfqTemplate
 from bido_back.negotiation import service as negotiation_service
 from bido_back.negotiation.agents import NegotiationWriter, default_negotiation_writer
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
@@ -473,6 +474,22 @@ class ListOpenPosOut(BaseModel):
 
 
 # --- Handlers ------------------------------------------------------------------------------
+
+
+async def _latest_open_analysis(db: Db, principal: Principal) -> UUID | None:
+    """The buyer's newest analysis from the last 24 hours that has no RFQ yet."""
+    since = datetime.now(UTC) - timedelta(hours=24)
+    async with tenant_session(db, principal.tenant_id) as session:
+        return await session.scalar(
+            select(Analysis.id)
+            .where(
+                Analysis.created_by == principal.user_id,
+                Analysis.rfq_id.is_(None),
+                Analysis.created_at >= since,
+            )
+            .order_by(Analysis.created_at.desc())
+            .limit(1)
+        )
 
 
 # --- run_purchase_analysis / create_rfq_from_analysis ---------------------------------------
@@ -1022,10 +1039,23 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         ctx: ToolContext, args: RfqFromAnalysisIn
     ) -> RfqFromAnalysisOut:
         principal = _principal(ctx)
+        analysis_id = args.analysis_id
         try:
             created = await purchasing_service.create_rfq_from_analysis(
-                db, principal, args.analysis_id, RfqFromAnalysisRequest()
+                db, principal, analysis_id, RfqFromAnalysisRequest()
             )
+        except purchasing_service.NotFound:
+            # Models sometimes copy an id wrongly: fall back to this buyer's most
+            # recent analysis that has no RFQ yet, if there is one from today.
+            latest = await _latest_open_analysis(db, principal)
+            if latest is None or latest == analysis_id:
+                raise ToolError(f"analysis {analysis_id} not found") from None
+            try:
+                created = await purchasing_service.create_rfq_from_analysis(
+                    db, principal, latest, RfqFromAnalysisRequest()
+                )
+            except purchasing_service.PurchasingError as exc:
+                raise ToolError(str(exc)) from None
         except purchasing_service.PurchasingError as exc:
             raise ToolError(str(exc)) from None
         rfq = created.rfq
