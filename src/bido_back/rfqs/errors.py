@@ -27,3 +27,11 @@ class MailboxNotConnected(InvalidState):
 
 class MailboxNotConfigured(InvalidState):
     """This deployment cannot use buyer mailboxes (token encryption is not set up)."""
+
+
+class CurrencyRequired(RfqError):
+    """Nothing tells which currency the RFQ is in: the buyer has to say (no silent default)."""
+
+
+class UnknownCurrency(RfqError):
+    """A currency code Bido cannot convert (not EUR nor an ECB reference currency)."""
