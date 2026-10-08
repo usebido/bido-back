@@ -23,6 +23,7 @@ from bido_back.purchasing.sources.contracts import (
 )
 from bido_back.purchasing.sources.mapping import Mapper, map_sources
 from bido_back.purchasing.sources.planning import assess_plan, planning_context
+from bido_back.purchasing.sources.pricing import spend_totals
 from bido_back.purchasing.sources.readers import SourceDocument, read_source
 from bido_back.purchasing.sources.snapshots import find_snapshot, save_snapshot
 from bido_back.storage import BlobStorage
@@ -102,6 +103,7 @@ async def analyze_documents(
             and all(row.inspected for row in all_coverage)
             else "needs_review"
         ),
+        totals=spend_totals(result.lines),
     )
 
 
@@ -145,7 +147,7 @@ async def analyze_uploads(
     source_key = hashlib.sha256(
         json.dumps(
             {
-                "version": 2,
+                "version": 3,
                 "objective": objective,
                 "scope": scope.model_dump(mode="json") if scope is not None else None,
                 "sources": sorted(

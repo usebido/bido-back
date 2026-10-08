@@ -9,6 +9,7 @@ demand balance. Every issue retains the original evidence coordinates.
 import re
 from collections import Counter, defaultdict
 from collections.abc import Sequence
+from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
 from bido_back.purchasing.importers import norm
@@ -36,6 +37,14 @@ from bido_back.purchasing.sources.evidence import (
 )
 from bido_back.purchasing.sources.evidence import (
     source_text as _text,
+)
+from bido_back.purchasing.sources.joins import CANCELLED, coalesce, state
+from bido_back.purchasing.sources.pricing import (
+    ORDER_KEY,
+    OrderFacts,
+    measure,
+    reconcile_order,
+    reference_date,
 )
 
 _ZERO = Decimal(0)
@@ -601,6 +610,50 @@ def supplier_evidence(
     return result
 
 
+def _supplier_key(code: str | None, name: str | None) -> str | None:
+    if code is not None:
+        return f"code:{code}"
+    return f"name:{_name(name)}" if name is not None else None
+
+
+def _orders(
+    purchases: Sequence[Record],
+    records: Sequence[Record],
+    unit: str | None,
+    as_of: date | None,
+    issues: list[Issue],
+) -> list[OrderFacts]:
+    """The item's purchase lines at any location, joined to receipts where keyed."""
+    if as_of is None:
+        return []
+    keyed = [r for r in purchases if all(_text(r, field) for field in ORDER_KEY)]
+    conflicts: list[Issue] = []
+    lines = [
+        *coalesce(keyed, ORDER_KEY, conflicts, "conflicting_purchase_history"),
+        *(r for r in purchases if not all(_text(r, field) for field in ORDER_KEY)),
+    ]
+    # Measured history supplements this assessment; it never blocks its quantities.
+    issues.extend(issue.model_copy(update={"severity": "warning"}) for issue in conflicts)
+    orders: list[OrderFacts] = []
+    for order in lines:
+        key = _supplier_key(_text(order, "supplier_code"), _text(order, "supplier_name"))
+        ordered_at = _day(order, "ordered_at", [])
+        if key is None or ordered_at is None or ordered_at > as_of or state(order) in CANCELLED:
+            continue
+        orders.append(
+            reconcile_order(
+                order,
+                records,
+                supplier=key,
+                ordered_at=ordered_at,
+                unit=unit,
+                as_of=as_of,
+                issues=issues,
+            )
+        )
+    return orders
+
+
 def assess(records: Sequence[Record]) -> Assessment:
     """Produce a source-grounded assessment, never write data or propose an action."""
     unique = _deduplicate(records)
@@ -613,6 +666,8 @@ def assess(records: Sequence[Record]) -> Assessment:
     for record in unique:
         if record.kind == "purchase" and (part := _text(record, "part_number")) is not None:
             purchases[part].append(record)
+    # Without a planning scope, history is measured up to the latest date the evidence shows.
+    as_of = reference_date(unique)
     for (part, location), group in grouped.items():
         line = _planning_line(part, location, group)
         if location is None and any(key[0] == part and key[1] is not None for key in grouped):
@@ -640,10 +695,26 @@ def assess(records: Sequence[Record]) -> Assessment:
                 )
                 continue
             by_supplier[code, None if code else _name(name)].append(record)
-        line.suppliers = [
-            supplier_evidence(rows, masters, performance, all_purchases, line.issues)
-            for rows in by_supplier.values()
-        ]
+        orders = _orders(purchases[part], unique, line.unit, as_of, line.issues)
+        suppliers: dict[str, SupplierEvidence] = {}
+        for (code, name), rows in by_supplier.items():
+            key = _supplier_key(code, name) or ""
+            # A completed purchase (closed, fully received) sets the last price when one
+            # reconciles; otherwise the latest purchase order does, under its disclosed basis.
+            completed = [o.order for o in orders if o.supplier == key and o.completed]
+            suppliers[key] = supplier_evidence(
+                completed or rows,
+                masters,
+                performance,
+                all_purchases,
+                line.issues,
+                include_history_evidence=not completed,
+            )
+            if completed:
+                suppliers[key].last_price_basis = "received_order"
+        line.suppliers = list(suppliers.values())
+        # Supplier performance and the internal price benchmark (an internal reference only).
+        measure(line, suppliers, orders, as_of)
         line.ready = line.calculated_to_buy is not None and not any(
             issue.severity == "blocker" for issue in line.issues
         )
