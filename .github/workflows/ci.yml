@@ -22,8 +22,46 @@ env:
   OASDIFF_SHA256: "7c8939fc49b75ee11fec66a5b83b37a2fca6aee109fed85013b1ba2ac2a1ee7f"
 
 jobs:
+  # The Solana job installs Rust, Solana and Anchor and takes the longest; run it
+  # only when something it builds or tests changed. ci-ok accepts "skipped".
+  changes:
+    name: Changed paths
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      solana: ${{ steps.diff.outputs.solana }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Did solana/ or its workflows change?
+        id: diff
+        env:
+          EVENT: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: |
+          if [ "$EVENT" = "pull_request" ]; then
+            base=$(git merge-base "$PR_BASE" HEAD)
+          else
+            base=$PUSH_BEFORE
+          fi
+          # No usable base (new branch, force push, shallow history): run it.
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            echo "solana=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if git diff --name-only "$base" HEAD -- solana .github/workflows/solana.yml .github/workflows/ci.yml | grep -q .; then
+            echo "solana=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "solana=false" >> "$GITHUB_OUTPUT"
+          fi
+
   solana:
     name: Solana program and setup tooling
+    needs: changes
+    if: needs.changes.outputs.solana == 'true'
     uses: ./.github/workflows/solana.yml
 
   lint:
@@ -209,7 +247,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [lint, test, openapi, docker, solana]
+    needs: [changes, lint, test, openapi, docker, solana]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

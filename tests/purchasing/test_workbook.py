@@ -707,3 +707,23 @@ async def test_a_retry_does_not_add_a_new_kind_of_data_to_a_sheet_that_partly_wo
     report = await import_workbook(app_engine, storage, who, upload_id, mapper=mapper)
 
     assert [r.type for r in report.sections] == ["purchase_history"]
+
+
+@pytest.mark.db
+async def test_legacy_import_retains_published_omission_metadata(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
+    storage = FakeStorage()
+    upload = await onboarding.store_upload(
+        app_engine,
+        storage,
+        who,
+        filename="legacy.xlsx",
+        content_type=XLSX,
+        data=workbook({"Stock": STOCK, "Notes": [["Unstructured note"]]}),
+    )
+    report = await import_workbook(app_engine, storage, who, upload.id, mapper=None)
+    assert report.status == "imported"
+    assert report.unimported_sheets == ["Notes"]
+    assert report.questions == []
