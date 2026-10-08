@@ -85,6 +85,7 @@ def golden_analysis(
             {
                 "part_number": line.item.part_number,
                 "description": line.item.description,
+                "mpn": line.item.mpn,
                 "to_buy": str(line.to_buy),
                 "target_price": str(line.target_price) if line.target_price is not None else None,
                 "max_price": str(line.max_price) if line.max_price is not None else None,

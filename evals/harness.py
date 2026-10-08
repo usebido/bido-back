@@ -425,7 +425,10 @@ async def scenario_copilot(env: Env, fixture: Fixture, result: RunResult) -> Non
         mentioned = [
             g["part_number"]
             for g in top
+            # The copilot may translate descriptions: a part number, an MPN or the
+            # description's first two words all count as naming the item.
             if g["part_number"].lower() in first
+            or (g["mpn"] and str(g["mpn"]).lower() in first)
             or " ".join(g["description"].lower().split()[:2]) in first
         ]
         result.check(
