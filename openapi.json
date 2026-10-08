@@ -10490,7 +10490,7 @@
         "type": "object"
       },
       "SupplierPerformance": {
-        "description": "Observed purchase-line outcomes for this supplier and requested item only.",
+        "description": "Observed purchase-line outcomes for this supplier and requested item only.\n\n`basis` says where they come from: purchase orders imported into Bido\n(`imported_history`, evidenced by `evidence_po_line_ids`), or, when none is\nin the policy window, the supplier statistics measured by the source\nassessment the RFQ line was drafted from (`source_assessment`, evidenced by\nthe line's `source_evidence`). The two are never mixed.",
         "properties": {
           "accepted_quantity_rate": {
             "anyOf": [
@@ -10503,6 +10503,15 @@
               }
             ],
             "title": "Accepted Quantity Rate"
+          },
+          "basis": {
+            "default": "imported_history",
+            "enum": [
+              "imported_history",
+              "source_assessment"
+            ],
+            "title": "Basis",
+            "type": "string"
           },
           "delivery_samples": {
             "default": 0,

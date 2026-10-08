@@ -3,8 +3,11 @@
 Reads, in one `tenant_session`: the RFQ and its lines, its invites with the
 supplier names, the LATEST proposal version per invite and its lines, and
 the ECB rates in effect today (per currency, the latest `rate_date` on or
-before today; `fx_rates` is global reference data, not tenant-owned). Then
-applies the sector rules and recommendations (`bido_back.comparison.rules`).
+before today; `fx_rates` is global reference data, not tenant-owned). Supplier
+history per line is the imported purchase history, or, without an imported
+observation in the policy window, what the line's source assessment measured
+(`bido_back.comparison.assessment_history`). Then applies the sector rules and
+recommendations (`bido_back.comparison.rules`).
 """
 
 from collections.abc import Mapping, Sequence
@@ -18,6 +21,7 @@ from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.auth import Principal
+from bido_back.comparison.assessment_history import with_assessment_history
 from bido_back.comparison.compute import (
     AwaitingSupplier,
     Comparison,
@@ -306,10 +310,11 @@ async def load_comparison(db: Db, principal: Principal, rfq_id: UUID, today: dat
             ):
                 proposal_lines[pl.proposal_id].append(pl)
         rates = await load_rates(session, today)
-        performance = await load_performance(
-            session,
+        supplier_ids = [invite.supplier_id for invite, _, _ in invites]
+        performance = with_assessment_history(
+            await load_performance(session, lines, supplier_ids, today=today, policy=policy),
             lines,
-            [invite.supplier_id for invite, _, _ in invites],
+            supplier_ids,
             today=today,
             policy=policy,
         )
