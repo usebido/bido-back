@@ -1,0 +1,219 @@
+"""The RFQ list row (stage, next step, suppliers, totals), payment terms and the activity feed."""
+
+from collections.abc import AsyncIterator
+from datetime import date
+from uuid import uuid4
+
+import httpx
+import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+from sqlalchemy import update
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+
+from bido_back.api.deps import ApiResources, get_db, get_principal
+from bido_back.api.rfqs import rfqs_router
+from bido_back.auth import Principal
+from bido_back.comparison.loader import load_comparison
+from bido_back.db import create_sessionmaker, tenant_session
+from bido_back.db.models import Message, Proposal
+from bido_back.rfqs.activity import rfq_activity
+from bido_back.rfqs.errors import NotFound
+from bido_back.rfqs.overview import RfqFacts, derive_next_step, derive_stage, list_rfq_overviews
+from bido_back.settings import Settings
+from tests.approvals.conftest import People
+
+from .conftest import FakeMailboxes
+from .test_corrections import quoted_rfq
+from .test_service import buyer, prepared
+
+UNUSED_DB = "postgresql+asyncpg://app@localhost:5432/unused"
+TODAY = date(2026, 10, 7)
+
+
+# --- Derivation (no database) ---------------------------------------------------------------
+
+
+def facts(
+    *statuses: str, pending: int = 0, awarded: bool = False, pos: tuple[int, int] = (0, 0)
+) -> RfqFacts:
+    return RfqFacts(
+        suppliers=[f"S{i}" for i in range(len(statuses))],
+        invite_statuses=list(statuses),
+        pending_approvals=pending,
+        awarded=awarded,
+        pos_total=pos[0],
+        pos_sent=pos[1],
+    )
+
+
+@pytest.mark.parametrize(
+    ("status", "negotiation", "fx", "stage", "step"),
+    [
+        ("draft", "not_started", facts(), "draft", "send RFQ"),
+        ("draft", "not_started", facts("pending_approval", pending=1), "draft", "approve"),
+        ("open", "not_started", facts("sent", "sent"), "bidding", "waiting for suppliers"),
+        ("open", "not_started", facts("responded", "sent"), "bidding", "waiting for suppliers"),
+        ("open", "not_started", facts("responded", "declined"), "review", "review quotes"),
+        ("open", "open", facts("responded", "sent", pending=2), "bidding", "approve"),
+        ("open", "ready_to_close", facts("responded", "responded"), "review", "close negotiation"),
+        ("open", "closed", facts("responded"), "review", "award"),
+        ("closed", "closed", facts("responded", awarded=True, pos=(2, 1)), "awarded", "send PO"),
+        ("closed", "closed", facts("responded", awarded=True, pos=(2, 2)), "completed", None),
+        ("closed", "not_started", facts("responded"), "completed", None),
+        ("cancelled", "not_started", facts("sent", pending=1), "cancelled", None),
+    ],
+)
+def test_stage_and_next_step(
+    status: str, negotiation: str, fx: RfqFacts, stage: str, step: str | None
+) -> None:
+    assert derive_stage(status, negotiation, fx) == stage
+    assert derive_next_step(status, negotiation, fx) == step
+
+
+# --- Against Postgres -----------------------------------------------------------------------
+
+
+@pytest.mark.db
+async def test_list_row_has_suppliers_need_by_owner_and_filters(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    principal = buyer(rfq_rows)
+    quoted = await quoted_rfq(app_engine, principal)
+
+    page = await list_rfq_overviews(app_engine, principal, today=TODAY, q=quoted.rfq.ref)
+    [row] = [item for item in page.items if item.id == quoted.rfq.id]
+    assert row.supplier_names and row.supplier_names[0].startswith("Rhein")
+    assert row.invited_count == 1
+    assert row.base_currency == "EUR"
+    assert row.owner is not None
+    expected_need_by = min(
+        (line.need_by for line in quoted.rfq.lines if line.need_by is not None), default=None
+    )
+    assert row.need_by == expected_need_by
+    assert row.stage == "draft" and row.next_step == "send RFQ"
+    assert page.total >= 1
+
+    # Filters: status, stage and a search that matches nothing.
+    drafts = await list_rfq_overviews(app_engine, principal, today=TODAY, status="draft")
+    assert all(item.status == "draft" for item in drafts.items)
+    assert any(item.id == quoted.rfq.id for item in drafts.items)
+    bidding = await list_rfq_overviews(app_engine, principal, today=TODAY, stage="bidding")
+    assert all(item.stage == "bidding" for item in bidding.items)
+    nothing = await list_rfq_overviews(app_engine, principal, today=TODAY, q=f"zz{uuid4().hex}")
+    assert nothing.items == [] and nothing.total == 0
+    # Wildcards are literal.
+    assert (await list_rfq_overviews(app_engine, principal, today=TODAY, q="%")).total == 0
+
+    paged = await list_rfq_overviews(app_engine, principal, today=TODAY, limit=1)
+    assert len(paged.items) == 1 and paged.total >= 1
+
+    # Another tenant sees none of it.
+    outsider = Principal(tenant_id=rfq_rows.other_tenant, user_id=rfq_rows.other_approver)
+    other = await list_rfq_overviews(app_engine, outsider, today=TODAY, q=quoted.rfq.ref)
+    assert other.items == []
+
+
+@pytest.mark.db
+async def test_pending_send_approval_makes_the_next_step_approve(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    rfq, _, _, _ = await prepared(app_engine, rfq_rows, FakeMailboxes())
+    page = await list_rfq_overviews(app_engine, buyer(rfq_rows), today=TODAY, q=rfq.ref)
+    [row] = [item for item in page.items if item.id == rfq.id]
+    assert row.next_step == "approve"
+
+
+@pytest.mark.db
+async def test_comparison_carries_payment_terms(app_engine: AsyncEngine, rfq_rows: People) -> None:
+    principal = buyer(rfq_rows)
+    quoted = await quoted_rfq(app_engine, principal)
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        await session.execute(
+            update(Proposal)
+            .where(Proposal.id == quoted.proposal_id)
+            .values(payment_terms="30 days net")
+        )
+    comparison = await load_comparison(app_engine, principal, quoted.rfq.id, TODAY)
+    [column] = comparison.suppliers
+    assert column.payment_terms == "30 days net"
+
+
+@pytest.mark.db
+async def test_activity_lists_replies_and_approvals_without_content(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    principal = buyer(rfq_rows)
+    rfq, _, _, _ = await prepared(app_engine, rfq_rows, FakeMailboxes())
+    quoted = await quoted_rfq(app_engine, principal)
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        await session.execute(
+            update(Message)
+            .where(Message.direction == "in")
+            .values(subject="SECRET subject", body_text="SECRET body")
+        )
+
+    sent = await rfq_activity(app_engine, principal, rfq.id)
+    assert any(item.action == "approval.requested" for item in sent)
+    assert any("RFQ email" in item.summary for item in sent)
+
+    replies = await rfq_activity(app_engine, principal, quoted.rfq.id)
+    [reply] = [item for item in replies if item.action == "reply"]
+    assert reply.kind == "email" and reply.supplier_name and reply.supplier_name.startswith("Rhein")
+    assert all("SECRET" not in item.summary for item in [*sent, *replies])
+    assert [item.at for item in replies] == sorted((item.at for item in replies), reverse=True)
+
+    outsider = Principal(tenant_id=rfq_rows.other_tenant, user_id=rfq_rows.other_approver)
+    with pytest.raises(NotFound):
+        await rfq_activity(app_engine, outsider, rfq.id)
+
+
+# --- Over HTTP ------------------------------------------------------------------------------
+
+
+def build_app() -> FastAPI:
+    app = FastAPI()
+    app.state.resources = ApiResources(
+        Settings.model_validate({"environment": "test", "database_url": UNUSED_DB})
+    )
+    app.include_router(rfqs_router())
+    return app
+
+
+@pytest_asyncio.fixture
+async def http(app_engine: AsyncEngine, rfq_rows: People) -> AsyncIterator[httpx.AsyncClient]:
+    app = build_app()
+    sessionmaker = create_sessionmaker(app_engine)
+
+    def principal() -> Principal:
+        return buyer(rfq_rows)
+
+    def db() -> async_sessionmaker[AsyncSession]:
+        return sessionmaker
+
+    app.dependency_overrides[get_principal] = principal
+    app.dependency_overrides[get_db] = db
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        yield client
+
+
+@pytest.mark.db
+async def test_list_and_activity_over_http(
+    http: httpx.AsyncClient, app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    quoted = await quoted_rfq(app_engine, buyer(rfq_rows))
+
+    listing = await http.get("/v1/rfqs", params={"q": quoted.rfq.ref, "limit": 5})
+    assert listing.status_code == 200, listing.text
+    assert int(listing.headers["x-total-count"]) >= 1
+    [row] = [item for item in listing.json() if item["id"] == str(quoted.rfq.id)]
+    assert row["stage"] == "draft" and row["invited_count"] == 1
+
+    assert (await http.get("/v1/rfqs", params={"stage": "nope"})).status_code == 422
+    assert (await http.get("/v1/rfqs", params={"limit": 0})).status_code == 422
+
+    activity = await http.get(f"/v1/rfqs/{quoted.rfq.id}/activity", params={"limit": 10})
+    assert activity.status_code == 200
+    assert any(item["action"] == "reply" for item in activity.json())
+    assert (await http.get(f"/v1/rfqs/{uuid4()}/activity")).status_code == 404

@@ -67,7 +67,7 @@ class InviteView(BaseModel):
     responded_at: datetime | None
 
 
-class RfqSummary(BaseModel):
+class RfqHeader(BaseModel):
     id: UUID
     ref: str
     title: str
@@ -76,7 +76,44 @@ class RfqSummary(BaseModel):
     created_at: datetime
 
 
-class RfqDetail(RfqSummary):
+RfqStage = Literal["draft", "bidding", "review", "awarded", "completed", "cancelled"]
+RfqNextStep = Literal[
+    "send RFQ",
+    "approve",
+    "waiting for suppliers",
+    "review quotes",
+    "close negotiation",
+    "award",
+    "send PO",
+]
+
+
+class RfqSummary(RfqHeader):
+    """One row of the RFQ list: the header plus what the list screen shows."""
+
+    stage: RfqStage = Field(
+        default="draft",
+        description="Where the RFQ is in the journey, derived from status, replies, "
+        "negotiation and award",
+    )
+    next_step: RfqNextStep | None = Field(
+        default=None, description="What the buyer should do next; null when nothing"
+    )
+    supplier_names: list[str] = Field(
+        default_factory=list[str], description="Invited suppliers, in invite order"
+    )
+    invited_count: int = 0
+    responses_count: int = Field(default=0, description="Invites that answered with a quote")
+    best_total_base: Decimal | None = Field(
+        default=None,
+        description="Lowest complete first-tier total among the quotes, in base_currency",
+    )
+    base_currency: str | None = None
+    need_by: date | None = Field(default=None, description="Earliest need-by among the lines")
+    owner: str | None = Field(default=None, description="The buyer who created the RFQ")
+
+
+class RfqDetail(RfqHeader):
     base_currency: str
     lines: list[RfqLineView]
     invites: list[InviteView]
@@ -223,3 +260,22 @@ class ApprovalQueueItem(BaseModel):
     award: AwardApprovalView | None = None
     # Set for `send_purchase_order` and `send_award_notice`: the exact email.
     thread_email: ThreadEmailApprovalView | None = None
+
+
+ActivityKind = Literal["agent", "email", "user", "system"]
+
+
+class RfqActivityItem(BaseModel):
+    """One event in an RFQ's activity feed: ids and a code-written summary, never content."""
+
+    at: datetime
+    kind: ActivityKind = Field(
+        description="agent: Bido decided; email: something was sent or received; "
+        "user: a person acted; system: bookkeeping"
+    )
+    action: str = Field(description="Stable code, e.g. rfq.email_sent, approval.approved, reply")
+    actor: str | None = Field(
+        default=None, description="Who acted: a person's name, 'Bido', or the supplier"
+    )
+    supplier_name: str | None = None
+    summary: str = Field(description="One short English sentence written by code")

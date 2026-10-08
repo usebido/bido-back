@@ -5453,6 +5453,68 @@
         "title": "RequirementsView",
         "type": "object"
       },
+      "RfqActivityItem": {
+        "description": "One event in an RFQ's activity feed: ids and a code-written summary, never content.",
+        "properties": {
+          "action": {
+            "description": "Stable code, e.g. rfq.email_sent, approval.approved, reply",
+            "title": "Action",
+            "type": "string"
+          },
+          "actor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Who acted: a person's name, 'Bido', or the supplier",
+            "title": "Actor"
+          },
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "kind": {
+            "description": "agent: Bido decided; email: something was sent or received; user: a person acted; system: bookkeeping",
+            "enum": [
+              "agent",
+              "email",
+              "user",
+              "system"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "summary": {
+            "description": "One short English sentence written by code",
+            "title": "Summary",
+            "type": "string"
+          },
+          "supplier_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Name"
+          }
+        },
+        "required": [
+          "at",
+          "kind",
+          "action",
+          "summary"
+        ],
+        "title": "RfqActivityItem",
+        "type": "object"
+      },
       "RfqCreated": {
         "properties": {
           "base_currency": {
@@ -6065,7 +6127,32 @@
         "type": "object"
       },
       "RfqSummary": {
+        "description": "One row of the RFQ list: the header plus what the list screen shows.",
         "properties": {
+          "base_currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Base Currency"
+          },
+          "best_total_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Lowest complete first-tier total among the quotes, in base_currency",
+            "title": "Best Total Base"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -6075,6 +6162,57 @@
             "format": "uuid",
             "title": "Id",
             "type": "string"
+          },
+          "invited_count": {
+            "default": 0,
+            "title": "Invited Count",
+            "type": "integer"
+          },
+          "need_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Earliest need-by among the lines",
+            "title": "Need By"
+          },
+          "next_step": {
+            "anyOf": [
+              {
+                "enum": [
+                  "send RFQ",
+                  "approve",
+                  "waiting for suppliers",
+                  "review quotes",
+                  "close negotiation",
+                  "award",
+                  "send PO"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the buyer should do next; null when nothing",
+            "title": "Next Step"
+          },
+          "owner": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The buyer who created the RFQ",
+            "title": "Owner"
           },
           "ref": {
             "title": "Ref",
@@ -6092,6 +6230,26 @@
             ],
             "title": "Response Due"
           },
+          "responses_count": {
+            "default": 0,
+            "description": "Invites that answered with a quote",
+            "title": "Responses Count",
+            "type": "integer"
+          },
+          "stage": {
+            "default": "draft",
+            "description": "Where the RFQ is in the journey, derived from status, replies, negotiation and award",
+            "enum": [
+              "draft",
+              "bidding",
+              "review",
+              "awarded",
+              "completed",
+              "cancelled"
+            ],
+            "title": "Stage",
+            "type": "string"
+          },
           "status": {
             "enum": [
               "draft",
@@ -6101,6 +6259,14 @@
             ],
             "title": "Status",
             "type": "string"
+          },
+          "supplier_names": {
+            "description": "Invited suppliers, in invite order",
+            "items": {
+              "type": "string"
+            },
+            "title": "Supplier Names",
+            "type": "array"
           },
           "title": {
             "title": "Title",
@@ -6621,6 +6787,17 @@
               }
             ],
             "title": "Max Lead Time Days"
+          },
+          "payment_terms": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payment Terms"
           },
           "proposal_id": {
             "format": "uuid",
@@ -12264,8 +12441,95 @@
     },
     "/v1/rfqs": {
       "get": {
+        "description": "Newest first. The total that matched is in the `X-Total-Count` header.",
         "operationId": "list_rfqs_v1_rfqs_get",
         "parameters": [
+          {
+            "in": "query",
+            "name": "status",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "draft",
+                    "open",
+                    "closed",
+                    "cancelled"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Status"
+            }
+          },
+          {
+            "in": "query",
+            "name": "stage",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "draft",
+                    "bidding",
+                    "review",
+                    "awarded",
+                    "completed",
+                    "cancelled"
+                  ],
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Stage"
+            }
+          },
+          {
+            "in": "query",
+            "name": "q",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 200,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Q"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 100,
+              "maximum": 500,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
           {
             "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
             "in": "header",
@@ -12664,6 +12928,129 @@
           }
         ],
         "summary": "Get Rfq",
+        "tags": [
+          "rfqs"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/activity": {
+      "get": {
+        "description": "Newest first: what was sent, received, approved and decided. No email content.",
+        "operationId": "activity_v1_rfqs__rfq_id__activity_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RfqActivityItem"
+                  },
+                  "title": "Response Activity V1 Rfqs  Rfq Id  Activity Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Activity",
         "tags": [
           "rfqs"
         ]
