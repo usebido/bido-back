@@ -9,7 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from bido_back.branding.images import LogoType
 
 Line = Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)]
-LongText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=4000)]
+LongText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)]
 AccentColor = Annotated[str, StringConstraints(pattern=r"^#[0-9A-Fa-f]{6}$")]
 
 

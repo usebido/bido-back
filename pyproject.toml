@@ -29,6 +29,7 @@ dependencies = [
     "holidays>=0.60",
     "dnspython>=2.6,<3",
     "pillow>=11",
+    "weasyprint>=66",
 ]
 
 [dependency-groups]

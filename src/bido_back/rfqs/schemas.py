@@ -248,7 +248,7 @@ class UpdateRfqRequest(BaseModel):
     # and terms replacing the company's default footer; null = back to the default.
     logo_asset_id: UUID | None = None
     footer_override: (
-        Annotated[str, StringConstraints(strip_whitespace=True, max_length=4000)] | None
+        Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] | None
     ) = None
 
 

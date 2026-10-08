@@ -109,3 +109,22 @@ def test_svg_size_falls_back_to_the_viewbox() -> None:
     assert (checked.width, checked.height) == (320, 90)
     with pytest.raises(InvalidLogo):
         check_logo(b"<html xmlns='http://www.w3.org/1999/xhtml'><svg/></html>", "image/svg+xml")
+
+
+def test_document_logos_are_small_png_jpeg_or_svg() -> None:
+    from bido_back.branding.images import MAX_DOCUMENT_LOGO_BYTES, logo_for_document
+
+    small = _png()
+    assert logo_for_document(small, "image/png") == (small, "image/png")
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (3000, 1000), (1, 2, 3)).save(buffer, format="WEBP")
+    converted = logo_for_document(buffer.getvalue(), "image/webp")
+    assert converted is not None and converted[1] == "image/png"
+    with Image.open(io.BytesIO(converted[0])) as image:
+        assert image.width <= 1200 and image.height <= 400
+
+    svg = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"/>'
+    assert logo_for_document(svg, "image/svg+xml") == (svg, "image/svg+xml")
+    assert logo_for_document(b"<svg>" + b" " * MAX_DOCUMENT_LOGO_BYTES, "image/svg+xml") is None
+    assert logo_for_document(b"not an image", "image/png") is None

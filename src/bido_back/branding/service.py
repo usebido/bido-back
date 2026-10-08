@@ -47,7 +47,8 @@ from bido_back.branding.schemas import (
 from bido_back.db import tenant_session
 from bido_back.db.models import CompanyBranding, CompanyLogo, Rfq, Tenant
 from bido_back.orgs import CLERK_API_URL
-from bido_back.storage import BlobStorage
+from bido_back.settings import get_settings
+from bido_back.storage import BlobStorage, build_storage
 from bido_back.storage.direct import DirectUploads
 from bido_back.storage.keys import BlobNotFound
 from bido_back.storage.links import DownloadLinks
@@ -327,17 +328,10 @@ async def rfq_branding(db: Db, storage: BlobStorage, tenant_id: UUID, rfq_id: UU
         rfq = await session.get(Rfq, rfq_id)
         if rfq is None:
             raise NotFound(f"rfq {rfq_id} not found")
-        row = await session.get(CompanyBranding, tenant_id)
+        rows = await rfq_branding_rows(session, tenant_id, rfq)
         tenant = await session.get(Tenant, tenant_id)
-        logo_id = rfq.logo_asset_id or (row.default_logo_asset_id if row else None)
-        logo = await session.get(CompanyLogo, logo_id) if logo_id is not None else None
-        footer = rfq.footer_override or (row.default_footer if row else None)
-    logo_bytes = None
-    if logo is not None:
-        try:
-            logo_bytes = await storage.get(logo.storage_key)
-        except BlobNotFound:
-            logger.warning("rfq logo missing in storage", extra={"logo_id": str(logo.id)})
+    row, logo = rows.branding, rows.logo
+    data = await logo_bytes(storage, logo) if logo is not None else None
     company_name = (row.trade_name or row.legal_name) if row else None
     return Branding(
         company_name=company_name or (tenant.name if tenant else None),
@@ -346,11 +340,51 @@ async def rfq_branding(db: Db, storage: BlobStorage, tenant_id: UUID, rfq_id: UU
         address=row.address if row else None,
         phone=row.phone if row else None,
         website=row.website if row else None,
-        footer_text=footer,
+        footer_text=rows.footer,
         accent_color=row.accent_color if row else None,
-        logo_bytes=logo_bytes,
-        logo_content_type=logo.content_type if logo is not None and logo_bytes else None,
+        logo_bytes=data,
+        logo_content_type=logo.content_type if logo is not None and data else None,
     )
+
+
+@dataclass(frozen=True, slots=True)
+class RfqBrandingRows:
+    """What an RFQ's document is branded with, read in the caller's tenant session."""
+
+    branding: CompanyBranding | None
+    logo: CompanyLogo | None
+    footer: str | None
+
+
+async def rfq_branding_rows(session: AsyncSession, tenant_id: UUID, rfq: Rfq) -> RfqBrandingRows:
+    """The RFQ's own logo and footer when it chose them, else the company defaults."""
+    row = await session.get(CompanyBranding, tenant_id)
+    logo_id = rfq.logo_asset_id or (row.default_logo_asset_id if row else None)
+    logo = await session.get(CompanyLogo, logo_id) if logo_id is not None else None
+    footer = rfq.footer_override or (row.default_footer if row else None)
+    return RfqBrandingRows(branding=row, logo=logo, footer=footer)
+
+
+async def logo_bytes(storage: BlobStorage | None, logo: CompanyLogo) -> bytes | None:
+    """The stored logo, or None (logged) when it cannot be read: a document never fails
+    for its logo. Without `storage`, the process's blob storage."""
+    try:
+        return await (storage or default_storage()).get(logo.storage_key)
+    except BlobNotFound:
+        logger.warning("company logo missing in storage", extra={"logo_id": str(logo.id)})
+        return None
+
+
+_storage: BlobStorage | None = None
+
+
+def default_storage() -> BlobStorage:
+    """The process's blob storage, for callers that were not handed one (the Copilot's
+    tools prepare sends without the api's storage dependency)."""
+    global _storage  # noqa: PLW0603  # one per process, built on first use
+    if _storage is None:
+        _storage = build_storage(get_settings())
+    return _storage
 
 
 async def check_logo_exists(session: AsyncSession, logo_id: UUID) -> None:

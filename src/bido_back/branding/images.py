@@ -227,3 +227,46 @@ def _local(tag: str) -> str:
 
 def _namespace(tag: str) -> str:
     return tag[1:].split("}", 1)[0] if tag.startswith("{") else ""
+
+
+# --- For the RFQ document -----------------------------------------------------------------
+
+# The RFQ document carries the logo inside the approved arguments (base64), so it is kept
+# small: wide enough to print sharp, never the multi-megabyte original.
+MAX_DOCUMENT_LOGO_BYTES: Final = 450_000
+_DOCUMENT_LOGO_BOX: Final = (1200, 400)
+
+DocumentLogoType = Literal["image/png", "image/jpeg", "image/svg+xml"]
+
+
+def logo_for_document(data: bytes, content_type: str) -> tuple[bytes, DocumentLogoType] | None:
+    """The logo as the RFQ document embeds it: SVG and small PNG/JPEG unchanged, WebP and
+    large images re-encoded (PNG, or JPEG for a photo-like JPEG) to fit the document; None
+    when it cannot be made to fit."""
+    if content_type == "image/svg+xml":
+        return (data, "image/svg+xml") if len(data) <= MAX_DOCUMENT_LOGO_BYTES else None
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            fits = (
+                content_type in ("image/png", "image/jpeg")
+                and len(data) <= MAX_DOCUMENT_LOGO_BYTES
+                and image.width <= _DOCUMENT_LOGO_BOX[0]
+                and image.height <= _DOCUMENT_LOGO_BOX[1]
+            )
+            if fits:
+                return data, "image/png" if content_type == "image/png" else "image/jpeg"
+            converted = image.copy()
+    except (UnidentifiedImageError, OSError, SyntaxError, Image.DecompressionBombError):
+        return None
+    converted.thumbnail(_DOCUMENT_LOGO_BOX)
+    buffer = io.BytesIO()
+    if content_type == "image/jpeg":
+        converted.convert("RGB").save(buffer, format="JPEG", quality=85, optimize=True)
+        media: DocumentLogoType = "image/jpeg"
+    else:
+        if converted.mode not in ("RGB", "RGBA", "L", "LA", "P"):
+            converted = converted.convert("RGBA")
+        converted.save(buffer, format="PNG", optimize=True)
+        media = "image/png"
+    out = buffer.getvalue()
+    return (out, media) if len(out) <= MAX_DOCUMENT_LOGO_BYTES else None
