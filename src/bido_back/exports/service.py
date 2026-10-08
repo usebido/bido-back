@@ -19,12 +19,13 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.auth import Principal
-from bido_back.comparison.compute import Comparison
+from bido_back.comparison.compute import Comparison, best_first_tier_total
 from bido_back.comparison.loader import load_comparison
 from bido_back.db import tenant_session
-from bido_back.db.models import Contact, Invite, Proposal, Rfq, RfqLine, Supplier, User
+from bido_back.db.models import Invite, Proposal, Rfq, RfqLine, Supplier
 from bido_back.exports.render import Table, Value
 from bido_back.rfqs.errors import NotFound
+from bido_back.rfqs.overview import owner_names
 
 Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
@@ -70,15 +71,6 @@ COMPARISON_HEADER: Final = (
     "Flags",
     "Corrected fields",
 )
-
-
-def best_first_tier_total(comparison: Comparison) -> Decimal | None:
-    totals = [
-        s.totals[0].total_base
-        for s in comparison.suppliers
-        if s.totals and s.totals[0].complete and s.totals[0].total_base is not None
-    ]
-    return min(totals) if totals else None
 
 
 def comparison_table(comparison: Comparison, rfq_ref: str) -> Table:
@@ -162,7 +154,7 @@ async def export_rfq_list(db: Db, principal: Principal, today: date) -> Table:
                 .distinct()
             )
         )
-        owners = await _owner_names(session, {rfq.created_by for rfq in rfqs})
+        owners = await owner_names(session, {rfq.created_by for rfq in rfqs})
 
     landed: dict[UUID, Decimal | None] = {}
     for rfq_id in quoted:
@@ -185,29 +177,3 @@ async def export_rfq_list(db: Db, principal: Principal, today: date) -> Table:
         for rfq in rfqs
     ]
     return Table(header=RFQ_LIST_HEADER, rows=rows)
-
-
-async def _owner_names(session: AsyncSession, user_ids: set[UUID]) -> dict[UUID, str]:
-    """A user's name from their `buyer` contact (matched by email), else their email."""
-    if not user_ids:
-        return {}
-    users: dict[UUID, str] = {
-        user_id: email
-        for user_id, email in await session.execute(
-            select(User.id, User.email).where(User.id.in_(user_ids))
-        )
-    }
-    names: dict[str, str] = {}
-    for email, name in await session.execute(
-        select(Contact.email, Contact.name)
-        .where(
-            Contact.kind == "buyer",
-            Contact.email.in_(set(users.values())),
-            Contact.pseudonymized_at.is_(None),
-            Contact.name.is_not(None),
-        )
-        .order_by(Contact.created_at.desc())
-    ):
-        if email is not None and name is not None:
-            names[email] = name
-    return {user_id: names.get(email, email) for user_id, email in users.items()}

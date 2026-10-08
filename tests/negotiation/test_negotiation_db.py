@@ -28,6 +28,7 @@ from bido_back.db.models import (
     RfqLine,
 )
 from bido_back.followups import service as followup_service
+from bido_back.followups.calendar import add_business_days
 from bido_back.followups.send import register_followup_act_tools
 from bido_back.negotiation import service
 from bido_back.negotiation.hooks import cancel_on_new_offer
@@ -392,7 +393,9 @@ async def test_the_deadline_closes_with_the_best_offers_and_stops_follow_ups(
     app_engine: AsyncEngine, rfq_rows: People
 ) -> None:
     world = await World(app_engine, rfq_rows).setup(silent=True)
-    deadline = datetime.now(UTC) + timedelta(days=5)
+    # A week: the first chase (2 business days, US calendar for the silent
+    # supplier) must fall before the deadline even across a holiday weekend.
+    deadline = datetime.now(UTC) + timedelta(days=7)
     await world.configure(deadline=deadline)
     await world.offer("rhein", ("0.050", "1.20"))
     await world.offer("lyon", ("0.038", "1.10"))
@@ -404,7 +407,7 @@ async def test_the_deadline_closes_with_the_best_offers_and_stops_follow_ups(
 
     # A chase for the silent supplier is due before the deadline.
     chases = FakeFollowupWriter()
-    later = datetime.now(UTC) + timedelta(days=4)
+    later = add_business_days(datetime.now(UTC), 2, "US") + timedelta(minutes=1)
     await followup_service.sweep_tenant(world.engine, world.people.tenant, writer=chases, now=later)
     assert [t.kind for t in chases.calls] == ["chase"]
 

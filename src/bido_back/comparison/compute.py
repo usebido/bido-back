@@ -133,6 +133,8 @@ class SupplierQuote:
     fields: Mapping[str, FieldInfo] = field(default_factory=dict[str, FieldInfo])
     # suppliers.type: authorized_distributor, distributor, reseller, manufacturer...
     supplier_type: str | None = None
+    # As extracted from the proposal header (free text, e.g. "30 days net").
+    payment_terms: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -221,6 +223,8 @@ class SupplierColumn(BaseModel):
     totals: list[TierTotal]
     supplier_type: str | None = None
     rules: list[RuleFlag] = Field(default_factory=list[RuleFlag])
+    # The latest proposal's payment terms, as extracted (free text).
+    payment_terms: str | None = None
 
 
 class AwaitingSupplier(BaseModel):
@@ -610,6 +614,7 @@ def compute_supplier(
         cells=cells,
         totals=totals,
         supplier_type=quote.supplier_type,
+        payment_terms=quote.payment_terms,
     )
 
 
@@ -659,3 +664,13 @@ def compute_comparison(
             if (r := rates.get(code)) is not None
         ],
     )
+
+
+def best_first_tier_total(comparison: Comparison) -> Decimal | None:
+    """The lowest complete first-tier total among the suppliers, in the base currency."""
+    totals = [
+        s.totals[0].total_base
+        for s in comparison.suppliers
+        if s.totals and s.totals[0].complete and s.totals[0].total_base is not None
+    ]
+    return min(totals) if totals else None
