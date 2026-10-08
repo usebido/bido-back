@@ -27,7 +27,9 @@ from typing import Final
 from uuid import UUID, uuid4
 
 from pydantic import JsonValue, ValidationError
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import SQLAlchemyError
 
 from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
@@ -38,6 +40,8 @@ from bido_back.copilot.agent import copilot_agent
 from bido_back.copilot.contracts import (
     AnswerEvent,
     ConversationEvent,
+    ConversationList,
+    ConversationSummary,
     ConversationTurn,
     ConversationView,
     CopilotAction,
@@ -49,7 +53,7 @@ from bido_back.copilot.contracts import (
 )
 from bido_back.copilot.tools import CopilotToolDeps, Db, copilot_tools
 from bido_back.db import tenant_session
-from bido_back.db.models import TemplateUpload
+from bido_back.db.models import CopilotConversation, TemplateUpload
 from bido_back.documents import DocumentText, extract_text, render_documents
 from bido_back.purchasing.workbook import SheetMapper, default_sheet_mapper
 from bido_back.rfqs.agents import RfqAgents
@@ -59,6 +63,8 @@ from bido_back.storage import BlobStorage
 logger = logging.getLogger(__name__)
 
 MAX_ATTACHMENT_CHARS: Final = 40_000
+TITLE_CHARS: Final = 80
+LIST_LIMIT_MAX: Final = 100
 
 
 class AttachmentNotFound(Exception):
@@ -153,6 +159,7 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
     )
     agent = copilot_agent(tools)
     yield ConversationEvent(conversation_id=prepared.conversation_id, run_id=context.run_id)
+    await _record_turn(deps.db, principal, prepared)
 
     kinds = {tool.name: tool.kind for tool in tools}
     called: dict[str, str] = {}
@@ -205,6 +212,81 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
         conversation_id=prepared.conversation_id,
         ok=ok,
         actions=actions,
+    )
+
+
+def conversation_title(input: CopilotInput) -> str:
+    """The first message, whitespace collapsed and truncated; a placeholder for files only."""
+    text = " ".join(input.message.split())
+    if not text:
+        return "(attachments)" if input.attachment_ids else "(empty)"
+    if len(text) <= TITLE_CHARS:
+        return text
+    return text[: TITLE_CHARS - 1].rstrip() + "…"
+
+
+async def _record_turn(db: Db, principal: Principal, prepared: PreparedMessage) -> None:
+    """Upsert the caller's conversation row: the title on the first turn, then counts.
+
+    Listing is secondary to answering, so a failure here is logged (ids only)
+    and the message goes on.
+    """
+    statement = (
+        insert(CopilotConversation)
+        .values(
+            tenant_id=principal.tenant_id,
+            user_id=principal.user_id,
+            id=prepared.conversation_id,
+            title=conversation_title(prepared.input),
+            turns=1,
+        )
+        .on_conflict_do_update(
+            index_elements=["tenant_id", "user_id", "id"],
+            set_={
+                "turns": CopilotConversation.turns + 1,
+                "last_activity_at": func.now(),
+            },
+        )
+    )
+    try:
+        async with tenant_session(db, principal.tenant_id) as session:
+            await session.execute(statement)
+    except SQLAlchemyError:
+        logger.warning(
+            "copilot conversation not recorded tenant=%s conversation=%s",
+            principal.tenant_id,
+            prepared.conversation_id,
+        )
+
+
+async def list_conversations(
+    db: Db, principal: Principal, *, limit: int, before: datetime | None = None
+) -> ConversationList:
+    """The caller's own conversations in their tenant, most recent activity first."""
+    limit = max(1, min(limit, LIST_LIMIT_MAX))
+    query = (
+        select(CopilotConversation)
+        .where(CopilotConversation.user_id == principal.user_id)
+        .order_by(CopilotConversation.last_activity_at.desc(), CopilotConversation.id.desc())
+        .limit(limit + 1)
+    )
+    if before is not None:
+        query = query.where(CopilotConversation.last_activity_at < before)
+    async with tenant_session(db, principal.tenant_id) as session:
+        rows = list((await session.scalars(query)).all())
+    page = rows[:limit]
+    return ConversationList(
+        items=[
+            ConversationSummary(
+                conversation_id=row.id,
+                title=row.title,
+                created_at=row.created_at,
+                last_activity_at=row.last_activity_at,
+                turns=row.turns,
+            )
+            for row in page
+        ],
+        next_before=page[-1].last_activity_at if len(rows) > limit else None,
     )
 
 

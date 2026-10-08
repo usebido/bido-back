@@ -235,3 +235,116 @@ async def test_a_conversation_keeps_its_history_for_its_owner_only(
         tenant_id=copilot_rows.tenant, user_id=copilot_rows.member, role="member"
     )
     assert (await api.http.get(f"/v1/copilot/conversations/{conversation}")).status_code == 404
+
+
+@pytest.mark.db
+async def test_conversations_are_listed_for_their_owner_newest_first(
+    api: Api, copilot_rows: People, script: Script
+) -> None:
+    first, second = str(uuid4()), str(uuid4())
+    script(
+        final(answer="one"),
+        final(answer="two"),
+        final(answer="three"),
+    )
+    long_message = "preciso de uma análise de compra pro motor EV-120 " * 4
+    for conversation, message in (
+        (first, long_message),
+        (second, "segunda conversa"),
+        (first, "continuando a primeira"),
+    ):
+        response = await api.http.post(
+            "/v1/copilot/messages", json={"message": message, "conversation_id": conversation}
+        )
+        assert parse_sse(response.text)[-1]["type"] == "done"
+
+    listed = await api.http.get("/v1/copilot/conversations")
+
+    assert listed.status_code == 200, listed.text
+    items = listed.json()["items"]
+    # The first conversation had the latest activity; its title is its first message.
+    assert [i["conversation_id"] for i in items] == [first, second]
+    assert [i["turns"] for i in items] == [2, 1]
+    assert items[0]["title"].startswith("preciso de uma análise de compra")
+    assert len(items[0]["title"]) <= 80 and items[0]["title"].endswith("…")
+    assert items[1]["title"] == "segunda conversa"
+    assert listed.json()["next_before"] is None
+
+
+@pytest.mark.db
+async def test_conversation_list_pages_with_before(
+    api: Api, copilot_rows: People, script: Script
+) -> None:
+    script(*(final(answer=str(n)) for n in range(3)))
+    ids = [str(uuid4()) for _ in range(3)]
+    for conversation in ids:
+        await api.http.post(
+            "/v1/copilot/messages", json={"message": "oi", "conversation_id": conversation}
+        )
+
+    page_one = (await api.http.get("/v1/copilot/conversations", params={"limit": 2})).json()
+    assert [i["conversation_id"] for i in page_one["items"]] == [ids[2], ids[1]]
+    assert page_one["next_before"] is not None
+    page_two = (
+        await api.http.get(
+            "/v1/copilot/conversations", params={"limit": 2, "before": page_one["next_before"]}
+        )
+    ).json()
+    assert [i["conversation_id"] for i in page_two["items"]] == [ids[0]]
+    assert page_two["next_before"] is None
+
+
+@pytest.mark.db
+async def test_conversations_are_private_to_user_and_tenant(
+    api: Api, copilot_rows: People, script: Script
+) -> None:
+    conversation = str(uuid4())
+    script(final(answer="ok"), final(answer="ok"))
+    await api.http.post(
+        "/v1/copilot/messages", json={"message": "minha", "conversation_id": conversation}
+    )
+
+    # Same tenant, another user: sees nothing, and reusing the id starts their own row.
+    api.principal = Principal(
+        tenant_id=copilot_rows.tenant, user_id=copilot_rows.member, role="member"
+    )
+    assert (await api.http.get("/v1/copilot/conversations")).json()["items"] == []
+    await api.http.post(
+        "/v1/copilot/messages", json={"message": "do outro", "conversation_id": conversation}
+    )
+    mine = (await api.http.get("/v1/copilot/conversations")).json()["items"]
+    assert [(i["title"], i["turns"]) for i in mine] == [("do outro", 1)]
+
+    # Another tenant sees nothing.
+    api.principal = Principal(
+        tenant_id=copilot_rows.other_tenant, user_id=copilot_rows.other_approver, role="approver"
+    )
+    assert (await api.http.get("/v1/copilot/conversations")).json()["items"] == []
+
+    # The first owner still has their row, untouched by the other user.
+    api.principal = buyer_of(copilot_rows)
+    owner = (await api.http.get("/v1/copilot/conversations")).json()["items"]
+    assert [(i["title"], i["turns"]) for i in owner] == [("minha", 1)]
+
+
+async def test_listing_requires_authentication() -> None:
+    transport = httpx.ASGITransport(app=build_app())
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        response = await http.get("/v1/copilot/conversations")
+    assert response.status_code == 401
+
+
+def test_conversation_title_collapses_and_truncates() -> None:
+    from datetime import date
+
+    from bido_back.copilot.contracts import CopilotInput
+    from bido_back.copilot.service import TITLE_CHARS, conversation_title
+
+    today = date(2026, 10, 7)
+    assert conversation_title(CopilotInput(message="  oi\n  tudo   bem? ", today=today)) == (
+        "oi tudo bem?"
+    )
+    long = conversation_title(CopilotInput(message="x" * 200, today=today))
+    assert len(long) == TITLE_CHARS and long.endswith("…")
+    files_only = CopilotInput(message="", today=today, attachment_ids=[uuid4()])
+    assert conversation_title(files_only) == "(attachments)"

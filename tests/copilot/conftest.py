@@ -1,8 +1,8 @@
 """Fixtures for the copilot tests: two tenants with RFQ data, fake agents and mailbox.
 
 Database fixtures come from tests/db, tests/approvals and tests/rfqs (skipped
-without Postgres). `copilot_rows` also removes the RFQ templates and uploads
-the copilot may create. `seed_quote` writes a supplier's proposal directly,
+without Postgres). `copilot_rows` also removes the RFQ templates, uploads and
+conversation rows the copilot may create. `seed_quote` writes a supplier's proposal directly,
 as quote extraction would.
 """
 
@@ -22,7 +22,15 @@ from bido_back.agents.tools import AnyTool
 from bido_back.auth import Principal
 from bido_back.copilot.tools import CopilotToolDeps, copilot_tools
 from bido_back.db import tenant_session
-from bido_back.db.models import Invite, Message, Proposal, ProposalLine, RfqTemplate, TemplateUpload
+from bido_back.db.models import (
+    CopilotConversation,
+    Invite,
+    Message,
+    Proposal,
+    ProposalLine,
+    RfqTemplate,
+    TemplateUpload,
+)
 from bido_back.rfqs import service
 from bido_back.rfqs.schemas import RfqCreated, SupplierView
 from tests.approvals.conftest import People, people
@@ -40,7 +48,7 @@ async def copilot_rows(migrator_engine: AsyncEngine, rfq_rows: People) -> AsyncI
     yield rfq_rows
     for tenant_id in (rfq_rows.tenant, rfq_rows.other_tenant):
         async with tenant_session(migrator_engine, tenant_id) as session:
-            for model in (RfqTemplate, TemplateUpload):
+            for model in (RfqTemplate, TemplateUpload, CopilotConversation):
                 await session.execute(delete(model).where(model.tenant_id == tenant_id))
 
 
