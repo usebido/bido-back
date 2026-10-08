@@ -257,6 +257,7 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
             buyer_messages=own_words,
             storage=deps.storage,
             sheet_mapper=deps.sheet_mapper or default_sheet_mapper(deps.runner_config),
+            conversation_id=prepared.conversation_id,
         )
     )
     agent = copilot_agent(tools)

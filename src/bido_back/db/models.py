@@ -1109,6 +1109,29 @@ class OutboundDomainConfirmation(Base):
     )
 
 
+class CopilotProposal(Base):
+    """What the Copilot offered to do, waiting for the buyer's go-ahead (migration 0028).
+
+    A gated tool (create an RFQ, invite suppliers) called without a proposal
+    stores its args and the preview the buyer is shown, and does nothing else.
+    Confirmed from a later run of the same conversation, it runs the stored
+    args once (`used_at`).
+    """
+
+    __tablename__ = "copilot_proposals"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    conversation_id: Mapped[UUID]
+    run_id: Mapped[UUID]
+    action: Mapped[str] = mapped_column(Text)
+    args: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    preview: Mapped[dict[str, Any]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class CopilotConversation(Base):
     """One copilot conversation, for listing (migration 0022).
 

@@ -44,6 +44,7 @@ from bido_back.agents.catalog.contracts import (
     RfqEmailLine,
     RfqEmailOutput,
     RfqIntakeInput,
+    RfqIntakeOutput,
 )
 from bido_back.agents.catalog.definitions import rfq_email_problems
 from bido_back.agents.context import ToolContext
@@ -76,6 +77,7 @@ from bido_back.rfqs.schemas import (
     AddLineRequest,
     ApprovalQueueItem,
     ApprovalStatus,
+    CurrencySource,
     EmailKind,
     InviteStatus,
     InviteView,
@@ -238,6 +240,16 @@ async def _next_ref(session: AsyncSession, tenant_id: UUID) -> str:
 # --- RFQs ----------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class TextDraft:
+    """The intake agent's draft of an RFQ written from text, before it is stored."""
+
+    source_text: str
+    draft: RfqIntakeOutput
+    currency: str
+    currency_source: CurrencySource
+
+
 async def create_rfq_from_text(
     db: Db,
     principal: Principal,
@@ -255,6 +267,26 @@ async def create_rfq_from_text(
     decides, and when it cannot, `CurrencyRequired` is raised before the intake
     agent runs (`bido_back.rfqs.currency`).
     """
+    drafted = await draft_rfq_from_text(
+        db, principal, source_text, intake, buyer_messages=buyer_messages, currency=currency
+    )
+    return await store_text_draft(db, principal, drafted)
+
+
+async def draft_rfq_from_text(
+    db: Db,
+    principal: Principal,
+    source_text: str,
+    intake: IntakeAgent,
+    *,
+    buyer_messages: Sequence[str] = (),
+    currency: str | None = None,
+) -> TextDraft:
+    """The first half of `create_rfq_from_text`: the draft, stored nowhere.
+
+    The Copilot shows it to the buyer and, once they confirm, stores this very
+    draft with `store_text_draft` (no second run of the agent).
+    """
     async with tenant_session(db, principal.tenant_id) as session:
         resolved = await resolve_currency(session, stated=currency)
     context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
@@ -264,16 +296,26 @@ async def create_rfq_from_text(
         ),
         context,
     )
+    return TextDraft(
+        source_text=source_text,
+        draft=draft,
+        currency=resolved.code,
+        currency_source=resolved.source,
+    )
 
+
+async def store_text_draft(db: Db, principal: Principal, drafted: TextDraft) -> RfqCreated:
+    """Store a draft from `draft_rfq_from_text` as a draft RFQ."""
+    draft = drafted.draft
     async with tenant_session(db, principal.tenant_id) as session:
         rfq = Rfq(
             tenant_id=principal.tenant_id,
             ref=await _next_ref(session, principal.tenant_id),
             title=draft.title,
             status="draft",
-            base_currency=resolved.code,
+            base_currency=drafted.currency,
             response_due=draft.response_due,
-            source_text=source_text,
+            source_text=drafted.source_text,
             created_by=principal.user_id,
         )
         session.add(rfq)
@@ -301,14 +343,17 @@ async def create_rfq_from_text(
         await session.refresh(rfq)
         detail = await _detail(session, rfq)
     logger.info(
-        "rfq created tenant=%s rfq=%s run=%s currency_source=%s",
+        "rfq created tenant=%s rfq=%s currency_source=%s",
         principal.tenant_id,
         rfq.id,
-        context.run_id,
-        resolved.source,
+        drafted.currency_source,
     )
     return RfqCreated.model_validate(
-        {**detail.model_dump(), "questions": draft.questions, "currency_source": resolved.source}
+        {
+            **detail.model_dump(),
+            "questions": draft.questions,
+            "currency_source": drafted.currency_source,
+        }
     )
 
 

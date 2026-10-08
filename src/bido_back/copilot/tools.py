@@ -34,14 +34,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Final, Literal
+from typing import Any, Final, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from bido_back.agents.catalog.contracts import LineCategory, ModelDecimal
+from bido_back.agents.catalog.contracts import LineCategory, ModelDecimal, RfqIntakeOutput
 from bido_back.agents.context import ToolContext
 from bido_back.agents.tools import AnyTool, Tool, ToolError
 from bido_back.auth import Principal
@@ -50,10 +50,17 @@ from bido_back.awards.schemas import AwardLine, AwardRequest, AwardSelection, Pu
 from bido_back.comparison.compute import Recommendation
 from bido_back.comparison.loader import load_comparison
 from bido_back.comparison.policy import ComparisonPolicy
-from bido_back.copilot import queries
+from bido_back.copilot import proposals, queries
 from bido_back.copilot.journey_tools import journey_tools, reply_by_explained
+from bido_back.copilot.proposals import (
+    PROPOSAL_ARG,
+    AwaitingConfirmation,
+    ProposalPreview,
+    ProposedLine,
+    ProposedSupplier,
+)
 from bido_back.db import tenant_session
-from bido_back.db.models import Analysis, Invite, Rfq, RfqLine, RfqTemplate
+from bido_back.db.models import Analysis, Contact, Invite, Rfq, RfqLine, RfqTemplate, Supplier
 from bido_back.negotiation import service as negotiation_service
 from bido_back.negotiation.agents import NegotiationWriter, default_negotiation_writer
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
@@ -126,6 +133,9 @@ class CopilotToolDeps:
     sheet_mapper: SheetMapper | None = None
     source_mapper: Mapper | None = None
     today: Callable[[], date] = lambda: datetime.now(UTC).date()
+    # The conversation, for the gated tools: a proposal made in it can only be
+    # confirmed in it, from a later run (`bido_back.copilot.proposals`).
+    conversation_id: UUID | None = None
 
 
 def _principal(ctx: ToolContext) -> Principal:
@@ -506,18 +516,20 @@ class CreateRfqIn(BaseModel):
         ),
     )
     currency: str | None = Field(default=None, description=_CURRENCY_ARG)
+    proposal_id: UUID | None = Field(default=None, description=PROPOSAL_ARG)
 
 
-class CreateRfqOut(BaseModel):
-    id: UUID
-    ref: str
-    title: str
-    status: str
+class CreateRfqOut(AwaitingConfirmation):
+    # Set once the RFQ exists (not while awaiting the buyer's confirmation).
+    id: UUID | None = None
+    ref: str | None = None
+    title: str | None = None
+    status: str | None = None
     # The RFQ's currency (offers are compared in it) and where it came from.
-    currency: str
-    currency_source: CurrencySource | None
-    lines: list[LineItem]
-    questions: list[str]
+    currency: str | None = None
+    currency_source: CurrencySource | None = None
+    lines: list[LineItem] = Field(default_factory=list[LineItem])
+    questions: list[str] = Field(default_factory=list[str])
 
 
 # --- editing a draft RFQ ---------------------------------------------------------------
@@ -694,6 +706,7 @@ def _edited(detail: RfqDetail, change: CurrencyChange | None = None) -> EditedRf
 class InviteSuppliersIn(BaseModel):
     rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
     supplier_ids: list[UUID] = Field(min_length=1, max_length=10)
+    proposal_id: UUID | None = Field(default=None, description=PROPOSAL_ARG)
 
 
 class InviteResult(BaseModel):
@@ -702,9 +715,9 @@ class InviteResult(BaseModel):
     detail: str
 
 
-class InviteSuppliersOut(BaseModel):
+class InviteSuppliersOut(AwaitingConfirmation):
     ref: str
-    results: list[InviteResult]
+    results: list[InviteResult] = Field(default_factory=list[InviteResult])
 
 
 class PreparedApproval(BaseModel):
@@ -924,22 +937,24 @@ class PurchaseAnalysisOut(BaseModel):
 class RfqFromAnalysisIn(BaseModel):
     analysis_id: UUID = Field(description="The analysis_id returned by run_purchase_analysis")
     currency: str | None = Field(default=None, description=_CURRENCY_ARG)
+    proposal_id: UUID | None = Field(default=None, description=PROPOSAL_ARG)
 
 
-class RfqFromAnalysisOut(BaseModel):
-    id: UUID
-    ref: str
-    title: str
-    status: str
+class RfqFromAnalysisOut(AwaitingConfirmation):
+    # Set once the RFQ exists (not while awaiting the buyer's confirmation).
+    id: UUID | None = None
+    ref: str | None = None
+    title: str | None = None
+    status: str | None = None
     # The RFQ's currency: offers are compared, and limits set, in it.
-    currency: str
-    currency_source: CurrencySource | None
-    lines: list[LineItem]
-    invited_suppliers: list[str]
-    skipped_suppliers: list[str]
+    currency: str | None = None
+    currency_source: CurrencySource | None = None
+    lines: list[LineItem] = Field(default_factory=list[LineItem])
+    invited_suppliers: list[str] = Field(default_factory=list[str])
+    skipped_suppliers: list[str] = Field(default_factory=list[str])
     # Positions without a target/maximum price (no history, or another currency
     # with no exchange rate): the buyer must give them before negotiating.
-    lines_without_limits: list[int]
+    lines_without_limits: list[int] = Field(default_factory=list[int])
 
 
 def _line_item(line: RfqLine) -> LineItem:
@@ -1013,6 +1028,21 @@ def _po_item(po: PurchaseOrderSummary) -> PoItem:
 
 def _clean(items: list[str]) -> list[str]:
     return [item.strip()[:120] for item in items if item.strip()][:MAX_TEMPLATE_ITEMS]
+
+
+_CONFIRM_FIRST: Final = (
+    " Two calls: the first (no proposal_id) does nothing and answers a preview with a "
+    "proposal_id; show it to the buyer and ask. Call again with that proposal_id only after "
+    "they confirm in their own later message."
+)
+
+
+def _analysis_request(args: RfqFromAnalysisIn) -> RfqFromAnalysisRequest:
+    try:
+        currency = known_currency(args.currency) if args.currency else None
+    except RfqError as exc:
+        raise _service_error(exc) from None
+    return RfqFromAnalysisRequest(currency=currency)
 
 
 def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
@@ -1337,8 +1367,45 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         logger.info("copilot updated template tenant=%s template=%s", ctx.tenant_id, template_id)
         return _template_out(updated)
 
+    async def _propose(
+        ctx: ToolContext, action: str, args: BaseModel, preview: ProposalPreview, **stored: object
+    ) -> UUID:
+        """Store what `action` would do (its args, the preview, anything it needs to run
+        exactly that); nothing else happens until the buyer confirms."""
+        if deps.conversation_id is None:
+            raise ToolError("this action needs a conversation to ask the buyer in")
+        return await proposals.propose(
+            db,
+            _principal(ctx),
+            conversation_id=deps.conversation_id,
+            run_id=ctx.run_id,
+            action=action,
+            args=args.model_dump(mode="json", exclude={"proposal_id"}),
+            preview={
+                "shown": preview.model_dump(mode="json"),
+                **stored,
+            },
+        )
+
+    async def _claim(ctx: ToolContext, action: str, proposal_id: UUID) -> proposals.Claimed:
+        if deps.conversation_id is None:
+            raise ToolError("this action needs a conversation to ask the buyer in")
+        try:
+            return await proposals.claim(
+                db,
+                _principal(ctx),
+                conversation_id=deps.conversation_id,
+                run_id=ctx.run_id,
+                action=action,
+                proposal_id=proposal_id,
+            )
+        except proposals.ProposalRefused as exc:
+            raise ToolError(str(exc)) from None
+
     async def create_rfq(ctx: ToolContext, args: CreateRfqIn) -> CreateRfqOut:
         principal = _principal(ctx)
+        if args.proposal_id is not None:
+            return await _confirm_create_rfq(ctx, args.proposal_id)
         text = args.text
         if args.include_attachments:
             attached = deps.attachments_text
@@ -1348,7 +1415,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 text = f"{text}\n\n{attached}"
         own_words = await deps.buyer_messages() if deps.buyer_messages is not None else []
         try:
-            created = await rfq_service.create_rfq_from_text(
+            drafted = await rfq_service.draft_rfq_from_text(
                 db,
                 principal,
                 text,
@@ -1358,13 +1425,63 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             )
         except RfqError as exc:
             raise _service_error(exc) from None
+        title = drafted.draft.title
         if args.pending_validation:
-            title = rfq_service.preliminary_title(created.title, args.pending_validation)
-            renamed = await rfq_service.update_rfq(
-                db, principal, created.id, UpdateRfqRequest(title=title[:500])
-            )
-            created = created.model_copy(update={"title": renamed.title})
+            title = rfq_service.preliminary_title(title, args.pending_validation)[:500]
+        preview = ProposalPreview(
+            action="create_rfq",
+            title=title,
+            currency=drafted.currency,
+            lines=[
+                ProposedLine(
+                    position=position,
+                    description=line.description,
+                    part_number=line.part_number,
+                    quantities=list(line.quantities),
+                    unit=line.unit,
+                    need_by=line.need_by,
+                    incoterm=line.incoterm,
+                    delivery_location=line.delivery_location,
+                )
+                for position, line in enumerate(drafted.draft.lines, start=1)
+            ],
+            questions=list(drafted.draft.questions),
+        )
+        # The intake draft itself is stored, so the confirmation creates this very
+        # RFQ instead of asking the agent again (it could answer differently).
+        proposal_id = await _propose(
+            ctx,
+            "create_rfq",
+            args,
+            preview,
+            draft={
+                "source_text": drafted.source_text,
+                "draft": drafted.draft.model_dump(mode="json"),
+                "currency": drafted.currency,
+                "currency_source": drafted.currency_source,
+                "title": title,
+            },
+        )
+        return CreateRfqOut(awaiting_confirmation=True, proposal_id=proposal_id, preview=preview)
+
+    async def _confirm_create_rfq(ctx: ToolContext, proposal_id: UUID) -> CreateRfqOut:
+        principal = _principal(ctx)
+        claimed = await _claim(ctx, "create_rfq", proposal_id)
+        stored = cast(dict[str, Any], claimed.preview["draft"])
+        draft = RfqIntakeOutput.model_validate(stored["draft"])
+        drafted = rfq_service.TextDraft(
+            source_text=str(stored["source_text"]),
+            draft=draft.model_copy(update={"title": str(stored["title"])}),
+            currency=str(stored["currency"]),
+            currency_source=cast(CurrencySource, stored["currency_source"]),
+        )
+        try:
+            created = await rfq_service.store_text_draft(db, principal, drafted)
+        except RfqError as exc:
+            await proposals.release(db, principal, proposal_id)
+            raise _service_error(exc) from None
         return CreateRfqOut(
+            proposal_id=proposal_id,
             id=created.id,
             ref=created.ref,
             title=created.title,
@@ -1458,11 +1575,53 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
 
     async def invite_suppliers(ctx: ToolContext, args: InviteSuppliersIn) -> InviteSuppliersOut:
         principal = _principal(ctx)
+        if args.proposal_id is None:
+            async with tenant_session(db, ctx.tenant_id) as session:
+                rfq = await _rfq(session, args.rfq)
+                contacts = await queries.first_contacts(session, list(args.supplier_ids))
+                wanted = list(dict.fromkeys(args.supplier_ids))
+                names = {
+                    row.id: row.name
+                    for row in await session.execute(
+                        select(Supplier.id, Supplier.name).where(Supplier.id.in_(wanted))
+                    )
+                }
+                emails = {
+                    row.id: row.email
+                    for row in await session.execute(
+                        select(Contact.id, Contact.email).where(
+                            Contact.id.in_(list(contacts.values()))
+                        )
+                    )
+                }
+            missing = [str(s) for s in wanted if s not in names]
+            if missing:
+                raise ToolError(f"unknown supplier ids: {', '.join(missing)}; use list_suppliers")
+            preview = ProposalPreview(
+                action="invite_suppliers",
+                rfq=rfq.ref,
+                title=rfq.title,
+                suppliers=[
+                    ProposedSupplier(
+                        name=names[s],
+                        email=emails.get(contacts[s]) if s in contacts else None,
+                    )
+                    for s in wanted
+                ],
+            )
+            proposal_id = await _propose(
+                ctx, "invite_suppliers", args.model_copy(update={"rfq": str(rfq.id)}), preview
+            )
+            return InviteSuppliersOut(
+                ref=rfq.ref, awaiting_confirmation=True, proposal_id=proposal_id, preview=preview
+            )
+        claimed = await _claim(ctx, "invite_suppliers", args.proposal_id)
+        stored = InviteSuppliersIn.model_validate(claimed.args)
         async with tenant_session(db, ctx.tenant_id) as session:
-            rfq = await _rfq(session, args.rfq)
-            contacts = await queries.first_contacts(session, list(args.supplier_ids))
+            rfq = await _rfq(session, stored.rfq)
+            contacts = await queries.first_contacts(session, list(stored.supplier_ids))
         results: list[InviteResult] = []
-        for supplier_id in dict.fromkeys(args.supplier_ids):
+        for supplier_id in dict.fromkeys(stored.supplier_ids):
             contact_id = contacts.get(supplier_id)
             if contact_id is None:
                 results.append(
@@ -1480,7 +1639,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 results.append(InviteResult(supplier_id=supplier_id, ok=False, detail=str(exc)))
                 continue
             results.append(InviteResult(supplier_id=supplier_id, ok=True, detail="invited"))
-        return InviteSuppliersOut(ref=rfq.ref, results=results)
+        return InviteSuppliersOut(ref=rfq.ref, results=results, proposal_id=args.proposal_id)
 
     async def prepare_send(ctx: ToolContext, args: RfqRef) -> PrepareSendOut:
         principal = _principal(ctx)
@@ -1594,32 +1753,20 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         ctx: ToolContext, args: RfqFromAnalysisIn
     ) -> RfqFromAnalysisOut:
         principal = _principal(ctx)
-        analysis_id = args.analysis_id
-        try:
-            currency = known_currency(args.currency) if args.currency else None
-        except RfqError as exc:
-            raise _service_error(exc) from None
-        request = RfqFromAnalysisRequest(currency=currency)
+        if args.proposal_id is None:
+            return await _propose_rfq_from_analysis(ctx, args)
+        claimed = await _claim(ctx, "create_rfq_from_analysis", args.proposal_id)
+        stored = RfqFromAnalysisIn.model_validate(claimed.args)
         try:
             created = await purchasing_service.create_rfq_from_analysis(
-                db, principal, analysis_id, request
+                db, principal, stored.analysis_id, _analysis_request(stored)
             )
-        except purchasing_service.NotFound:
-            # Models sometimes copy an id wrongly: fall back to this buyer's most
-            # recent analysis that has no RFQ yet, if there is one from today.
-            latest = await _latest_open_analysis(db, principal)
-            if latest is None or latest == analysis_id:
-                raise ToolError(f"analysis {analysis_id} not found") from None
-            try:
-                created = await purchasing_service.create_rfq_from_analysis(
-                    db, principal, latest, request
-                )
-            except purchasing_service.PurchasingError as exc:
-                raise ToolError(str(exc)) from None
-        except purchasing_service.PurchasingError as exc:
+        except (purchasing_service.PurchasingError, RfqError) as exc:
+            await proposals.release(db, principal, args.proposal_id)
             raise ToolError(str(exc)) from None
         rfq = created.rfq
         return RfqFromAnalysisOut(
+            proposal_id=args.proposal_id,
             id=rfq.id,
             ref=rfq.ref,
             title=rfq.title,
@@ -1643,6 +1790,58 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             invited_suppliers=[s.name for s in created.invited],
             skipped_suppliers=[f"{s.name} ({s.reason})" for s in created.skipped],
             lines_without_limits=created.lines_without_limits,
+        )
+
+    async def _propose_rfq_from_analysis(
+        ctx: ToolContext, args: RfqFromAnalysisIn
+    ) -> RfqFromAnalysisOut:
+        principal = _principal(ctx)
+        request = _analysis_request(args)
+        analysis_id = args.analysis_id
+        try:
+            plan = await purchasing_service.plan_rfq_from_analysis(
+                db, principal, analysis_id, request
+            )
+        except purchasing_service.NotFound:
+            # Models sometimes copy an id wrongly: fall back to this buyer's most
+            # recent analysis that has no RFQ yet, if there is one from today.
+            latest = await _latest_open_analysis(db, principal)
+            if latest is None or latest == analysis_id:
+                raise ToolError(f"analysis {analysis_id} not found") from None
+            try:
+                plan = await purchasing_service.plan_rfq_from_analysis(
+                    db, principal, latest, request
+                )
+            except purchasing_service.PurchasingError as exc:
+                raise ToolError(str(exc)) from None
+        except purchasing_service.PurchasingError as exc:
+            raise ToolError(str(exc)) from None
+        preview = ProposalPreview(
+            action="create_rfq_from_analysis",
+            title=plan.title,
+            currency=plan.currency,
+            lines=[
+                ProposedLine(
+                    position=position,
+                    description=line.description,
+                    part_number=line.part_number,
+                    quantities=[line.quantity],
+                    unit=line.unit,
+                    need_by=line.need_by,
+                )
+                for position, line in enumerate(plan.lines, start=1)
+            ],
+            suppliers=[ProposedSupplier(name=s.name, email=s.email) for s in plan.suppliers],
+        )
+        # The analysis that was previewed is the one confirmed, fallback included.
+        proposal_id = await _propose(
+            ctx,
+            "create_rfq_from_analysis",
+            args.model_copy(update={"analysis_id": plan.analysis_id}),
+            preview,
+        )
+        return RfqFromAnalysisOut(
+            awaiting_confirmation=True, proposal_id=proposal_id, preview=preview
         )
 
     async def get_negotiation_status(ctx: ToolContext, args: RfqRef) -> NegotiationStatusOut:
@@ -1911,22 +2110,24 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             "create_rfq_from_analysis",
             "Create a DRAFT RFQ from a purchase analysis: the parts to buy with their "
             "quantities and need-by dates, and the suggested suppliers as DRAFT invites. "
-            "Nothing is sent." + _CURRENCY_RESULT,
+            "Nothing is sent." + _CURRENCY_RESULT + _CONFIRM_FIRST,
             RfqFromAnalysisIn,
             RfqFromAnalysisOut,
             "draft",
             create_rfq_from_analysis,
             artifact_kind="rfq_draft",
+            artifact_if=proposals.created,
         ),
         Tool(
             "create_rfq",
             "Create a DRAFT RFQ from a description of what to buy (and the attached "
-            "files). Nothing is sent." + _CURRENCY_RESULT,
+            "files). Nothing is sent." + _CURRENCY_RESULT + _CONFIRM_FIRST,
             CreateRfqIn,
             CreateRfqOut,
             "draft",
             create_rfq,
             artifact_kind="rfq_draft",
+            artifact_if=proposals.created,
         ),
         Tool(
             "update_rfq_line",
@@ -1976,7 +2177,8 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         ),
         Tool(
             "invite_suppliers",
-            "Add suppliers to a draft or open RFQ as DRAFT invites. Nothing is sent.",
+            "Add suppliers to a draft or open RFQ as DRAFT invites. Nothing is sent."
+            + _CONFIRM_FIRST,
             InviteSuppliersIn,
             InviteSuppliersOut,
             "draft",

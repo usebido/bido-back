@@ -7,11 +7,11 @@ as quote extraction would.
 """
 
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest_asyncio
 from sqlalchemy import delete, select
@@ -70,10 +70,19 @@ class Tools:
     tools: dict[str, AnyTool]
     mailboxes: FakeMailboxes
     intake: FakeIntake
+    conversation_id: UUID
 
     async def call(self, ctx: ToolContext, name: str, **args: object) -> Any:
         tool = self.tools[name]
         return await tool.invoke(ctx, tool.parse_input(args))
+
+    async def confirmed(self, ctx: ToolContext, name: str, **args: object) -> Any:
+        """A gated tool as the buyer would see it run: proposed in one run, then
+        confirmed with its proposal_id from a later run (the buyer's next message)."""
+        proposed = await self.call(ctx, name, **args)
+        assert proposed.awaiting_confirmation and proposed.proposal_id is not None
+        later = replace(ctx, run_id=uuid4())
+        return await self.call(later, name, **args, proposal_id=str(proposed.proposal_id))
 
 
 def make_tools(
@@ -84,7 +93,9 @@ def make_tools(
     earlier_attachments_text: str | None = None,
     storage: BlobStorage | None = None,
     buyer_messages: tuple[str, ...] | None = None,
+    conversation_id: UUID | None = None,
 ) -> Tools:
+    conversation = conversation_id or uuid4()
     mailboxes = FakeMailboxes()
     agents = fake_agents()
     assert isinstance(agents.intake, FakeIntake)
@@ -100,9 +111,10 @@ def make_tools(
             buyer_messages=_messages_of(buyer_messages),
             storage=storage,
             today=lambda: date(2026, 10, 7),
+            conversation_id=conversation,
         )
     )
-    return Tools({tool.name: tool for tool in tools}, mailboxes, agents.intake)
+    return Tools({tool.name: tool for tool in tools}, mailboxes, agents.intake, conversation)
 
 
 def _messages_of(value: tuple[str, ...] | None) -> Callable[[], Awaitable[list[str]]] | None:

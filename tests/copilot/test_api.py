@@ -30,7 +30,7 @@ from bido_back.api.deps import (
 from bido_back.auth import Principal
 from bido_back.copilot.contracts import ATTACHMENTS_ONLY_MESSAGE
 from bido_back.db import create_sessionmaker, tenant_session
-from bido_back.db.models import Approval, TemplateUpload
+from bido_back.db.models import Approval, CopilotProposal, Invite, Rfq, TemplateUpload
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.settings import Settings
@@ -171,15 +171,31 @@ async def test_preparing_a_send_creates_approvals_not_emails(
 ) -> None:
     rfq = await make_rfq(app_engine, api.principal)
     rhein = await supplier(app_engine, api.principal, "Rhein")
+    conversation = str(uuid4())
+    invite = {"rfq": rfq.ref, "supplier_ids": [str(rhein.id)]}
+    # First message: the invite is only proposed; nothing changes until the buyer answers.
     script(
-        reply(tool_use("fc_1", "invite_suppliers", rfq=rfq.ref, supplier_ids=[str(rhein.id)])),
+        reply(tool_use("fc_1", "invite_suppliers", **invite)),
+        reply(text("I will invite Rhein (its contact's email). Confirm?")),
+    )
+    await api.http.post(
+        "/v1/copilot/messages",
+        json={"message": "invite Rhein and send it", "conversation_id": conversation},
+    )
+    async with tenant_session(app_engine, api.principal.tenant_id) as session:
+        [proposal] = list(await session.scalars(select(CopilotProposal)))
+        invites = list(await session.scalars(select(Invite).where(Invite.rfq_id == rfq.id)))
+    assert proposal.action == "invite_suppliers" and proposal.used_at is None
+    assert invites == []
+
+    # The buyer's next message confirms it.
+    script(
+        reply(tool_use("fc_1", "invite_suppliers", **invite, proposal_id=str(proposal.id))),
         reply(tool_use("fc_2", "prepare_send", rfq=rfq.ref)),
         reply(text("The email to Rhein is waiting for an approver.")),
     )
-
     response = await api.http.post(
-        "/v1/copilot/messages",
-        json={"message": "invite Rhein and send it", "conversation_id": str(uuid4())},
+        "/v1/copilot/messages", json={"message": "yes", "conversation_id": conversation}
     )
 
     events = parse_sse(response.text)
@@ -192,6 +208,34 @@ async def test_preparing_a_send_creates_approvals_not_emails(
     async with tenant_session(app_engine, api.principal.tenant_id) as session:
         statuses = list(await session.scalars(select(Approval.status)))
     assert statuses == ["pending"]
+
+
+@pytest.mark.db
+async def test_a_proposed_rfq_is_no_card_and_no_rfq(
+    api: Api, app_engine: AsyncEngine, copilot_rows: People, script: Script
+) -> None:
+    script(
+        reply(tool_use("fc_1", "create_rfq", text="4000 MLCC 100nF", currency="EUR")),
+        reply(text("Here is the RFQ I would create. Confirm?")),
+    )
+
+    response = await api.http.post(
+        "/v1/copilot/messages",
+        json={"message": "make an RFQ for 4000 MLCC", "conversation_id": str(uuid4())},
+    )
+
+    events = parse_sse(response.text)
+    [result] = [e for e in events if e["type"] == "tool_result"]
+    assert result["ok"] is True and result["output"]["awaiting_confirmation"] is True
+    preview = result["output"]["preview"]
+    assert [(line["description"], line["unit"]) for line in preview["lines"]] == [
+        ("MLCC 100nF 50V X7R 0603", "pcs"),
+        ("Board-to-board connector 40 pin", "pcs"),
+    ]
+    # No rfq_draft card for something that does not exist yet, and no RFQ row.
+    assert [e for e in events if e["type"] == "artifact"] == []
+    async with tenant_session(app_engine, api.principal.tenant_id) as session:
+        assert list(await session.scalars(select(Rfq))) == []
 
 
 @pytest.mark.db

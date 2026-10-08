@@ -49,6 +49,9 @@ class Tool[InT: BaseModel, OutT: BaseModel]:
     # When set, every successful output is also emitted as an Artifact event
     # of this kind, so the frontend can render it as a card.
     artifact_kind: str | None = None
+    # Which successful outputs make that card (the JSON output); None = all. A
+    # proposal awaiting the buyer's confirmation, for one, is not an RFQ yet.
+    artifact_if: Callable[[Mapping[str, JsonValue]], bool] | None = None
 
     def __post_init__(self) -> None:
         if not _TOOL_NAME.match(self.name):

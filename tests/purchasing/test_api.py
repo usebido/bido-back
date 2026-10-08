@@ -1,6 +1,7 @@
 """Purchasing routes and copilot tools over Postgres (skipped without it)."""
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
+from dataclasses import replace
 from uuid import UUID, uuid4
 
 import httpx
@@ -154,6 +155,17 @@ def tool(tools: tuple[AnyTool, ...], name: str) -> AnyTool:
     return next(t for t in tools if t.name == name)
 
 
+async def confirmed(
+    gated: AnyTool, ctx: ToolContext, args: Mapping[str, object], proposed: object
+) -> object:
+    """Confirm a proposal from a later run, as the buyer's next message would."""
+    assert isinstance(proposed, RfqFromAnalysisOut) and proposed.proposal_id is not None
+    later = replace(ctx, run_id=uuid4())
+    return await gated.invoke(
+        later, gated.parse_input({**args, "proposal_id": str(proposed.proposal_id)})
+    )
+
+
 @pytest.mark.db
 async def test_copilot_tools(app_engine: AsyncEngine, purchasing_rows: People) -> None:
     who = buyer(purchasing_rows)
@@ -161,7 +173,11 @@ async def test_copilot_tools(app_engine: AsyncEngine, purchasing_rows: People) -
     await seed(app_engine, who)
     tools = copilot_tools(
         CopilotToolDeps(
-            db=app_engine, agents=fake_agents(), mailboxes=FakeMailboxes(), today=lambda: TODAY
+            db=app_engine,
+            agents=fake_agents(),
+            mailboxes=FakeMailboxes(),
+            today=lambda: TODAY,
+            conversation_id=uuid4(),
         )
     )
     ctx = ToolContext(tenant_id=who.tenant_id, user_id=who.user_id, run_id=uuid4())
@@ -179,7 +195,16 @@ async def test_copilot_tools(app_engine: AsyncEngine, purchasing_rows: People) -
     assert analyse.kind == "draft" and draft.kind == "draft"
     assert isinstance(analyse.parse_input({"product": "x"}), PurchaseAnalysisIn)
 
-    out = await draft.invoke(ctx, draft.parse_input({"analysis_id": str(result.analysis_id)}))
+    proposed = await draft.invoke(ctx, draft.parse_input({"analysis_id": str(result.analysis_id)}))
+    # A preview with every line's quantity and unit, and who would be invited; no RFQ yet.
+    assert isinstance(proposed, RfqFromAnalysisOut) and proposed.awaiting_confirmation
+    assert proposed.id is None and proposed.preview is not None
+    assert [(line.part_number, line.unit) for line in proposed.preview.lines] == [
+        ("BRG-6205", "pz"),
+        ("CU-WIRE", "kg"),
+    ]
+    assert [s.name for s in proposed.preview.suppliers] == ["Cuscinetti Precisione S.r.l."]
+    out = await confirmed(draft, ctx, {"analysis_id": str(result.analysis_id)}, proposed)
     assert isinstance(out, RfqFromAnalysisOut)
     assert out.status == "draft" and out.invited_suppliers == ["Cuscinetti Precisione S.r.l."]
     assert isinstance(RfqFromAnalysisIn(analysis_id=UUID(int=1)), RfqFromAnalysisIn)
@@ -194,7 +219,11 @@ async def test_a_miscopied_analysis_id_uses_the_latest_open_analysis(
     await seed(app_engine, who)
     tools = copilot_tools(
         CopilotToolDeps(
-            db=app_engine, agents=fake_agents(), mailboxes=FakeMailboxes(), today=lambda: TODAY
+            db=app_engine,
+            agents=fake_agents(),
+            mailboxes=FakeMailboxes(),
+            today=lambda: TODAY,
+            conversation_id=uuid4(),
         )
     )
     ctx = ToolContext(tenant_id=who.tenant_id, user_id=who.user_id, run_id=uuid4())
@@ -202,7 +231,9 @@ async def test_a_miscopied_analysis_id_uses_the_latest_open_analysis(
     draft = tool(tools, "create_rfq_from_analysis")
     await analyse.invoke(ctx, analyse.parse_input({"product": "motor"}))
 
-    out = await draft.invoke(ctx, draft.parse_input({"analysis_id": str(uuid4())}))
+    miscopied = {"analysis_id": str(uuid4())}
+    proposed = await draft.invoke(ctx, draft.parse_input(miscopied))
+    out = await confirmed(draft, ctx, miscopied, proposed)
 
     assert isinstance(out, RfqFromAnalysisOut) and out.status == "draft"
     # The fallback is used up: that analysis now has its RFQ.
