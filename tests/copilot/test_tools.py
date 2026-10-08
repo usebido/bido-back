@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.tools import ToolError
 from bido_back.db import tenant_session
-from bido_back.db.models import Approval, Invite, RfqTemplate, RfqTemplateVersion
+from bido_back.db.models import Approval, Invite, RfqLine, RfqTemplate, RfqTemplateVersion
 from bido_back.rfqs.send import SEND_RFQ_EMAIL
 from tests.approvals.conftest import People
 
@@ -253,3 +253,126 @@ async def test_template_edits_are_new_versions(
     # version; every version, the current one included, stays as a snapshot.
     assert template.version == 3
     assert versions == [1, 2, 3]
+
+
+async def test_editing_a_draft_rfq_by_position(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+    created = await tools.call(ctx, "create_rfq", text="MLCC and connectors")
+    ref = created.ref
+
+    edited = await tools.call(
+        ctx, "update_rfq_line", rfq=ref, position=1, quantities=[5000], clear=["manufacturer"]
+    )
+    added = await tools.call(
+        ctx,
+        "add_rfq_line",
+        rfq=ref,
+        description="Cable 2.5 mm2",
+        quantities=[50],
+        unit="m",
+        part_number="CB-2.5",
+    )
+    renamed = await tools.call(
+        ctx, "update_rfq_line", rfq=ref, position=1, part_number="CAP-0603-104-B"
+    )
+    removed = await tools.call(ctx, "remove_rfq_line", rfq=ref, position=2)
+    terms = await tools.call(
+        ctx,
+        "set_rfq_terms",
+        rfq=ref,
+        incoterm="FCA",
+        delivery_location="Joinville",
+        response_due=datetime(2026, 11, 20, tzinfo=UTC).date(),
+    )
+
+    assert edited.lines[0].quantities == [Decimal(5000)]
+    assert [(line.part_number, line.description) for line in added.lines][-1] == (
+        "CB-2.5",
+        "Cable 2.5 mm2",
+    )
+    assert renamed.lines[0].part_number == "CAP-0603-104-B"
+    # The connector (line 2) is gone and the cable moved up to position 2.
+    assert [(line.position, line.description) for line in removed.lines] == [
+        (1, "MLCC 100nF 50V X7R 0603"),
+        (2, "Cable 2.5 mm2"),
+    ]
+    assert terms.response_due == datetime(2026, 11, 20, tzinfo=UTC).date()
+    assert {(line.incoterm, line.delivery_location) for line in terms.lines} == {
+        ("FCA", "Joinville")
+    }
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        lines = list(
+            await session.scalars(
+                select(RfqLine).where(RfqLine.rfq_id == created.id).order_by(RfqLine.position)
+            )
+        )
+    assert [(line.incoterm, line.delivery_location) for line in lines] == [
+        ("FCA", "Joinville"),
+        ("FCA", "Joinville"),
+    ]
+    assert lines[0].manufacturer is None and lines[0].unit == "pcs"
+
+    with pytest.raises(ToolError, match="no line 9"):
+        await tools.call(ctx, "update_rfq_line", rfq=ref, position=9, unit="kg")
+    with pytest.raises(ToolError, match="nothing to change"):
+        await tools.call(ctx, "update_rfq_line", rfq=ref, position=1)
+    with pytest.raises(ToolError, match="invalid value for: quantities"):
+        await tools.call(ctx, "update_rfq_line", rfq=ref, position=1, quantities=[-1])
+    await tools.call(ctx, "remove_rfq_line", rfq=ref, position=2)
+    with pytest.raises(ToolError, match="at least one"):
+        await tools.call(ctx, "remove_rfq_line", rfq=ref, position=1)
+    assert {tool.kind for tool in tools.tools.values()} == {"read", "draft"}
+
+
+async def test_lines_are_frozen_once_emails_are_prepared(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    rhein = await supplier(app_engine, principal, "Rhein")
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+    created = await tools.call(ctx, "create_rfq", text="MLCC and connectors")
+    await tools.call(ctx, "invite_suppliers", rfq=created.ref, supplier_ids=[str(rhein.id)])
+    await tools.call(ctx, "prepare_send", rfq=created.ref)
+
+    with pytest.raises(ToolError, match="frozen"):
+        await tools.call(ctx, "update_rfq_line", rfq=created.ref, position=1, quantities=[1])
+    with pytest.raises(ToolError, match="frozen"):
+        await tools.call(ctx, "set_rfq_terms", rfq=created.ref, incoterm="EXW")
+
+
+async def test_a_preliminary_rfq_is_not_prepared_for_sending(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    rhein = await supplier(app_engine, principal, "Rhein")
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+
+    created = await tools.call(
+        ctx,
+        "create_rfq",
+        text="MLCC and connectors",
+        pending_validation="engineering validation of the BOM",
+    )
+    await tools.call(ctx, "invite_suppliers", rfq=created.ref, supplier_ids=[str(rhein.id)])
+
+    assert created.title.startswith("PRELIMINARY (pending engineering validation of the BOM): ")
+    with pytest.raises(ToolError, match="is preliminary"):
+        await tools.call(ctx, "prepare_send", rfq=created.ref)
+    with pytest.raises(ToolError, match="is preliminary"):
+        await tools.call(
+            ctx,
+            "propose_negotiation_mandate",
+            rfq=created.ref,
+            deadline=datetime(2026, 12, 1, tzinfo=UTC).date(),
+        )
+
+    # The buyer confirmed the validation: the mark goes, and the RFQ can be prepared.
+    await tools.call(ctx, "set_rfq_terms", rfq=created.ref, title="Capacitors and connectors")
+    prepared = await tools.call(ctx, "prepare_send", rfq=created.ref)
+    assert len(prepared.approvals) == 1

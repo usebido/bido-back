@@ -1,7 +1,7 @@
 """The RFQ services against Postgres, with fake agents and a fake mailbox."""
 
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import delete, select, update
@@ -29,11 +29,13 @@ from bido_back.db.models import (
 from bido_back.rfqs import service, suppliers
 from bido_back.rfqs.errors import Duplicate, InvalidState, MailboxNotConnected, NotFound
 from bido_back.rfqs.schemas import (
+    AddLineRequest,
     ContactIn,
     CreateSupplierRequest,
     RfqCreated,
     SupplierView,
     UpdateLineRequest,
+    UpdateRfqRequest,
 )
 from bido_back.rfqs.send import (
     REJECT_HOOKS,
@@ -506,3 +508,57 @@ async def test_rejected_proposal_is_refused_by_the_send_tool(
             SendRfqEmailArgs.model_validate(approval.args),
         )
     assert mailboxes.sender.sent == []
+
+
+async def test_add_remove_lines_and_rfq_wide_terms(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    principal = buyer(rfq_rows)
+    rfq = await make_rfq(app_engine, principal)
+
+    added = await service.add_line(
+        app_engine,
+        principal,
+        rfq.id,
+        AddLineRequest(description="Cable", quantities=[Decimal(50)], unit="m"),
+    )
+    assert [(line.position, line.description) for line in added.lines][-1] == (3, "Cable")
+
+    # Removing the first line moves the others up, keeping positions unique and dense.
+    removed = await service.remove_line(app_engine, principal, rfq.id, added.lines[0].id)
+    assert [(line.position, line.description) for line in removed.lines] == [
+        (1, "Board-to-board connector 40 pin"),
+        (2, "Cable"),
+    ]
+
+    terms = await service.update_rfq(
+        app_engine,
+        principal,
+        rfq.id,
+        UpdateRfqRequest(
+            title="Connectors and cable", incoterm="FCA", delivery_location="Joinville"
+        ),
+    )
+    assert terms.title == "Connectors and cable"
+    assert {(line.incoterm, line.delivery_location) for line in terms.lines} == {
+        ("FCA", "Joinville")
+    }
+    cleared = await service.update_rfq(
+        app_engine, principal, rfq.id, UpdateRfqRequest(delivery_location=None)
+    )
+    assert {line.delivery_location for line in cleared.lines} == {None}
+    assert {line.incoterm for line in cleared.lines} == {"FCA"}
+
+    with pytest.raises(InvalidState, match="title cannot be cleared"):
+        await service.update_rfq(app_engine, principal, rfq.id, UpdateRfqRequest(title=None))
+    await service.remove_line(app_engine, principal, rfq.id, removed.lines[0].id)
+    with pytest.raises(InvalidState, match="at least one"):
+        await service.remove_line(app_engine, principal, rfq.id, removed.lines[1].id)
+    with pytest.raises(NotFound):
+        await service.remove_line(app_engine, principal, rfq.id, uuid4())
+
+
+def test_preliminary_titles() -> None:
+    title = service.preliminary_title("Motor parts", " engineering validation ")
+    assert title == "PRELIMINARY (pending engineering validation): Motor parts"
+    assert service.is_preliminary(title) and not service.is_preliminary("Motor parts")

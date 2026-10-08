@@ -34,10 +34,11 @@ from decimal import Decimal
 from typing import Final, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from bido_back.agents.catalog.contracts import LineCategory, ModelDecimal
 from bido_back.agents.context import ToolContext
 from bido_back.agents.tools import AnyTool, Tool, ToolError
 from bido_back.auth import Principal
@@ -58,6 +59,7 @@ from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.errors import Duplicate, MailboxNotConfigured, MailboxNotConnected, RfqError
 from bido_back.rfqs.mailbox import MailboxSenderFactory
+from bido_back.rfqs.schemas import AddLineRequest, RfqDetail, UpdateLineRequest, UpdateRfqRequest
 from bido_back.storage import BlobStorage
 from bido_back.templates import service as template_service
 from bido_back.templates.schemas import TemplateEdit
@@ -356,6 +358,16 @@ class CreateRfqIn(BaseModel):
             "buyer's part numbers exactly as they wrote them; never turn them into MPNs"
         ),
     )
+    pending_validation: str | None = Field(
+        default=None,
+        max_length=200,
+        description=(
+            "What the RFQ still waits for, when the buyer wants to move on before it "
+            "(e.g. 'engineering validation of the BOM'). Marks the RFQ PRELIMINARY: it "
+            "cannot be prepared for sending until the buyer confirms and the mark is removed "
+            "with set_rfq_terms(title=...)"
+        ),
+    )
     include_attachments: bool = Field(
         default=True,
         description=(
@@ -372,6 +384,121 @@ class CreateRfqOut(BaseModel):
     status: str
     lines: list[LineItem]
     questions: list[str]
+
+
+# --- editing a draft RFQ ---------------------------------------------------------------
+
+_DRAFT_ONLY = (
+    " Only while the RFQ is a draft and no email has been prepared from it; after that the "
+    "lines are frozen."
+)
+_LINE_FIELDS = Literal[
+    "part_number",
+    "mpn",
+    "manufacturer",
+    "need_by",
+    "incoterm",
+    "delivery_location",
+    "qualification",
+]
+
+
+class UpdateRfqLineIn(BaseModel):
+    rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
+    position: int = Field(ge=1, description="The line's position, as shown")
+    description: str | None = Field(default=None, min_length=1, max_length=500)
+    part_number: str | None = Field(
+        default=None, description="The buyer's own code for the part, exactly as written"
+    )
+    mpn: str | None = Field(default=None, description="A manufacturer part number, as given")
+    manufacturer: str | None = None
+    category: LineCategory | None = None
+    quantities: list[ModelDecimal] | None = Field(
+        default=None, min_length=1, max_length=20, description="All quantity tiers, replaced"
+    )
+    unit: str | None = Field(default=None, min_length=1)
+    need_by: date | None = None
+    incoterm: str | None = Field(default=None, description="The rule only: DAP, FCA, EXW...")
+    delivery_location: str | None = None
+    qualification: str | None = None
+    clear: list[_LINE_FIELDS] = Field(
+        default_factory=list[_LINE_FIELDS], description="Optional fields to empty"
+    )
+
+
+class AddRfqLineIn(BaseModel):
+    rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
+    description: str = Field(min_length=1, max_length=500)
+    quantities: list[ModelDecimal] = Field(min_length=1, max_length=20)
+    unit: str = Field(default="pcs", min_length=1)
+    part_number: str | None = Field(
+        default=None, description="The buyer's own code for the part, exactly as written"
+    )
+    mpn: str | None = Field(default=None, description="A manufacturer part number, as given")
+    manufacturer: str | None = None
+    category: LineCategory = "catalog"
+    need_by: date | None = None
+    incoterm: str | None = None
+    delivery_location: str | None = None
+    qualification: str | None = None
+
+
+class RemoveRfqLineIn(BaseModel):
+    rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
+    position: int = Field(ge=1, description="The line's position, as shown")
+
+
+class SetRfqTermsIn(BaseModel):
+    rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
+    incoterm: str | None = Field(
+        default=None, description="For every line. The rule only: DAP, FCA, EXW..."
+    )
+    delivery_location: str | None = Field(default=None, description="For every line")
+    need_by: date | None = Field(default=None, description="For every line")
+    response_due: date | None = Field(default=None, description="When suppliers must answer")
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+
+
+class EditedRfqOut(BaseModel):
+    id: UUID
+    ref: str
+    title: str
+    status: str
+    response_due: date | None
+    lines: list[LineItem]
+
+
+def _request[M: BaseModel](model: type[M], fields: dict[str, object]) -> M:
+    """The service's request from tool arguments; a refusal names the fields, not the values."""
+    try:
+        return model.model_validate(fields)
+    except ValidationError as exc:
+        where = ", ".join(".".join(str(p) for p in error["loc"]) for error in exc.errors())
+        raise ToolError(f"invalid value for: {where}") from None
+
+
+def _edited(detail: RfqDetail) -> EditedRfqOut:
+    return EditedRfqOut(
+        id=detail.id,
+        ref=detail.ref,
+        title=detail.title,
+        status=detail.status,
+        response_due=detail.response_due,
+        lines=[
+            LineItem(
+                position=line.position,
+                description=line.description,
+                part_number=line.part_number,
+                mpn=line.mpn,
+                quantities=list(line.quantities),
+                unit=line.unit,
+                need_by=line.need_by,
+                incoterm=line.incoterm,
+                delivery_location=line.delivery_location,
+            )
+            for line in detail.lines
+        ],
+    )
 
 
 class InviteSuppliersIn(BaseModel):
@@ -941,6 +1068,12 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             )
         except RfqError as exc:
             raise _service_error(exc) from None
+        if args.pending_validation:
+            title = rfq_service.preliminary_title(created.title, args.pending_validation)
+            renamed = await rfq_service.update_rfq(
+                db, principal, created.id, UpdateRfqRequest(title=title[:500])
+            )
+            created = created.model_copy(update={"title": renamed.title})
         return CreateRfqOut(
             id=created.id,
             ref=created.ref,
@@ -962,6 +1095,65 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             ],
             questions=list(created.questions),
         )
+
+    async def _draft_line(ctx: ToolContext, reference: str, position: int) -> tuple[Rfq, RfqLine]:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, reference)
+            line = await session.scalar(
+                select(RfqLine).where(RfqLine.rfq_id == rfq.id, RfqLine.position == position)
+            )
+        if line is None:
+            raise ToolError(f"{rfq.ref} has no line {position}")
+        return rfq, line
+
+    async def update_rfq_line(ctx: ToolContext, args: UpdateRfqLineIn) -> EditedRfqOut:
+        rfq, line = await _draft_line(ctx, args.rfq, args.position)
+        changes: dict[str, object] = {
+            field: value
+            for field, value in args.model_dump(exclude={"rfq", "position", "clear"}).items()
+            if value is not None
+        }
+        changes.update({field: None for field in args.clear})
+        if not changes:
+            raise ToolError("nothing to change: pass the fields to set or to clear")
+        patch = _request(UpdateLineRequest, changes)
+        try:
+            await rfq_service.update_line(db, _principal(ctx), rfq.id, line.id, patch)
+            return _edited(await rfq_service.get_rfq(db, _principal(ctx), rfq.id))
+        except RfqError as exc:
+            raise _service_error(exc) from None
+
+    async def add_rfq_line(ctx: ToolContext, args: AddRfqLineIn) -> EditedRfqOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+        request = _request(AddLineRequest, args.model_dump(exclude={"rfq"}))
+        try:
+            return _edited(await rfq_service.add_line(db, _principal(ctx), rfq.id, request))
+        except RfqError as exc:
+            raise _service_error(exc) from None
+
+    async def remove_rfq_line(ctx: ToolContext, args: RemoveRfqLineIn) -> EditedRfqOut:
+        rfq, line = await _draft_line(ctx, args.rfq, args.position)
+        try:
+            return _edited(await rfq_service.remove_line(db, _principal(ctx), rfq.id, line.id))
+        except RfqError as exc:
+            raise _service_error(exc) from None
+
+    async def set_rfq_terms(ctx: ToolContext, args: SetRfqTermsIn) -> EditedRfqOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+        changes = {
+            field: value
+            for field, value in args.model_dump(exclude={"rfq"}).items()
+            if value is not None
+        }
+        if not changes:
+            raise ToolError("nothing to change: pass the terms to set")
+        patch = _request(UpdateRfqRequest, changes)
+        try:
+            return _edited(await rfq_service.update_rfq(db, _principal(ctx), rfq.id, patch))
+        except RfqError as exc:
+            raise _service_error(exc) from None
 
     async def invite_suppliers(ctx: ToolContext, args: InviteSuppliersIn) -> InviteSuppliersOut:
         principal = _principal(ctx)
@@ -993,6 +1185,8 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         principal = _principal(ctx)
         async with tenant_session(db, ctx.tenant_id) as session:
             rfq = await _rfq(session, args.rfq)
+        if (hold := rfq_service.preliminary_hold(rfq)) is not None:
+            raise ToolError(hold)
         try:
             prepared = await rfq_service.prepare_send(
                 db, principal, rfq.id, deps.agents.email_writer, deps.mailboxes
@@ -1387,6 +1581,47 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             CreateRfqOut,
             "draft",
             create_rfq,
+            artifact_kind="rfq_draft",
+        ),
+        Tool(
+            "update_rfq_line",
+            "Change one line of a draft RFQ (by its position): description, quantities, unit, "
+            "the buyer's part number, MPN, manufacturer, need-by date, Incoterm, delivery "
+            "location, qualification. Only the fields passed change; `clear` empties optional "
+            "ones." + _DRAFT_ONLY,
+            UpdateRfqLineIn,
+            EditedRfqOut,
+            "draft",
+            update_rfq_line,
+            artifact_kind="rfq_draft",
+        ),
+        Tool(
+            "add_rfq_line",
+            "Add a line at the end of a draft RFQ." + _DRAFT_ONLY,
+            AddRfqLineIn,
+            EditedRfqOut,
+            "draft",
+            add_rfq_line,
+            artifact_kind="rfq_draft",
+        ),
+        Tool(
+            "remove_rfq_line",
+            "Remove a line (by its position) from a draft RFQ; the lines after it move up. "
+            "The last line cannot be removed." + _DRAFT_ONLY,
+            RemoveRfqLineIn,
+            EditedRfqOut,
+            "draft",
+            remove_rfq_line,
+            artifact_kind="rfq_draft",
+        ),
+        Tool(
+            "set_rfq_terms",
+            "Set a draft RFQ's terms for every line at once: Incoterm, delivery location, "
+            "need-by date; and the RFQ's response date or title." + _DRAFT_ONLY,
+            SetRfqTermsIn,
+            EditedRfqOut,
+            "draft",
+            set_rfq_terms,
             artifact_kind="rfq_draft",
         ),
         Tool(
