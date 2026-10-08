@@ -2752,8 +2752,20 @@
             "type": "string"
           },
           "title": {
-            "description": "The first message, truncated",
+            "description": "The first message, truncated, until the copilot names the conversation or the buyer renames it",
             "title": "Title",
+            "type": "string"
+          },
+          "title_source": {
+            "default": "fallback",
+            "description": "Where the title came from: `fallback` (the first message), `ai` (named by the copilot), `milestone` (an RFQ, analysis or award reference) or `user` (renamed by the buyer; never changed automatically after that)",
+            "enum": [
+              "fallback",
+              "ai",
+              "milestone",
+              "user"
+            ],
+            "title": "Title Source",
             "type": "string"
           },
           "turns": {
@@ -7444,6 +7456,21 @@
         "title": "RecordDocumentRequest",
         "type": "object"
       },
+      "RenameConversationRequest": {
+        "properties": {
+          "title": {
+            "maxLength": 120,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "title": "RenameConversationRequest",
+        "type": "object"
+      },
       "RequiredFieldView": {
         "properties": {
           "conditional": {
@@ -11780,6 +11807,121 @@
           }
         ],
         "summary": "Get Conversation",
+        "tags": [
+          "copilot"
+        ]
+      },
+      "patch": {
+        "description": "Rename the caller's own conversation; automatic titles stop for it.",
+        "operationId": "rename_conversation_v1_copilot_conversations__conversation_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Conversation Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameConversationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationSummary"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Rename Conversation",
         "tags": [
           "copilot"
         ]

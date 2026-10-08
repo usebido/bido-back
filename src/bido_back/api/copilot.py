@@ -34,7 +34,15 @@
   person in four-eyes tenants).
 * `GET /v1/copilot/conversations`: the caller's own conversations, most recent
   activity first (`limit`, and `before` = the previous page's `next_before`).
+  - `title` `{conversation_id, title}`: the conversation's title changed (the
+    copilot names it over the first turns, or an RFQ/analysis/award reference
+    becomes part of it). Sent before `done` when ready in time; otherwise the
+    next conversation list has it.
+* `GET /v1/copilot/conversations`: the caller's own conversations, most recent
+  activity first (`limit`, and `before` = the previous page's `next_before`).
 * `GET /v1/copilot/conversations/{id}`: the caller's own conversation so far.
+* `PATCH /v1/copilot/conversations/{id}` `{title}`: the caller renames their
+  conversation (1-120 characters); it is never renamed automatically after that.
 """
 
 import json
@@ -62,10 +70,13 @@ from bido_back.auth import Principal
 from bido_back.copilot import service
 from bido_back.copilot.contracts import (
     ConversationList,
+    ConversationSummary,
     ConversationView,
     CopilotMessageRequest,
+    RenameConversationRequest,
     StreamItem,
 )
+from bido_back.copilot.titles import Titler, default_titler
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.storage import BlobStorage
@@ -82,15 +93,28 @@ def get_copilot_runner_config(request: Request) -> RunnerConfig:
     return RunnerConfig.from_settings(resources.settings)
 
 
+def get_copilot_titler(
+    runner_config: Annotated[RunnerConfig, Depends(get_copilot_runner_config)],
+) -> Titler | None:
+    """The agent that names conversations; tests override it (None = keep the first message)."""
+    return default_titler(runner_config)
+
+
 def get_copilot_deps(
     db: Db,
     storage: Annotated[BlobStorage, Depends(get_storage)],
     agents: Annotated[RfqAgents, Depends(get_rfq_agents)],
     mailboxes: Annotated[MailboxSenderFactory, Depends(get_mailbox_senders)],
     runner_config: Annotated[RunnerConfig, Depends(get_copilot_runner_config)],
+    titler: Annotated[Titler | None, Depends(get_copilot_titler)],
 ) -> service.CopilotDeps:
     return service.CopilotDeps(
-        db=db, storage=storage, agents=agents, mailboxes=mailboxes, runner_config=runner_config
+        db=db,
+        storage=storage,
+        agents=agents,
+        mailboxes=mailboxes,
+        runner_config=runner_config,
+        titler=titler,
     )
 
 
@@ -160,5 +184,18 @@ def copilot_router() -> APIRouter:
         if found is None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
         return found
+
+    @router.patch(
+        "/conversations/{conversation_id}",
+        responses=error_responses(status.HTTP_404_NOT_FOUND),
+    )
+    async def rename_conversation(  # pyright: ignore[reportUnusedFunction]
+        conversation_id: UUID, body: RenameConversationRequest, principal: CurrentPrincipal, db: Db
+    ) -> ConversationSummary:
+        """Rename the caller's own conversation; automatic titles stop for it."""
+        renamed = await service.rename_conversation(db, principal, conversation_id, body.title)
+        if renamed is None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "conversation not found")
+        return renamed
 
     return router

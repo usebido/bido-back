@@ -1136,8 +1136,14 @@ class CopilotConversation(Base):
     """One copilot conversation, for listing (migration 0022).
 
     The turns themselves live in Agno's run storage; this row only lets a user
-    list their conversations: the owner, a title (the first message,
-    truncated), the turn count and the last activity.
+    list their conversations: the owner, a title, the turn count and the last
+    activity.
+
+    The title (migration 0028) starts as the first message, truncated
+    (`fallback`); the titler refines it over the first turns until it is
+    `title_settled` (`ai`); an RFQ, analysis or award writes a title with its
+    reference once per kind (`milestone`, kinds in `title_milestones`); a
+    buyer's rename (`user`) is final.
     """
 
     __tablename__ = "copilot_conversations"
@@ -1148,6 +1154,12 @@ class CopilotConversation(Base):
     user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id"), primary_key=True)
     id: Mapped[UUID] = mapped_column(primary_key=True)
     title: Mapped[str] = mapped_column(Text)
+    title_source: Mapped[str] = mapped_column(Text, server_default=text("'fallback'"))
+    title_settled: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    title_language: Mapped[str | None] = mapped_column(Text)
+    title_milestones: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), server_default=text("'{}'::text[]")
+    )
     turns: Mapped[int] = mapped_column(Integer, server_default=text("0"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     last_activity_at: Mapped[datetime] = mapped_column(
