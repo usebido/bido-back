@@ -1255,11 +1255,14 @@ def _stock_notes(section: Section, table: ParsedTable) -> list[str]:
     if section.import_type != "inventory":
         return []
     left_out = [c for c in table.unknown_columns if norm(c) in _UNAVAILABLE_STOCK]
+    blocked = table.columns.get("blocked_qty")
+    if blocked is not None:
+        left_out.append(blocked)
     if not left_out:
         return []
     return [
-        f"Only unrestricted stock counted as on hand ({table.columns.get('on_hand')}); "
-        f"left out: {', '.join(left_out)}."
+        f"Unavailable stock excluded from the available balance ({table.columns.get('on_hand')}); "
+        f"excluded: {', '.join(left_out)}."
     ]
 
 

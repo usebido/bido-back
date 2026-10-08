@@ -17,6 +17,9 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.config import RunnerConfig
+from bido_back.auth import Principal
+from bido_back.corrections.schemas import LineCorrectionRequest
+from bido_back.corrections.service import correct_line, list_corrections
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Attachment,
@@ -69,7 +72,14 @@ class Seeded:
     storage: FakeStorage
     engine: AsyncEngine
 
-    async def add_message(self, *, body: str = BODY, with_sheet: bool = True) -> UUID:
+    async def add_message(
+        self,
+        *,
+        body: str = BODY,
+        with_sheet: bool = True,
+        occurred_at: datetime | None = None,
+        in_reply_to: str | None = None,
+    ) -> UUID:
         async with tenant_session(self.engine, self.tenant_id) as session:
             message = Message(
                 tenant_id=self.tenant_id,
@@ -79,7 +89,8 @@ class Seeded:
                 subject="AW: [RFQ-12] LDO regulators",
                 body_text=body,
                 status="stored",
-                occurred_at=datetime.now(UTC),
+                occurred_at=occurred_at or datetime.now(UTC),
+                in_reply_to=in_reply_to,
             )
             session.add(message)
             await session.flush()
@@ -313,7 +324,7 @@ async def test_reply_becomes_a_proposal_with_provenance(seeded: Seeded, script: 
         "declined": False,
     }
     assert proposal.fields["_extraction"]["agent"] == "quote_extraction"
-    assert proposal.fields["_extraction"]["prompt_version"] == 2
+    assert proposal.fields["_extraction"]["prompt_version"] == 3
     assert proposal.fields["extra_offers"] == []
 
     assert [(pl.min_quantity, pl.unit_price) for pl in lines] == [
@@ -438,3 +449,171 @@ async def test_other_tenants_cannot_be_targeted(
 
     assert stub.calls == []
     assert await status_of(seeded, message_id) == "stored"
+
+
+AMENDMENT = "For tier 1000, delivery is now 15 days. All other terms unchanged."
+
+
+def revision_output(*, unchanged: bool = True) -> dict[str, object]:
+    return {
+        "is_quote": True,
+        "currency": _NONE,
+        "valid_until": _NONE,
+        "incoterm": _NONE,
+        "payment_terms": _NONE,
+        "reply_kind": "amendment",
+        "unchanged_terms": _body("All other terms unchanged", "All other terms unchanged")
+        if unchanged
+        else _NONE,
+        "lines": [
+            {
+                "rfq_line_position": 1,
+                "offered_mpn": _NONE,
+                "min_quantity": _body("1000", "tier 1000"),
+                "unit_price": _NONE,
+                "unit": _NONE,
+                "tooling_cost": _NONE,
+                "moq": _NONE,
+                "lead_time_days": _body("15", "15 days"),
+                "origin_country": _NONE,
+                "qualification": _NONE,
+            }
+        ],
+    }
+
+
+async def test_delivery_revision_keeps_original_price_evidence_and_supplier_context(
+    seeded: Seeded, script: Script
+) -> None:
+    script(final(**quote_output()))
+    first = await seeded.add_message()
+    await run_job(seeded, first)
+    second = await seeded.add_message(body=AMENDMENT, with_sheet=False)
+    stub = script(final(**revision_output()))
+    await run_job(seeded, second)
+    proposals = await proposals_of(seeded)
+    proposal, lines = proposals[-1]
+    assert proposal.currency == "EUR"
+    assert [(line.min_quantity, line.unit_price, line.lead_time_days) for line in lines] == [
+        (Decimal("1000"), Decimal("0.45"), 15),
+        (Decimal("5000"), Decimal("0.41"), 42),
+    ]
+    assert lines[0].fields["unit_price"]["message_id"] == str(first)
+    assert lines[0].fields["lead_time_days"]["message_id"] == str(second)
+    assert not any(line.needs_review for line in lines)
+    user_text = str(stub.calls[0]["input"])
+    assert "prior_supplier_offer" in user_text
+    assert str(first) in user_text
+    assert not stub.calls[0].get("tools")
+
+
+async def test_late_extraction_rebuilds_offer_in_business_order(
+    seeded: Seeded, script: Script
+) -> None:
+    first = await seeded.add_message()
+    second = await seeded.add_message(body=AMENDMENT, with_sheet=False)
+    script(final(**revision_output()), final(**quote_output()))
+    await run_job(seeded, second)
+    await run_job(seeded, first)
+    proposals = await proposals_of(seeded)
+    proposal, lines = proposals[-1]
+    assert proposal.message_id == first  # Extraction version is not business recency.
+    assert proposal.fields["_offer_state"]["active_message_id"] == str(second)
+    assert lines[0].unit_price == Decimal("0.45")
+    assert lines[0].lead_time_days == 15
+    assert not lines[0].needs_review
+    stub = script()
+    await run_job(seeded, first)
+    assert not stub.calls
+    assert len(await proposals_of(seeded)) == 2
+
+
+async def test_ambiguous_amendment_is_durable_and_held(seeded: Seeded, script: Script) -> None:
+    first = await seeded.add_message()
+    script(final(**quote_output()))
+    await run_job(seeded, first)
+    second = await seeded.add_message(
+        body="For tier 1000 delivery is now 15 days.", with_sheet=False
+    )
+    script(final(**revision_output(unchanged=False)))
+    await run_job(seeded, second)
+    proposal, lines = (await proposals_of(seeded))[-1]
+    assert proposal.fields["_offer_state"]["requires_clarification"] is True
+    assert all(line.needs_review for line in lines)
+    assert lines[0].lead_time_days == 42
+    assert proposal.fields["_quote_event"]["lines"][0]["fields"]["lead_time_days"]["parsed"] == 15
+
+
+async def test_explicit_withdrawal_replaces_active_offer_with_no_lines(
+    seeded: Seeded, script: Script
+) -> None:
+    first = await seeded.add_message()
+    script(final(**quote_output()))
+    await run_job(seeded, first)
+    second = await seeded.add_message(body="We withdraw our entire offer.", with_sheet=False)
+    script(
+        final(
+            is_quote=True,
+            currency=_NONE,
+            valid_until=_NONE,
+            incoterm=_NONE,
+            payment_terms=_NONE,
+            reply_kind="withdrawal",
+            update_evidence=_body("We withdraw our entire offer", "We withdraw our entire offer"),
+            lines=[],
+        )
+    )
+    await run_job(seeded, second)
+    proposal, lines = (await proposals_of(seeded))[-1]
+    assert lines == []
+    assert proposal.fields["_offer_state"]["reply_kind"] == "withdrawal"
+    assert proposal.fields["_offer_state"]["active_message_id"] == str(second)
+
+
+async def test_buyer_correction_survives_replay_and_retains_its_audit_id(
+    seeded: Seeded, script: Script, two_tenants: TwoTenants
+) -> None:
+    first = await seeded.add_message()
+    script(final(**quote_output()))
+    await run_job(seeded, first)
+    proposal, lines = (await proposals_of(seeded))[-1]
+    principal = Principal(tenant_id=seeded.tenant_id, user_id=two_tenants.a.user_id)
+    await correct_line(
+        seeded.engine,
+        principal,
+        proposal.id,
+        lines[0].id,
+        LineCorrectionRequest(unit_price=Decimal("0.44"), reason="Confirmed with supplier"),
+    )
+    [correction] = await list_corrections(seeded.engine, principal, proposal.id)
+    second = await seeded.add_message(body=AMENDMENT, with_sheet=False)
+    script(final(**revision_output()))
+    await run_job(seeded, second)
+    _, updated = (await proposals_of(seeded))[-1]
+    assert updated[0].unit_price == Decimal("0.44")
+    assert updated[0].fields["unit_price"]["corrected"] is True
+    assert updated[0].fields["unit_price"]["correction_id"] == str(correction.id)
+
+
+async def test_refusal_after_offer_prevents_recommending_stale_terms(
+    seeded: Seeded, script: Script
+) -> None:
+    first = await seeded.add_message()
+    script(final(**quote_output()))
+    await run_job(seeded, first)
+    second = await seeded.add_message(body="We cannot supply these parts.", with_sheet=False)
+    script(
+        final(
+            is_quote=False,
+            declined=True,
+            currency=_NONE,
+            valid_until=_NONE,
+            incoterm=_NONE,
+            payment_terms=_NONE,
+            lines=[],
+        )
+    )
+    await run_job(seeded, second)
+    proposal, lines = (await proposals_of(seeded))[-1]
+    assert all(line.needs_review for line in lines)
+    assert proposal.fields["_offer_state"]["requires_clarification"] is True

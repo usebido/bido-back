@@ -89,7 +89,7 @@ BOM = [
     BomEntry(HOUSING, Decimal(1)),
 ]
 STOCK = {
-    BEARING.id: Stock(on_hand=Decimal(50), on_order=Decimal(30)),
+    BEARING.id: Stock(on_hand=Decimal(50), on_order=Decimal(30), on_order_due=date(2026, 11, 1)),
     COPPER.id: Stock(on_hand=Decimal("30.5")),
     HOUSING.id: Stock(on_hand=Decimal(150)),
 }
@@ -285,7 +285,11 @@ def test_the_stock_on_order_wins_over_open_purchase_orders() -> None:
         quantity=Decimal(500),
         need_by=date(2026, 11, 15),
         bom=[BomEntry(it, Decimal(1))],
-        stock={it.id: Stock(on_hand=Decimal(20), on_order=Decimal(300))},
+        stock={
+            it.id: Stock(
+                on_hand=Decimal(20), on_order=Decimal(300), on_order_due=date(2026, 10, 30)
+            )
+        },
         purchases=history,
         today=TODAY,
     ).lines

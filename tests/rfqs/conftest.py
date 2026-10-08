@@ -55,7 +55,8 @@ __all__ = ["app_engine", "migrator_engine", "people", "two_tenants"]
 
 INTAKE_OUTPUT = RfqIntakeOutput(
     title="Capacitors and connectors for Q1 build",
-    response_due=date(2026, 11, 1),
+    # Far ahead: an RFQ is only prepared for sending with a reply-by date of today or later.
+    response_due=date(2099, 11, 1),
     lines=[
         RfqLineDraft(
             description="MLCC 100nF 50V X7R 0603",

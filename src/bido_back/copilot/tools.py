@@ -47,22 +47,35 @@ from bido_back.agents.tools import AnyTool, Tool, ToolError
 from bido_back.auth import Principal
 from bido_back.awards import service as award_service
 from bido_back.awards.schemas import AwardLine, AwardRequest, AwardSelection, PurchaseOrderSummary
+from bido_back.comparison.compute import Recommendation
 from bido_back.comparison.loader import load_comparison
+from bido_back.comparison.policy import ComparisonPolicy
 from bido_back.copilot import queries
-from bido_back.copilot.journey_tools import journey_tools
+from bido_back.copilot.journey_tools import journey_tools, reply_by_explained
 from bido_back.db import tenant_session
 from bido_back.db.models import Analysis, Invite, Rfq, RfqLine, RfqTemplate
 from bido_back.negotiation import service as negotiation_service
 from bido_back.negotiation.agents import NegotiationWriter, default_negotiation_writer
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
 from bido_back.purchasing import service as purchasing_service
-from bido_back.purchasing.schemas import AnalysisRequest, CurrencyTotalView, RfqFromAnalysisRequest
+from bido_back.purchasing.schemas import (
+    AnalysisRequest,
+    CalculationView,
+    CurrencyTotalView,
+    RfqFromAnalysisRequest,
+)
 from bido_back.purchasing.sources.mapping import Mapper
 from bido_back.purchasing.workbook import SheetMapper
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.currency import CurrencyChange, known_currency
-from bido_back.rfqs.errors import Duplicate, MailboxNotConfigured, MailboxNotConnected, RfqError
+from bido_back.rfqs.errors import (
+    Duplicate,
+    MailboxNotConfigured,
+    MailboxNotConnected,
+    ReplyByRequired,
+    RfqError,
+)
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.schemas import (
     AddLineRequest,
@@ -129,6 +142,8 @@ async def _rfq(session: AsyncSession, reference: str) -> Rfq:
 
 
 def _service_error(exc: RfqError) -> ToolError:
+    if isinstance(exc, ReplyByRequired):
+        return ToolError(reply_by_explained(exc))
     if isinstance(exc, MailboxNotConnected):
         return ToolError("the buyer has not connected a mailbox; emails are sent from it")
     if isinstance(exc, MailboxNotConfigured):
@@ -286,6 +301,11 @@ class ComparisonOut(BaseModel):
     suppliers: list[ComparisonSupplier]
     cheapest_complete_by_tier: list[CheapestTier]
     awaiting: list[str]
+    recommendations: list[Recommendation] = Field(default_factory=list[Recommendation])
+    policy: ComparisonPolicy = Field(default_factory=ComparisonPolicy)
+    readiness: str = "needs_review"
+    covered_line_tiers: int = 0
+    requested_line_tiers: int = 0
 
 
 # --- price_history / suggest_suppliers ------------------------------------------------------
@@ -829,6 +849,12 @@ class PurchaseAnalysisIn(BaseModel):
         description="Units to build; omit to use the production plan from today on",
     )
     safety_stock_pct: int = Field(default=0, ge=0, le=100, description="Extra % to buy")
+    need_by: date | None = None
+    planning_start: date | None = None
+    planning_end: date | None = None
+    location: str | None = Field(default=None, max_length=200)
+    stock_as_of: date | None = None
+    max_stock_age_days: int | None = Field(default=None, ge=0, le=1095)
 
 
 class AnalysisSupplierItem(BaseModel):
@@ -841,6 +867,9 @@ class AnalysisSupplierItem(BaseModel):
     on_time_rate: Decimal | None
     quality_rate: Decimal | None
     suggested: bool
+    delivery_observations: int = 0
+    quality_observations: int = 0
+    last_received_at: date | None = None
 
 
 class AnalysisFlagItem(BaseModel):
@@ -867,6 +896,7 @@ class AnalysisLineItem(BaseModel):
     max_price: Decimal | None
     suppliers: list[AnalysisSupplierItem]
     flags: list[AnalysisFlagItem]
+    calculation: CalculationView = Field(default_factory=CalculationView)
 
 
 class PurchaseAnalysisOut(BaseModel):
@@ -883,6 +913,12 @@ class PurchaseAnalysisOut(BaseModel):
     # Spend per currency; never add amounts in different currencies together.
     totals: list[CurrencyTotalView]
     lines: list[AnalysisLineItem]
+    planning_start: date | None = None
+    planning_end: date | None = None
+    location: str | None = None
+    stock_as_of: date | None = None
+    max_stock_age_days: int | None = None
+    demand_source: str = "explicit_quantity"
 
 
 class RfqFromAnalysisIn(BaseModel):
@@ -1131,6 +1167,11 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             ],
             cheapest_complete_by_tier=[cheapest[tier] for tier in sorted(cheapest)],
             awaiting=[a.supplier_name for a in comparison.awaiting],
+            recommendations=comparison.recommendations,
+            policy=comparison.policy,
+            readiness=comparison.readiness,
+            covered_line_tiers=comparison.covered_line_tiers,
+            requested_line_tiers=comparison.requested_line_tiers,
         )
 
     async def price_history(ctx: ToolContext, args: PriceHistoryIn) -> PriceHistoryOut:
@@ -1449,7 +1490,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             raise ToolError(hold)
         try:
             prepared = await rfq_service.prepare_send(
-                db, principal, rfq.id, deps.agents.email_writer, deps.mailboxes
+                db, principal, rfq.id, deps.agents.email_writer, deps.mailboxes, today=deps.today()
             )
         except RfqError as exc:
             raise _service_error(exc) from None
@@ -1477,6 +1518,12 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                     product=args.product,
                     quantity=Decimal(args.quantity) if args.quantity is not None else None,
                     safety_stock_pct=Decimal(args.safety_stock_pct),
+                    need_by=args.need_by,
+                    planning_start=args.planning_start,
+                    planning_end=args.planning_end,
+                    location=args.location,
+                    stock_as_of=args.stock_as_of,
+                    max_stock_age_days=args.max_stock_age_days,
                 ),
                 today=deps.today(),
             )
@@ -1492,6 +1539,12 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             currency=view.summary.currency,
             total_at_target=view.summary.total_at_target,
             total_at_last_price=view.summary.total_at_last_price,
+            planning_start=view.planning_start,
+            planning_end=view.planning_end,
+            location=view.location,
+            stock_as_of=view.stock_as_of,
+            max_stock_age_days=view.max_stock_age_days,
+            demand_source=view.demand_source,
             totals=view.summary.totals,
             lines=[
                 AnalysisLineItem(
@@ -1521,6 +1574,9 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                             on_time_rate=s.on_time_rate,
                             quality_rate=s.quality_rate,
                             suggested=s.suggested,
+                            delivery_observations=s.delivery_observations,
+                            quality_observations=s.quality_observations,
+                            last_received_at=s.last_received_at,
                         )
                         for s in line.suppliers[:MAX_ANALYSIS_SUPPLIERS]
                     ],
@@ -1528,6 +1584,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                         AnalysisFlagItem(code=f.code, supplier=f.supplier, value=f.value)
                         for f in line.flags
                     ],
+                    calculation=line.calculation,
                 )
                 for line in view.lines
             ],
@@ -1929,7 +1986,9 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             "prepare_send",
             "Write the RFQ email for every draft invite and ask for approval. Nothing is "
             "sent: the buyer (or, if the company requires it, a second person) must approve "
-            "each email first." + rfq_ref_hint,
+            "each email first. The RFQ needs a reply-by date (response_due, today or "
+            "later): if it is missing or past, ask the buyer by when suppliers must answer "
+            "and set it with set_rfq_terms before calling this." + rfq_ref_hint,
             RfqRef,
             PrepareSendOut,
             "draft",

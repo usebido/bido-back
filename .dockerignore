@@ -2,6 +2,7 @@
 # small and keeps secrets out of it entirely.
 
 .git
+.context
 .github
 .venv
 **/__pycache__

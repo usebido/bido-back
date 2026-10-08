@@ -47,20 +47,20 @@ BOM = [
     ["Motor EV-120", "HSG-AL", 1, "Carcassa in alluminio", "pz", "casting"],
 ]
 STOCK = [
-    ["Codice", "Giacenza", "In ordine"],
-    ["BRG-6205", 50, 30],
-    ["CU-WIRE", 30.5, 0],
-    ["HSG-AL", 150, 0],
+    ["Codice", "Giacenza", "In ordine", "On order due"],
+    ["BRG-6205", 50, 30, date(2026, 11, 1)],
+    ["CU-WIRE", 30.5, 0, None],
+    ["HSG-AL", 150, 0, None],
 ]
 HISTORY = [
     ["Numero Ordine", "Fornitore", "Codice Articolo", "Quantità", "Prezzo Unitario",
-     "Data Ordine", "Data Consegna Prevista", "Data Ricevimento", "Scarti"],
+     "Data Ordine", "Data Consegna Prevista", "Data Ricevimento", "Scarti", "Received qty"],
     ["PO-1", "Cuscinetti Precisione S.r.l.", "BRG-6205", 100, 2.0,
-     date(2026, 1, 10), date(2026, 1, 20), date(2026, 1, 25), 0],
+     date(2026, 1, 10), date(2026, 1, 20), date(2026, 1, 25), 0, 100],
     ["PO-2", "Cuscinetti Precisione S.r.l.", "BRG-6205", 200, 2.2,
-     date(2026, 8, 1), date(2026, 8, 15), date(2026, 8, 14), 10],
+     date(2026, 8, 1), date(2026, 8, 15), date(2026, 8, 14), 10, 200],
     ["PO-3", "Fonderia Veneta S.p.A.", "HSG-AL", 10, 30.0,
-     date(2025, 12, 1), date(2025, 12, 20), date(2025, 12, 19), 0],
+     date(2025, 12, 1), date(2025, 12, 20), date(2025, 12, 19), 0, 10],
 ]  # fmt: skip
 PLAN = [["Prodotto", "Quantità", "Data"], ["Motor EV-120", 100, date(2026, 11, 15)]]
 
@@ -314,6 +314,18 @@ async def test_a_mixed_analysis_takes_the_history_currency_and_converts_the_rest
     storage = FakeStorage()
     await load(app_engine, storage, who, "bom", BOM)
     await load(app_engine, storage, who, "purchase_history", MIXED_HISTORY)
+    await load(
+        app_engine,
+        storage,
+        who,
+        "inventory",
+        [
+            ["Part number", "On hand"],
+            ["BRG-6205", 0],
+            ["CU-WIRE", 0],
+            ["HSG-AL", 0],
+        ],
+    )
     view = await service.create_analysis(
         app_engine, who, AnalysisRequest(product="Motor EV-120", quantity=Decimal(100)), today=TODAY
     )

@@ -10,7 +10,9 @@ The five import types and their columns (* = required):
 * `items`: part_number*, description*, mpn, manufacturer, category, unit
 * `bom`: product*, part_number*, qty_per_unit*, description, mpn, manufacturer,
   category, unit (item columns create the item when it is new)
-* `inventory`: part_number*, on_hand*, on_order, location, as_of, description, unit
+* `inventory`: part_number*, on_hand*, on_order, location, as_of, description, unit,
+  reserved_qty, blocked_qty, on_order_due. Gross, available and unrestricted
+  balance headers preserve their meaning when subtracting unavailable stock.
 * `purchase_history`: po_number*, supplier*, part_number*, quantity*,
   unit_price*, ordered_at*, currency, promised_at, received_at, received_qty,
   rejected_qty, quality_ok, line_no, description; read but not stored:
@@ -259,6 +261,41 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             ("location", "local", "deposito", "magazzino", "warehouse", "storage location"),
         ),
         FieldSpec("as_of", "date", False, ("as of", "data inventario", "inventory date", "date")),
+        FieldSpec(
+            "reserved_qty",
+            "number",
+            False,
+            (
+                "reserved qty",
+                "reserved quantity",
+                "reserved",
+                "reservado",
+                "estoque reservado",
+            ),
+        ),
+        FieldSpec(
+            "blocked_qty",
+            "number",
+            False,
+            (
+                "blocked qty",
+                "blocked quantity",
+                "blocked",
+                "blocked stock",
+                "estoque bloqueado",
+            ),
+        ),
+        FieldSpec(
+            "on_order_due",
+            "date",
+            False,
+            (
+                "on order due",
+                "inbound due",
+                "expected receipt",
+                "data chegada pedido",
+            ),
+        ),
         FieldSpec("description", "text", False, _DESC),
         FieldSpec("unit", "text", False, _UNIT),
     ),
@@ -1013,8 +1050,54 @@ def parse_mapped(
             table.skipped_rows += 1
             table.total_rows -= 1
             continue
+        if import_type == "inventory":
+            _inventory_line(values, table.columns.get("on_hand", ""))
         table.rows.append((offset, values))
     return table
+
+
+# Explicit availability excludes reservations; unrestricted stock only establishes
+# that blocked stock is separate. Normalize each restriction exactly once.
+_AVAILABLE_STOCK_HEADERS: Final = frozenset(
+    {
+        "disponibile",
+        "estoque livre",
+        "estoque disponivel",
+        "free stock",
+        "available",
+        "available stock",
+        "qty available",
+        "quantidade disponivel",
+        "disponivel",
+        "libero",
+        "uso libero",
+        "stock libero",
+        "giacenza disponibile",
+    }
+)
+_UNRESTRICTED_STOCK_HEADERS: Final = frozenset(
+    {
+        "utilizacao livre",
+        "livre utilizacao",
+        "unrestricted",
+        "unrestricted use",
+        "unrestricted stock",
+    }
+)
+
+
+def _inventory_line(values: dict[str, object], on_hand_header: str) -> None:
+    header = _norm(on_hand_header)
+    if header not in _AVAILABLE_STOCK_HEADERS | _UNRESTRICTED_STOCK_HEADERS:
+        return
+    on_hand = values.get("on_hand")
+    if isinstance(on_hand, Decimal):
+        restrictions = [values.get("blocked_qty")]
+        if header in _AVAILABLE_STOCK_HEADERS:
+            restrictions.append(values.get("reserved_qty"))
+        values["on_hand"] = on_hand + sum(
+            (value for value in restrictions if isinstance(value, Decimal)), Decimal(0)
+        )
 
 
 # What a PO status says when the line was cancelled.
@@ -1129,6 +1212,8 @@ def _check_row(import_type: ImportType, row: int, values: Mapping[str, object]) 
         case "inventory":
             positive("on_hand", allow_zero=True)
             positive("on_order", allow_zero=True)
+            positive("reserved_qty", allow_zero=True)
+            positive("blocked_qty", allow_zero=True)
         case "purchase_history":
             positive("quantity")
             positive("unit_price", allow_zero=True)

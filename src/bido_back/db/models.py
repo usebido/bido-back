@@ -14,6 +14,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from pydantic import JsonValue
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -26,6 +27,7 @@ from sqlalchemy import (
     Numeric,
     Text,
     UniqueConstraint,
+    Uuid,
     false,
     func,
     text,
@@ -265,6 +267,9 @@ class Rfq(Base):
     negotiation_ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     negotiation_closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     negotiation_outcome: Mapped[list[Any] | None] = mapped_column(JSONB)
+    comparison_policy: Mapped[dict[str, JsonValue]] = mapped_column(
+        JSONB, server_default=text("'{}'::jsonb")
+    )
 
 
 class RfqLine(Base):
@@ -291,6 +296,9 @@ class RfqLine(Base):
     target_unit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
     max_unit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
     max_lead_time_days: Mapped[int | None] = mapped_column(Integer)
+    source_evidence: Mapped[dict[str, JsonValue]] = mapped_column(
+        JSONB, server_default=text("'{}'::jsonb")
+    )
 
 
 class Invite(Base):
@@ -841,6 +849,9 @@ class InventoryRow(Base):
     __table_args__ = (
         UniqueConstraint("tenant_id", "item_id", "location", name="inventory_item_location_key"),
         CheckConstraint("on_hand >= 0 AND on_order >= 0", name="inventory_quantities_check"),
+        CheckConstraint(
+            "reserved_qty >= 0 AND blocked_qty >= 0", name="inventory_unavailable_check"
+        ),
     )
 
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
@@ -849,6 +860,9 @@ class InventoryRow(Base):
     location: Mapped[str] = mapped_column(Text, server_default=text("''"))
     on_hand: Mapped[Decimal] = mapped_column(AMOUNT, server_default=text("0"))
     on_order: Mapped[Decimal] = mapped_column(AMOUNT, server_default=text("0"))
+    reserved_qty: Mapped[Decimal] = mapped_column(AMOUNT, server_default=text("0"))
+    blocked_qty: Mapped[Decimal] = mapped_column(AMOUNT, server_default=text("0"))
+    on_order_due: Mapped[date | None] = mapped_column(Date)
     as_of: Mapped[date | None] = mapped_column(Date)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
@@ -962,6 +976,9 @@ class AnalysisLine(Base):
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
     analysis_id: Mapped[UUID] = mapped_column(ForeignKey("analyses.id", ondelete="CASCADE"))
     item_id: Mapped[UUID] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"))
+    calculation: Mapped[dict[str, JsonValue]] = mapped_column(
+        JSONB, server_default=text("'{}'::jsonb")
+    )
     position: Mapped[int] = mapped_column(Integer)
     required: Mapped[Decimal] = mapped_column(AMOUNT)
     on_hand: Mapped[Decimal] = mapped_column(AMOUNT)
@@ -1113,3 +1130,24 @@ class CopilotConversation(Base):
     last_activity_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+
+
+class ProcurementAssessment(Base):
+    """An immutable, evidence-backed source assessment and its optional draft RFQ."""
+
+    __tablename__ = "procurement_assessments"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "user_id", "source_key", name="procurement_assessments_source_key"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    source_key: Mapped[str] = mapped_column(Text)
+    upload_ids: Mapped[list[UUID]] = mapped_column(ARRAY(Uuid()))
+    objective: Mapped[str] = mapped_column(Text)
+    assessment: Mapped[dict[str, JsonValue]] = mapped_column(JSONB)
+    rfq_id: Mapped[UUID | None] = mapped_column(ForeignKey("rfqs.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

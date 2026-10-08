@@ -5,7 +5,10 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
+
+from bido_back.comparison.compute import DecisionOffer, ExcludedOffer, OfferAlternative
+from bido_back.comparison.policy import ComparisonPolicy, SupplierPerformance
 
 NegotiationStatus = Literal["not_started", "open", "ready_to_close", "closed"]
 InviteNegotiationStatus = Literal[
@@ -33,6 +36,7 @@ class NegotiationSettings(BaseModel):
     early_close: bool
     base_currency: str
     lines: list[LineLimitsView]
+    comparison_policy: ComparisonPolicy = Field(default_factory=ComparisonPolicy)
 
 
 class LineLimitsUpdate(BaseModel):
@@ -64,6 +68,7 @@ class NegotiationSettingsUpdate(BaseModel):
     max_rounds: int = Field(default=3, ge=1, le=10)
     early_close: bool = True
     lines: list[LineLimitsUpdate] = Field(default_factory=list[LineLimitsUpdate], max_length=500)
+    comparison_policy: ComparisonPolicy | None = None
 
 
 class NegotiationMessageView(BaseModel):
@@ -98,6 +103,8 @@ class InviteNegotiation(BaseModel):
     # How the latest offer stands against the limits right now (recomputed).
     lines: list[LineDecisionView]
     messages: list[NegotiationMessageView]
+    strategy_reasons: list[str] = Field(default_factory=list[str])
+    stalled_rounds: int = 0
 
 
 class OutcomeLine(BaseModel):
@@ -110,6 +117,22 @@ class OutcomeLine(BaseModel):
     lead_time_days: int | None
     within_target: bool | None
     justification: str
+    readiness: Literal["ready_for_buyer_review", "needs_review", "no_feasible_offer"] = (
+        "needs_review"
+    )
+    policy: ComparisonPolicy = Field(default_factory=ComparisonPolicy)
+    policy_reasons: list[str] = Field(default_factory=list[str])
+    decision_version: int = 1
+    source_evidence: dict[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
+    offer: DecisionOffer | None = None
+    evidence_gaps: list[str] = Field(default_factory=list[str])
+    alternatives: list[OfferAlternative] = Field(default_factory=list[OfferAlternative])
+    excluded: list[ExcludedOffer] = Field(default_factory=list[ExcludedOffer])
+    performance: SupplierPerformance = Field(default_factory=SupplierPerformance)
+    proposal_id: UUID | None = None
+    proposal_line_id: UUID | None = None
+    evidence_message_ids: list[UUID] = Field(default_factory=list[UUID])
+    landed_total_base: Decimal | None = None
 
 
 class RfqNegotiation(BaseModel):
