@@ -80,7 +80,6 @@ from bido_back.rfqs.schemas import (
     RfqEmailDraft,
     RfqLineView,
     RfqStatus,
-    RfqSummary,
     UpdateLineRequest,
 )
 from bido_back.rfqs.send import (
@@ -346,12 +345,6 @@ async def add_draft_invite(
 
 async def rfq_detail(session: AsyncSession, rfq: Rfq) -> RfqDetail:
     return await _detail(session, rfq)
-
-
-async def list_rfqs(db: Db, principal: Principal) -> list[RfqSummary]:
-    async with tenant_session(db, principal.tenant_id) as session:
-        rfqs = await session.scalars(select(Rfq).order_by(Rfq.created_at.desc(), Rfq.id).limit(500))
-        return [RfqSummary.model_validate(_summary_fields(rfq)) for rfq in rfqs]
 
 
 async def get_rfq(db: Db, principal: Principal, rfq_id: UUID) -> RfqDetail:

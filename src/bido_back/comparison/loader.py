@@ -175,6 +175,7 @@ async def load_comparison(db: Db, principal: Principal, rfq_id: UUID, today: dat
                 incoterm=proposal.incoterm,
                 fields=field_infos(proposal.fields),
                 supplier_type=supplier_type,
+                payment_terms=proposal.payment_terms,
                 lines=tuple(
                     QuotedLine(
                         id=pl.id,
