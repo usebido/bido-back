@@ -86,9 +86,6 @@ from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.errors import InvalidState
 from bido_back.rfqs.send import SendRfqEmailArgs
 from bido_back.settings import get_settings
-from bido_back.templates.render import (
-    _headings as render_headings,  # pyright: ignore[reportPrivateUsage]
-)
 from bido_back.templates.render import format_date, format_quantity
 from bido_back.templates.required import REQUIRED_FIELDS, covered_keys
 from bido_back.templates.service import FOOTER_SEPARATOR
@@ -353,15 +350,10 @@ async def scenario_rfq_email(world: World, language: str, result: RunResult) -> 
     )  # fmt: skip
     problems = rfq_email_problems(task, RfqEmailOutput(subject=args.subject, body=body))
     result.check("problems_clean", not problems, ", ".join(problems))
-    # Asked: a synonym of the field in the email, or the render's own wording for it in
-    # the supplier's language (its column heading or its question).
+    # Asked: a line of the email (or a table cell) names the field. Bido's own labels and
+    # headings count as synonyms, so this is the same coverage rule the product uses.
     wanted = {f.key for f in REQUIRED_FIELDS if not f.conditional}
-    headings = render_headings(language)
-    covered = covered_keys(re.split(r"[\n|]", body)) | {
-        f.key
-        for f in REQUIRED_FIELDS
-        if f.label(language) in body or (f.key in headings and headings[f.key] in body)
-    }
+    covered = covered_keys(re.split(r"[\n|]", body))
     result.check(
         "required_fields_asked", wanted <= covered, f"not asked: {sorted(wanted - covered)}"
     )

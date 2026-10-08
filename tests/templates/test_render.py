@@ -85,6 +85,12 @@ def test_headings_map_to_line_data_or_stay_for_the_supplier() -> None:
     assert column_key("Prazo de entrega") is None  # lead time: the supplier answers
     assert column_key("Preço unitário") is None
     assert column_key("Lieferzeit (Wochen)") is None
+    # Bido's own headings in other languages name the same line data.
+    assert column_key("Data richiesta") == "need_by"
+    assert column_key("Date souhaitée") == "need_by"
+    assert column_key("Réf. fabricant") == "mpn"
+    assert column_key("Délai de livraison") is None
+    assert column_key("Delivery time") is None
 
 
 def test_buyer_columns_in_their_order_then_the_missing_line_data() -> None:
