@@ -73,6 +73,7 @@ class Api:
     mailboxes: FakeMailboxes
     principal: Principal
     runner_config: RunnerConfig = CONFIG
+    storage: FakeStorage | None = None
 
 
 @pytest_asyncio.fixture
@@ -98,7 +99,7 @@ async def api(app_engine: AsyncEngine, copilot_rows: People) -> AsyncIterator[Ap
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-        state = Api(http=http, mailboxes=mailboxes, principal=principal)
+        state = Api(http=http, mailboxes=mailboxes, principal=principal, storage=storage)
 
         def current_principal() -> Principal:
             return state.principal

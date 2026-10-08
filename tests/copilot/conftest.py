@@ -6,7 +6,7 @@ conversation rows the copilot may create. `seed_quote` writes a supplier's propo
 as quote extraction would.
 """
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -76,7 +76,11 @@ class Tools:
 
 
 def make_tools(
-    engine: AsyncEngine, attachments_text: str = "", attachment_ids: tuple[UUID, ...] = ()
+    engine: AsyncEngine,
+    attachments_text: str = "",
+    attachment_ids: tuple[UUID, ...] = (),
+    earlier_attachment_ids: tuple[UUID, ...] = (),
+    earlier_attachments_text: str | None = None,
 ) -> Tools:
     mailboxes = FakeMailboxes()
     agents = fake_agents()
@@ -88,10 +92,22 @@ def make_tools(
             mailboxes=mailboxes,
             attachments_text=attachments_text,
             attachment_ids=attachment_ids,
+            earlier_attachment_ids=earlier_attachment_ids,
+            earlier_attachments_text=_text_of(earlier_attachments_text),
             today=lambda: date(2026, 10, 7),
         )
     )
     return Tools({tool.name: tool for tool in tools}, mailboxes, agents.intake)
+
+
+def _text_of(value: str | None) -> Callable[[], Awaitable[str]] | None:
+    if value is None:
+        return None
+
+    async def read() -> str:
+        return value
+
+    return read
 
 
 async def make_rfq(engine: AsyncEngine, principal: Principal) -> RfqCreated:

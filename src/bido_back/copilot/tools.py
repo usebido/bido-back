@@ -27,7 +27,7 @@ model.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -85,6 +85,13 @@ class CopilotToolDeps:
     # This message's attachments (upload ids) and where their bytes live, for
     # import_spreadsheet; the sheet mapper reads sheets the rules cannot.
     attachment_ids: tuple[UUID, ...] = ()
+    # Files attached in earlier turns of the same conversation, read from its
+    # stored runs on the server (never from the request), so a confirmation
+    # sent as text alone can still import the file it confirms.
+    earlier_attachment_ids: tuple[UUID, ...] = ()
+    # Reads the text of those earlier files, for create_rfq when this message
+    # has none. Only called when needed; None = there is nothing to read.
+    earlier_attachments_text: Callable[[], Awaitable[str]] | None = None
     storage: BlobStorage | None = None
     sheet_mapper: SheetMapper | None = None
     today: Callable[[], date] = lambda: datetime.now(UTC).date()
@@ -337,7 +344,11 @@ class CreateRfqIn(BaseModel):
         min_length=1, max_length=8_000, description="What to quote: items, quantities, dates"
     )
     include_attachments: bool = Field(
-        default=True, description="Also read the files attached to this message"
+        default=True,
+        description=(
+            "Also read the files attached to this message (or, when it has none, "
+            "the ones attached earlier in this conversation)"
+        ),
     )
 
 
@@ -893,8 +904,12 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
     async def create_rfq(ctx: ToolContext, args: CreateRfqIn) -> CreateRfqOut:
         principal = _principal(ctx)
         text = args.text
-        if args.include_attachments and deps.attachments_text:
-            text = f"{text}\n\n{deps.attachments_text}"
+        if args.include_attachments:
+            attached = deps.attachments_text
+            if not deps.attachment_ids and deps.earlier_attachments_text is not None:
+                attached = await deps.earlier_attachments_text()
+            if attached:
+                text = f"{text}\n\n{attached}"
         try:
             created = await rfq_service.create_rfq_from_text(
                 db, principal, text, deps.agents.intake
