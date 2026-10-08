@@ -14,24 +14,29 @@ Events, in order (the SSE contract the API documents):
    if an `act` tool was ever proposed (the copilot has none today).
    The reply itself streams as `text_delta` events while the model writes it.
 3. `answer` - the whole reply text, when the run completed (the deltas joined).
-4. `done` - always last: whether it worked and the draft actions it ran
+4. `title` - the conversation's new title, when this turn changed it in time
+   (named by the titler over the first turns, or an RFQ/analysis/award
+   reference; `bido_back.copilot.titles`).
+5. `done` - always last: whether it worked and the draft actions it ran
    (RFQs created, suppliers invited, sends prepared, template changes).
 
 A failed run sends the runner's `run_failed`, then `done` with ok=false.
 """
 
+import asyncio
 import logging
 import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Final
+from typing import Final, cast
 from uuid import UUID, uuid4
 
 from pydantic import JsonValue, ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import func, not_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.sql.elements import ColumnElement
 
 from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
@@ -54,6 +59,20 @@ from bido_back.copilot.contracts import (
     CopilotReply,
     DoneEvent,
     StreamItem,
+    TitleEvent,
+)
+from bido_back.copilot.titles import (
+    MAX_TITLED_TURNS,
+    Milestone,
+    Titler,
+    TitlerFailed,
+    TitleSource,
+    TitleTurn,
+    clean_title,
+    differs,
+    log_titler_failure,
+    milestone,
+    titler_input,
 )
 from bido_back.copilot.tools import CopilotToolDeps, Db, copilot_tools
 from bido_back.db import tenant_session
@@ -73,6 +92,11 @@ MAX_BUYER_MESSAGES: Final = 20
 MAX_BUYER_MESSAGES_CHARS: Final = 16_000
 TITLE_CHARS: Final = 80
 LIST_LIMIT_MAX: Final = 100
+# How long the stream waits, after the answer, for a new title to send before `done`.
+TITLE_WAIT_SECONDS: Final = 2.0
+
+# Titler runs still going after their stream ended (they store the title when done).
+_title_tasks: set[asyncio.Task[str | None]] = set()
 
 
 class AttachmentNotFound(Exception):
@@ -88,6 +112,8 @@ class CopilotDeps:
     runner_config: RunnerConfig
     # Reads sheets the import rules cannot; None = the default agent.
     sheet_mapper: SheetMapper | None = None
+    # Names conversations over their first turns; None = titles stay the first message.
+    titler: Titler | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,12 +290,13 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
     annotate(conversation_id=prepared.conversation_id, run_id=context.run_id)
     turn = _TurnLog(prepared, context.run_id, agent.prompt_version, agent.model)
     yield ConversationEvent(conversation_id=prepared.conversation_id, run_id=context.run_id)
-    await _record_turn(deps.db, principal, prepared)
+    state = await _record_turn(deps.db, principal, prepared)
 
     kinds = {tool.name: tool.kind for tool in tools}
     called: dict[str, str] = {}
     actions: list[CopilotAction] = []
     ok = False
+    title = _TitleWork(deps, prepared, context, state)
     events: AsyncIterator[Event] = run(
         agent,
         prepared.input,
@@ -295,6 +322,7 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
                     ).model_dump(mode="json")
                     break
                 ok = True
+                title.answered(reply.answer, list(called.values()), actions)
                 yield AnswerEvent(run_id=context.run_id, text=reply.answer)
                 continue
             if isinstance(event, ToolCalled):
@@ -322,6 +350,9 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
         raise
     finally:
         turn.write(tools=sorted(set(called.values())), tool_calls=len(called), actions=len(actions))
+    new_title = await title.result()
+    if new_title is not None:
+        yield TitleEvent(conversation_id=prepared.conversation_id, title=new_title)
     yield DoneEvent(
         run_id=context.run_id,
         conversation_id=prepared.conversation_id,
@@ -398,11 +429,25 @@ def _files_only(input: CopilotInput) -> bool:
     return bool(input.attachment_ids) and input.message == ATTACHMENTS_ONLY_MESSAGE
 
 
-async def _record_turn(db: Db, principal: Principal, prepared: PreparedMessage) -> None:
+@dataclass(frozen=True, slots=True)
+class _TitleState:
+    """The conversation row as this turn found it (after counting the turn)."""
+
+    turns: int
+    title: str
+    source: str
+    settled: bool
+    language: str | None
+    milestones: tuple[str, ...]
+
+
+async def _record_turn(
+    db: Db, principal: Principal, prepared: PreparedMessage
+) -> _TitleState | None:
     """Upsert the caller's conversation row: the title on the first turn, then counts.
 
     Listing is secondary to answering, so a failure here is logged (ids only)
-    and the message goes on.
+    and the message goes on (with no title updates for this turn).
     """
     statement = (
         insert(CopilotConversation)
@@ -420,16 +465,249 @@ async def _record_turn(db: Db, principal: Principal, prepared: PreparedMessage) 
                 "last_activity_at": func.now(),
             },
         )
+        .returning(
+            CopilotConversation.turns,
+            CopilotConversation.title,
+            CopilotConversation.title_source,
+            CopilotConversation.title_settled,
+            CopilotConversation.title_language,
+            CopilotConversation.title_milestones,
+        )
     )
     try:
         async with tenant_session(db, principal.tenant_id) as session:
-            await session.execute(statement)
+            row = (await session.execute(statement)).one()
     except SQLAlchemyError:
         logger.warning(
             "copilot conversation not recorded tenant=%s conversation=%s",
             principal.tenant_id,
             prepared.conversation_id,
         )
+        return None
+    return _TitleState(
+        turns=row.turns,
+        title=row.title,
+        source=row.title_source,
+        settled=row.title_settled,
+        language=row.title_language,
+        milestones=tuple(row.title_milestones or ()),
+    )
+
+
+def _owned(
+    principal: Principal, conversation_id: UUID
+) -> tuple[ColumnElement[bool], ColumnElement[bool]]:
+    """The caller's own conversation row (RLS already scopes the tenant)."""
+    return (
+        CopilotConversation.user_id == principal.user_id,
+        CopilotConversation.id == conversation_id,
+    )
+
+
+class _TitleWork:
+    """This turn's title change: a milestone, or a titler run, or nothing.
+
+    `answered` is called when the reply is complete: a milestone is decided
+    then, otherwise the titler starts in the background (it never delays the
+    reply). `result` returns the new title if it is ready within
+    `TITLE_WAIT_SECONDS` of the answer; a titler still running then keeps going
+    and stores its title for the next list.
+    """
+
+    def __init__(
+        self,
+        deps: CopilotDeps,
+        prepared: PreparedMessage,
+        context: ToolContext,
+        state: _TitleState | None,
+    ) -> None:
+        self._deps = deps
+        self._prepared = prepared
+        self._context = context
+        self._state = state
+        self._milestone: Milestone | None = None
+        self._task: asyncio.Task[str | None] | None = None
+        self._answered_at = 0.0
+
+    def answered(self, answer: str, tools: Sequence[str], actions: Sequence[CopilotAction]) -> None:
+        state = self._state
+        if state is None or state.source == "user":
+            return
+        self._answered_at = time.monotonic()
+        reached = milestone(
+            [(a.tool, a.ok, a.output) for a in actions],
+            language=state.language,
+            base_title=state.title,
+        )
+        if reached is not None:
+            if reached.kind not in state.milestones:
+                self._milestone = reached
+            return
+        if (
+            self._deps.titler is None
+            or state.settled
+            or state.source not in ("fallback", "ai")
+            or state.turns > MAX_TITLED_TURNS
+        ):
+            return
+        task = asyncio.create_task(self._refine(state, answer, list(tools)))
+        _title_tasks.add(task)
+        task.add_done_callback(_title_tasks.discard)
+        self._task = task
+
+    async def result(self) -> str | None:
+        if self._milestone is not None:
+            return await self._apply_milestone(self._milestone)
+        task = self._task
+        if task is None:
+            return None
+        left = TITLE_WAIT_SECONDS - (time.monotonic() - self._answered_at)
+        done, _ = await asyncio.wait({task}, timeout=max(0.0, left))
+        if task not in done or task.cancelled() or task.exception() is not None:
+            return None
+        return task.result()
+
+    async def _apply_milestone(self, reached: Milestone) -> str | None:
+        principal = self._prepared.principal
+        statement = (
+            update(CopilotConversation)
+            .where(
+                *_owned(principal, self._prepared.conversation_id),
+                CopilotConversation.title_source != "user",
+                not_(CopilotConversation.title_milestones.contains([reached.kind])),
+            )
+            .values(
+                title=reached.title,
+                title_source="milestone",
+                title_settled=True,
+                title_milestones=func.array_append(
+                    CopilotConversation.title_milestones, reached.kind
+                ),
+            )
+            .returning(CopilotConversation.title)
+        )
+        try:
+            async with tenant_session(self._deps.db, principal.tenant_id) as session:
+                changed = (await session.execute(statement)).scalar_one_or_none()
+        except SQLAlchemyError:
+            logger.warning(
+                "copilot conversation title not updated",
+                extra={
+                    "kind": reached.kind,
+                    "conversation_id": str(self._prepared.conversation_id),
+                },
+            )
+            return None
+        return changed
+
+    async def _refine(self, state: _TitleState, answer: str, tools: list[str]) -> str | None:
+        """Run the titler on the conversation so far and store what it proposes."""
+        assert self._deps.titler is not None
+        prepared = self._prepared
+        principal = prepared.principal
+        context = ToolContext(
+            tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4()
+        )
+        try:
+            turns = await _title_turns(self._deps, prepared, self._context.run_id)
+            turns.append(
+                TitleTurn(
+                    message="" if _files_only(prepared.input) else prepared.input.message,
+                    attachments=prepared.input.attachments,
+                    answer=answer,
+                    tools=tools,
+                )
+            )
+            proposal = await self._deps.titler(titler_input(state.title, turns), context)
+        except TitlerFailed as exc:
+            log_titler_failure(context, str(exc))
+            return None
+        except Exception:  # noqa: BLE001 - a title is never worth failing a turn
+            log_titler_failure(context, "error")
+            return None
+        new = clean_title(proposal.title)
+        change = new is not None and differs(state.title, new)
+        values: dict[str, object] = {"title_settled": proposal.settled}
+        if proposal.language:
+            values["title_language"] = proposal.language[:8].lower()
+        if change:
+            values["title"] = new
+            values["title_source"] = "ai"
+        statement = (
+            update(CopilotConversation)
+            .where(
+                *_owned(principal, prepared.conversation_id),
+                CopilotConversation.title_source.in_(("fallback", "ai")),
+                not_(CopilotConversation.title_settled),
+            )
+            .values(**values)
+            .returning(CopilotConversation.title)
+        )
+        try:
+            async with tenant_session(self._deps.db, principal.tenant_id) as session:
+                stored = (await session.execute(statement)).scalar_one_or_none()
+        except SQLAlchemyError:
+            log_titler_failure(context, "not_stored")
+            return None
+        return stored if change and stored is not None else None
+
+
+async def _title_turns(
+    deps: CopilotDeps, prepared: PreparedMessage, run_id: UUID
+) -> list[TitleTurn]:
+    """The conversation's earlier turns, for the titler (this run left out)."""
+    from bido_back.agents.agno_adapter import load_session_runs
+
+    principal = prepared.principal
+    context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
+    runs = await load_session_runs(
+        context, session_key(principal, prepared.conversation_id), deps.runner_config
+    )
+    turns: list[TitleTurn] = []
+    for stored in runs or []:
+        if stored.run_id == str(run_id) or not stored.input:
+            continue
+        try:
+            parsed = CopilotInput.model_validate_json(stored.input)
+        except ValidationError:
+            continue
+        turns.append(
+            TitleTurn(
+                message="" if _files_only(parsed) else parsed.message,
+                attachments=parsed.attachments,
+                answer=_answer(stored.output) or "",
+            )
+        )
+    return turns
+
+
+async def rename_conversation(
+    db: Db, principal: Principal, conversation_id: UUID, title: str
+) -> ConversationSummary | None:
+    """The buyer names their conversation; automatic titles stop for good."""
+    statement = (
+        update(CopilotConversation)
+        .where(*_owned(principal, conversation_id))
+        .values(title=title, title_source="user", title_settled=True)
+        .returning(CopilotConversation)
+    )
+    async with tenant_session(db, principal.tenant_id) as session:
+        row = (await session.execute(statement)).scalar_one_or_none()
+        if row is None:
+            return None
+        return _summary(row)
+
+
+def _summary(row: CopilotConversation) -> ConversationSummary:
+    return ConversationSummary(
+        conversation_id=row.id,
+        title=row.title,
+        # The database's check constraint allows only these values.
+        title_source=cast(TitleSource, row.title_source),
+        created_at=row.created_at,
+        last_activity_at=row.last_activity_at,
+        turns=row.turns,
+    )
 
 
 async def list_conversations(
@@ -449,16 +727,7 @@ async def list_conversations(
         rows = list((await session.scalars(query)).all())
     page = rows[:limit]
     return ConversationList(
-        items=[
-            ConversationSummary(
-                conversation_id=row.id,
-                title=row.title,
-                created_at=row.created_at,
-                last_activity_at=row.last_activity_at,
-                turns=row.turns,
-            )
-            for row in page
-        ],
+        items=[_summary(row) for row in page],
         next_before=page[-1].last_activity_at if len(rows) > limit else None,
     )
 

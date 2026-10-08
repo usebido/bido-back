@@ -428,3 +428,29 @@ async def test_suppliers_without_a_language_get_their_countrys(
     # stored value is the column default "en": the two cannot be told apart yet.)
     assert languages["Rhein Bauteile GmbH"] == "en"
     assert languages["Acme Corp"] == "en"
+
+
+async def test_a_preliminary_rfq_from_an_analysis_keeps_its_units(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = buyer(purchasing_rows)
+    await make_supplier(app_engine, who, "Cuscinetti Precisione S.r.l.")
+    await seed(app_engine, who)
+    view = await service.create_analysis(
+        app_engine, who, AnalysisRequest(product="Motor EV-120", quantity=Decimal(100)), today=TODAY
+    )
+
+    created = await service.create_rfq_from_analysis(
+        app_engine,
+        who,
+        view.id,
+        RfqFromAnalysisRequest(pending_validation="engineering validation of the BOM"),
+    )
+
+    assert created.rfq.title.startswith(
+        "PRELIMINARY (pending engineering validation of the BOM): Motor EV-120"
+    )
+    assert [(line.part_number, line.unit) for line in created.rfq.lines] == [
+        ("BRG-6205", "pz"),
+        ("CU-WIRE", "kg"),
+    ]

@@ -15,7 +15,7 @@ from bido_back.db.models import ProcurementAssessment, Rfq
 from bido_back.purchasing.service import Conflict, InvalidRequest, NotFound
 from bido_back.purchasing.sources.contracts import SourceAssessment
 from bido_back.rfqs.schemas import CurrencyCode
-from bido_back.rfqs.service import NewRfqLine, create_draft_rfq
+from bido_back.rfqs.service import NewRfqLine, create_draft_rfq, preliminary_title
 
 Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
@@ -33,6 +33,17 @@ class AssessmentRfqRequest(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     base_currency: CurrencyCode
     response_due: date | None = None
+    pending_validation: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description=(
+            "Create a PRELIMINARY draft although evidence issues remain, naming what it waits "
+            "for (e.g. 'engineering validation of the BOM'). Lines without a quantity or unit "
+            "are left out and listed in `skipped`. A preliminary RFQ cannot be prepared for "
+            "sending until the mark is removed."
+        ),
+    )
 
 
 class AssessmentRfqResult(BaseModel):
@@ -41,6 +52,10 @@ class AssessmentRfqResult(BaseModel):
     ref: str
     lines: int
     reused: bool
+    title: str = ""
+    preliminary: bool = False
+    # Preliminary only: assessed lines left out (no quantity or unit yet), by part number.
+    skipped: list[str] = Field(default_factory=list[str])
 
 
 class AssessmentSnapshotSummary(BaseModel):
@@ -166,14 +181,23 @@ async def draft_from_snapshot(
         if row is None:
             raise NotFound("procurement assessment not found")
         assessment = _view(row)
-        if (
+        preliminary = request.pending_validation is not None
+        title = (
+            preliminary_title(request.title, request.pending_validation)[:300]
+            if request.pending_validation is not None
+            else request.title
+        )
+        # A complete assessment, or a PRELIMINARY draft that carries its open issues: the
+        # mark keeps it from being prepared for sending, and the quantities and units still
+        # come from the assessment, never from a rewritten text.
+        if not preliminary and (
             assessment.status != "assessed"
             or any(issue.severity == "blocker" for issue in assessment.issues)
             or not assessment.coverage
             or not all(part.inspected for part in assessment.coverage)
         ):
             raise InvalidRequest("resolve the assessment's evidence issues before creating an RFQ")
-        if any(
+        if not preliminary and any(
             not line.ready
             or line.calculated_to_buy is None
             or not line.unit
@@ -187,7 +211,12 @@ async def draft_from_snapshot(
         lines = [
             line
             for line in assessment.lines
-            if line.calculated_to_buy is not None and line.calculated_to_buy > 0
+            if line.calculated_to_buy is not None and line.calculated_to_buy > 0 and line.unit
+        ]
+        skipped = [
+            line.part_number
+            for line in assessment.lines
+            if line.calculated_to_buy is None or not line.unit
         ]
         if not lines:
             raise InvalidRequest("the assessment has no validated positive purchase requirements")
@@ -196,13 +225,20 @@ async def draft_from_snapshot(
             if rfq is None:
                 raise NotFound("linked RFQ not found")
             if (rfq.title, rfq.base_currency, rfq.response_due) != (
-                request.title,
+                title,
                 request.base_currency,
                 request.response_due,
             ):
                 raise Conflict("this assessment already has a draft RFQ with different settings")
             return AssessmentRfqResult(
-                assessment_id=row.id, rfq_id=rfq.id, ref=rfq.ref, lines=len(lines), reused=True
+                assessment_id=row.id,
+                rfq_id=rfq.id,
+                ref=rfq.ref,
+                lines=len(lines),
+                reused=True,
+                title=rfq.title,
+                preliminary=preliminary,
+                skipped=skipped,
             )
         new_lines = [
             NewRfqLine(
@@ -218,7 +254,7 @@ async def draft_from_snapshot(
         rfq, rfq_lines = await create_draft_rfq(
             session,
             principal,
-            title=request.title,
+            title=title,
             lines=new_lines,
             source_text=f"Procurement assessment {row.id}",
             response_due=request.response_due,
@@ -235,5 +271,12 @@ async def draft_from_snapshot(
             }
         row.rfq_id = rfq.id
         return AssessmentRfqResult(
-            assessment_id=row.id, rfq_id=rfq.id, ref=rfq.ref, lines=len(lines), reused=False
+            assessment_id=row.id,
+            rfq_id=rfq.id,
+            ref=rfq.ref,
+            lines=len(lines),
+            reused=False,
+            title=rfq.title,
+            preliminary=preliminary,
+            skipped=skipped,
         )
