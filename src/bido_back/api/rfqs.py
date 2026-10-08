@@ -35,6 +35,7 @@ from bido_back.rfqs.errors import (
 )
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.schemas import (
+    AddLineRequest,
     CreateInviteRequest,
     CreateRfqRequest,
     InviteView,
@@ -47,6 +48,7 @@ from bido_back.rfqs.schemas import (
     RfqStatus,
     RfqSummary,
     UpdateLineRequest,
+    UpdateRfqRequest,
 )
 from bido_back.templates.schemas import RfqEmailPreview
 
@@ -158,6 +160,50 @@ def rfqs_router() -> APIRouter:
             raise rfq_http_error(exc) from None
 
     @router.patch(
+        "/{rfq_id}",
+        responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT),
+    )
+    async def update_rfq(  # pyright: ignore[reportUnusedFunction]
+        rfq_id: UUID, body: UpdateRfqRequest, principal: CurrentPrincipal, db: Db
+    ) -> RfqDetail:
+        """Edit a draft RFQ that no email has been prepared from (409 otherwise).
+
+        Only the fields present change; `incoterm`, `delivery_location` and `need_by` are
+        set on every line. Changing the currency converts any negotiation limits.
+        """
+        try:
+            return await service.update_rfq(db, principal, rfq_id, body)
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
+
+    @router.post(
+        "/{rfq_id}/lines",
+        status_code=status.HTTP_201_CREATED,
+        responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT),
+    )
+    async def add_line(  # pyright: ignore[reportUnusedFunction]
+        rfq_id: UUID, body: AddLineRequest, principal: CurrentPrincipal, db: Db
+    ) -> RfqDetail:
+        """Append a line to a draft RFQ that no email has been prepared from."""
+        try:
+            return await service.add_line(db, principal, rfq_id, body)
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
+
+    @router.delete(
+        "/{rfq_id}/lines/{line_id}",
+        responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT),
+    )
+    async def remove_line(  # pyright: ignore[reportUnusedFunction]
+        rfq_id: UUID, line_id: UUID, principal: CurrentPrincipal, db: Db
+    ) -> RfqDetail:
+        """Remove a line from a draft RFQ; the last line cannot go (409)."""
+        try:
+            return await service.remove_line(db, principal, rfq_id, line_id)
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
+
+    @router.patch(
         "/{rfq_id}/lines/{line_id}",
         responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT),
     )
@@ -185,6 +231,19 @@ def rfqs_router() -> APIRouter:
             return await service.add_invite(
                 db, principal, rfq_id, body.supplier_id, body.contact_id
             )
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
+
+    @router.delete(
+        "/{rfq_id}/invites/{invite_id}",
+        responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT),
+    )
+    async def remove_invite(  # pyright: ignore[reportUnusedFunction]
+        rfq_id: UUID, invite_id: UUID, principal: CurrentPrincipal, db: Db
+    ) -> RfqDetail:
+        """Take a supplier off a draft RFQ before an email was prepared for it (409 after)."""
+        try:
+            return await service.remove_invite(db, principal, rfq_id, invite_id)
         except RfqError as exc:
             raise rfq_http_error(exc) from None
 
