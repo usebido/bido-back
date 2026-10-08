@@ -104,24 +104,36 @@ analysis, returning only cell locators. It does not generate join code, quantiti
 normalized statuses or SQL. Manifest samples now include late headers and separate
 table blocks with original row numbers rather than only introductory rows.
 
-Both source tools and `POST /v1/procurement-assessments` accept optional `scope`:
+Both source tools and `POST /v1/procurement-assessments` accept an optional `scope`
+request with the buyer's boundaries as stated, every field optional:
 
 ```json
 {
-  "product_code": "MTR-100",
-  "location": "Plant A",
-  "as_of": "2026-10-08",
-  "horizon_end": "2026-10-22",
-  "safety_stock": 0,
-  "production_lead_days": 0
+  "product": "Motor MTR-100",
+  "location": "Planta A",
+  "horizon_days": 14,
+  "safety_stock": 0
 }
 ```
 
-`area` can select production using the plan or product master instead of a single
-product. Product codes and plant keys match exactly; objective text alone is not
-a filter. Located `planning_candidates` and `snapshot_dates` let the copilot resolve
-identifiers and repeat an initially unscoped call. Saving preserves the same scope;
-scope and contract version are part of the immutable snapshot cache identity.
+The copilot cannot know the export date (and often not the exact code) before the file
+is read, so `purchasing/sources/scope.py` resolves the request in code after mapping and
+before planning, in the same call. The product is found by its code (case, spacing and
+punctuation aside), by a production product's code written in the buyer's words, or by
+the only master description matching them; area and plant compare without case, accents,
+spacing or punctuation, and a product planned at one plant uses it. A missing `as_of` is
+the latest stock snapshot of that plant (older snapshots are never added); the horizon is
+`horizon_end` or `as_of + horizon_days`. Values settled this way are assumptions:
+`scope_resolution.assumptions` and warning issues. Ambiguity never guesses: it returns
+`scope_resolution.questions` with options from the evidence (without a horizon, the
+candidate orders and their dates), a `missing_planning_scope` blocker and no lines, never
+per-material lines of every area. The response's `scope` is the resolved `PlanningScope`;
+today's complete scope fields (`product_code` or `area`, `location`, `as_of`,
+`horizon_end`) remain a valid request and pass through unchanged. Objective text alone is
+not a filter. Sources without production plans keep the unscoped assessment unless the
+request is already complete (`scope_not_applied` discloses that boundaries were ignored).
+The request, not the resolved scope, is part of the snapshot cache identity: saving with
+the analysis request finds the same snapshot and resolves the same scope.
 
 The deterministic planner:
 
@@ -147,8 +159,8 @@ The deterministic planner:
   require reconciled receipts with evidence. Open orders and archived quotation emails
   cannot become the last received price.
 
-`copilot.v20.md` uses these typed boundaries and explains assumptions rather than asking
-buyers to prejoin the workbook. This path performs no import or outbound action.
+`copilot.v22.md` passes the buyer's boundaries in one call, discloses the assumptions and
+asks only the open questions, rather than asking buyers to prejoin the workbook. This path performs no import or outbound action.
 Manufacturing lead time defaults to zero and is disclosed: component deadlines then
 equal the production need date. Coverage is conditional on pending deliveries arriving.
 

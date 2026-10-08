@@ -47,6 +47,13 @@ def procurement_assessments_router() -> APIRouter:
         storage: Storage,
         mapper: Annotated[Mapper, Depends(get_source_mapper)],
     ) -> SourceAssessment:
+        """Assess the uploads and save the evidence snapshot.
+
+        `scope` carries the buyer's planning boundaries as stated, all optional (a product
+        name or code, plant, reference date, horizon end or days, safety stock). They are
+        resolved against the mapped evidence: `scope` in the response is the resolved scope
+        and `scope_resolution` the assumptions made and the questions still open.
+        """
         try:
             return await analyze_uploads(
                 db,

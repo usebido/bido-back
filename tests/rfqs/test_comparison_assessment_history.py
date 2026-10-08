@@ -210,7 +210,9 @@ async def sourced_rfq(engine: AsyncEngine, people: People) -> Sourced:
         line = await session.scalar(select(RfqLine.id).where(RfqLine.rfq_id == draft.rfq_id))
     assert line is not None
     # The handoff invites the assessed suppliers itself (creating them from the evidence).
-    assert sorted(s.name for s in draft.invited) == sorted([METALNOVA.name, ACOS_SUL.name])
+    assert sorted(s.name for s in draft.invited) == sorted(
+        [str(METALNOVA.name), str(ACOS_SUL.name)]
+    )
     async with tenant_session(engine, principal.tenant_id) as session:
         invites = {
             name: (invite_id, supplier_id)

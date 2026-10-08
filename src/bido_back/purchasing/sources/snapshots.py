@@ -15,7 +15,12 @@ from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import ProcurementAssessment, Rfq
 from bido_back.purchasing.service import Conflict, InvalidRequest, NotFound
-from bido_back.purchasing.sources.contracts import AssessmentLine, PlanningScope, SourceAssessment
+from bido_back.purchasing.sources.contracts import (
+    AssessmentLine,
+    PlanningScope,
+    ScopeRequest,
+    SourceAssessment,
+)
 from bido_back.purchasing.sources.handoff import (
     AssessmentInvitedSupplier,
     AssessmentSkippedSupplier,
@@ -42,7 +47,10 @@ class AssessmentRequest(BaseModel):
 
     upload_ids: list[UUID] = Field(min_length=1, max_length=10)
     objective: str = Field(min_length=1, max_length=2000)
-    scope: PlanningScope | None = None
+    # The buyer's boundaries, resolved against the evidence. A complete PlanningScope stays
+    # an accepted shape (any valid one parses as a ScopeRequest first): the published
+    # contract only gains an alternative.
+    scope: ScopeRequest | PlanningScope | None = None
 
 
 class AssessmentRfqRequest(BaseModel):
