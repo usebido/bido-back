@@ -94,13 +94,13 @@ PREVIEW_CELL_CHARS: Final = 40
 MAX_SHEETS: Final = 20
 CONFIDENT: Final = 0.7
 MAX_FAILED_SHARE: Final = 0.2
-# Write order: items and BOMs before stock and history that reference them.
+# Inventory can supply item descriptions and units missing from order history.
 _ORDER: Final[tuple[ImportType, ...]] = (
     "items",
     "bom",
     "supplier_contacts",
-    "purchase_history",
     "inventory",
+    "purchase_history",
     "production_plan",
 )
 _DETAIL_TYPES: Final[tuple[ImportType, ...]] = (
@@ -157,7 +157,11 @@ def read_workbook(data: bytes, filename: str) -> list[SheetGrid]:
         raise WorkbookFileError("the file is not a readable .xlsx workbook") from exc
     sheets: list[SheetGrid] = []
     try:
-        for sheet in workbook.worksheets[:MAX_SHEETS]:
+        if len(workbook.worksheets) > MAX_SHEETS:
+            raise WorkbookFileError(
+                f"imports are limited to {MAX_SHEETS} sheets; split the workbook"
+            )
+        for sheet in workbook.worksheets:
             rows: list[list[object]] = []
             for raw in sheet.iter_rows(values_only=True):
                 rows.append(list(raw))
@@ -283,7 +287,10 @@ def _from_model(
     problems: list[str] = []
     for proposed in output.sections:
         grid = grids.get(proposed.sheet)
-        if grid is None or proposed.import_type == "ignore":
+        if grid is None:
+            problems.append("mapping references an unknown sheet")
+            continue
+        if proposed.import_type == "ignore":
             continue
         import_type = proposed.import_type
         names = {s.name for s in SPECS[import_type]}
@@ -293,7 +300,8 @@ def _from_model(
         if (
             not 0 <= header < len(grid.rows)
             or first <= header
-            or (last is not None and last < first)
+            or first >= len(grid.rows)
+            or (last is not None and not first <= last < len(grid.rows))
         ):
             problems.append(f"{proposed.sheet}: rows out of range")
             continue
@@ -313,6 +321,16 @@ def _from_model(
             used.add(assignment.column)
         if bad:
             problems.append(f"{proposed.sheet}: invalid column mapping for {import_type}")
+            continue
+        if any(
+            s.sheet == grid.name
+            and s.import_type == import_type
+            and not used.isdisjoint(s.index.values())
+            and first <= (s.last_row if s.last_row is not None else len(grid.rows) - 1)
+            and s.first_row <= (last if last is not None else len(grid.rows) - 1)
+            for s in sections
+        ):
+            problems.append(f"{proposed.sheet}: overlapping sections for {import_type}")
             continue
         sections.append(
             Section(
@@ -413,6 +431,7 @@ class SectionReport(BaseModel):
     source: Literal["rules", "model"]
     header_row: int  # 1-based, as in the spreadsheet
     columns: dict[str, str]
+    unknown_columns: list[str] = Field(default_factory=list[str])
     missing_required: list[str]
     rows_total: int
     rows_ok: int
@@ -437,6 +456,10 @@ class WorkbookImportReport(BaseModel):
     # What to ask the buyer before importing; empty when imported.
     questions: list[str]
     problems: list[str]
+    unimported_sheets: list[str] = Field(
+        default_factory=list[str],
+        description="Nonempty sheets with no parsed section; their data was not imported",
+    )
     suppliers_without_email: list[str] = Field(
         default_factory=list[str],
         description=(
@@ -466,6 +489,7 @@ class _Parsed:
             source=self.section.source,
             header_row=self.section.header_row + 1,
             columns=t.columns,
+            unknown_columns=t.unknown_columns,
             missing_required=t.missing_required,
             rows_total=t.total_rows,
             rows_ok=len(t.rows),
@@ -637,19 +661,10 @@ def _explode_levels(
     ]
 
 
-async def import_workbook(
-    db: Db,
-    storage: BlobStorage,
-    principal: Principal,
-    upload_id: UUID,
-    *,
-    mapper: SheetMapper | None,
-    confirmed: bool = False,
-    decimal: DecimalSeparator | None = None,
-) -> WorkbookImportReport:
-    """Read every sheet, find the sections, and import them (or ask first)."""
-    from bido_back.purchasing.service import apply_parsed
-
+async def load_workbook_upload(
+    db: Db, storage: BlobStorage, principal: Principal, upload_id: UUID
+) -> tuple[str, bytes]:
+    """Read only an upload owned by the caller inside their tenant."""
     async with tenant_session(db, principal.tenant_id) as session:
         upload = await session.scalar(
             select(TemplateUpload).where(
@@ -659,14 +674,37 @@ async def import_workbook(
         if upload is None:
             raise WorkbookFileError(f"upload {upload_id} not found")
         key, filename = upload.storage_key, upload.filename
-    data = await storage.get(key)
+    return filename, await storage.get(key)
+
+
+async def import_workbook(
+    db: Db,
+    storage: BlobStorage,
+    principal: Principal,
+    upload_id: UUID,
+    *,
+    mapper: SheetMapper | None,
+    confirmed: bool = False,
+    decimal: DecimalSeparator | None = None,
+    mapping: SheetMappingOutput | None = None,
+    dry_run: bool = False,
+    apply_session: AsyncSession | None = None,
+    source: tuple[str, bytes] | None = None,
+) -> WorkbookImportReport:
+    """Read every sheet, find the sections, and import them (or ask first)."""
+    from bido_back.purchasing.service import apply_parsed
+
+    filename, data = source or await load_workbook_upload(db, storage, principal, upload_id)
     try:
         grids = read_workbook(data, filename)
     except ImportFileError as exc:
         raise WorkbookFileError(str(exc)) from exc
     context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
-    sections, problems = await map_workbook(grids, filename, mapper=mapper, context=context)
     by_name = {g.name: g for g in grids}
+    if mapping is None:
+        sections, problems = await map_workbook(grids, filename, mapper=mapper, context=context)
+    else:
+        sections, problems = _from_model(mapping, by_name)
     numbers = {id(s): _number_cells(s, by_name[s.sheet]) for s in sections}
     in_workbook = (
         decimal_evidence(c for cells in numbers.values() for c in cells)
@@ -686,6 +724,12 @@ async def import_workbook(
             continue
         parsed.append(_Parsed(section, table, [*notes, *_stock_notes(section, table)]))
     _names_for_codes(parsed)
+    parsed_sheets = {p.section.sheet for p in parsed if p.table.rows}
+    unimported = [
+        g.name
+        for g in grids
+        if g.name not in parsed_sheets and any(not _blank(c) for row in g.rows for c in row)
+    ]
     if not parsed:
         _log_import("nothing_found", upload_id, parsed, problems, sheets=len(grids))
         return WorkbookImportReport(
@@ -695,9 +739,17 @@ async def import_workbook(
             sections=[],
             questions=["I could not find a table to import. Which sheet and columns hold it?"],
             problems=problems,
+            unimported_sheets=unimported,
         )
     questions = [q for p in parsed for q in p.doubts()]
-    if questions and not confirmed:
+    if problems:
+        questions.append("Some sections could not be read. Review the problems before importing.")
+    if unimported:
+        questions.append(
+            f"These sheets have no importable rows: {', '.join(unimported)}. "
+            "Import only the supported data?"
+        )
+    if dry_run or (questions and not confirmed):
         _log_import(
             "needs_confirmation",
             upload_id,
@@ -713,14 +765,22 @@ async def import_workbook(
             sections=[p.report for p in parsed],
             questions=questions,
             problems=problems,
+            unimported_sheets=unimported,
         )
     order = {t: i for i, t in enumerate(_ORDER)}
-    async with tenant_session(db, principal.tenant_id) as session:
+
+    async def write(session: AsyncSession) -> list[str]:
         for item in sorted(parsed, key=lambda p: order[p.section.import_type]):
             created, updated, skipped = await apply_parsed(session, principal.tenant_id, item.table)
             item.report.created, item.report.updated = created, updated
             item.report.skipped = skipped
-        without_email = await suppliers_without_email(session)
+        return await suppliers_without_email(session)
+
+    if apply_session is None:
+        async with tenant_session(db, principal.tenant_id) as session:
+            without_email = await write(session)
+    else:
+        without_email = await write(apply_session)
     _log_import("imported", upload_id, parsed, problems, sheets=len(grids), confirmed=confirmed)
     return WorkbookImportReport(
         upload_id=upload_id,
@@ -729,6 +789,7 @@ async def import_workbook(
         sections=[p.report for p in parsed],
         questions=[],
         problems=problems,
+        unimported_sheets=unimported,
         suppliers_without_email=without_email,
     )
 

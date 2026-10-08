@@ -191,6 +191,41 @@ code validates every value. When unsure it answers `needs_confirmation` with
 questions and writes nothing until confirmed. Supplier emails next to supplier
 names become supplier contacts.
 
+The copilot also has a persisted workbook workflow (migration `0026`):
+`plan_spreadsheet` creates or recovers a plan, `execute_spreadsheet_plan` advances
+up to three steps, and `get_spreadsheet_plan` resumes saved progress. The planner
+proposes an acyclic task list covering every sheet. A separate analyst reads
+50-row / 20-column pages, accumulating source-backed mappings and issues. Code
+owns the cursor and completion status; a model cannot mark unread pages complete.
+A read-only import dry run and an independent reviewer check the final mapping.
+All three specialists run through the existing Agno adapter without action tools.
+
+Plans are owner- and tenant-scoped, tied to a source hash, and checkpointed between
+model calls. Calls run outside database transactions; leases prevent competing
+checkpoints. Three failed attempts stop a task. `needs_input` requires buyer
+clarification through `revise_spreadsheet_plan`, which invalidates the old mapping
+and confirmation. `ready` is not imported: `import_spreadsheet` needs the reviewed
+`plan_id`, `plan_revision`, a preview, and confirmation in a later chat turn.
+The reviewed import and its receipt commit together; retries of the same plan
+return the receipt instead of repeating writes. The direct workbook API retains
+its existing behavior and does not use this copilot workflow.
+
+Reading coverage is not a guarantee of semantic accuracy. Supported import types
+remain items, BOM, inventory, purchase history, production plans and supplier
+contacts. Direct material requirements, ratings and consolidated reports may be
+read but must be disclosed when not imported, never forced into another type.
+Unit conflicts require evidence or buyer clarification, not guessed conversions.
+Limits are 20 sheets, 1,000 pages per sheet and 150,000 serialized input characters
+per specialist call; larger inputs fail explicitly and require splitting.
+Execution advances during chat calls, not in an unattended background worker.
+
+Design references: [orchestrator-workers and bounded workflows](https://www.anthropic.com/engineering/building-effective-agents),
+[persisted task progress](https://www.anthropic.com/engineering/effective-harnesses-for-long-running-agents),
+and [manager-style orchestration](https://developers.openai.com/api/docs/guides/agents/orchestration).
+Offline tests cover structured Agno calls, pagination, resumption, review blockers,
+confirmation, idempotency and tenant boundaries. Live model accuracy, latency and
+cost still need evaluation on representative, authorized workbooks before rollout.
+
 ## Observability
 
 - **Logs:** one JSON object per line on stdout (CloudWatch reads the fields;

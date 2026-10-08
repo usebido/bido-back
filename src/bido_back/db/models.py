@@ -14,6 +14,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
+from pydantic import JsonValue
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -619,6 +620,32 @@ class TemplateUpload(Base):
     size_bytes: Mapped[int] = mapped_column(Integer)
     storage_key: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SpreadsheetPlan(Base):
+    """Tenant-owned checkpoints for a single uploaded workbook and its owner."""
+
+    __tablename__ = "spreadsheet_plans"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id",
+            "user_id",
+            "upload_id",
+            "source_sha256",
+            name="spreadsheet_plans_source_key",
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    upload_id: Mapped[UUID] = mapped_column(ForeignKey("template_uploads.id", ondelete="CASCADE"))
+    source_sha256: Mapped[str] = mapped_column(Text)
+    state: Mapped[dict[str, JsonValue]] = mapped_column(JSONB)
+    lease_token: Mapped[UUID | None]
+    lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class FollowupMessage(Base):
