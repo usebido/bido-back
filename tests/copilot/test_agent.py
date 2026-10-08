@@ -17,6 +17,8 @@ EXPECTED_TOOLS = {
     "list_proposals": "read",
     "get_comparison": "read",
     "price_history": "read",
+    "list_suppliers": "read",
+    "purchase_history": "read",
     "suggest_suppliers": "read",
     "get_rfq_template": "read",
     "update_rfq_template": "draft",

@@ -578,6 +578,7 @@ class SectionReport(BaseModel):
     source: Literal["rules", "model"]
     header_row: int  # 1-based, as in the spreadsheet
     columns: dict[str, str]
+    unknown_columns: list[str] = Field(default_factory=list[str])
     missing_required: list[str]
     rows_total: int
     rows_ok: int
@@ -602,6 +603,10 @@ class WorkbookImportReport(BaseModel):
     # What to ask the buyer before importing; empty when imported.
     questions: list[str]
     problems: list[str]
+    unimported_sheets: list[str] = Field(
+        default_factory=list[str],
+        description="Nonempty sheets with no parsed section; their data was not imported",
+    )
     suppliers_without_email: list[str] = Field(
         default_factory=list[str],
         description=(
@@ -641,6 +646,7 @@ class _Parsed:
             source=self.section.source,
             header_row=self.section.header_row + 1,
             columns=t.columns,
+            unknown_columns=t.unknown_columns,
             missing_required=t.missing_required,
             rows_total=t.total_rows,
             rows_ok=len(t.rows),
@@ -905,6 +911,12 @@ async def import_workbook(
             context=context,
         )
     _names_for_codes(parsed)
+    parsed_sheets = {p.section.sheet for p in parsed if p.table.rows}
+    unimported = [
+        g.name
+        for g in grids
+        if g.name not in parsed_sheets and any(not _blank(c) for row in g.rows for c in row)
+    ]
     if not parsed:
         _log_import("nothing_found", upload_id, parsed, problems, sheets=len(grids))
         return WorkbookImportReport(
@@ -914,6 +926,7 @@ async def import_workbook(
             sections=[],
             questions=["I could not find a table to import. Which sheet and columns hold it?"],
             problems=problems,
+            unimported_sheets=unimported,
         )
     questions = [q for p in parsed for q in p.doubts()]
     if questions and not confirmed:
@@ -933,6 +946,7 @@ async def import_workbook(
             questions=questions,
             problems=problems,
             products=_products(parsed),
+            unimported_sheets=unimported,
         )
     order = {t: i for i, t in enumerate(_ORDER)}
     async with tenant_session(db, principal.tenant_id) as session:
@@ -949,6 +963,7 @@ async def import_workbook(
         sections=[p.report for p in parsed],
         questions=[],
         problems=problems,
+        unimported_sheets=unimported,
         suppliers_without_email=without_email,
         products=_products(parsed),
     )
