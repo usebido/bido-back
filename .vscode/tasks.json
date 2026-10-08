@@ -191,6 +191,20 @@
       "problemMatcher": []
     },
     {
+      "label": "eval: run (mock)",
+      "detail": "Agent evals on synthetic spreadsheets with scripted model outputs (harness check, free)",
+      "type": "shell",
+      "command": "uv run python -m evals.run --mock",
+      "problemMatcher": []
+    },
+    {
+      "label": "eval: run (live)",
+      "detail": "Agent evals against the live model (OPENAI_API_KEY; k=3, a few minutes, small cost)",
+      "type": "shell",
+      "command": "uv run python -m evals.run",
+      "problemMatcher": []
+    },
+    {
       "label": "check: lint + types",
       "type": "shell",
       "command": "uv run ruff check && uv run ruff format --check && uv run pyright",
