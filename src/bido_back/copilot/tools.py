@@ -46,7 +46,7 @@ from bido_back.awards import service as award_service
 from bido_back.awards.schemas import AwardLine, AwardRequest, AwardSelection, PurchaseOrderSummary
 from bido_back.comparison.loader import load_comparison
 from bido_back.copilot import queries
-from bido_back.copilot.journey_tools import journey_tools
+from bido_back.copilot.journey_tools import journey_tools, reply_by_explained
 from bido_back.db import tenant_session
 from bido_back.db.models import Analysis, Invite, Rfq, RfqLine, RfqTemplate
 from bido_back.negotiation import service as negotiation_service
@@ -57,7 +57,13 @@ from bido_back.purchasing.schemas import AnalysisRequest, CurrencyTotalView, Rfq
 from bido_back.purchasing.workbook import SheetMapper
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
-from bido_back.rfqs.errors import Duplicate, MailboxNotConfigured, MailboxNotConnected, RfqError
+from bido_back.rfqs.errors import (
+    Duplicate,
+    MailboxNotConfigured,
+    MailboxNotConnected,
+    ReplyByRequired,
+    RfqError,
+)
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.schemas import AddLineRequest, RfqDetail, UpdateLineRequest, UpdateRfqRequest
 from bido_back.storage import BlobStorage
@@ -117,6 +123,8 @@ async def _rfq(session: AsyncSession, reference: str) -> Rfq:
 
 
 def _service_error(exc: RfqError) -> ToolError:
+    if isinstance(exc, ReplyByRequired):
+        return ToolError(reply_by_explained(exc))
     if isinstance(exc, MailboxNotConnected):
         return ToolError("the buyer has not connected a mailbox; emails are sent from it")
     if isinstance(exc, MailboxNotConfigured):
@@ -1189,7 +1197,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             raise ToolError(hold)
         try:
             prepared = await rfq_service.prepare_send(
-                db, principal, rfq.id, deps.agents.email_writer, deps.mailboxes
+                db, principal, rfq.id, deps.agents.email_writer, deps.mailboxes, today=deps.today()
             )
         except RfqError as exc:
             raise _service_error(exc) from None
@@ -1636,7 +1644,9 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             "prepare_send",
             "Write the RFQ email for every draft invite and ask for approval. Nothing is "
             "sent: the buyer (or, if the company requires it, a second person) must approve "
-            "each email first." + rfq_ref_hint,
+            "each email first. The RFQ needs a reply-by date (response_due, today or "
+            "later): if it is missing or past, ask the buyer by when suppliers must answer "
+            "and set it with set_rfq_terms before calling this." + rfq_ref_hint,
             RfqRef,
             PrepareSendOut,
             "draft",

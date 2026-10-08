@@ -43,7 +43,12 @@ from bido_back.purchasing import service as purchasing_service
 from bido_back.purchasing.schemas import AnalysisRequest, CurrencyTotalView
 from bido_back.purchasing.workbook import WorkbookFileError, WorkbookImportReport, import_workbook
 from bido_back.rfqs import suppliers as supplier_service
-from bido_back.rfqs.errors import MailboxNotConfigured, MailboxNotConnected, RfqError
+from bido_back.rfqs.errors import (
+    MailboxNotConfigured,
+    MailboxNotConnected,
+    ReplyByRequired,
+    RfqError,
+)
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest, EmailAddress
 from bido_back.rfqs.service import preliminary_hold
 
@@ -53,7 +58,22 @@ if TYPE_CHECKING:
 MAX_EXTRA_OFFERS: Final = 20
 
 
+def reply_by_explained(exc: ReplyByRequired) -> str:
+    """A reply-by refusal with what the model should do next."""
+    if exc.draft:
+        return (
+            f"{exc}. Ask the buyer by when suppliers must answer, set it with "
+            "set_rfq_terms(response_due=...), then try again."
+        )
+    return (
+        f"{exc}. The RFQ is no longer a draft: ask the buyer to set the reply-by date in "
+        "its follow-up settings, then try again."
+    )
+
+
 def _explain(exc: RfqError) -> str:
+    if isinstance(exc, ReplyByRequired):
+        return reply_by_explained(exc)
     if isinstance(exc, MailboxNotConnected):
         return "the buyer has not connected a mailbox; emails are sent from it"
     if isinstance(exc, MailboxNotConfigured):
@@ -577,8 +597,10 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             "propose_negotiation_mandate",
             "When the buyer says to go ahead and negotiate: record ONE approval that covers "
             "the initial RFQ emails and the negotiation's limits (targets and maximums "
-            "from the analysis) until the deadline. Nothing is sent until it is approved."
-            + ref_hint,
+            "from the analysis) until the deadline. Nothing is sent until it is approved. "
+            "Needs the RFQ's reply-by date (response_due, today or later) when initial "
+            "emails are still to be written: if it is missing or past, ask the buyer for it "
+            "and set it with set_rfq_terms first." + ref_hint,
             ProposeMandateIn,
             ProposeMandateOut,
             "draft",

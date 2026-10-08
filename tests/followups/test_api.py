@@ -73,7 +73,7 @@ async def test_get_and_patch_followup_settings(
         "first_after_business_days": 2,
         "every_business_days": 2,
         "max_chases": 3,
-        "response_due": "2026-11-01",
+        "response_due": "2099-11-01",
     }
 
     patched = await http.patch(

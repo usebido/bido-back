@@ -4,8 +4,10 @@ Every function takes the caller's `Principal` and works in one
 `tenant_session` for that tenant (forced RLS). Agent runs (seconds) happen
 OUTSIDE any transaction; their results are written afterwards.
 
-Preparing a send never sends. It first checks that the caller (the buyer)
-has a connected mailbox, since that is where the emails will go out from
+Preparing a send never sends. It first checks that the RFQ has a reply-by
+date of today or later when there is an invite to prepare
+(`bido_back.rfqs.readiness`, `ReplyByRequired` otherwise), then that the
+caller (the buyer) has a connected mailbox, since that is where the emails will go out from
 (`MailboxNotConnected` otherwise). It pins the RFQ to the template version
 its emails use (`bido_back.templates.service.resolve_for_rfq`, recorded at
 the first send). Then, for each invite still in `draft`, it renders the email
@@ -66,8 +68,9 @@ from bido_back.negotiation.send import SEND_NEGOTIATION_EMAIL, SendNegotiationEm
 from bido_back.onboarding.standard import TemplateContent
 from bido_back.outbound.domains import RecipientCheck, check_recipients, recipients_in_args
 from bido_back.rfqs.agents import EmailWriterAgent, IntakeAgent
-from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound
+from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound, ReplyByRequired
 from bido_back.rfqs.mailbox import MailboxSenderFactory
+from bido_back.rfqs.readiness import reply_by_refusal, send_blockers, utc_today
 from bido_back.rfqs.schemas import (
     AddLineRequest,
     ApprovalQueueItem,
@@ -179,6 +182,7 @@ def _summary_fields(rfq: Rfq) -> dict[str, object]:
         "status": cast(RfqStatus, rfq.status),
         "response_due": rfq.response_due,
         "created_at": rfq.created_at,
+        "send_blockers": send_blockers(rfq.status, rfq.response_due, utc_today()),
     }
 
 
@@ -734,9 +738,14 @@ async def prepare_send(
     mailboxes: MailboxSenderFactory,
     *,
     require_mailbox: bool = True,
+    today: date | None = None,
 ) -> PrepareSendResponse:
     """Render one email per draft invite and record each as a pending approval.
 
+    With an invite to prepare, the RFQ needs a reply-by date of `today` (UTC by
+    default) or later; otherwise this fails with `ReplyByRequired` before
+    anything is rendered or proposed. This is the one place RFQ emails are
+    proposed, so the API, the copilot and negotiation mandates all get the rule.
     The emails will go out from the caller's connected mailbox; without one
     this fails with `MailboxNotConnected` before anything is rendered, unless
     `require_mailbox` is False (a negotiation mandate, whose sends wait for the
@@ -746,9 +755,6 @@ async def prepare_send(
         rfq = await _rfq(session, rfq_id, lock=True)
         if rfq.status not in ("draft", "open"):
             raise InvalidState(f"rfq {rfq_id} is {rfq.status}")
-        # Fail early: nobody should approve an email that cannot be sent.
-        if require_mailbox:
-            await mailboxes(session, principal.tenant_id, principal.user_id)
         rows = await session.execute(
             select(Invite, Supplier, Contact)
             .join(Supplier, Supplier.id == Invite.supplier_id)
@@ -757,6 +763,17 @@ async def prepare_send(
             .order_by(Invite.created_at, Invite.id)
         )
         drafts = list(rows)
+        # Without a date to answer by, suppliers have no deadline and follow-ups
+        # and the negotiation nothing to anchor on. Checked first: the buyer can
+        # fix it at once. Nothing to prepare (e.g. a mandate on an RFQ already
+        # sent) means no email, so no date is needed.
+        if drafts and (
+            refusal := reply_by_refusal(rfq.ref, rfq.status, rfq.response_due, today or utc_today())
+        ):
+            raise ReplyByRequired(refusal, draft=rfq.status == "draft")
+        # Fail early: nobody should approve an email that cannot be sent.
+        if require_mailbox:
+            await mailboxes(session, principal.tenant_id, principal.user_id)
         # Earlier rejected (or expired, e.g. with a rejected mandate) proposals per
         # invite: the next proposal is a new attempt.
         call_ids = [send_proposal_ids(invite.id)[1] for invite, _, _ in drafts]

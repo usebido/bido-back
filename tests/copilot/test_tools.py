@@ -5,12 +5,12 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.tools import ToolError
 from bido_back.db import tenant_session
-from bido_back.db.models import Approval, Invite, RfqLine, RfqTemplate, RfqTemplateVersion
+from bido_back.db.models import Approval, Invite, Rfq, RfqLine, RfqTemplate, RfqTemplateVersion
 from bido_back.rfqs.send import SEND_RFQ_EMAIL
 from tests.approvals.conftest import People
 
@@ -343,6 +343,46 @@ async def test_lines_are_frozen_once_emails_are_prepared(
         await tools.call(ctx, "update_rfq_line", rfq=created.ref, position=1, quantities=[1])
     with pytest.raises(ToolError, match="frozen"):
         await tools.call(ctx, "set_rfq_terms", rfq=created.ref, incoterm="EXW")
+
+
+async def test_without_a_reply_by_date_the_model_is_told_to_ask_for_one(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    rhein = await supplier(app_engine, principal, "Rhein")
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+    for name in ("prepare_send", "propose_negotiation_mandate"):
+        assert "reply-by date" in tools.tools[name].description
+        assert "set_rfq_terms" in tools.tools[name].description
+
+    created = await tools.call(ctx, "create_rfq", text="MLCC and connectors")
+    await tools.call(ctx, "invite_suppliers", rfq=created.ref, supplier_ids=[str(rhein.id)])
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        await session.execute(update(Rfq).where(Rfq.id == created.id).values(response_due=None))
+
+    ask = rf"{created.ref} has no reply-by date.*set_rfq_terms\(response_due="
+    with pytest.raises(ToolError, match=ask):
+        await tools.call(ctx, "prepare_send", rfq=created.ref)
+    with pytest.raises(ToolError, match=ask):
+        await tools.call(
+            ctx,
+            "propose_negotiation_mandate",
+            rfq=created.ref,
+            deadline=datetime.now(UTC).date() + timedelta(days=30),
+            limits=[
+                {"position": p, "target_unit_price": "1.00", "max_unit_price": "1.50"}
+                for p in (1, 2)
+            ],
+        )
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        assert list(await session.scalars(select(Approval))) == []
+
+    # The buyer gave the date: the model sets it and prepares the send.
+    due = datetime.now(UTC).date() + timedelta(days=14)
+    await tools.call(ctx, "set_rfq_terms", rfq=created.ref, response_due=due)
+    prepared = await tools.call(ctx, "prepare_send", rfq=created.ref)
+    assert len(prepared.approvals) == 1
 
 
 async def test_a_preliminary_rfq_is_not_prepared_for_sending(

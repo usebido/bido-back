@@ -6039,6 +6039,18 @@
             ],
             "title": "Response Due"
           },
+          "send_blockers": {
+            "description": "Why preparing a send would be refused now (reply_by_missing: no response_due; reply_by_past: response_due before today, UTC); empty when nothing blocks. Only draft and open RFQs can have blockers",
+            "items": {
+              "enum": [
+                "reply_by_missing",
+                "reply_by_past"
+              ],
+              "type": "string"
+            },
+            "title": "Send Blockers",
+            "type": "array"
+          },
           "status": {
             "enum": [
               "draft",
@@ -6114,6 +6126,18 @@
               }
             ],
             "title": "Response Due"
+          },
+          "send_blockers": {
+            "description": "Why preparing a send would be refused now (reply_by_missing: no response_due; reply_by_past: response_due before today, UTC); empty when nothing blocks. Only draft and open RFQs can have blockers",
+            "items": {
+              "enum": [
+                "reply_by_missing",
+                "reply_by_past"
+              ],
+              "type": "string"
+            },
+            "title": "Send Blockers",
+            "type": "array"
           },
           "status": {
             "enum": [
@@ -6725,6 +6749,18 @@
             "description": "Invites that answered with a quote",
             "title": "Responses Count",
             "type": "integer"
+          },
+          "send_blockers": {
+            "description": "Why preparing a send would be refused now (reply_by_missing: no response_due; reply_by_past: response_due before today, UTC); empty when nothing blocks. Only draft and open RFQs can have blockers",
+            "items": {
+              "enum": [
+                "reply_by_missing",
+                "reply_by_past"
+              ],
+              "type": "string"
+            },
+            "title": "Send Blockers",
+            "type": "array"
           },
           "stage": {
             "default": "draft",
