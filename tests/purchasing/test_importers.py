@@ -9,10 +9,12 @@ from typing import Any, cast
 import pytest
 
 from bido_back.purchasing.importers import (
+    DroppedColumn,
     ImportFileError,
     decimal_evidence,
     map_columns,
     parse_date,
+    parse_mapped,
     parse_number,
     parse_rows,
     read_table,
@@ -157,7 +159,7 @@ def test_sap_headers_map_to_fields() -> None:
         "part_number": "Material",
         "quantity": "Qtd.do pedido",
         "unit_price": "Preço líquido",
-        "price_unit": "Por",
+        "price_quantity_basis": "Por",
         "ordered_at": "Data doc.",
         "currency": "Moeda",
         "promised_at": "Data remessa",
@@ -217,7 +219,7 @@ def test_text_numbers_resolve_with_their_column() -> None:
     assert parse_number("1.250,00-", ",") == Decimal("-1250.00")  # SAP's trailing minus
 
 
-def test_totals_are_skipped_and_prices_follow_the_price_unit() -> None:
+def test_totals_are_skipped_and_prices_follow_the_price_quantity_basis() -> None:
     table = parse_rows(
         "purchase_history",
         [
@@ -232,7 +234,120 @@ def test_totals_are_skipped_and_prices_follow_the_price_unit() -> None:
     assert (table.total_rows, table.skipped_rows) == (2, 1)
     assert [v["unit_price"] for _, v in table.rows] == [Decimal("1.954"), Decimal("185.00")]
     assert table.rows[1][1]["ordered_at"] == date(2026, 3, 2)
-    assert all("price_unit" not in v for _, v in table.rows)
+    assert all("price_quantity_basis" not in v for _, v in table.rows)
+
+
+# An ERP export's purchase lines (46 columns in the real one): units of measure,
+# a local and a converted price, statuses and cancelled quantities.
+ERP_HEADER: list[object] = [
+    "Company_Code", "PO_Number", "PO_Line", "PO_Date", "Supplier_ID", "Supplier_Name",
+    "Material_ID", "Material_Description", "Plant", "Currency", "FX_to_USD", "Ordered_Qty",
+    "UoM", "Unit_Price_Local", "Unit_Price_USD", "Cancelled_Qty", "Requested_Delivery_Date",
+    "Confirmed_Delivery_Date", "Last_Receipt_Date", "Received_Qty_Gross", "Rejected_Qty",
+    "Net_Received_Qty", "Outstanding_Qty", "PO_Status", "Payment_Status",
+]  # fmt: skip
+
+
+def erp_line(po: str, qty: int, unit: str, cancelled: int, status: str) -> list[object]:
+    return [
+        "RVN", po, 10, date(2026, 3, 1), "SUP-1", "Arvella LLC", "EL-1", "Harness", "EV01",
+        "EUR", 1.1, qty, unit, 14.5, 15.95, cancelled, date(2026, 4, 1), date(2026, 4, 3),
+        date(2026, 4, 2), qty - cancelled, 0, qty - cancelled, 0, status, "PAID",
+    ]  # fmt: skip
+
+
+def test_an_erp_export_maps_by_rules_with_the_local_price() -> None:
+    _, columns, missing, _ = map_columns("purchase_history", ERP_HEADER)
+    assert missing == []
+    assert columns["part_number"] == "Material_ID"
+    assert columns["unit_price"] == "Unit_Price_Local"  # not the converted USD price
+    assert columns["promised_at"] == "Confirmed_Delivery_Date"
+    assert columns["received_at"] == "Last_Receipt_Date"
+    assert columns["received_qty"] == "Received_Qty_Gross"
+    assert (columns["status"], columns["cancelled_qty"]) == ("PO_Status", "Cancelled_Qty")
+    assert "price_quantity_basis" not in columns  # "UoM" is a unit of measure
+
+    # Requested dates count as promised only when nothing confirms a date.
+    _, columns, _, _ = map_columns(
+        "purchase_history",
+        ["PO", "Supplier", "Part", "Qty", "Price", "PO date", "Requested_Delivery_Date"],
+    )
+    assert columns["promised_at"] == "Requested_Delivery_Date"
+    _, columns, missing, _ = map_columns(
+        "inventory", ["Material", "Estoque disponível", "Quantidade em pedido"]
+    )
+    assert missing == [] and columns["on_order"] == "Quantidade em pedido"
+
+
+def test_cancelled_lines_are_not_purchases() -> None:
+    table = parse_rows(
+        "purchase_history",
+        [
+            ERP_HEADER,
+            erp_line("PO-1", 90, "EA", 0, "CLOSED"),
+            erp_line("PO-2", 100, "EA", 100, "CANCELLED"),
+            erp_line("PO-3", 100, "EA", 40, "CLOSED"),  # partly cancelled
+            erp_line("PO-4", 50, "EA", 0, "Cancelado"),
+        ],
+    )
+    assert table.errors == []
+    assert (table.total_rows, table.cancelled_rows, table.skipped_rows) == (2, 2, 2)
+    assert [(v["po_number"], v["quantity"]) for _, v in table.rows] == [
+        ("PO-1", Decimal(90)),
+        ("PO-3", Decimal(60)),
+    ]
+    assert all("status" not in v and "cancelled_qty" not in v for _, v in table.rows)
+
+
+def test_an_optional_column_that_does_not_fit_its_field_is_dropped_not_every_row() -> None:
+    # The mapper read "UoM" (EA, M) as the price's quantity basis: every row failed.
+    header = ["PO", "Supplier", "Part", "Qty", "UoM", "Price", "PO date"]
+    rows: list[tuple[int, Sequence[object]]] = [
+        (2, ["PO-1", "Arvella", "EL-1", 90, "EA", 14.09, date(2026, 3, 1)]),
+        (3, ["PO-2", "Arvella", "EL-2", 120, "M", 2.5, date(2026, 3, 2)]),
+        (4, ["PO-3", "Bramvolt", "EL-3", 10, "EA", 7.0, date(2026, 3, 3)]),
+    ]
+    index = {
+        "po_number": 0, "supplier": 1, "part_number": 2, "quantity": 3,
+        "price_quantity_basis": 4, "unit_price": 5, "ordered_at": 6,
+    }  # fmt: skip
+
+    table = parse_mapped("purchase_history", header, index, rows)
+
+    assert table.errors == [] and len(table.rows) == 3
+    assert table.dropped == [DroppedColumn("price_quantity_basis", "UoM")]
+    assert "price_quantity_basis" not in table.columns
+    assert table.rows[0][1]["unit_price"] == Decimal("14.09")  # not divided by anything
+
+    # Without the check every row fails on that column (what the buyer saw).
+    unchecked = parse_mapped("purchase_history", header, index, rows, check_types=False)
+    assert unchecked.rows == [] and unchecked.field_failures == {"price_quantity_basis": 3}
+
+
+def test_a_mostly_valid_column_is_kept_and_a_required_one_is_never_dropped() -> None:
+    header = ["PO", "Supplier", "Part", "Qty", "Price", "PO date", "Received qty"]
+    rows: list[tuple[int, Sequence[object]]] = [
+        (2, ["PO-1", "A", "P-1", 10, 1.0, date(2026, 3, 1), 10]),
+        (3, ["PO-2", "A", "P-2", 10, 1.0, date(2026, 3, 1), "n/a"]),
+        (4, ["PO-3", "A", "P-3", 10, "EA", date(2026, 3, 1), 10]),
+    ]
+    index = {
+        "po_number": 0, "supplier": 1, "part_number": 2, "quantity": 3, "unit_price": 4,
+        "ordered_at": 5, "received_qty": 6,
+    }  # fmt: skip
+
+    table = parse_mapped("purchase_history", header, index, rows)
+
+    # Two of three received quantities read: the column stays and its bad row fails.
+    assert table.dropped == []
+    assert [o for o, _ in table.rows] == [2]
+    assert table.field_failures == {"received_qty": 1, "unit_price": 1}
+
+    # A required column that holds no numbers at all still fails its rows.
+    rows = [(2, ["PO-1", "A", "P-1", 10, "EA", date(2026, 3, 1), 10])]
+    table = parse_mapped("purchase_history", header, index, rows)
+    assert table.dropped == [] and table.rows == []
+    assert table.field_failures == {"unit_price": 1}
 
 
 def test_supplier_types() -> None:

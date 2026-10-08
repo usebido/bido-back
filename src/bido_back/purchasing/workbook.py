@@ -12,10 +12,20 @@ Buyers send what their ERP or their own Excel produces. There is no template:
    known sheet, known type, fields of that type, columns inside the sheet, no
    column used twice.
 3. Validate every value with the importers (`parse_mapped`), as for any import.
-4. Ask before writing when unsure: a section with low confidence, a missing
+   An optional column whose values do not fit its field (units of measure
+   mapped as a number) is dropped first, so it cannot fail every row.
+4. Correct once before asking: a sheet where more than a fifth of a section's
+   rows still fail, or one field fails on more than half of them, goes back to
+   the sheet mapper with what was wrong ("column X holds 'EA', 'M', not
+   numbers"); the better of the two readings is kept (`_retry_mapping`).
+5. Ask before writing when unsure: a section with low confidence, a missing
    required field, a question from the mapper, or more than a fifth of its rows
    failing makes the import `needs_confirmation`. Nothing is written until
    the buyer confirms; then the valid rows are imported, in dependency order.
+
+Every section is logged with ids and counts only; a section read with a
+dropped column, a retry or many failing rows is logged `degraded` with a
+stable reason code (`DegradedReason`) for monitoring.
 
 The model never sees more than a preview (first rows, cells cut short) and
 never produces a value that is written.
@@ -45,6 +55,7 @@ import logging
 import re
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Final, Literal, Protocol, cast
 from uuid import UUID, uuid4
@@ -68,6 +79,7 @@ from bido_back.logs import safe_reason
 from bido_back.purchasing.importers import (
     MAX_ROWS,
     SPECS,
+    DroppedColumn,
     ImportFileError,
     ImportType,
     ParsedTable,
@@ -89,11 +101,21 @@ SheetMapper = Callable[[SheetMappingInput, ToolContext], Awaitable[SheetMappingO
 
 HEADER_SCAN_ROWS: Final = 30
 PREVIEW_ROWS: Final = 25
-PREVIEW_COLUMNS: Final = 30
+# A wide sheet shows fewer rows (cells per preview stay about the same); the
+# profile still describes every column.
+PREVIEW_CELLS: Final = 750
+MIN_PREVIEW_ROWS: Final = 8
+# Columns the mapper is shown (preview and profile) and may map.
+PREVIEW_COLUMNS: Final = 120
 PREVIEW_CELL_CHARS: Final = 40
 MAX_SHEETS: Final = 20
 CONFIDENT: Final = 0.7
 MAX_FAILED_SHARE: Final = 0.2
+# One field failing on more than this share of a section's rows: mapped wrongly.
+FIELD_FAILED_SHARE: Final = 0.5
+FEEDBACK_SAMPLES: Final = 3
+# Stable codes on the "workbook section" log line; monitoring alarms on them.
+DegradedReason = Literal["retry_mapping", "high_failure_rate", "optional_field_dropped"]
 # Write order: items and BOMs before stock and history that reference them.
 _ORDER: Final[tuple[ImportType, ...]] = (
     "items",
@@ -192,12 +214,122 @@ def _cell(value: object) -> str:
     return text[:PREVIEW_CELL_CHARS] + ("…" if len(text) > PREVIEW_CELL_CHARS else "")
 
 
+def preview_rows(grid: SheetGrid) -> int:
+    """Rows to show: fewer for a wide sheet, always a few under the likely header."""
+    width = max(min(grid.width, PREVIEW_COLUMNS), 1)
+    by_cells = max(MIN_PREVIEW_ROWS, min(PREVIEW_ROWS, PREVIEW_CELLS // width))
+    return max(by_cells, _likely_header(grid) + 4)
+
+
 def preview(grid: SheetGrid) -> str:
     lines: list[str] = []
-    for number, row in enumerate(grid.rows[:PREVIEW_ROWS], start=1):
+    for number, row in enumerate(grid.rows[: preview_rows(grid)], start=1):
         cells = [f"[{i}] {_cell(v)}" for i, v in enumerate(row[:PREVIEW_COLUMNS]) if not _blank(v)]
         if cells:
             lines.append(f"row {number}: " + " | ".join(cells))
+    return "\n".join(lines)
+
+
+# --- Column profiles: what each column holds, for the mapper ------------------------------
+
+PROFILE_SAMPLE_ROWS: Final = 2000
+PROFILE_EXAMPLES: Final = 3
+PROFILE_EXAMPLE_CHARS: Final = 16
+# A column is of a kind when this share of its cells are; else "mostly <kind>".
+PROFILE_KIND_SHARE: Final = 0.8
+# Units of measure as ERPs write them (lower case, dots removed).
+_UNITS: Final = frozenset(
+    {
+        "ea", "each", "pc", "pcs", "pce", "pz", "pzs", "pç", "peca", "peça", "pecas", "un",
+        "und", "unid", "unit", "units", "st", "stk", "stck", "nr", "set", "kit", "box", "cx",
+        "pack", "pk", "pr", "pair", "m", "mm", "cm", "km", "m2", "m3", "ft", "in", "kg", "g",
+        "mg", "t", "lb", "lbs", "oz", "l", "ml", "gal", "rol", "roll", "rl", "h", "hr",
+    }
+)  # fmt: skip
+_CURRENCY_CODE: Final = re.compile(r"^[A-Z]{3}$")
+_ID_LIKE: Final = re.compile(r"^(?=.*\d)[A-Za-z0-9][A-Za-z0-9._/-]*$")
+_NUMBER_TEXT: Final = re.compile(r"^[-+]?[\d\s.,']*\d[\d\s.,']*-?$")
+_DATE_TEXT: Final = re.compile(r"^\d{1,4}[./-]\d{1,2}[./-]\d{1,4}")
+_EMAIL_TEXT: Final = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+ColumnKind = Literal["number", "date", "currency-code", "unit-like", "email", "id-like", "text"]
+
+
+def _kind_of(value: object) -> ColumnKind:
+    if isinstance(value, bool):
+        return "text"
+    if isinstance(value, int | float | Decimal):
+        return "number"
+    if isinstance(value, datetime | date):
+        return "date"
+    text = str(value).strip()
+    if _DATE_TEXT.match(text):
+        return "date"
+    if _NUMBER_TEXT.match(text):
+        return "number"
+    if _EMAIL_TEXT.match(text):
+        return "email"
+    if text.lower().replace(".", "") in _UNITS:
+        return "unit-like"
+    if _CURRENCY_CODE.match(text):
+        return "currency-code"
+    if _ID_LIKE.match(text):
+        return "id-like"
+    return "text"
+
+
+def _likely_header(grid: SheetGrid) -> int:
+    """0-based row with the most text cells among the first rows: the column titles."""
+    best, best_count = 0, 0
+    for at, row in enumerate(grid.rows[:PREVIEW_ROWS]):
+        count = sum(1 for c in row[:PREVIEW_COLUMNS] if isinstance(c, str) and c.strip())
+        if count > best_count:
+            best, best_count = at, count
+    return best
+
+
+def _range(cells: Sequence[object], kind: ColumnKind) -> str | None:
+    if kind == "number":
+        numbers = [
+            c for c in cells if isinstance(c, int | float | Decimal) and not isinstance(c, bool)
+        ]
+        return f"{_cell(min(numbers))}..{_cell(max(numbers))}" if numbers else None
+    if kind == "date":
+        days = [c.date() if isinstance(c, datetime) else c for c in cells if isinstance(c, date)]
+        return f"{min(days).isoformat()}..{max(days).isoformat()}" if days else None
+    return None
+
+
+def profile(grid: SheetGrid) -> str:
+    """One compact line per column: its kind, distinct values, examples or range, % empty.
+
+    Computed over the rows under the likely header row, for every column the
+    mapper may map (the row preview shows fewer rows of a wide sheet), so it sees
+    what a column holds ("UoM: unit-like, 2 distinct (EA, M)"), not only its
+    title. Short examples go to the model only; nothing here is logged.
+    """
+    header_at = _likely_header(grid)
+    header = grid.rows[header_at] if grid.rows else []
+    data = grid.rows[header_at + 1 : header_at + 1 + PROFILE_SAMPLE_ROWS]
+    if not data:
+        return ""
+    lines: list[str] = []
+    for i in range(min(grid.width, PREVIEW_COLUMNS)):
+        cells = [row[i] for row in data if i < len(row) and not _blank(row[i])]
+        title = _cell(header[i]) if i < len(header) and not _blank(header[i]) else "(no title)"
+        if not cells:
+            lines.append(f"[{i}] {title}: empty")
+            continue
+        counts: dict[ColumnKind, int] = {}
+        for c in cells:
+            k = _kind_of(c)
+            counts[k] = counts.get(k, 0) + 1
+        kind, n = max(counts.items(), key=lambda kv: kv[1])
+        label = kind if n >= PROFILE_KIND_SHARE * len(cells) else f"mostly {kind}"
+        distinct = list(dict.fromkeys(_cell(c)[:PROFILE_EXAMPLE_CHARS] for c in cells))
+        span = _range(cells, kind)
+        detail = f", {span}" if span else " (" + ", ".join(distinct[:PROFILE_EXAMPLES]) + ")"
+        empty = round(100 * (len(data) - len(cells)) / len(data))
+        lines.append(f"[{i}] {title}: {label}, {len(distinct)} distinct{detail}, {empty}% empty")
     return "\n".join(lines)
 
 
@@ -264,12 +396,29 @@ def _title_product(rows: Sequence[Sequence[object]]) -> str | None:
     return None
 
 
+# What the mapper is told about fields that are easy to confuse.
+_FIELD_HINTS: Final[Mapping[str, str]] = {
+    "price_quantity_basis": (
+        "the quantity the price refers to, e.g. 100 in 'EUR 50 per 100 pcs' (SAP 'Por'); "
+        "never the unit of measure (EA, PC, M, KG)"
+    ),
+    "unit": "the unit of measure (EA, PC, M, KG)",
+    "unit_price": "price per unit in the line's own currency; prefer it over a converted price",
+    "status": "the line's status (e.g. OPEN, CLOSED, CANCELLED)",
+    "cancelled_qty": "quantity cancelled on the line",
+    "received_qty": "quantity received (gross, before rejections)",
+    "on_order": "quantity ordered and not yet received",
+}
+
+
 def _catalog() -> list[ImportFieldCatalog]:
     return [
         ImportFieldCatalog(
             import_type=t,
             fields=[s.name for s in specs],
             required=[s.name for s in specs if s.required],
+            types={s.name: s.kind for s in specs},
+            hints={s.name: _FIELD_HINTS[s.name] for s in specs if s.name in _FIELD_HINTS},
         )
         for t, specs in SPECS.items()
     ]
@@ -364,24 +513,39 @@ async def map_workbook(
             )
             sections.extend(s for found in partial.values() for s in found)
         else:
-            output = await mapper(
-                SheetMappingInput(
-                    filename=filename,
-                    sheets=[
-                        SheetPreview(
-                            sheet=g.name, rows=len(g.rows), columns=g.width, preview=preview(g)
-                        )
-                        for g in unresolved
-                    ],
-                    catalog=_catalog(),
-                ),
-                context,
-            )
-            mapped, problems = _from_model(output, {g.name: g for g in unresolved})
+            mapped, problems = await _ask_mapper(mapper, unresolved, filename, context)
             sections.extend(mapped)
             read = {s.sheet for s in mapped}
             sections.extend(s for name, found in partial.items() if name not in read for s in found)
     return sections, problems
+
+
+async def _ask_mapper(
+    mapper: SheetMapper,
+    grids: Sequence[SheetGrid],
+    filename: str,
+    context: ToolContext,
+    feedback: Sequence[str] = (),
+) -> tuple[list[Section], list[str]]:
+    output = await mapper(
+        SheetMappingInput(
+            filename=filename,
+            sheets=[
+                SheetPreview(
+                    sheet=g.name,
+                    rows=len(g.rows),
+                    columns=g.width,
+                    preview=preview(g),
+                    profile=profile(g),
+                )
+                for g in grids
+            ],
+            catalog=_catalog(),
+            feedback=list(feedback),
+        ),
+        context,
+    )
+    return _from_model(output, {g.name: g for g in grids})
 
 
 _WEAK_TYPES: Final[frozenset[ImportType]] = frozenset({"items", "supplier_contacts"})
@@ -442,6 +606,8 @@ class _Parsed:
     section: Section
     table: ParsedTable
     notes: list[str] = field(default_factory=list[str])
+    # The sheet went back to the mapper once (`_retry_mapping`).
+    retried: bool = False
     report: SectionReport = field(init=False)
 
     def __post_init__(self) -> None:
@@ -470,6 +636,27 @@ class _Parsed:
             notes=list(self.notes),
         )
 
+    def failing(self) -> bool:
+        """Too many failing rows, or one field failing on most of them."""
+        t = self.table
+        if not t.total_rows:
+            return False
+        failed = t.total_rows - len(t.rows)
+        return failed / t.total_rows > MAX_FAILED_SHARE or any(
+            n / t.total_rows > FIELD_FAILED_SHARE for n in t.field_failures.values()
+        )
+
+    def degraded(self) -> list[DegradedReason]:
+        reasons: list[DegradedReason] = []
+        if self.retried:
+            reasons.append("retry_mapping")
+        r = self.report
+        if r.rows_total and r.rows_failed / r.rows_total > MAX_FAILED_SHARE:
+            reasons.append("high_failure_rate")
+        if self.table.dropped:
+            reasons.append("optional_field_dropped")
+        return reasons
+
     def doubts(self) -> list[str]:
         r = self.report
         found: list[str] = []
@@ -481,7 +668,18 @@ class _Parsed:
             found.append(
                 f"Sheet '{r.sheet}' ({r.type}): which columns hold {', '.join(r.missing_required)}?"
             )
-        if r.rows_total and r.rows_failed / r.rows_total > MAX_FAILED_SHARE:
+        if r.rows_total and not r.rows_ok:
+            # Nothing to import "only the valid rows" of: say what failed and ask for it.
+            worst = sorted(self.table.field_failures.items(), key=lambda kv: -kv[1])[:2]
+            columns = [
+                f"{f} (column '{r.columns[f]}')" if f in r.columns else f for f, _ in worst if f
+            ]
+            found.append(
+                f"Sheet '{r.sheet}': none of its {r.rows_total} rows could be read"
+                + (f"; the values of {' and '.join(columns)} are not valid" if columns else "")
+                + ". Which columns hold those values?"
+            )
+        elif r.rows_total and r.rows_failed / r.rows_total > MAX_FAILED_SHARE:
             found.append(
                 f"Sheet '{r.sheet}': {r.rows_failed} of {r.rows_total} rows have invalid "
                 "values; import only the valid rows?"
@@ -493,6 +691,19 @@ def parse_section(
     section: Section, grid: SheetGrid, decimal: DecimalSeparator | None
 ) -> ParsedTable:
     return _parse_section(section, grid, decimal)[0]
+
+
+def _read_notes(table: ParsedTable) -> list[str]:
+    """How a section's columns and rows were read, for the buyer."""
+    notes = [_dropped_note(d) for d in table.dropped]
+    if table.cancelled_rows:
+        notes.append(f"{table.cancelled_rows} cancelled purchase lines skipped (not purchases).")
+    return notes
+
+
+def _dropped_note(dropped: DroppedColumn) -> str:
+    field_name = dropped.field.replace("_", " ")
+    return f"Column '{dropped.header}' does not hold {field_name} values; not used."
 
 
 def _parse_section(
@@ -517,6 +728,7 @@ def _parse_section(
             index["product"] = column
             notes.append(f"Product {product} taken from the sheet's title / level-0 row.")
     table = parse_mapped(section.import_type, header, index, rows, decimal=decimal)
+    notes.extend(_read_notes(table))
     if section.import_type == "bom" and "level" in index and not table.missing_required:
         notes.extend(_explode_levels(table, index["level"], rows))
     return table, notes
@@ -657,24 +869,22 @@ async def import_workbook(
     context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
     sections, problems = await map_workbook(grids, filename, mapper=mapper, context=context)
     by_name = {g.name: g for g in grids}
-    numbers = {id(s): _number_cells(s, by_name[s.sheet]) for s in sections}
     in_workbook = (
-        decimal_evidence(c for cells in numbers.values() for c in cells)
+        decimal_evidence(c for s in sections for c in _number_cells(s, by_name[s.sheet]))
         or _dotted_dates(sections, by_name)
         or decimal
     )
-    parsed: list[_Parsed] = []
-    for section in sections:
-        try:
-            table, notes = _parse_section(
-                section,
-                by_name[section.sheet],
-                decimal_evidence(numbers[id(section)]) or in_workbook,
-            )
-        except ImportFileError as exc:
-            problems.append(f"{section.sheet}: {exc}")
-            continue
-        parsed.append(_Parsed(section, table, [*notes, *_stock_notes(section, table)]))
+    parsed = _parse_sections(sections, by_name, in_workbook, problems)
+    if mapper is not None:
+        parsed = await _retry_mapping(
+            parsed,
+            by_name,
+            in_workbook,
+            problems,
+            mapper=mapper,
+            filename=filename,
+            context=context,
+        )
     _names_for_codes(parsed)
     if not parsed:
         _log_import("nothing_found", upload_id, parsed, problems, sheets=len(grids))
@@ -721,6 +931,123 @@ async def import_workbook(
     )
 
 
+def _parse_sections(
+    sections: Sequence[Section],
+    grids: Mapping[str, SheetGrid],
+    in_workbook: DecimalSeparator | None,
+    problems: list[str],
+) -> list[_Parsed]:
+    parsed: list[_Parsed] = []
+    for section in sections:
+        try:
+            table, notes = _parse_section(
+                section,
+                grids[section.sheet],
+                decimal_evidence(_number_cells(section, grids[section.sheet])) or in_workbook,
+            )
+        except ImportFileError as exc:
+            problems.append(f"{section.sheet}: {exc}")
+            continue
+        parsed.append(_Parsed(section, table, [*notes, *_stock_notes(section, table)]))
+    return parsed
+
+
+async def _retry_mapping(
+    parsed: Sequence[_Parsed],
+    grids: Mapping[str, SheetGrid],
+    in_workbook: DecimalSeparator | None,
+    problems: list[str],
+    *,
+    mapper: SheetMapper,
+    filename: str,
+    context: ToolContext,
+) -> list[_Parsed]:
+    """Map the sheets whose rows still fail once more, told what was wrong.
+
+    One retry per import, for every failing sheet at once. Per sheet, the
+    reading that imports more rows (then fails fewer) is kept; either way its
+    sections are marked as retried.
+    """
+    sheets = list(dict.fromkeys(p.section.sheet for p in parsed if p.failing()))
+    if not sheets:
+        return list(parsed)
+    feedback = [
+        line
+        for p in parsed
+        if p.section.sheet in sheets
+        for line in _feedback(p, grids[p.section.sheet])
+    ]
+    mapped, new_problems = await _ask_mapper(
+        mapper, [grids[name] for name in sheets], filename, context, feedback
+    )
+    again = _parse_sections(mapped, grids, in_workbook, new_problems)
+    chosen: dict[str, list[_Parsed]] = {}
+    for name in sheets:
+        before = [p for p in parsed if p.section.sheet == name]
+        after = [p for p in again if p.section.sheet == name]
+        better = after if after and _score(after) > _score(before) else before
+        for item in better:
+            item.retried = True
+        chosen[name] = better
+        if better is after:
+            problems.extend(m for m in new_problems if m.startswith(f"{name}:"))
+    result: list[_Parsed] = []
+    for item in parsed:
+        name = item.section.sheet
+        if name not in chosen:
+            result.append(item)
+        elif chosen[name]:
+            result.extend(chosen.pop(name))
+            chosen[name] = []
+    return result
+
+
+def _score(items: Sequence[_Parsed]) -> tuple[int, int]:
+    ok = sum(len(p.table.rows) for p in items)
+    failed = sum(p.table.total_rows - len(p.table.rows) for p in items)
+    return ok, -failed
+
+
+def _feedback(item: _Parsed, grid: SheetGrid) -> list[str]:
+    """What was wrong with a section's mapping, checked against its values (for the mapper)."""
+    section, table = item.section, item.table
+    where = f"Sheet '{section.sheet}' ({section.import_type})"
+    header = grid.rows[section.header_row]
+    end = len(grid.rows) if section.last_row is None else section.last_row + 1
+    rows = grid.rows[section.first_row : end]
+
+    def column(field_name: str) -> str:
+        at = section.index[field_name]
+        title = header[at] if at < len(header) else None
+        values: list[str] = []
+        for row in rows:
+            cell = row[at] if at < len(row) else None
+            text = _cell(cell)[:20] if not _blank(cell) else ""
+            if text and text not in values:
+                values.append(text)
+            if len(values) >= FEEDBACK_SAMPLES:
+                break
+        shown = ", ".join(f"'{v}'" for v in values) or "empty"
+        return f"column [{at}] '{title}' (values like {shown})"
+
+    kinds = {s.name: s.kind for s in SPECS[section.import_type]}
+    lines = [
+        f"{where}: field '{d.field}' was mapped to {column(d.field)}, which are not "
+        f"{kinds[d.field]} values; it was left out."
+        for d in table.dropped
+        if d.field in section.index
+    ]
+    total = table.total_rows or 1
+    for name, count in sorted(table.field_failures.items(), key=lambda kv: -kv[1]):
+        if name and name in section.index:
+            lines.append(
+                f"{where}: field '{name}' mapped to {column(name)} failed on {count} of "
+                f"{total} rows; is it the right column?"
+            )
+    lines.extend(f"{where}: required field '{m}' not found." for m in table.missing_required)
+    return lines
+
+
 _NUMBER: Final = re.compile(r"\d[\d.,]*")
 
 
@@ -763,8 +1090,11 @@ def _log_import(
             key = _NUMBER.sub("<n>", safe_reason(text, 120))
             reasons[key] = reasons.get(key, 0) + 1
         top = sorted(reasons.items(), key=lambda kv: -kv[1])[:5]
+        degraded = item.degraded()
         logger.log(
-            logging.WARNING if report.rows_failed or report.missing_required else logging.INFO,
+            logging.WARNING
+            if report.rows_failed or report.missing_required or degraded
+            else logging.INFO,
             "workbook section",
             extra={
                 "upload_id": str(upload_id),
@@ -781,6 +1111,13 @@ def _log_import(
                 "columns_mapped": len(report.columns),
                 "has_question": report.question is not None,
                 "error_reasons": [f"{count}x {reason}" for reason, count in top],
+                # Field names and codes only: never a header or a value.
+                "degraded": bool(degraded),
+                "degraded_reason": degraded[0] if degraded else None,
+                "degraded_reasons": degraded,
+                "dropped_fields": [d.field for d in item.table.dropped],
+                "retried": item.retried,
+                "cancelled_rows": item.table.cancelled_rows,
             },
         )
 
