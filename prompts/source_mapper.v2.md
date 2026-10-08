@@ -44,7 +44,9 @@ Meanings:
   demand_basis ONLY if the source explicitly says gross or net (including its
   original language); never infer it from a sheet name. need_by is the required
   receipt date. reference is the requirement's identifier, not a supplier code.
-- supplier: supplier code, legal/display name, contact email, country.
+- supplier: supplier code, legal/display COMPANY name, contact email, country.
+  A contact person's name or department is not the supplier's name: leave it
+  unmapped. A contact-only table can map supplier_code and email without name.
 - purchase: purchase-order lines, BOTH historical and open. Map po_number,
   po_line (the item/line within the order), location, status, promised_at,
   ordered_at, quantity, unit_price, currency, unit, part_number, supplier_code
