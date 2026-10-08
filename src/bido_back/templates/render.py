@@ -28,7 +28,9 @@ from typing import Final
 
 from bido_back.onboarding.standard import TemplateContent
 from bido_back.templates.required import (
+    LINE_HEADINGS,
     REQUIRED_FIELDS,
+    accepted_terms,
     covered_keys,
     label_matches,
     normalize,
@@ -124,85 +126,15 @@ _PHRASES: Final[dict[str, dict[str, str]]] = {
     },
 }
 
-# Short headings for the line-data columns the render adds.
-_HEADINGS: Final[dict[str, dict[str, str]]] = {
-    "en": {
-        "position": "Pos.",
-        "description": "Description",
-        "mpn": "MPN",
-        "manufacturer": "Manufacturer",
-        "quantity": "Quantity",
-        "unit": "Unit",
-        "need_by": "Need by",
-        "qualification": "Qualification",
-        "incoterm": "Incoterm",
-    },
-    "pt": {
-        "position": "Item",
-        "description": "Descrição",
-        "mpn": "Código (MPN)",
-        "manufacturer": "Fabricante",
-        "quantity": "Quantidade",
-        "unit": "Un.",
-        "need_by": "Data de entrega",
-        "qualification": "Qualificação",
-        "incoterm": "Incoterm",
-    },
-    "de": {
-        "position": "Pos.",
-        "description": "Bezeichnung",
-        "mpn": "MPN",
-        "manufacturer": "Hersteller",
-        "quantity": "Menge",
-        "unit": "Einheit",
-        "need_by": "Liefertermin",
-        "qualification": "Qualifikation",
-        "incoterm": "Incoterm",
-    },
-    "fr": {
-        "position": "Pos.",
-        "description": "Désignation",
-        "mpn": "Réf. fabricant",
-        "manufacturer": "Fabricant",
-        "quantity": "Quantité",
-        "unit": "Unité",
-        "need_by": "Date souhaitée",
-        "qualification": "Qualification",
-        "incoterm": "Incoterm",
-    },
-    "es": {
-        "position": "Pos.",
-        "description": "Descripción",
-        "mpn": "MPN",
-        "manufacturer": "Fabricante",
-        "quantity": "Cantidad",
-        "unit": "Unidad",
-        "need_by": "Fecha requerida",
-        "qualification": "Calificación",
-        "incoterm": "Incoterm",
-    },
-    "it": {
-        "position": "Pos.",
-        "description": "Descrizione",
-        "mpn": "Codice produttore",
-        "manufacturer": "Produttore",
-        "quantity": "Quantità",
-        "unit": "Unità",
-        "need_by": "Data richiesta",
-        "qualification": "Qualifica",
-        "incoterm": "Incoterm",
-    },
-}
-
 # Which template headings carry which line data. Checked in this order, so
 # "Item e descrição" is the description, not the position.
 _COLUMN_KEYS: Final[tuple[tuple[str, tuple[str, ...]], ...]] = (
-    ("mpn", required_field("mpn").synonyms),
-    ("manufacturer", required_field("manufacturer").synonyms),
-    ("quantity", required_field("quantity_tiers").synonyms),
-    ("unit", required_field("unit").synonyms),
-    ("need_by", (*required_field("need_by").synonyms, "prazo", "termin")),
-    ("qualification", required_field("qualification").synonyms),
+    ("mpn", accepted_terms("mpn")),
+    ("manufacturer", accepted_terms("manufacturer")),
+    ("quantity", accepted_terms("quantity_tiers")),
+    ("unit", accepted_terms("unit")),
+    ("need_by", (*accepted_terms("need_by"), "prazo", "termin")),
+    ("qualification", accepted_terms("qualification")),
     ("incoterm", ("incoterm", "frete", "freight", "local de entrega", "lieferbedingung")),
     (
         "description",
@@ -237,7 +169,7 @@ def phrases(language: str) -> dict[str, str]:
 
 
 def _headings(language: str) -> dict[str, str]:
-    return _HEADINGS.get(language, _HEADINGS["en"])
+    return LINE_HEADINGS.get(language, LINE_HEADINGS["en"])
 
 
 # --- Inputs and output ------------------------------------------------------------------
