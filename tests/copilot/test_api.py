@@ -14,6 +14,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -28,7 +29,12 @@ from bido_back.api.deps import (
     get_storage,
 )
 from bido_back.auth import Principal
-from bido_back.copilot.contracts import ATTACHMENTS_ONLY_MESSAGE
+from bido_back.copilot.contracts import (
+    ATTACHMENTS_ONLY_MESSAGE,
+    MAX_ATTACHMENTS,
+    MAX_MESSAGE_CHARS,
+    CopilotMessageRequest,
+)
 from bido_back.copilot.titles import Titler
 from bido_back.db import create_sessionmaker, tenant_session
 from bido_back.db.models import Approval, CopilotProposal, Invite, Rfq, TemplateUpload
@@ -280,6 +286,45 @@ async def test_unknown_attachment_is_404_before_streaming(api: Api, copilot_rows
         "/v1/copilot/messages", json={"message": "read this", "attachment_ids": [str(uuid4())]}
     )
     assert response.status_code == 404
+
+
+def test_a_message_carries_up_to_25_files() -> None:
+    # ERP exports come one file per transaction (MB52, ME2N, MD04, ...).
+    accepted = CopilotMessageRequest(attachment_ids=[uuid4() for _ in range(25)])
+    assert len(accepted.attachment_ids) == MAX_ATTACHMENTS == 25
+    with pytest.raises(ValidationError):
+        CopilotMessageRequest(attachment_ids=[uuid4() for _ in range(26)])
+
+
+@pytest.mark.db
+async def test_26_files_are_refused_before_streaming(api: Api, copilot_rows: People) -> None:
+    response = await api.http.post(
+        "/v1/copilot/messages",
+        json={"message": "", "attachment_ids": [str(uuid4()) for _ in range(26)]},
+    )
+    assert response.status_code == 422, response.text
+    assert "attachment_ids" in response.text
+
+
+@pytest.mark.db
+async def test_limits_tell_the_front_what_a_message_may_carry(
+    api: Api, copilot_rows: People
+) -> None:
+    response = await api.http.get("/v1/copilot/limits")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "max_attachments": 25,
+        "max_message_chars": MAX_MESSAGE_CHARS,
+        "max_upload_bytes": 100 * 1024 * 1024,
+        "accepted_extensions": ["csv", "docx", "pdf", "xls", "xlsx"],
+    }
+
+
+async def test_limits_require_authentication() -> None:
+    transport = httpx.ASGITransport(app=build_app())
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        response = await http.get("/v1/copilot/limits")
+    assert response.status_code == 401
 
 
 @pytest.mark.db

@@ -7,7 +7,10 @@ from uuid import UUID
 from pydantic import BaseModel, Field, JsonValue, model_validator
 
 MAX_MESSAGE_CHARS = 8_000
-MAX_ATTACHMENTS = 5
+# Files per message. ERP exports often come one file per transaction (MB52, ME2N,
+# MD04, ...), so a single message can carry many; their text reaches the model
+# capped at MAX_ATTACHMENT_CHARS in total (service.py), and imports read them by id.
+MAX_ATTACHMENTS = 25
 # What the copilot is asked when the buyer sends files without writing anything:
 # import and analyse them. Portuguese, since the buyer's language is not stored
 # and the copilot answers in the language of the message it reads.
@@ -41,6 +44,15 @@ class CopilotReply(BaseModel):
 
 
 # --- HTTP ------------------------------------------------------------------------------------
+
+
+class CopilotLimits(BaseModel):
+    """What one Copilot message may carry, so the front never drifts from the server."""
+
+    max_attachments: int = Field(description="Files per message")
+    max_message_chars: int = Field(description="Characters in the message text")
+    max_upload_bytes: int = Field(description="Size of one uploaded file, in bytes")
+    accepted_extensions: list[str] = Field(description="File extensions accepted, lowercase")
 
 
 class CopilotMessageRequest(BaseModel):
