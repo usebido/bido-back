@@ -390,3 +390,29 @@ async def test_parts_never_bought_take_the_history_currency_or_ask(
         app_engine, who, view.id, RfqFromAnalysisRequest()
     )
     assert (created.rfq.base_currency, created.currency_source) == ("BRL", "purchase_history")
+
+
+async def test_a_preliminary_rfq_from_an_analysis_keeps_its_units(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = buyer(purchasing_rows)
+    await make_supplier(app_engine, who, "Cuscinetti Precisione S.r.l.")
+    await seed(app_engine, who)
+    view = await service.create_analysis(
+        app_engine, who, AnalysisRequest(product="Motor EV-120", quantity=Decimal(100)), today=TODAY
+    )
+
+    created = await service.create_rfq_from_analysis(
+        app_engine,
+        who,
+        view.id,
+        RfqFromAnalysisRequest(pending_validation="engineering validation of the BOM"),
+    )
+
+    assert created.rfq.title.startswith(
+        "PRELIMINARY (pending engineering validation of the BOM): Motor EV-120"
+    )
+    assert [(line.part_number, line.unit) for line in created.rfq.lines] == [
+        ("BRG-6205", "pz"),
+        ("CU-WIRE", "kg"),
+    ]
