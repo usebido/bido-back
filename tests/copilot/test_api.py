@@ -269,9 +269,9 @@ async def test_conversations_are_listed_for_their_owner_newest_first(
 ) -> None:
     first, second = str(uuid4()), str(uuid4())
     script(
-        final(answer="one"),
-        final(answer="two"),
-        final(answer="three"),
+        reply(text("one")),
+        reply(text("two")),
+        reply(text("three")),
     )
     long_message = "preciso de uma análise de compra pro motor EV-120 " * 4
     for conversation, message in (
@@ -301,7 +301,7 @@ async def test_conversations_are_listed_for_their_owner_newest_first(
 async def test_conversation_list_pages_with_before(
     api: Api, copilot_rows: People, script: Script
 ) -> None:
-    script(*(final(answer=str(n)) for n in range(3)))
+    script(*(reply(text(str(n))) for n in range(3)))
     ids = [str(uuid4()) for _ in range(3)]
     for conversation in ids:
         await api.http.post(
@@ -325,7 +325,7 @@ async def test_conversations_are_private_to_user_and_tenant(
     api: Api, copilot_rows: People, script: Script
 ) -> None:
     conversation = str(uuid4())
-    script(final(answer="ok"), final(answer="ok"))
+    script(reply(text("ok")), reply(text("ok")))
     await api.http.post(
         "/v1/copilot/messages", json={"message": "minha", "conversation_id": conversation}
     )
