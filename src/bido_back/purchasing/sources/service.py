@@ -1,6 +1,8 @@
-"""Read-only source assessment: authorization, extraction, mapping, reconciliation."""
+"""Source assessment: authorized extraction, reconciliation and optional evidence snapshots."""
 
 import asyncio
+import hashlib
+import json
 from collections.abc import Sequence
 from uuid import UUID
 
@@ -15,6 +17,7 @@ from bido_back.purchasing.sources.analysis import assess
 from bido_back.purchasing.sources.contracts import Coverage, EvidenceTable, Issue, SourceAssessment
 from bido_back.purchasing.sources.mapping import Mapper, map_sources
 from bido_back.purchasing.sources.readers import SourceDocument, read_source
+from bido_back.purchasing.sources.snapshots import find_snapshot, save_snapshot
 from bido_back.storage import BlobStorage
 
 Db = AsyncEngine | async_sessionmaker[AsyncSession]
@@ -88,6 +91,8 @@ async def analyze_uploads(
     objective: str,
     context: ToolContext,
     mapper: Mapper,
+    *,
+    persist: bool = False,
 ) -> SourceAssessment:
     documents: list[SourceDocument] = []
     # Check ALL IDs before fetching any content. The tenant helper and user ownership
@@ -113,4 +118,31 @@ async def analyze_uploads(
                 data=await storage.get(key),
             )
         )
-    return await analyze_documents(documents, objective, context, mapper)
+    # Source bytes and contract version prevent reuse of stale evidence.
+    source_key = hashlib.sha256(
+        json.dumps(
+            {
+                "version": 1,
+                "objective": objective,
+                "sources": sorted(
+                    (doc.source_id, hashlib.sha256(doc.data).hexdigest()) for doc in documents
+                ),
+            },
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+    if persist:
+        existing = await find_snapshot(db, principal, source_key)
+        if existing is not None:
+            return existing
+    assessment = await analyze_documents(documents, objective, context, mapper)
+    if not persist:
+        return assessment
+    return await save_snapshot(
+        db,
+        principal,
+        source_key=source_key,
+        upload_ids=sorted(set(upload_ids)),
+        objective=objective,
+        assessment=assessment,
+    )

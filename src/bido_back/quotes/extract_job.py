@@ -26,10 +26,10 @@ Logs carry ids and codes only, never message or document content.
 
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Final
+from typing import Final, cast
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
@@ -38,6 +38,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from bido_back.agents.approvals import ApprovalSink
 from bido_back.agents.catalog import QUOTE_EXTRACTION
 from bido_back.agents.catalog.contracts import (
+    ExtractedValue,
+    PriorSupplierOffer,
+    ProposalLineDraft,
     QuoteExtractionInput,
     QuoteExtractionOutput,
     RfqEmailLine,
@@ -60,7 +63,20 @@ from bido_back.db.models import (
 from bido_back.documents import DocumentText, extract_text, render_documents
 from bido_back.negotiation.hooks import cancel_on_new_offer
 from bido_back.quotes.parsing import decimal_separator_for
+from bido_back.quotes.state import (
+    OfferEvent,
+    StoredField,
+    reconcile,
+    restore_field,
+    restore_quote,
+    stamp_quote,
+    store_quote,
+)
 from bido_back.quotes.validation import (
+    HEADER_FIELDS,
+    LINE_FIELDS,
+    FieldCheck,
+    FieldKind,
     LineCheck,
     QuoteSources,
     RequestedLine,
@@ -101,6 +117,7 @@ class _Loaded:
     line_ids: dict[int, UUID]
     line_mpns: dict[int, str | None]
     attachments: list[_AttachmentRef]
+    prior_supplier_offer: PriorSupplierOffer | None
 
 
 async def handle_quote_extract(
@@ -136,6 +153,7 @@ async def handle_quote_extract(
         email_subject=loaded.subject,
         email_body=body,
         attachments_text=render_documents(documents),
+        prior_supplier_offer=loaded.prior_supplier_offer,
     )
 
     context = ToolContext(tenant_id=tenant_id, user_id=None, run_id=uuid4())
@@ -253,6 +271,12 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
                 .order_by(Attachment.created_at, Attachment.id)
             )
         ).all()
+        prior_events = [
+            event
+            for event in await _events(session, invite_id)
+            if event.occurred_at < message.occurred_at and event.received_at <= message.created_at
+        ]
+        prior_state = reconcile(prior_events) if prior_events else None
 
         return _Loaded(
             message_id=message_id,
@@ -267,6 +291,15 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
             attachments=[
                 _AttachmentRef(a.filename, a.content_type, a.storage_key) for a in attachments
             ],
+            prior_supplier_offer=(
+                PriorSupplierOffer(
+                    message_id=str(prior_state.active_message_id),
+                    currency=_str(prior_state.quote.parsed("currency")),
+                    lines=[line.draft for line in prior_state.quote.lines],
+                )
+                if prior_state is not None
+                else None
+            ),
         )
 
 
@@ -283,6 +316,222 @@ def _email_line(line: RfqLine) -> RfqEmailLine:
         incoterm=line.incoterm,
         qualification=line.qualification,
     )
+
+
+def _field_from_row(
+    name: str, kind: FieldKind, raw: object, value: object, message_id: UUID
+) -> FieldCheck:
+    entry = cast(dict[str, object], raw) if isinstance(raw, dict) else {}
+    extracted = ExtractedValue.model_validate(
+        {
+            "value": entry.get("value", str(value) if value is not None else None),
+            "source": entry.get("source"),
+            "confidence": entry.get("confidence", 0),
+        }
+    )
+    parsed = entry.get("parsed", value)
+    serialized = (
+        parsed.isoformat()
+        if isinstance(parsed, date)
+        else str(parsed)
+        if parsed is not None
+        else None
+    )
+    return restore_field(
+        name,
+        kind,
+        StoredField.model_validate(
+            {
+                "extracted": extracted.model_dump(mode="json"),
+                "parsed": serialized,
+                "issues": entry.get("issues", []),
+                "message_id": entry.get("message_id", str(message_id)),
+                "retained_by": entry.get("retained_by", []),
+                "corrected": entry.get("corrected", False),
+                "correction_id": entry.get("correction_id"),
+            }
+        ),
+    )
+
+
+def _stored_issues(raw: object) -> tuple[str, ...]:
+    if not isinstance(raw, dict):
+        return ()
+    review = cast(dict[str, object], raw).get("_review")
+    if not isinstance(review, dict):
+        return ()
+    issues = cast(dict[str, object], review).get("issues")
+    return (
+        tuple(str(issue) for issue in cast(list[object], issues))
+        if isinstance(issues, list)
+        else ()
+    )
+
+
+def _legacy_quote(
+    proposal: Proposal, rows: list[ProposalLine], positions: dict[UUID, int]
+) -> ValidatedQuote:
+    header = {
+        name: _field_from_row(
+            name,
+            kind,
+            proposal.fields.get(name),
+            getattr(proposal, name, None),
+            proposal.message_id,
+        )
+        for name, kind in HEADER_FIELDS.items()
+    }
+    lines: list[LineCheck] = []
+    for row in rows:
+        fields = {
+            name: _field_from_row(
+                name, kind, row.fields.get(name), getattr(row, name, None), proposal.message_id
+            )
+            for name, kind in LINE_FIELDS.items()
+        }
+        draft = ProposalLineDraft.model_validate(
+            {
+                "rfq_line_position": positions.get(row.rfq_line_id) if row.rfq_line_id else None,
+                "is_alternative": row.is_alternative,
+                **{name: check.extracted.model_dump(mode="json") for name, check in fields.items()},
+            }
+        )
+        issues = _stored_issues(row.fields)
+        if (
+            row.needs_review
+            and not issues
+            and not any(check.needs_review for check in fields.values())
+        ):
+            issues = ("legacy_review_required",)
+        lines.append(
+            LineCheck(
+                draft=draft,
+                rfq_line_id=row.rfq_line_id,
+                is_alternative=row.is_alternative,
+                fields=fields,
+                issues=issues,
+            )
+        )
+    output = QuoteExtractionOutput.model_validate(
+        {
+            "is_quote": True,
+            **{name: check.extracted.model_dump(mode="json") for name, check in header.items()},
+            "lines": [line.draft.model_dump(mode="json") for line in lines],
+        }
+    )
+    return ValidatedQuote(
+        output=output, header=header, lines=tuple(lines), issues=_stored_issues(proposal.fields)
+    )
+
+
+async def _events(session: AsyncSession, invite_id: UUID) -> list[OfferEvent]:
+    rows = (
+        await session.execute(
+            select(Proposal, Message)
+            .join(Message, Message.id == Proposal.message_id)
+            .where(Proposal.invite_id == invite_id)
+            .order_by(Proposal.version)
+        )
+    ).all()
+    if not rows:
+        return []
+    proposal_ids = [proposal.id for proposal, _ in rows]
+    stored_lines: dict[UUID, list[ProposalLine]] = {proposal_id: [] for proposal_id in proposal_ids}
+    for line in await session.scalars(
+        select(ProposalLine).where(ProposalLine.proposal_id.in_(proposal_ids))
+    ):
+        stored_lines[line.proposal_id].append(line)
+    positions = dict(
+        (
+            await session.execute(
+                select(RfqLine.id, RfqLine.position)
+                .join(Invite, Invite.rfq_id == RfqLine.rfq_id)
+                .where(Invite.id == invite_id)
+            )
+        ).all()
+    )
+    events: list[OfferEvent] = []
+    for proposal, message in rows:
+        event_record: object = proposal.fields.get("_quote_event")
+        quote = (
+            restore_quote(event_record)
+            if event_record is not None
+            else _legacy_quote(proposal, stored_lines[proposal.id], positions)
+        )
+        events.append(
+            OfferEvent(
+                message_id=message.id,
+                message_header=message.message_id_header,
+                in_reply_to=message.in_reply_to,
+                occurred_at=message.occurred_at,
+                received_at=message.created_at,
+                quote=quote,
+            )
+        )
+    # A human correction remains authoritative for its original field evidence.
+    # Later supplier statements have a different message origin and supersede it.
+    for proposal, _ in rows:
+        for name, kind in HEADER_FIELDS.items():
+            entry: object = proposal.fields.get(name)
+            if isinstance(entry, dict) and cast(dict[str, object], entry).get("corrected") is True:
+                check = _field_from_row(
+                    name,
+                    kind,
+                    cast(dict[str, object], entry),
+                    getattr(proposal, name),
+                    proposal.message_id,
+                )
+                for index, event in enumerate(events):
+                    if event.message_id == check.message_id:
+                        events[index] = replace(
+                            event,
+                            quote=replace(event.quote, header={**event.quote.header, name: check}),
+                        )
+        for row in stored_lines[proposal.id]:
+            for name, kind in LINE_FIELDS.items():
+                entry = row.fields.get(name)
+                if (
+                    not isinstance(entry, dict)
+                    or cast(dict[str, object], entry).get("corrected") is not True
+                ):
+                    continue
+                check = _field_from_row(
+                    name,
+                    kind,
+                    cast(dict[str, object], entry),
+                    getattr(row, name, None),
+                    proposal.message_id,
+                )
+                for index, event in enumerate(events):
+                    if event.message_id != check.message_id:
+                        continue
+                    matches = [
+                        line
+                        for line in event.quote.lines
+                        if line.rfq_line_id == row.rfq_line_id
+                        and (
+                            line.fields["min_quantity"].parsed == row.min_quantity
+                            or name == "min_quantity"
+                        )
+                    ]
+                    if len(matches) != 1:
+                        continue
+                    target = matches[0]
+                    corrected = replace(
+                        target,
+                        fields={**target.fields, name: check},
+                        draft=target.draft.model_copy(update={name: check.extracted}),
+                    )
+                    events[index] = replace(
+                        event,
+                        quote=replace(
+                            event.quote,
+                            lines=tuple(
+                                corrected if line is target else line for line in event.quote.lines
+                            ),
+                        ),
+                    )
+    return events
 
 
 async def _has_proposal(session: AsyncSession, message_id: UUID) -> bool:
@@ -344,6 +593,11 @@ async def _persist(
     meta: _RunMeta,
 ) -> None:
     async with tenant_session(db, tenant_id) as session:
+        # Corrections and negotiation preparation lock the RFQ first. Replay
+        # must observe a committed correction consistently across its fields.
+        rfq_id = await session.scalar(select(Invite.rfq_id).where(Invite.id == loaded.invite_id))
+        if rfq_id is not None:
+            await session.scalar(select(Rfq.id).where(Rfq.id == rfq_id).with_for_update())
         message = await session.scalar(
             select(Message).where(Message.id == loaded.message_id).with_for_update()
         )
@@ -359,7 +613,18 @@ async def _persist(
             logger.info("quote.extract: concurrent extraction won message=%s", loaded.message_id)
             return
 
-        if not validated.is_quote:
+        previous_events = await _events(session, invite.id)
+        if previous_events and not validated.is_quote and validated.output.declined:
+            # A refusal must not leave a previously usable offer live. Without
+            # explicit withdrawal evidence keep its facts, but hold all decisions.
+            validated = replace(
+                validated, output=validated.output.model_copy(update={"reply_kind": "withdrawal"})
+            )
+            invite.status = "declined"
+        updates_state = validated.output.reply_kind in {"amendment", "withdrawal"} or (
+            validated.output.reply_kind == "clarification" and bool(previous_events)
+        )
+        if not validated.is_quote and not updates_state:
             message.status = "extracted"
             if validated.output.declined:
                 invite.status = "declined"
@@ -375,29 +640,48 @@ async def _persist(
         latest = await session.scalar(
             select(func.max(Proposal.version)).where(Proposal.invite_id == invite.id)
         )
-        fields = validated.provenance()
+        event_quote = stamp_quote(validated, message.id)
+        state = reconcile(
+            [
+                *previous_events,
+                OfferEvent(
+                    message_id=message.id,
+                    message_header=message.message_id_header,
+                    in_reply_to=message.in_reply_to,
+                    occurred_at=message.occurred_at,
+                    received_at=message.created_at,
+                    quote=event_quote,
+                ),
+            ]
+        )
+        effective = state.quote
+        fields = effective.provenance()
+        fields["_quote_event"] = store_quote(event_quote)
+        fields["_offer_snapshot"] = store_quote(effective)
+        fields["_offer_state"] = state.provenance()
         fields["_extraction"] = {key: value for key, value in meta.items()}
         # Offers for things not requested: kept as written, never compared or priced.
         fields["extra_offers"] = [
-            offer.model_dump(mode="json") for offer in validated.output.extra_offers[:20]
+            offer.model_dump(mode="json") for offer in effective.output.extra_offers[:20]
         ]
         proposal = Proposal(
             tenant_id=tenant_id,
             invite_id=invite.id,
             message_id=loaded.message_id,
             version=(latest or 0) + 1,
-            currency=_str(validated.parsed("currency")),
-            valid_until=_date(validated.parsed("valid_until")),
-            incoterm=_str(validated.parsed("incoterm")),
-            payment_terms=_str(validated.parsed("payment_terms")),
+            currency=_str(effective.parsed("currency")),
+            valid_until=_date(effective.parsed("valid_until")),
+            incoterm=_str(effective.parsed("incoterm")),
+            payment_terms=_str(effective.parsed("payment_terms")),
             fields=fields,
         )
         session.add(proposal)
         await session.flush()
-        session.add_all(_proposal_line(tenant_id, proposal.id, line) for line in validated.lines)
+        session.add_all(_proposal_line(tenant_id, proposal.id, line) for line in effective.lines)
         message.status = "extracted"
         # A counter-offer awaiting approval answered an older offer: cancel it.
-        await cancel_on_new_offer(session, invite.id)
+        if state.active_message_id == message.id or state.issues:
+            await cancel_on_new_offer(session, invite.id)
         await session.flush()
         logger.info(
             "quote.extract: proposal stored message=%s proposal=%s version=%s lines=%s "
@@ -405,8 +689,8 @@ async def _persist(
             loaded.message_id,
             proposal.id,
             proposal.version,
-            len(validated.lines),
-            validated.needs_review,
+            len(effective.lines),
+            effective.needs_review,
             meta["run_id"],
         )
 

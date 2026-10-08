@@ -15,11 +15,12 @@ Per line (`decide_line`):
 - `accept`: price at or below the target and lead time acceptable.
 - `above_max`: price above the buyer's maximum.
 - `counter`: anything else. We ask for the target; without a target, for the
-  best competing price if lower, else 5% off, never above what was offered.
+  5% off its own offer, never a competitor-derived amount.
   If only the lead time is the problem, we ask for the lead time and no price.
 
-The target is the buyer's (`rfq_lines.target_unit_price`) or, without one,
-the best price in the price history (`bido_back.negotiation.history`).
+The disclosed target is the buyer's (`rfq_lines.target_unit_price`). Without
+one, price history (`bido_back.negotiation.history`) is only an internal
+attainment reference; asks use this supplier's own offer as their basis.
 
 Per supplier (`decide_supplier`), with `rounds_used` = counter/BAFO emails
 already proposed or sent to that supplier:
@@ -96,10 +97,61 @@ class SupplierDecision:
     status: InviteNegotiationStatus
     lines: tuple[LineDecision, ...]
     mention_competition: bool
+    reasons: tuple[str, ...] = ()
+    stalled_rounds: int = 0
 
     @property
     def sends_email(self) -> bool:
         return self.action in ("counter", "bafo")
+
+
+@dataclass(frozen=True, slots=True)
+class PreviousRound:
+    """Supplier terms preceding a counter actually sent, never a pending draft."""
+
+    offers: Mapping[UUID, LineOffer]
+
+
+def stagnant_rounds(current: Mapping[UUID, LineOffer], previous: Sequence[PreviousRound]) -> int:
+    """Count consecutive sent rounds without an evidenced price/delivery improvement.
+
+    Only comparable unblocked line snapshots count. New lines, missing history
+    or a changed scope reset the observation rather than inventing a refusal.
+    """
+    count = 0
+    recent = {
+        line: offer
+        for line, offer in current.items()
+        if offer.unit_price is not None and not offer.blockers
+    }
+    for prior in reversed(previous):
+        earlier = {
+            line: offer
+            for line, offer in prior.offers.items()
+            if offer.unit_price is not None and not offer.blockers
+        }
+        common = set(recent) & set(earlier)
+        if not common or set(recent) != set(earlier):
+            break
+        comparable = [(recent[line], earlier[line]) for line in common]
+        improved = any(
+            (
+                new.unit_price is not None
+                and old.unit_price is not None
+                and new.unit_price < old.unit_price
+            )
+            or (
+                new.lead_time_days is not None
+                and old.lead_time_days is not None
+                and new.lead_time_days < old.lead_time_days
+            )
+            for new, old in comparable
+        )
+        if improved:
+            break
+        count += 1
+        recent = earlier
+    return count
 
 
 def _round(value: Decimal) -> Decimal:
@@ -144,20 +196,23 @@ def decide_line(
     if offer.blockers:
         return decision("blocked")
     target = limits.effective_target
+    if target is not None and limits.max_price is not None and target > limits.max_price:
+        # Historical reference is not permission to disclose or raise the private ceiling.
+        target = None
+    if limits.max_price is not None and price > limits.max_price:
+        return decision(
+            "above_max",
+            ask=_round(limits.target) if limits.target is not None else None,
+            ask_lead=None if lead_ok else limits.max_lead_days,
+        )
     if target is not None and price <= target:
         if lead_ok:
             return decision("accept")
         return decision("counter", ask_lead=limits.max_lead_days)
-    if limits.max_price is not None and price > limits.max_price:
-        return decision(
-            "above_max",
-            ask=_round(target) if target is not None else None,
-            ask_lead=None if lead_ok else limits.max_lead_days,
-        )
-    if target is not None:
-        ask = target
-    elif better and best_competing is not None:
-        ask = best_competing
+    # Historical and competing prices stay internal. Only a buyer-adopted
+    # target or a reduction of this supplier's own offer reaches the writer.
+    if limits.target is not None:
+        ask = limits.target
     else:
         ask = price * NO_TARGET_DISCOUNT
     ask = _round(min(ask, price))
@@ -181,23 +236,42 @@ def decide_supplier(
     max_rounds: int,
     deadline: datetime | None,
     now: datetime,
+    previous_rounds: Sequence[PreviousRound] = (),
+    holds: Sequence[str] = (),
 ) -> SupplierDecision:
     """What Bido proposes to one supplier next (see the module docstring)."""
     decisions = tuple(
         decide_line(limits, offers.get(limits.rfq_line_id), best_competing.get(limits.rfq_line_id))
         for limits in lines
     )
+    if holds:
+        return SupplierDecision("none", "open", decisions, False, tuple(holds))
     priced = [d for d in decisions if d.kind not in ("no_offer", "blocked")]
     mention = any(d.better_offer_exists for d in priced if d.kind != "accept")
     if not priced:
         return SupplierDecision("none", "open", decisions, False)
     if all(d.kind == "accept" for d in priced):
-        return SupplierDecision("accept", "accepted", decisions, False)
-    if bafo_already_requested or rounds_used >= max_rounds:
+        incomplete = any(d.kind in ("no_offer", "blocked") for d in decisions)
+        return SupplierDecision(
+            "none" if incomplete else "accept",
+            "open" if incomplete else "accepted",
+            decisions,
+            False,
+            ("partial_coverage_requires_review",) if incomplete else (),
+        )
+    stagnant = stagnant_rounds(offers, previous_rounds)
+    if stagnant >= 2:
         status: InviteNegotiationStatus = (
             "rejected" if all(d.kind == "above_max" for d in priced) else "closed"
         )
-        return SupplierDecision("final", status, decisions, False)
+        return SupplierDecision(
+            "final", status, decisions, False, ("stalled_negotiation_requires_buyer",), stagnant
+        )
+    if bafo_already_requested or rounds_used >= max_rounds:
+        status = "rejected" if all(d.kind == "above_max" for d in priced) else "closed"
+        return SupplierDecision("final", status, decisions, False, ("round_limit_reached",))
+    if not any(d.ask_price is not None or d.ask_lead_days is not None for d in priced):
+        return SupplierDecision("none", "open", decisions, False, ("buyer_target_required",))
     last_round = rounds_used + 1 >= max_rounds
     near_deadline = deadline is not None and deadline - now <= BAFO_WINDOW
     if last_round or near_deadline:
@@ -235,6 +309,18 @@ def ready_to_close(
     if waiting_suppliers > 0 or not line_ids:
         return False
     accepted = {
-        d.rfq_line_id for supplier in decisions for d in supplier.lines if d.kind == "accept"
+        d.rfq_line_id
+        for supplier in decisions
+        if not any(
+            reason
+            in (
+                "supplier_clarification_requires_buyer",
+                "offer_state_requires_review",
+                "offer_withdrawn",
+            )
+            for reason in supplier.reasons
+        )
+        for d in supplier.lines
+        if d.kind == "accept"
     }
     return all(line_id in accepted for line_id in line_ids)

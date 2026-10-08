@@ -156,6 +156,7 @@ def _line_view(line: RfqLine) -> RfqLineView:
         incoterm=line.incoterm,
         delivery_location=line.delivery_location,
         qualification=line.qualification,
+        source_evidence=line.source_evidence,
     )
 
 

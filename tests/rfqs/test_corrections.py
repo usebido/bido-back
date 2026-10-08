@@ -265,3 +265,123 @@ async def test_another_tenant_cannot_correct_or_read(
 
     async with tenant_session(app_engine, rfq_rows.other_tenant) as session:
         assert list(await session.scalars(select(FieldCorrection))) == []
+
+
+async def test_commercial_basis_corrections_are_audited_and_readable(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    principal = buyer(rfq_rows)
+    quoted = await quoted_rfq(app_engine, principal)
+    corrected = await service.correct_line(
+        app_engine,
+        principal,
+        quoted.proposal_id,
+        quoted.line_id,
+        LineCorrectionRequest(
+            price_basis_quantity=Decimal(100),
+            freight_cost=Decimal("24.50"),
+            tax_rate_percent=Decimal("17.5"),
+            conditional_terms="Only when all listed items are purchased together",
+            reason="Confirmed written commercial terms",
+        ),
+    )
+    assert corrected.price_basis_quantity == Decimal(100)
+    assert corrected.freight_cost == Decimal("24.5")
+    assert corrected.tax_rate_percent == Decimal("17.5")
+    assert corrected.conditional_terms == "Only when all listed items are purchased together"
+    assert set(corrected.corrected_fields) == {
+        "price_basis_quantity",
+        "freight_cost",
+        "tax_rate_percent",
+        "conditional_terms",
+    }
+    history = await service.list_corrections(app_engine, principal, quoted.proposal_id)
+    assert {row.field for row in history} == set(corrected.corrected_fields)
+    proposal = await service.get_proposal(app_engine, principal, quoted.proposal_id)
+    assert proposal.lines[0].freight_cost == Decimal("24.5")
+
+
+def test_commercial_basis_corrections_reject_invalid_denominators_and_tax() -> None:
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        LineCorrectionRequest(price_basis_quantity=Decimal(0))
+    with pytest.raises(ValidationError):
+        LineCorrectionRequest(tax_rate_percent=Decimal(101))
+
+
+@pytest.mark.parametrize("header", [False, True])
+async def test_correction_cancels_pending_send_and_reopens_review(
+    app_engine: AsyncEngine, rfq_rows: People, header: bool
+) -> None:
+    from bido_back.db.models import Approval, Invite, NegotiationMessage, Rfq
+
+    principal = buyer(rfq_rows)
+    quoted = await quoted_rfq(app_engine, principal)
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        proposal = await session.get(Proposal, quoted.proposal_id)
+        assert proposal is not None
+        invite = await session.get(Invite, proposal.invite_id)
+        rfq = await session.get(Rfq, quoted.rfq.id)
+        assert invite is not None and rfq is not None
+        rfq.negotiation_status = "ready_to_close"
+        rfq.negotiation_ready_at = datetime.now(UTC)
+        invite.negotiation_evaluated_proposal_id = proposal.id
+        invite.negotiation_status = "accepted"
+        approval = Approval(
+            tenant_id=principal.tenant_id,
+            run_id=str(uuid4()),
+            session_id="correction-test",
+            tool_call_id="correction-pending-send",
+            tool="send_negotiation_email",
+            args={},
+            args_hash="0" * 64,
+            requested_by=principal.user_id,
+            status="pending",
+        )
+        session.add(approval)
+        await session.flush()
+        pending = NegotiationMessage(
+            id=uuid4(),
+            tenant_id=principal.tenant_id,
+            invite_id=invite.id,
+            proposal_id=proposal.id,
+            round=1,
+            action="counter",
+            status="proposed",
+            approval_id=approval.id,
+            terms={},
+        )
+        session.add(pending)
+        await session.flush()
+        pending_id, approval_id, invite_id = pending.id, approval.id, invite.id
+    if header:
+        await service.correct_header(
+            app_engine,
+            principal,
+            quoted.proposal_id,
+            HeaderCorrectionRequest(payment_terms="Payment before dispatch"),
+        )
+    else:
+        await service.correct_line(
+            app_engine,
+            principal,
+            quoted.proposal_id,
+            quoted.line_id,
+            LineCorrectionRequest(conditional_terms="Only as a complete bundle"),
+        )
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        pending = await session.get(NegotiationMessage, pending_id)
+        approval = await session.get(Approval, approval_id)
+        invite = await session.get(Invite, invite_id)
+        rfq = await session.get(Rfq, quoted.rfq.id)
+        assert (
+            pending is not None and approval is not None and invite is not None and rfq is not None
+        )
+        assert pending.status == "canceled"
+        assert pending.canceled_reason == "offer_corrected"
+        assert approval.status == "expired"
+        assert invite.negotiation_evaluated_proposal_id is None
+        assert invite.negotiation_status == "open"
+        assert rfq.negotiation_status == "open"
+        assert rfq.negotiation_ready_at is None

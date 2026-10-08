@@ -115,17 +115,25 @@ review. The assessment also detects an inventory inconsistency: one row reports
 that other residual stock gaps must equal reservations. This is different from
 claiming the file lacks demand.
 
-This assessment does not persist normalized requirements/evaluations, mint an
-analysis ID, send messages, create orders or approve anything. For now a buyer
-can use the existing draft RFQ flow; unresolved evidence must retain its existing
-preliminary-validation hold. Source analysis is tied to authorized attachments
-in the conversation; persisted company imports keep their existing behavior.
-A future write path needs versioned canonical facts, source identity/revisions,
-RLS migrations and idempotent application after review. It must not turn this
-read-only interpretation tool into an action executor.
+The original `analyze_procurement_sources` tool remains read-only. The explicit
+`save_procurement_assessment` tool and `POST /v1/procurement-assessments` now
+persist the server-validated assessment in `procurement_assessments`, with forced
+tenant RLS and buyer ownership. Evidence is immutable to the app role; only its
+draft RFQ link can change. The cache key includes upload identities, source-byte
+hashes, objective and assessment contract version. A changed source or objective
+creates a new snapshot. This does not import canonical master data.
+
+`get_procurement_assessment` retrieves the snapshot in later conversations.
+`create_rfq_from_assessment` copies validated positive requirements, exact units,
+dates, locations and evidence into a draft without asking the LLM to repeat
+numbers. It refuses unresolved evidence and serializes repeated creation against
+the assessment row. The buyer supplies the RFQ currency; supplier invitations and
+negotiation limits are separate draft steps. Neither persistence nor drafting
+sends messages, approves anything or creates an order. The existing preliminary
+workflow remains available when the buyer explicitly wants an unresolved draft.
 
 Further work should add OCR/vision with the same provenance contract, explicit
-UOM conversion evidence, time-phased multi-demand netting, connector adapters,
+UOM conversion evidence, time-phased multi-demand netting for arbitrary source records, connector adapters,
 native numeric type preservation, and durable checkpointed mapping for large sources. These are not implemented
 by claiming all formats are understood. Live-model semantic accuracy requires
 evaluations before rollout; deterministic fixture tests alone cannot establish it.

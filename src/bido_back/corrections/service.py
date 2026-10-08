@@ -43,16 +43,25 @@ from bido_back.corrections.schemas import (
     ProposalView,
 )
 from bido_back.db import tenant_session
-from bido_back.db.models import FieldCorrection, Invite, Proposal, ProposalLine, RfqLine
+from bido_back.db.models import FieldCorrection, Invite, Proposal, ProposalLine, Rfq, RfqLine
+from bido_back.negotiation.hooks import cancel_on_new_offer
 from bido_back.rfqs.errors import InvalidState, NotFound
 
 Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
 _REVIEW: Final = "_review"
-_PROVENANCE_ONLY: Final = frozenset({"qualification"})
+_PROVENANCE_ONLY: Final = frozenset(
+    {
+        "qualification",
+        "price_basis_quantity",
+        "freight_cost",
+        "tax_rate_percent",
+        "conditional_terms",
+    }
+)
 # Columns that cannot be cleared.
 _REQUIRED: Final = frozenset({"is_alternative"})
-_PRICED: Final = ("unit_price", "tooling_cost")
+_PRICED: Final = ("unit_price", "tooling_cost", "freight_cost")
 
 
 # --- Reading -------------------------------------------------------------------------
@@ -94,7 +103,7 @@ async def correct_line(
             raise InvalidState(f"{name} cannot be cleared")
 
     async with tenant_session(db, principal.tenant_id) as session:
-        _, rfq_id = await _proposal(session, proposal_id, lock=True)
+        proposal, rfq_id = await _proposal(session, proposal_id, lock=True)
         line = await session.scalar(
             select(ProposalLine)
             .where(ProposalLine.id == line_id, ProposalLine.proposal_id == proposal_id)
@@ -119,8 +128,13 @@ async def correct_line(
             resolved |= {f"missing:{name}", f"currency_mismatch:{name}"}
             if name == "rfq_line_id":
                 resolved |= {"unmatched_rfq_line", "unknown_rfq_line"}
+            if name == "tax_rate_percent":
+                resolved.add("invalid_tax_rate")
+            if name == "conditional_terms" and new is None:
+                resolved.add("conditional_terms_require_review")
         line.needs_review = _resolve(fields, resolved)
         line.fields = fields
+        await _invalidate_negotiation(session, proposal.invite_id, rfq_id)
         await session.flush()
         return _line_view(line)
 
@@ -144,6 +158,7 @@ async def correct_header(
                 resolved.add("validity_expired")
         _resolve(fields, resolved)
         proposal.fields = fields
+        await _invalidate_negotiation(session, proposal.invite_id, rfq_id)
 
         if "currency" in changes and changes["currency"] is not None:
             # A trusted currency answers every line's currency doubts.
@@ -225,12 +240,34 @@ async def _proposal(
         .where(Proposal.id == proposal_id)
     )
     if lock:
+        # Match negotiation settings/proposal writes: RFQ before proposal before
+        # pending messages. Corrections cannot race a freshly prepared draft.
+        rfq_id = await session.scalar(
+            select(Invite.rfq_id)
+            .join(Proposal, Proposal.invite_id == Invite.id)
+            .where(Proposal.id == proposal_id)
+        )
+        if rfq_id is not None:
+            await session.scalar(select(Rfq.id).where(Rfq.id == rfq_id).with_for_update())
         query = query.with_for_update(of=Proposal)
     row = (await session.execute(query)).first()
     if row is None:
         raise NotFound(f"proposal {proposal_id} not found")
     proposal, rfq_id = row
     return proposal, rfq_id
+
+
+async def _invalidate_negotiation(session: AsyncSession, invite_id: UUID, rfq_id: UUID) -> None:
+    await cancel_on_new_offer(session, invite_id, reason="offer_corrected")
+    rfq = await session.get(Rfq, rfq_id)
+    if rfq is None or rfq.negotiation_status not in {"open", "ready_to_close"}:
+        return
+    invite = await session.get(Invite, invite_id)
+    if invite is not None:
+        invite.negotiation_evaluated_proposal_id = None
+        invite.negotiation_status = "open"
+    rfq.negotiation_status = "open"
+    rfq.negotiation_ready_at = None
 
 
 async def _lines(
@@ -289,6 +326,17 @@ def _json(value: object) -> JsonValue:
 
 
 def _line_view(line: ProposalLine) -> ProposalLineView:
+    def value(name: str) -> str | None:
+        entry: object = line.fields.get(name)
+        if not isinstance(entry, dict):
+            return None
+        parsed: object = cast(dict[str, object], entry).get("parsed")
+        return parsed if isinstance(parsed, str) else None
+
+    def number(name: str) -> Decimal | None:
+        parsed = value(name)
+        return Decimal(parsed) if parsed is not None else None
+
     return ProposalLineView(
         id=line.id,
         proposal_id=line.proposal_id,
@@ -305,6 +353,10 @@ def _line_view(line: ProposalLine) -> ProposalLineView:
         needs_review=line.needs_review,
         review_fields=_review_fields(line.fields),
         corrected_fields=corrected_fields(line.fields),
+        price_basis_quantity=number("price_basis_quantity"),
+        freight_cost=number("freight_cost"),
+        tax_rate_percent=number("tax_rate_percent"),
+        conditional_terms=value("conditional_terms"),
     )
 
 

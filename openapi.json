@@ -15,6 +15,9 @@
             ],
             "title": "Avg Price"
           },
+          "calculation": {
+            "$ref": "#/components/schemas/CalculationView"
+          },
           "currency": {
             "anyOf": [
               {
@@ -224,12 +227,37 @@
       "AnalysisRequest": {
         "additionalProperties": false,
         "properties": {
+          "location": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
           "lookback_days": {
             "default": 365,
             "maximum": 1095.0,
             "minimum": 30.0,
             "title": "Lookback Days",
             "type": "integer"
+          },
+          "max_stock_age_days": {
+            "anyOf": [
+              {
+                "maximum": 1095.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Stock Age Days"
           },
           "need_by": {
             "anyOf": [
@@ -242,6 +270,30 @@
               }
             ],
             "title": "Need By"
+          },
+          "planning_end": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planning End"
+          },
+          "planning_start": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planning Start"
           },
           "product": {
             "maxLength": 200,
@@ -279,6 +331,18 @@
             ],
             "default": "0",
             "title": "Safety Stock Pct"
+          },
+          "stock_as_of": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stock As Of"
           }
         },
         "required": [
@@ -363,6 +427,15 @@
             "title": "Created At",
             "type": "string"
           },
+          "demand_source": {
+            "default": "explicit_quantity",
+            "enum": [
+              "explicit_quantity",
+              "production_plan"
+            ],
+            "title": "Demand Source",
+            "type": "string"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -375,9 +448,31 @@
             "title": "Lines",
             "type": "array"
           },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
           "lookback_days": {
             "title": "Lookback Days",
             "type": "integer"
+          },
+          "max_stock_age_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Stock Age Days"
           },
           "need_by": {
             "anyOf": [
@@ -390,6 +485,30 @@
               }
             ],
             "title": "Need By"
+          },
+          "planning_end": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planning End"
+          },
+          "planning_start": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planning Start"
           },
           "product": {
             "title": "Product",
@@ -416,6 +535,18 @@
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Safety Stock Pct",
             "type": "string"
+          },
+          "stock_as_of": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Stock As Of"
           },
           "summary": {
             "$ref": "#/components/schemas/AnalysisSummary"
@@ -574,6 +705,369 @@
           "approval_id"
         ],
         "title": "ApprovalRequested",
+        "type": "object"
+      },
+      "AssessmentLine": {
+        "properties": {
+          "available": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Available"
+          },
+          "calculated_to_buy": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Calculated To Buy"
+          },
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
+          "demand": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Demand"
+          },
+          "demand_unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Demand Unit"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "inventory_unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Inventory Unit"
+          },
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/Issue"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
+          "need_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need By"
+          },
+          "on_order": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "On Order"
+          },
+          "part_number": {
+            "title": "Part Number",
+            "type": "string"
+          },
+          "ready": {
+            "default": false,
+            "title": "Ready",
+            "type": "boolean"
+          },
+          "reported_estimated_cost": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reported Estimated Cost"
+          },
+          "reported_to_buy": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reported To Buy"
+          },
+          "reported_unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reported Unit"
+          },
+          "safety_stock": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Safety Stock"
+          },
+          "suppliers": {
+            "items": {
+              "$ref": "#/components/schemas/SupplierEvidence"
+            },
+            "title": "Suppliers",
+            "type": "array"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit"
+          }
+        },
+        "required": [
+          "part_number"
+        ],
+        "title": "AssessmentLine",
+        "type": "object"
+      },
+      "AssessmentRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "objective": {
+            "maxLength": 2000,
+            "minLength": 1,
+            "title": "Objective",
+            "type": "string"
+          },
+          "upload_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 10,
+            "minItems": 1,
+            "title": "Upload Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "upload_ids",
+          "objective"
+        ],
+        "title": "AssessmentRequest",
+        "type": "object"
+      },
+      "AssessmentRfqRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "base_currency": {
+            "description": "ISO 4217 code: EUR or a currency with an ECB reference rate (BRL, USD...)",
+            "examples": [
+              "BRL"
+            ],
+            "title": "Base Currency",
+            "type": "string"
+          },
+          "response_due": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Response Due"
+          },
+          "title": {
+            "maxLength": 300,
+            "minLength": 1,
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "title",
+          "base_currency"
+        ],
+        "title": "AssessmentRfqRequest",
+        "type": "object"
+      },
+      "AssessmentRfqResult": {
+        "properties": {
+          "assessment_id": {
+            "format": "uuid",
+            "title": "Assessment Id",
+            "type": "string"
+          },
+          "lines": {
+            "title": "Lines",
+            "type": "integer"
+          },
+          "ref": {
+            "title": "Ref",
+            "type": "string"
+          },
+          "reused": {
+            "title": "Reused",
+            "type": "boolean"
+          },
+          "rfq_id": {
+            "format": "uuid",
+            "title": "Rfq Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "assessment_id",
+          "rfq_id",
+          "ref",
+          "lines",
+          "reused"
+        ],
+        "title": "AssessmentRfqResult",
+        "type": "object"
+      },
+      "AssessmentSnapshotSummary": {
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "line_count": {
+            "title": "Line Count",
+            "type": "integer"
+          },
+          "objective": {
+            "title": "Objective",
+            "type": "string"
+          },
+          "rfq_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rfq Id"
+          },
+          "status": {
+            "enum": [
+              "assessed",
+              "needs_review"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "objective",
+          "created_at",
+          "status",
+          "rfq_id",
+          "line_count"
+        ],
+        "title": "AssessmentSnapshotSummary",
         "type": "object"
       },
       "AwaitingSupplier": {
@@ -1014,6 +1508,69 @@
         "title": "BlockingItem",
         "type": "object"
       },
+      "CalculationView": {
+        "properties": {
+          "allocations": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/DemandAllocationView"
+            },
+            "title": "Allocations",
+            "type": "array"
+          },
+          "blocked_qty": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Blocked Qty",
+            "type": "string"
+          },
+          "buyer_quantity_override": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Buyer Quantity Override"
+          },
+          "excluded_inbound": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Excluded Inbound",
+            "type": "string"
+          },
+          "gross_on_hand": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Gross On Hand",
+            "type": "string"
+          },
+          "reserved_qty": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Reserved Qty",
+            "type": "string"
+          },
+          "stock_issues": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Stock Issues",
+            "type": "array"
+          },
+          "stock_known": {
+            "default": true,
+            "title": "Stock Known",
+            "type": "boolean"
+          }
+        },
+        "title": "CalculationView",
+        "type": "object"
+      },
       "CandidateDocument": {
         "description": "An attachment the supplier sent whose filename matches the requirement.",
         "properties": {
@@ -1128,11 +1685,36 @@
             ],
             "title": "Break Min Quantity"
           },
+          "buyer_limit_issues": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Buyer Limit Issues",
+            "type": "array"
+          },
+          "conditional_terms": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conditional Terms"
+          },
           "corrected_fields": {
             "items": {
               "type": "string"
             },
             "title": "Corrected Fields",
+            "type": "array"
+          },
+          "cost_gaps": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Cost Gaps",
             "type": "array"
           },
           "currency": {
@@ -1157,6 +1739,14 @@
               }
             ],
             "title": "Effective Unit Price Base"
+          },
+          "evidence_message_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Evidence Message Ids",
+            "type": "array"
           },
           "flags": {
             "items": {
@@ -1184,9 +1774,45 @@
             "title": "Flags",
             "type": "array"
           },
+          "freight_cost": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Freight Cost"
+          },
           "is_alternative": {
             "title": "Is Alternative",
             "type": "boolean"
+          },
+          "known_total_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Known Total Base"
+          },
+          "landed_total_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Landed Total Base"
           },
           "lead_time_days": {
             "anyOf": [
@@ -1241,6 +1867,21 @@
             ],
             "title": "Offered Mpn"
           },
+          "performance": {
+            "$ref": "#/components/schemas/SupplierPerformance"
+          },
+          "price_basis_quantity": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Basis Quantity"
+          },
           "proposal_line_id": {
             "anyOf": [
               {
@@ -1290,6 +1931,18 @@
             },
             "title": "Rules",
             "type": "array"
+          },
+          "tax_rate_percent": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tax Rate Percent"
           },
           "tier": {
             "title": "Tier",
@@ -1549,6 +2202,11 @@
             "title": "Computed On",
             "type": "string"
           },
+          "covered_line_tiers": {
+            "default": 0,
+            "title": "Covered Line Tiers",
+            "type": "integer"
+          },
           "fx_rates": {
             "items": {
               "$ref": "#/components/schemas/RateUsed"
@@ -1563,12 +2221,30 @@
             "title": "Lines",
             "type": "array"
           },
+          "policy": {
+            "$ref": "#/components/schemas/ComparisonPolicy-Output"
+          },
+          "readiness": {
+            "default": "needs_review",
+            "enum": [
+              "ready_for_buyer_review",
+              "needs_review",
+              "no_feasible_offer"
+            ],
+            "title": "Readiness",
+            "type": "string"
+          },
           "recommendations": {
             "items": {
               "$ref": "#/components/schemas/Recommendation"
             },
             "title": "Recommendations",
             "type": "array"
+          },
+          "requested_line_tiers": {
+            "default": 0,
+            "title": "Requested Line Tiers",
+            "type": "integer"
           },
           "rfq_id": {
             "format": "uuid",
@@ -1663,6 +2339,13 @@
             "title": "Quantities",
             "type": "array"
           },
+          "source_evidence": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Source Evidence",
+            "type": "object"
+          },
           "unit": {
             "title": "Unit",
             "type": "string"
@@ -1678,6 +2361,156 @@
           "incoterm"
         ],
         "title": "ComparisonLine",
+        "type": "object"
+      },
+      "ComparisonPolicy-Input": {
+        "additionalProperties": false,
+        "description": "Hard thresholds are checked before the declared lexicographic preference.\n\nReliability-first sorts by evidenced on-time rate, then accepted-quantity\nrate, then price. Unknown or insufficient samples rank below known rates;\nthey never become perfect performance. Rates are fractions, not percentages.",
+        "properties": {
+          "allow_unknown_history": {
+            "default": true,
+            "title": "Allow Unknown History",
+            "type": "boolean"
+          },
+          "history_window_days": {
+            "default": 365,
+            "maximum": 3650.0,
+            "minimum": 1.0,
+            "title": "History Window Days",
+            "type": "integer"
+          },
+          "minimum_accepted_quantity_rate": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minimum Accepted Quantity Rate"
+          },
+          "minimum_history_samples": {
+            "default": 3,
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Minimum History Samples",
+            "type": "integer"
+          },
+          "minimum_on_time_rate": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minimum On Time Rate"
+          },
+          "preference": {
+            "default": "cost_first",
+            "enum": [
+              "cost_first",
+              "reliability_first"
+            ],
+            "title": "Preference",
+            "type": "string"
+          },
+          "require_complete_costs": {
+            "default": false,
+            "title": "Require Complete Costs",
+            "type": "boolean"
+          },
+          "require_on_time_delivery": {
+            "default": false,
+            "title": "Require On Time Delivery",
+            "type": "boolean"
+          }
+        },
+        "title": "ComparisonPolicy",
+        "type": "object"
+      },
+      "ComparisonPolicy-Output": {
+        "additionalProperties": false,
+        "description": "Hard thresholds are checked before the declared lexicographic preference.\n\nReliability-first sorts by evidenced on-time rate, then accepted-quantity\nrate, then price. Unknown or insufficient samples rank below known rates;\nthey never become perfect performance. Rates are fractions, not percentages.",
+        "properties": {
+          "allow_unknown_history": {
+            "default": true,
+            "title": "Allow Unknown History",
+            "type": "boolean"
+          },
+          "history_window_days": {
+            "default": 365,
+            "maximum": 3650.0,
+            "minimum": 1.0,
+            "title": "History Window Days",
+            "type": "integer"
+          },
+          "minimum_accepted_quantity_rate": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minimum Accepted Quantity Rate"
+          },
+          "minimum_history_samples": {
+            "default": 3,
+            "maximum": 10000.0,
+            "minimum": 1.0,
+            "title": "Minimum History Samples",
+            "type": "integer"
+          },
+          "minimum_on_time_rate": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Minimum On Time Rate"
+          },
+          "preference": {
+            "default": "cost_first",
+            "enum": [
+              "cost_first",
+              "reliability_first"
+            ],
+            "title": "Preference",
+            "type": "string"
+          },
+          "require_complete_costs": {
+            "default": false,
+            "title": "Require Complete Costs",
+            "type": "boolean"
+          },
+          "require_on_time_delivery": {
+            "default": false,
+            "title": "Require On Time Delivery",
+            "type": "boolean"
+          }
+        },
+        "title": "ComparisonPolicy",
         "type": "object"
       },
       "CompleteRequest": {
@@ -2026,6 +2859,44 @@
         "title": "CopilotMessageRequest",
         "type": "object"
       },
+      "Coverage": {
+        "properties": {
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "inspected": {
+            "default": false,
+            "title": "Inspected",
+            "type": "boolean"
+          },
+          "mapped_rows": {
+            "default": 0,
+            "title": "Mapped Rows",
+            "type": "integer"
+          },
+          "rows": {
+            "title": "Rows",
+            "type": "integer"
+          },
+          "source_id": {
+            "title": "Source Id",
+            "type": "string"
+          },
+          "table": {
+            "title": "Table",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id",
+          "filename",
+          "table",
+          "rows"
+        ],
+        "title": "Coverage",
+        "type": "object"
+      },
       "CreateInviteRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2225,6 +3096,166 @@
         "title": "CurrencyTotalView",
         "type": "object"
       },
+      "DecisionOffer": {
+        "properties": {
+          "evidence_message_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Evidence Message Ids",
+            "type": "array"
+          },
+          "incoterm": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Incoterm"
+          },
+          "known_total_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Known Total Base"
+          },
+          "landed_total_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Landed Total Base"
+          },
+          "offered_mpn": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offered Mpn"
+          },
+          "payment_terms": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Payment Terms"
+          },
+          "price_basis_quantity": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Basis Quantity"
+          },
+          "proposal_id": {
+            "format": "uuid",
+            "title": "Proposal Id",
+            "type": "string"
+          },
+          "proposal_line_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposal Line Id"
+          },
+          "proposal_version": {
+            "title": "Proposal Version",
+            "type": "integer"
+          },
+          "quoted_currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quoted Currency"
+          },
+          "quoted_unit_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quoted Unit Price"
+          },
+          "supplier_id": {
+            "format": "uuid",
+            "title": "Supplier Id",
+            "type": "string"
+          },
+          "unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit"
+          },
+          "valid_until": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid Until"
+          }
+        },
+        "required": [
+          "supplier_id",
+          "proposal_id",
+          "proposal_version"
+        ],
+        "title": "DecisionOffer",
+        "type": "object"
+      },
       "DecisionRequest": {
         "additionalProperties": false,
         "properties": {
@@ -2272,6 +3303,63 @@
           "status"
         ],
         "title": "DecisionResponse",
+        "type": "object"
+      },
+      "DemandAllocationView": {
+        "properties": {
+          "gross_required": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Gross Required",
+            "type": "string"
+          },
+          "inbound_used": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Inbound Used",
+            "type": "string"
+          },
+          "need_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need By"
+          },
+          "planned_supply_used": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Planned Supply Used",
+            "type": "string"
+          },
+          "required": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Required",
+            "type": "string"
+          },
+          "stock_used": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Stock Used",
+            "type": "string"
+          },
+          "to_buy": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "To Buy",
+            "type": "string"
+          }
+        },
+        "required": [
+          "need_by",
+          "required",
+          "gross_required",
+          "stock_used",
+          "inbound_used",
+          "to_buy"
+        ],
+        "title": "DemandAllocationView",
         "type": "object"
       },
       "DirectUploadRequest": {
@@ -3273,6 +4361,11 @@
             "title": "Rounds Used",
             "type": "integer"
           },
+          "stalled_rounds": {
+            "default": 0,
+            "title": "Stalled Rounds",
+            "type": "integer"
+          },
           "status": {
             "enum": [
               "open",
@@ -3284,6 +4377,13 @@
             ],
             "title": "Status",
             "type": "string"
+          },
+          "strategy_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Strategy Reasons",
+            "type": "array"
           },
           "supplier_name": {
             "title": "Supplier Name",
@@ -3390,6 +4490,40 @@
           "name"
         ],
         "title": "InvitedSupplier",
+        "type": "object"
+      },
+      "Issue": {
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "severity": {
+            "enum": [
+              "warning",
+              "blocker"
+            ],
+            "title": "Severity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "severity",
+          "message"
+        ],
+        "title": "Issue",
         "type": "object"
       },
       "IssuedPurchaseOrderLineView": {
@@ -3500,6 +4634,36 @@
       "LineCorrectionRequest": {
         "additionalProperties": false,
         "properties": {
+          "conditional_terms": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conditional Terms"
+          },
+          "freight_cost": {
+            "anyOf": [
+              {
+                "exclusiveMaximum": 1000000000000.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d{0,2}0*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Freight Cost"
+          },
           "is_alternative": {
             "anyOf": [
               {
@@ -3583,6 +4747,23 @@
             ],
             "title": "Origin Country"
           },
+          "price_basis_quantity": {
+            "anyOf": [
+              {
+                "exclusiveMaximum": 1000000000000.0,
+                "exclusiveMinimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d{0,4}0*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Basis Quantity"
+          },
           "qualification": {
             "anyOf": [
               {
@@ -3622,6 +4803,23 @@
             ],
             "description": "The requested line it answers",
             "title": "Rfq Line Id"
+          },
+          "tax_rate_percent": {
+            "anyOf": [
+              {
+                "maximum": 100.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d{0,6}0*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tax Rate Percent"
           },
           "tooling_cost": {
             "anyOf": [
@@ -4631,6 +5829,9 @@
             "title": "Base Currency",
             "type": "string"
           },
+          "comparison_policy": {
+            "$ref": "#/components/schemas/ComparisonPolicy-Output"
+          },
           "deadline": {
             "anyOf": [
               {
@@ -4673,6 +5874,16 @@
         "additionalProperties": false,
         "description": "PUT: replaces the settings given. Lines not listed keep their limits; a line\nlisted has all three limits replaced. Saving opens the negotiation.",
         "properties": {
+          "comparison_policy": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ComparisonPolicy-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "deadline": {
             "anyOf": [
               {
@@ -4765,6 +5976,74 @@
         "title": "NoticesRequested",
         "type": "object"
       },
+      "OfferAlternative": {
+        "properties": {
+          "effective_unit_price_base": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Effective Unit Price Base",
+            "type": "string"
+          },
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          },
+          "landed_total_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Landed Total Base"
+          },
+          "lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lead Time Days"
+          },
+          "offer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DecisionOffer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "performance": {
+            "$ref": "#/components/schemas/SupplierPerformance"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          },
+          "tradeoffs": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tradeoffs",
+            "type": "array"
+          }
+        },
+        "required": [
+          "invite_id",
+          "supplier_name",
+          "effective_unit_price_base"
+        ],
+        "title": "OfferAlternative",
+        "type": "object"
+      },
       "OnboardingState": {
         "properties": {
           "default_template": {
@@ -4831,6 +6110,18 @@
       },
       "OutcomeLine": {
         "properties": {
+          "alternatives": {
+            "items": {
+              "$ref": "#/components/schemas/OfferAlternative"
+            },
+            "title": "Alternatives",
+            "type": "array"
+          },
+          "decision_version": {
+            "default": 1,
+            "title": "Decision Version",
+            "type": "integer"
+          },
           "effective_unit_price_base": {
             "anyOf": [
               {
@@ -4842,6 +6133,28 @@
               }
             ],
             "title": "Effective Unit Price Base"
+          },
+          "evidence_gaps": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Evidence Gaps",
+            "type": "array"
+          },
+          "evidence_message_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Evidence Message Ids",
+            "type": "array"
+          },
+          "excluded": {
+            "items": {
+              "$ref": "#/components/schemas/ExcludedOffer"
+            },
+            "title": "Excluded",
+            "type": "array"
           },
           "invite_id": {
             "anyOf": [
@@ -4859,6 +6172,18 @@
             "title": "Justification",
             "type": "string"
           },
+          "landed_total_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Landed Total Base"
+          },
           "lead_time_days": {
             "anyOf": [
               {
@@ -4870,15 +6195,79 @@
             ],
             "title": "Lead Time Days"
           },
+          "offer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DecisionOffer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "performance": {
+            "$ref": "#/components/schemas/SupplierPerformance"
+          },
+          "policy": {
+            "$ref": "#/components/schemas/ComparisonPolicy-Output"
+          },
+          "policy_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Policy Reasons",
+            "type": "array"
+          },
+          "proposal_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposal Id"
+          },
+          "proposal_line_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposal Line Id"
+          },
           "quantity": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Quantity",
+            "type": "string"
+          },
+          "readiness": {
+            "default": "needs_review",
+            "enum": [
+              "ready_for_buyer_review",
+              "needs_review",
+              "no_feasible_offer"
+            ],
+            "title": "Readiness",
             "type": "string"
           },
           "rfq_line_id": {
             "format": "uuid",
             "title": "Rfq Line Id",
             "type": "string"
+          },
+          "source_evidence": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Source Evidence",
+            "type": "object"
           },
           "supplier_name": {
             "anyOf": [
@@ -5010,6 +6399,17 @@
       },
       "ProposalLineView": {
         "properties": {
+          "conditional_terms": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conditional Terms"
+          },
           "corrected_fields": {
             "description": "Fields a person corrected or confirmed",
             "items": {
@@ -5017,6 +6417,18 @@
             },
             "title": "Corrected Fields",
             "type": "array"
+          },
+          "freight_cost": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Freight Cost"
           },
           "id": {
             "format": "uuid",
@@ -5088,6 +6500,18 @@
             ],
             "title": "Origin Country"
           },
+          "price_basis_quantity": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Basis Quantity"
+          },
           "proposal_id": {
             "format": "uuid",
             "title": "Proposal Id",
@@ -5112,6 +6536,18 @@
               }
             ],
             "title": "Rfq Line Id"
+          },
+          "tax_rate_percent": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tax Rate Percent"
           },
           "tooling_cost": {
             "anyOf": [
@@ -5679,6 +7115,13 @@
             "title": "Advisories",
             "type": "array"
           },
+          "alternatives": {
+            "items": {
+              "$ref": "#/components/schemas/OfferAlternative"
+            },
+            "title": "Alternatives",
+            "type": "array"
+          },
           "effective_unit_price_base": {
             "anyOf": [
               {
@@ -5690,6 +7133,21 @@
               }
             ],
             "title": "Effective Unit Price Base"
+          },
+          "evidence_gaps": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Evidence Gaps",
+            "type": "array"
+          },
+          "evidence_message_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Evidence Message Ids",
+            "type": "array"
           },
           "excluded": {
             "items": {
@@ -5714,6 +7172,18 @@
             "title": "Justification",
             "type": "string"
           },
+          "landed_total_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Landed Total Base"
+          },
           "lead_time_days": {
             "anyOf": [
               {
@@ -5737,9 +7207,63 @@
             ],
             "title": "Line Total Base"
           },
+          "offer": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/DecisionOffer"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "performance": {
+            "$ref": "#/components/schemas/SupplierPerformance"
+          },
+          "policy_reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Policy Reasons",
+            "type": "array"
+          },
+          "proposal_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposal Id"
+          },
+          "proposal_line_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposal Line Id"
+          },
           "quantity": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Quantity",
+            "type": "string"
+          },
+          "readiness": {
+            "default": "needs_review",
+            "enum": [
+              "ready_for_buyer_review",
+              "needs_review",
+              "no_feasible_offer"
+            ],
+            "title": "Readiness",
             "type": "string"
           },
           "reasons": {
@@ -5770,6 +7294,13 @@
                 "type": "null"
               }
             ]
+          },
+          "source_evidence": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Source Evidence",
+            "type": "object"
           },
           "supplier_name": {
             "anyOf": [
@@ -6705,6 +8236,13 @@
             "title": "Quantities",
             "type": "array"
           },
+          "source_evidence": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/JsonValue"
+            },
+            "title": "Source Evidence",
+            "type": "object"
+          },
           "unit": {
             "title": "Unit",
             "type": "string"
@@ -7411,6 +8949,132 @@
         "title": "SkippedSupplier",
         "type": "object"
       },
+      "SourceAssessment": {
+        "properties": {
+          "assessment_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Assessment Id"
+          },
+          "coverage": {
+            "items": {
+              "$ref": "#/components/schemas/Coverage"
+            },
+            "title": "Coverage",
+            "type": "array"
+          },
+          "issues": {
+            "items": {
+              "$ref": "#/components/schemas/Issue"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/AssessmentLine"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
+          "persisted": {
+            "default": false,
+            "title": "Persisted",
+            "type": "boolean"
+          },
+          "record_counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "title": "Record Counts",
+            "type": "object"
+          },
+          "rfq_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rfq Id"
+          },
+          "status": {
+            "default": "needs_review",
+            "enum": [
+              "assessed",
+              "needs_review"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "title": "SourceAssessment",
+        "type": "object"
+      },
+      "SourceRef": {
+        "properties": {
+          "column": {
+            "minimum": 1.0,
+            "title": "Column",
+            "type": "integer"
+          },
+          "end": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "End"
+          },
+          "row": {
+            "minimum": 1.0,
+            "title": "Row",
+            "type": "integer"
+          },
+          "source_id": {
+            "title": "Source Id",
+            "type": "string"
+          },
+          "start": {
+            "anyOf": [
+              {
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Start"
+          },
+          "table": {
+            "title": "Table",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id",
+          "table",
+          "row",
+          "column"
+        ],
+        "title": "SourceRef",
+        "type": "object"
+      },
       "StartScanRequest": {
         "additionalProperties": false,
         "properties": {
@@ -7491,6 +9155,11 @@
             "title": "Corrected Fields",
             "type": "array"
           },
+          "correction_revision": {
+            "default": 0,
+            "title": "Correction Revision",
+            "type": "integer"
+          },
           "currency": {
             "anyOf": [
               {
@@ -7561,6 +9230,13 @@
               }
             ],
             "title": "Max Lead Time Days"
+          },
+          "negotiation_holds": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Negotiation Holds",
+            "type": "array"
           },
           "payment_terms": {
             "anyOf": [
@@ -7689,12 +9365,230 @@
         "title": "SupplierComplianceSummary",
         "type": "object"
       },
+      "SupplierEvidence": {
+        "properties": {
+          "currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Currency"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "last_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Price"
+          },
+          "lead_time_days": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lead Time Days"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "ordered_at": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ordered At"
+          },
+          "otif_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Otif Pct"
+          },
+          "quality_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quality Pct"
+          },
+          "supplier_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Code"
+          }
+        },
+        "title": "SupplierEvidence",
+        "type": "object"
+      },
+      "SupplierPerformance": {
+        "description": "Observed purchase-line outcomes for this supplier and requested item only.",
+        "properties": {
+          "accepted_quantity_rate": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Accepted Quantity Rate"
+          },
+          "delivery_samples": {
+            "default": 0,
+            "title": "Delivery Samples",
+            "type": "integer"
+          },
+          "evidence_po_line_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Evidence Po Line Ids",
+            "type": "array"
+          },
+          "excluded_stale_observations": {
+            "default": 0,
+            "title": "Excluded Stale Observations",
+            "type": "integer"
+          },
+          "issues": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Issues",
+            "type": "array"
+          },
+          "latest_observation_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Observation On"
+          },
+          "observations": {
+            "default": 0,
+            "title": "Observations",
+            "type": "integer"
+          },
+          "oldest_observation_on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Oldest Observation On"
+          },
+          "on_time_rate": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "On Time Rate"
+          },
+          "quality_samples": {
+            "default": 0,
+            "title": "Quality Samples",
+            "type": "integer"
+          },
+          "scope": {
+            "const": "requested_item",
+            "default": "requested_item",
+            "title": "Scope",
+            "type": "string"
+          }
+        },
+        "title": "SupplierPerformance",
+        "type": "object"
+      },
       "SupplierStatView": {
         "properties": {
           "avg_price": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Avg Price",
             "type": "string"
+          },
+          "delivery_observations": {
+            "default": 0,
+            "title": "Delivery Observations",
+            "type": "integer"
           },
           "last_ordered_at": {
             "format": "date",
@@ -7705,6 +9599,18 @@
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Last Price",
             "type": "string"
+          },
+          "last_received_at": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Received At"
           },
           "min_price": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -7729,6 +9635,11 @@
           },
           "orders": {
             "title": "Orders",
+            "type": "integer"
+          },
+          "quality_observations": {
+            "default": 0,
+            "title": "Quality Observations",
             "type": "integer"
           },
           "quality_rate": {
@@ -12246,6 +14157,431 @@
         ]
       }
     },
+    "/v1/procurement-assessments": {
+      "get": {
+        "operationId": "list_assessments_v1_procurement_assessments_get",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "search",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 2000,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Search"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AssessmentSnapshotSummary"
+                  },
+                  "title": "Response List Assessments V1 Procurement Assessments Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Assessments",
+        "tags": [
+          "purchasing"
+        ]
+      },
+      "post": {
+        "operationId": "create_assessment_v1_procurement_assessments_post",
+        "parameters": [
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssessmentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceAssessment"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Assessment",
+        "tags": [
+          "purchasing"
+        ]
+      }
+    },
+    "/v1/procurement-assessments/{assessment_id}": {
+      "get": {
+        "operationId": "read_assessment_v1_procurement_assessments__assessment_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "assessment_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assessment Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SourceAssessment"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Read Assessment",
+        "tags": [
+          "purchasing"
+        ]
+      }
+    },
+    "/v1/procurement-assessments/{assessment_id}/rfq": {
+      "post": {
+        "operationId": "create_assessment_rfq_v1_procurement_assessments__assessment_id__rfq_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "assessment_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Assessment Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AssessmentRfqRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AssessmentRfqResult"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Create Assessment Rfq",
+        "tags": [
+          "purchasing"
+        ]
+      }
+    },
     "/v1/proposals/{proposal_id}": {
       "get": {
         "operationId": "get_proposal_v1_proposals__proposal_id__get",
@@ -15153,6 +17489,123 @@
         "summary": "Export Comparison",
         "tags": [
           "exports"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/comparison/policy": {
+      "put": {
+        "description": "Set buyer review priorities without opening negotiation or changing its bounds.",
+        "operationId": "put_comparison_policy_v1_rfqs__rfq_id__comparison_policy_put",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ComparisonPolicy-Input"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ComparisonPolicy-Output"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Put Comparison Policy",
+        "tags": [
+          "negotiation"
         ]
       }
     },

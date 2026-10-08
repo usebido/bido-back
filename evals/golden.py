@@ -3,7 +3,7 @@
 The analysis numbers come from the production formulas (`purchasing.analysis`)
 applied to the dataset itself, the way a perfect import would load it: a
 supplier is a "distributor" unless the dataset gives its type, a received line
-without a received quantity counts the whole ordered quantity, every line keeps
+without a received quantity remains unknown, every line keeps
 its currency. So a mismatch in an eval means the spreadsheet was read wrong, not
 that the math changed.
 """
@@ -25,12 +25,14 @@ def golden_analysis(
     dataset: Dataset, today: date, quantity: Decimal | None
 ) -> dict[str, Any] | None:
     """Expected lines for the dataset's main product; None if it cannot be analysed."""
+    demands: list[calc.Demand] | None = None
     if quantity is None:
         planned = [p for p in dataset.plan if p.product == dataset.product and p.need_by >= today]
         if not planned:
             return None
         quantity = sum((p.quantity for p in planned), Decimal(0))
         need_by: date | None = min(p.need_by for p in planned)
+        demands = [calc.Demand(p.quantity, p.need_by) for p in planned]
     else:
         need_by = None
     items = {
@@ -47,7 +49,9 @@ def golden_analysis(
     }
     bom = [calc.BomEntry(items[p.number], p.qty_per_unit) for p in dataset.parts]
     stock = {
-        items[number].id: calc.Stock(on_hand=held[0], on_order=held[1])
+        items[number].id: calc.Stock(
+            on_hand=held[0], on_order=held[1], on_order_due=dataset.stock_due
+        )
         for number, held in dataset.stock.items()
     }
     purchases = [
@@ -62,9 +66,7 @@ def golden_analysis(
             unit_price=row.unit_price,
             promised_at=row.promised_at,
             received_at=row.received_at,
-            received_qty=row.received_qty
-            if row.received_qty is not None
-            else (row.quantity if row.received_at else None),
+            received_qty=row.received_qty,
             rejected_qty=row.rejected_qty,
         )
         for row in dataset.purchases
@@ -77,6 +79,7 @@ def golden_analysis(
         stock=stock,
         purchases=purchases,
         today=today,
+        demands=demands,
     )
     return {
         "product": dataset.product,

@@ -78,6 +78,10 @@ LINE_FIELDS: Final[Mapping[str, FieldKind]] = {
     "lead_time_days": "days",
     "origin_country": "country",
     "qualification": "text",
+    "price_basis_quantity": "quantity",
+    "freight_cost": "amount",
+    "tax_rate_percent": "amount",
+    "conditional_terms": "text",
 }
 
 type Parsed = Decimal | int | date | str
@@ -117,6 +121,10 @@ class FieldCheck:
     # The validated value; None when absent or unusable (see `issues`).
     parsed: Parsed | None
     issues: tuple[str, ...] = ()
+    message_id: UUID | None = None
+    retained_by: tuple[dict[str, JsonValue], ...] = ()
+    corrected: bool = False
+    correction_id: str | None = None
 
     @property
     def needs_review(self) -> bool:
@@ -124,7 +132,7 @@ class FieldCheck:
 
     def provenance(self) -> dict[str, JsonValue]:
         source = self.extracted.source
-        return {
+        data: dict[str, JsonValue] = {
             "value": self.extracted.value,
             "parsed": _json(self.parsed),
             "source": source.model_dump(mode="json") if source is not None else None,
@@ -132,6 +140,15 @@ class FieldCheck:
             "needs_review": self.needs_review,
             "issues": list(self.issues),
         }
+        if self.message_id is not None:
+            data["message_id"] = str(self.message_id)
+        if self.retained_by:
+            data["retained_by"] = list(self.retained_by)
+        if self.corrected:
+            data["corrected"] = True
+        if self.correction_id is not None:
+            data["correction_id"] = self.correction_id
+        return data
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,7 +239,7 @@ def validate_quote(
     header = {
         name: check(name, kind, getattr(output, name)) for name, kind in HEADER_FIELDS.items()
     }
-    if not output.is_quote:
+    if not output.is_quote and output.reply_kind == "replacement":
         return ValidatedQuote(output=output, header=header, lines=())
 
     currency = header["currency"]
@@ -232,18 +249,31 @@ def validate_quote(
         fields = {
             name: check(name, kind, getattr(draft, name)) for name, kind in LINE_FIELDS.items()
         }
-        lines.append(_check_line(draft, fields, by_position, currency))
+        lines.append(
+            _check_line(
+                draft, fields, by_position, currency, partial=output.reply_kind != "replacement"
+            )
+        )
 
     issues: list[str] = []
-    if not lines:
+    if not lines and output.reply_kind == "replacement":
         issues.append("no_lines")
-    if currency.extracted.value is None and any(
-        line.draft.unit_price.value is not None for line in lines
+    if (
+        output.reply_kind == "replacement"
+        and currency.extracted.value is None
+        and any(line.draft.unit_price.value is not None for line in lines)
     ):
         issues.append("missing:currency")
     valid_until = header["valid_until"].parsed
     if isinstance(valid_until, date) and valid_until < today:
         issues.append("validity_expired")
+    for conflict in output.conflicts:
+        # Even an ungrounded alleged conflict is held; neither claim wins silently.
+        issues.append(f"conflicting_sources:{conflict.field}")
+    for name in ("unchanged_terms", "update_evidence"):
+        evidence = check(name, "text", getattr(output, name))
+        if evidence.needs_review:
+            issues.append(f"unverified:{name}")
     return ValidatedQuote(output=output, header=header, lines=tuple(lines), issues=tuple(issues))
 
 
@@ -252,6 +282,8 @@ def _check_line(
     fields: dict[str, FieldCheck],
     by_position: Mapping[int, RequestedLine],
     currency: FieldCheck,
+    *,
+    partial: bool = False,
 ) -> LineCheck:
     issues: list[str] = []
     notes: list[str] = []
@@ -263,11 +295,15 @@ def _check_line(
     elif requested is None:
         issues.append("unknown_rfq_line")
 
-    if draft.unit_price.value is None:
+    if draft.unit_price.value is None and not partial:
         issues.append("missing:unit_price")
 
-    priced = [fields[n] for n in ("unit_price", "tooling_cost") if fields[n].parsed is not None]
-    if priced and (currency.parsed is None or currency.needs_review):
+    priced = [
+        fields[n]
+        for n in ("unit_price", "tooling_cost", "freight_cost")
+        if fields[n].parsed is not None
+    ]
+    if priced and (currency.needs_review or (currency.parsed is None and not partial)):
         # A price is meaningless without a trusted currency.
         issues.append("currency_unverified")
     for check in priced:
@@ -283,6 +319,11 @@ def _check_line(
             is_alternative = True
     if is_alternative:
         notes.append("alternative_offered")
+    tax = fields["tax_rate_percent"].parsed
+    if isinstance(tax, Decimal) and tax > 100:
+        issues.append("invalid_tax_rate")
+    if fields["conditional_terms"].parsed is not None:
+        issues.append("conditional_terms_require_review")
 
     return LineCheck(
         draft=draft,

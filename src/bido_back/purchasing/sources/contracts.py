@@ -3,6 +3,7 @@
 from datetime import date
 from decimal import Decimal
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -101,6 +102,8 @@ class SourceAssessment(Assessment):
     coverage: list[Coverage] = Field(default_factory=list[Coverage])
     status: Literal["assessed", "needs_review"] = "needs_review"
     persisted: bool = False
+    assessment_id: UUID | None = None
+    rfq_id: UUID | None = None
 
 
 class CellRef(BaseModel):
