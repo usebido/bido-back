@@ -55,7 +55,7 @@ class CopilotAction(BaseModel):
 
 # Server-sent events of POST /v1/copilot/messages. Besides these three, the
 # stream forwards the runner's own events unchanged (`bido_back.agents.events`):
-# reasoning_step, tool_called, tool_result, artifact, text_delta,
+# reasoning_delta, reasoning_step, tool_called, tool_result, artifact, text_delta,
 # approval_requested and run_failed.
 
 

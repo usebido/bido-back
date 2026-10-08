@@ -29,6 +29,7 @@ from bido_back.agents.events import (
     ApprovalRequested,
     Artifact,
     EventAdapter,
+    ReasoningDelta,
     ReasoningStep,
     RunCompleted,
     TextDelta,
@@ -141,11 +142,13 @@ def stream_events(response: Response) -> list[Any]:
                         for piece in _chunks(content.text)
                     )
         elif item.type == "reasoning":
+            # Like the real API: each summary arrives in many small pieces.
             events.extend(
                 r.ResponseReasoningSummaryTextDeltaEvent.model_construct(
-                    type="response.reasoning_summary_text.delta", delta=summary.text
+                    type="response.reasoning_summary_text.delta", delta=piece
                 )
                 for summary in item.summary
+                for piece in _chunks(summary.text)
             )
         events.append(
             r.ResponseOutputItemDoneEvent.model_construct(
@@ -411,15 +414,15 @@ async def test_read_tool_runs_and_its_result_is_fed_back(script: Script) -> None
     assert fed_back["call_id"] == "call_1"
     assert '{"sku":"SKU-1","price_cents":1250}' in result_text(fed_back)
 
-    kinds = [type(e) for e in result.events]
+    kinds = [type(e) for e in result.events if not isinstance(e, ReasoningDelta)]
     assert kinds == [ReasoningStep, ToolCalled, ToolResult, Artifact, ReasoningStep, RunCompleted]
     reasoning_steps = [e.text for e in result.events if isinstance(e, ReasoningStep)]
     assert reasoning_steps == ["I need the price.", "Got it."]
-    called = result.events[1]
+    called = next(e for e in result.events if isinstance(e, ToolCalled))
     assert isinstance(called, ToolCalled)
     assert (called.call_id, called.tool, called.kind) == ("fc_1", "lookup_price", "read")
     assert called.args == {"sku": "SKU-1"}
-    artifact = result.events[3]
+    artifact = next(e for e in result.events if isinstance(e, Artifact))
     assert isinstance(artifact, Artifact)
     assert artifact.kind == "price"
     assert artifact.data == {"sku": "SKU-1", "price_cents": 1250}
@@ -815,6 +818,36 @@ async def test_stream_text_streams_deltas_in_order_and_completes_with_the_whole_
     assert [e.seq for e in events] == list(range(len(events)))
     # Every delta comes before the terminal event.
     assert max(i for i, e in enumerate(events) if isinstance(e, TextDelta)) < len(events) - 1
+
+
+async def test_stream_text_reasoning_streams_as_one_step_per_summary(script: Script) -> None:
+    summary = "**Evaluating RFQs and POs** I think the user is looking for the open RFQs."
+    script(
+        reply(thinking(summary), tool_use("fc_1", "lookup_price", sku="SKU-1")),
+        reply(thinking("Now I can answer."), text("It is 12.50 euros.")),
+    )
+
+    events = [e async for e in run(chat_agent(), TASK, ctx(), config=CONFIG)]
+
+    deltas = [e for e in events if isinstance(e, ReasoningDelta)]
+    steps = [e for e in events if isinstance(e, ReasoningStep)]
+    # Many tiny pieces on the wire, but exactly one step per summary, whole.
+    assert len(deltas) > len(steps) == 2
+    assert [s.text for s in steps] == [summary, "Now I can answer."]
+    for step in steps:
+        assert step.step_id is not None
+        joined = "".join(d.text for d in deltas if d.step_id == step.step_id)
+        assert joined == step.text
+    # Each step is closed before what follows it: the tool call, then the answer.
+    kinds = [type(e) for e in events]
+    first_step, second_step = (events.index(s) for s in steps)
+    assert first_step < kinds.index(ToolCalled)
+    assert second_step < kinds.index(TextDelta)
+    # Reasoning never leaks into the answer.
+    terminal = events[-1]
+    assert isinstance(terminal, RunCompleted)
+    assert terminal.output == {"answer": "It is 12.50 euros."}
+    assert [e.seq for e in events] == list(range(len(events)))
 
 
 async def test_stream_text_tool_call_mid_stream_separates_the_text(script: Script) -> None:

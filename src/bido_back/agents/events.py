@@ -32,11 +32,28 @@ class TextDelta(_EventBase):
     text: str
 
 
+class ReasoningDelta(_EventBase):
+    """The next piece of a reasoning step while the model writes it.
+
+    Deltas with the same `step_id` belong to one step; a `ReasoningStep` with
+    that `step_id` and the whole text always follows. Clients that only render
+    finished steps can ignore deltas.
+    """
+
+    type: Literal["reasoning_delta"] = "reasoning_delta"
+    step_id: str
+    text: str
+
+
 class ReasoningStep(_EventBase):
-    """A summarized reasoning step, shown as the agent's 'thinking'."""
+    """A summarized reasoning step, shown as the agent's 'thinking'.
+
+    Always one whole step (all of its deltas joined), never a fragment.
+    """
 
     type: Literal["reasoning_step"] = "reasoning_step"
     text: str
+    step_id: str | None = None
 
 
 class ToolCalled(_EventBase):
@@ -100,6 +117,7 @@ class RunFailed(_EventBase):
 
 Event = Annotated[
     TextDelta
+    | ReasoningDelta
     | ReasoningStep
     | ToolCalled
     | ToolResult
