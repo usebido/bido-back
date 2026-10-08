@@ -1,5 +1,5 @@
-"""Local-only dev endpoints: `POST /dev/inbound`, `POST /dev/followups/sweep` and
-`POST /dev/negotiation/sweep`.
+"""Local-only dev endpoints: `POST /dev/inbound`, `POST /dev/followups/sweep`,
+`POST /dev/negotiation/sweep` and `POST /dev/uploads`.
 
 `POST /dev/inbound` simulates an inbound email locally.
 
@@ -7,6 +7,10 @@ Stands in for SES inbound -> S3 -> SQS: the body is a raw .eml, either as the
 request body itself or as the first file of a multipart/form-data upload
 (`curl -F file=@reply.eml`), and it goes through the same
 `InboundService.ingest` the intake consumer calls.
+
+`POST /dev/uploads` stands in for S3 for direct uploads: it takes the form
+signed by `LocalDirectUploads` (multipart/form-data, the fields then `file`)
+and answers 204 like S3, or 403 when the form does not match its signature.
 
 Local only, twice over: mount the router only when
 `settings.environment == "local"`, and every request is refused with 404
@@ -31,9 +35,13 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bido_back.api.deps import get_db, get_job_queue
+from bido_back.api.deps import get_db, get_job_queue, get_storage
 from bido_back.intake.service import InboundService
+from bido_back.onboarding.service import MAX_DIRECT_UPLOAD_BYTES
 from bido_back.settings import Settings, get_settings
+from bido_back.storage import BlobStorage
+from bido_back.storage.direct import InvalidUploadForm, LocalDirectUploads
+from bido_back.storage.local import LocalFileStorage
 from bido_back.worker.envelope import Envelope
 from bido_back.worker.job_types import FOLLOWUPS_SWEEP, NEGOTIATION_SWEEP
 from bido_back.worker.jobs import JobQueue
@@ -112,6 +120,59 @@ async def post_negotiation_sweep(
     key = f"negotiation.sweep:dev:{uuid4()}"
     await jobs.enqueue(Envelope(type=NEGOTIATION_SWEEP, tenant_id=UUID(int=0), idempotency_key=key))
     return {"enqueued": key}
+
+
+@dev_router.post(
+    "/uploads", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_local)]
+)
+async def post_upload(
+    request: Request, storage: Annotated[BlobStorage, Depends(get_storage)]
+) -> None:
+    """Receive a direct upload signed by `LocalDirectUploads` (the S3 stand-in)."""
+    if not isinstance(storage, LocalFileStorage):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not Found")
+    content_type = request.headers.get("content-type", "")
+    if not content_type.lower().startswith("multipart/form-data"):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "expected multipart/form-data")
+    body = await _read_capped(request, MAX_DIRECT_UPLOAD_BYTES + 64 * 1024)
+    fields, data = _form_fields_and_file(content_type, body)
+    try:
+        await LocalDirectUploads(storage, str(request.base_url)).receive(fields, data)
+    except InvalidUploadForm as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from None
+
+
+async def _read_capped(request: Request, limit: int) -> bytes:
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            raise HTTPException(status.HTTP_413_CONTENT_TOO_LARGE, "upload too large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _form_fields_and_file(content_type: str, body: bytes) -> tuple[dict[str, str], bytes]:
+    """The text fields and the `file` part of a multipart/form-data body (stdlib parser)."""
+    envelope = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode() + body
+    form = BytesParser(policy=policy.default).parsebytes(envelope)
+    fields: dict[str, str] = {}
+    data: bytes | None = None
+    for part in form.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        if not isinstance(name, str):
+            continue
+        payload = part.get_payload(decode=True)
+        if not isinstance(payload, bytes):
+            continue
+        if name == "file":
+            data = payload
+        else:
+            fields[name] = payload.decode()
+    if data is None:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "no file in the form")
+    return fields, data
 
 
 async def _read_eml(request: Request) -> bytes:

@@ -78,6 +78,32 @@ class UploadView(BaseModel):
     ext: str
 
 
+class DirectUploadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    filename: str = Field(min_length=1, max_length=255)
+    size_bytes: int = Field(gt=0)
+    content_type: str = Field(default="application/octet-stream", min_length=1, max_length=120)
+
+
+class DirectUploadView(BaseModel):
+    """Where to send the file: POST `url` as multipart/form-data with every
+    entry of `fields`, then the file last as `file`. Then call `complete`."""
+
+    upload_id: UUID
+    url: str
+    fields: dict[str, str]
+    expires_at: datetime
+    max_bytes: int
+
+
+class CompleteUploadRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # The same filename sent to POST /v1/onboarding/uploads/direct.
+    filename: str = Field(min_length=1, max_length=255)
+
+
 class CreateTemplateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -85,5 +111,5 @@ class CreateTemplateRequest(BaseModel):
     # source=search: the scan and the candidate ids the user kept ticked.
     scan_id: UUID | None = None
     candidate_ids: list[str] = Field(default_factory=list[str], max_length=10)
-    # source=upload: ids from POST /v1/onboarding/uploads.
+    # source=upload: ids from POST /v1/onboarding/uploads (or a completed direct upload).
     upload_ids: list[UUID] = Field(default_factory=list[UUID], max_length=10)

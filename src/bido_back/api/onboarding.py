@@ -8,6 +8,10 @@ The mailbox itself is connected through `/v1/mailbox`. Here:
   progress and the candidates.
 * `POST /v1/onboarding/uploads?filename=<name>`: one file per request, the raw
   bytes as the body (xlsx, xls, csv, pdf, docx; 10 MB).
+* `POST /v1/onboarding/uploads/direct`: the same files up to 100 MB, sent by
+  the browser straight to storage: this answers a form (`url` + `fields`) to
+  POST the file to, then `POST /v1/onboarding/uploads/{id}/complete` records it
+  and answers the same upload as above.
 * `POST /v1/onboarding/templates`: build a template from picked candidates
   (`search`), uploads (`upload`), or take Bido's standard one (`none`, ready at
   once); poll `GET /templates/{id}` until `ready` or `failed`.
@@ -22,12 +26,21 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, s
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bido_back.api.deps import get_db, get_job_queue, get_principal, get_storage
+from bido_back.api.deps import (
+    get_db,
+    get_direct_uploads,
+    get_job_queue,
+    get_principal,
+    get_storage,
+)
 from bido_back.api.rfqs import error_responses
 from bido_back.auth import Principal
 from bido_back.onboarding import service
 from bido_back.onboarding.schemas import (
+    CompleteUploadRequest,
     CreateTemplateRequest,
+    DirectUploadRequest,
+    DirectUploadView,
     OnboardingState,
     Provider,
     ScanView,
@@ -35,6 +48,7 @@ from bido_back.onboarding.schemas import (
     UploadView,
 )
 from bido_back.storage import BlobStorage
+from bido_back.storage.direct import DirectUploads
 from bido_back.worker.jobs import JobQueue
 
 Db = Annotated[async_sessionmaker[AsyncSession], Depends(get_db)]
@@ -155,6 +169,68 @@ def onboarding_router() -> APIRouter:
                 filename=filename,
                 content_type=content_type.split(";", 1)[0].strip()[:120],
                 data=data,
+            )
+        except service.OnboardingError as exc:
+            raise onboarding_http_error(exc) from None
+
+    @router.post(
+        "/uploads/direct",
+        status_code=status.HTTP_201_CREATED,
+        responses=error_responses(
+            status.HTTP_413_CONTENT_TOO_LARGE,
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        ),
+    )
+    async def start_direct_upload(  # pyright: ignore[reportUnusedFunction]
+        body: DirectUploadRequest,
+        principal: CurrentPrincipal,
+        direct: Annotated[DirectUploads, Depends(get_direct_uploads)],
+    ) -> DirectUploadView:
+        """A form to upload one file straight to storage (up to 100 MB).
+
+        POST `url` as multipart/form-data: every entry of `fields`, then the
+        file last as `file`. The form expires at `expires_at` and accepts at
+        most `max_bytes` (the declared `size_bytes`). Then call
+        `POST /v1/onboarding/uploads/{upload_id}/complete`.
+        """
+        try:
+            return await service.start_direct_upload(
+                direct,
+                principal,
+                filename=body.filename,
+                content_type=body.content_type.split(";", 1)[0].strip()
+                or "application/octet-stream",
+                size_bytes=body.size_bytes,
+            )
+        except service.OnboardingError as exc:
+            raise onboarding_http_error(exc) from None
+
+    @router.post(
+        "/uploads/{upload_id}/complete",
+        status_code=status.HTTP_201_CREATED,
+        responses=error_responses(
+            status.HTTP_404_NOT_FOUND,
+            status.HTTP_413_CONTENT_TOO_LARGE,
+            status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        ),
+    )
+    async def complete_direct_upload(  # pyright: ignore[reportUnusedFunction]
+        upload_id: UUID,
+        body: CompleteUploadRequest,
+        principal: CurrentPrincipal,
+        db: Db,
+        direct: Annotated[DirectUploads, Depends(get_direct_uploads)],
+    ) -> UploadView:
+        """Record a direct upload once the file is in storage (404 if it is not).
+
+        Calling it again for the same upload answers the same upload.
+        """
+        try:
+            return await service.complete_direct_upload(
+                db, direct, principal, upload_id, filename=body.filename
             )
         except service.OnboardingError as exc:
             raise onboarding_http_error(exc) from None

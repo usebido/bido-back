@@ -41,6 +41,9 @@ from bido_back.rfqs.agents import RfqAgents, default_rfq_agents
 from bido_back.rfqs.mailbox import MailboxSenderFactory, mailbox_senders_for
 from bido_back.settings import Settings
 from bido_back.storage import BlobStorage, build_storage
+from bido_back.storage.direct import DirectUploads, LocalDirectUploads
+from bido_back.storage.local import LocalFileStorage
+from bido_back.storage.s3 import S3Storage
 from bido_back.worker.jobs import JobQueue, SqsJobQueue
 
 DEV_USER_HEADER = "X-Dev-User"
@@ -129,6 +132,20 @@ def get_optional_job_queue(request: Request) -> JobQueue | None:
 
 def get_storage(request: Request) -> BlobStorage:
     return _resources(request).storage()
+
+
+def get_direct_uploads(request: Request) -> DirectUploads:
+    """Signs direct-upload forms: S3 in AWS, `POST /dev/uploads` locally.
+
+    503 when neither applies (local storage outside `ENVIRONMENT=local`).
+    """
+    resources = _resources(request)
+    storage = resources.storage()
+    if isinstance(storage, S3Storage):
+        return storage
+    if isinstance(storage, LocalFileStorage) and resources.settings.environment == "local":
+        return LocalDirectUploads(storage, str(request.base_url))
+    raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "direct uploads need S3 storage")
 
 
 def get_rfq_agents() -> RfqAgents:

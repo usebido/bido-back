@@ -87,6 +87,12 @@ class FakeS3:
 
         return {"Body": Body()}
 
+    def head_object(self, **kwargs: object) -> dict[str, object]:
+        raise NoSuchKeyError
+
+    def generate_presigned_post(self, **kwargs: object) -> dict[str, object]:
+        raise NotImplementedError
+
 
 async def test_s3_storage_uses_sse_kms_and_maps_missing_keys() -> None:
     s3 = FakeS3()

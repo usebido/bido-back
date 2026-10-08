@@ -2,8 +2,10 @@
 
 import asyncio
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Protocol, cast
 
+from bido_back.storage.direct import PresignedPost, StoredObject
 from bido_back.storage.keys import BlobNotFound, validate_key
 
 
@@ -16,6 +18,8 @@ class _S3Api(Protocol):
 
     def put_object(self, **kwargs: object) -> object: ...
     def get_object(self, **kwargs: object) -> Mapping[str, object]: ...
+    def head_object(self, **kwargs: object) -> Mapping[str, object]: ...
+    def generate_presigned_post(self, **kwargs: object) -> Mapping[str, object]: ...
 
 
 class S3Storage:
@@ -69,6 +73,53 @@ class S3Storage:
             raise
         return cast(_Body, response["Body"]).read()
 
+    async def presign_post(
+        self, key: str, *, content_type: str, max_bytes: int, expires_in: timedelta
+    ) -> PresignedPost:
+        """A presigned POST for `key`: this content type, 1 to `max_bytes` bytes.
+
+        Signing is local (no request to S3). The upload is made with the
+        signer's credentials, so the task role's PutObject and KMS grants are
+        what allow it; the bucket needs CORS for the frontend's origin.
+        """
+        validate_key(key)
+        fields: dict[str, str] = {
+            "Content-Type": content_type,
+            "x-amz-server-side-encryption": "aws:kms",
+        }
+        if self._kms_key_id:
+            fields["x-amz-server-side-encryption-aws-kms-key-id"] = self._kms_key_id
+        conditions: list[object] = [{name: value} for name, value in fields.items()]
+        conditions.append(["content-length-range", 1, max_bytes])
+        expires_at = datetime.now(UTC) + expires_in
+        signed = self._s3.generate_presigned_post(
+            Bucket=self._bucket,
+            Key=key,
+            Fields=fields,
+            Conditions=conditions,
+            ExpiresIn=int(expires_in.total_seconds()),
+        )
+        form = cast(Mapping[str, str], signed["fields"])
+        return PresignedPost(url=str(signed["url"]), fields=dict(form), expires_at=expires_at)
+
+    async def stat(self, key: str) -> StoredObject | None:
+        validate_key(key)
+        return await asyncio.to_thread(self._stat_sync, key)
+
+    def _stat_sync(self, key: str) -> StoredObject | None:
+        try:
+            response = self._s3.head_object(Bucket=self._bucket, Key=key)
+        except Exception as exc:
+            if _is_missing(exc):
+                return None
+            raise
+        size = response.get("ContentLength")
+        content_type = response.get("ContentType")
+        return StoredObject(
+            size_bytes=size if isinstance(size, int) else 0,
+            content_type=content_type if isinstance(content_type, str) else None,
+        )
+
 
 def _is_missing(exc: Exception) -> bool:
     response: object = getattr(exc, "response", None)
@@ -83,8 +134,17 @@ def _is_missing(exc: Exception) -> bool:
 
 def _boto3_s3(region: str, endpoint_url: str | None) -> _S3Api:
     import boto3  # pyright: ignore[reportMissingTypeStubs]
+    from botocore.config import Config  # pyright: ignore[reportMissingTypeStubs]
 
+    # The regional endpoint, virtual-hosted: presigned POST URLs then point at
+    # `<bucket>.s3.<region>.amazonaws.com`, not the global endpoint, which can
+    # answer a browser's upload with a redirect.
     return cast(
         _S3Api,
-        boto3.client("s3", region_name=region, endpoint_url=endpoint_url),  # pyright: ignore[reportUnknownMemberType]
+        boto3.client(  # pyright: ignore[reportUnknownMemberType]
+            "s3",
+            region_name=region,
+            endpoint_url=endpoint_url or f"https://s3.{region}.amazonaws.com",
+            config=Config(s3={"addressing_style": "virtual"}),
+        ),
     )
