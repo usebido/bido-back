@@ -40,7 +40,14 @@ from bido_back.storage.links import (
 )
 from bido_back.storage.local import LocalFileStorage
 from bido_back.storage.s3 import S3Storage
-from bido_back.uploads.files import PREVIEW_COLUMNS, PREVIEW_ROWS, read_preview
+from bido_back.uploads import files
+from bido_back.uploads.files import (
+    PREVIEW_COLUMNS,
+    PREVIEW_ROWS,
+    SheetNotFound,
+    read_page,
+    read_preview,
+)
 
 from .conftest import FakeStorage, Onboarding
 
@@ -197,17 +204,62 @@ async def test_s3_link_overrides_type_and_disposition() -> None:
 # --- Spreadsheet previews --------------------------------------------------------------------
 
 
-def test_preview_is_bounded_and_marks_what_it_cut() -> None:
-    wide = [[f"r{r}c{c}" for c in range(40)] for r in range(60)]
+def test_preview_shows_every_column_and_pages_the_rows() -> None:
+    wide = [[f"r{r}c{c}" for c in range(46)] for r in range(450)]
     wide[0][0] = "x" * 500
-    sheets = read_preview(_xlsx(wide), "xlsx", "big.xlsx")
-    (sheet,) = sheets
-    assert sheet.total_rows == 60 and sheet.total_columns == 40
-    assert len(sheet.rows) == PREVIEW_ROWS
+    data = _xlsx(wide)
+    (first,) = read_preview(data, "xlsx", "big.xlsx")
+    assert first.total_rows == 450 and first.total_columns == 46
+    assert len(first.rows) == PREVIEW_ROWS
+    assert all(len(row) == 46 for row in first.rows)  # every column, not a window
+    assert first.rows[0][0].endswith("…") and len(first.rows[0][0]) == 200
+    assert first.rows[1][45] == "r1c45"
+    assert (first.offset, first.has_more, first.truncated_columns) == (0, True, False)
+    assert first.truncated
+
+    (middle,) = read_page(data, "xlsx", "big.xlsx", "Sheet1", 200, 200)
+    assert middle.offset == 200 and middle.rows[0][0] == "r200c0" and middle.has_more
+    (last,) = read_page(data, "xlsx", "big.xlsx", "Sheet1", 400, 200)
+    assert len(last.rows) == 50 and last.rows[-1][0] == "r449c0" and not last.has_more
+    (past,) = read_page(data, "xlsx", "big.xlsx", "Sheet1", 1000, 200)
+    assert past.rows == [] and not past.has_more and past.total_rows == 450
+
+
+def test_preview_caps_the_columns_and_says_so() -> None:
+    data = _xlsx([[f"c{c}" for c in range(PREVIEW_COLUMNS + 10)], ["a"]])
+    (sheet,) = read_preview(data, "xlsx", "wide.xlsx")
+    assert sheet.total_columns == PREVIEW_COLUMNS + 10
     assert all(len(row) == PREVIEW_COLUMNS for row in sheet.rows)
-    assert sheet.rows[0][0].endswith("…") and len(sheet.rows[0][0]) == 200
-    assert sheet.rows[1][1] == "r1c1"
-    assert sheet.truncated
+    assert sheet.rows[0][-1] == f"c{PREVIEW_COLUMNS - 1}" and sheet.rows[1][0] == "a"
+    assert sheet.truncated_columns and sheet.truncated
+
+
+def test_preview_pages_every_sheet_or_one_and_refuses_an_unknown_sheet() -> None:
+    from openpyxl import Workbook  # pyright: ignore[reportMissingTypeStubs]
+
+    workbook = Workbook()
+    first = workbook.active
+    assert first is not None
+    first.title = "Estoque"
+    first.append(["Material", "Qtd"])  # pyright: ignore[reportUnknownMemberType]
+    second = workbook.create_sheet("Fornecedores")
+    for n in range(5):
+        second.append([f"S{n}"])  # pyright: ignore[reportUnknownMemberType]
+    out = io.BytesIO()
+    workbook.save(out)
+    data = out.getvalue()
+    assert [s.name for s in read_preview(data, "xlsx", "w.xlsx")] == ["Estoque", "Fornecedores"]
+    (page,) = read_page(data, "xlsx", "w.xlsx", "Fornecedores", 3, 10)
+    assert page.rows == [["S3"], ["S4"]] and page.total_rows == 5 and not page.has_more
+    with pytest.raises(SheetNotFound):
+        read_page(data, "xlsx", "w.xlsx", "Compras", 0, 10)
+
+
+def test_csv_preview_pages_and_skips_empty_lines() -> None:
+    data = ("h\n\n" + "".join(f"v{n}\n" for n in range(300))).encode()
+    (sheet,) = read_page(data, "csv", "a.csv", "a.csv", 250, 100)
+    assert sheet.total_rows == 301 and sheet.offset == 250 and len(sheet.rows) == 51
+    assert sheet.rows[0] == ["v249"] and not sheet.has_more
 
 
 def test_preview_never_evaluates_formulas_and_formats_values() -> None:
@@ -223,12 +275,14 @@ def test_preview_never_evaluates_formulas_and_formats_values() -> None:
     (sheet,) = read_preview(data, "xlsx", "f.xlsx")
     assert sheet.name == "Compras"
     # A formula never saved by Excel has no cached value: it shows nothing, never its text.
+    # The empty row the file has shows as an empty row, so offsets match the file.
     assert sheet.rows == [
         ["Material", "Qtd", "Total", "Data", "Ativo"],
         ["100000101", "4500", "", "2026-10-31", "TRUE"],
+        ["", "", "", "", ""],
         ["100000102", "12.5", "", "", ""],
     ]
-    assert sheet.total_rows == 3 and not sheet.truncated
+    assert sheet.total_rows == 4 and not sheet.truncated
 
 
 def test_preview_reads_semicolon_csv_in_any_common_encoding() -> None:
@@ -391,6 +445,7 @@ async def test_preview_by_file_type(app_engine: AsyncEngine, uploads_api: Upload
     )
     table = (await http.get(f"/v1/uploads/{sheet}/preview")).json()
     assert table["kind"] == "table" and table["url"] is None
+    assert table["sheet_names"] == ["Sheet1"]
     assert table["sheets"] == [
         {
             "name": "Sheet1",
@@ -398,6 +453,9 @@ async def test_preview_by_file_type(app_engine: AsyncEngine, uploads_api: Upload
             "total_rows": 2,
             "total_columns": 2,
             "truncated": False,
+            "offset": 0,
+            "has_more": False,
+            "truncated_columns": False,
         }
     ]
 
@@ -419,3 +477,35 @@ async def test_preview_by_file_type(app_engine: AsyncEngine, uploads_api: Upload
     broken = await _upload(app_engine, uploads_api, "broken.xlsx", b"not a zip")
     unreadable = (await http.get(f"/v1/uploads/{broken}/preview")).json()
     assert (unreadable["kind"], unreadable["reason"]) == ("none", "unreadable")
+
+
+@pytest.mark.db
+async def test_preview_pages_one_sheet_through_the_api(
+    app_engine: AsyncEngine, uploads_api: UploadsApi
+) -> None:
+    files.clear_caches()
+    rows = [["Material", *[f"c{c}" for c in range(45)]]] + [
+        [f"M{n}", *range(45)] for n in range(450)
+    ]
+    upload = await _upload(app_engine, uploads_api, "historico.xlsx", _xlsx(rows, title="Compras"))
+    http = uploads_api.http
+    page = (
+        await http.get(f"/v1/uploads/{upload}/preview?sheet=Compras&offset=400&limit=100")
+    ).json()
+    assert page["sheet_names"] == ["Compras"]
+    (sheet,) = page["sheets"]
+    assert sheet["offset"] == 400 and sheet["total_rows"] == 451 and sheet["total_columns"] == 46
+    assert len(sheet["rows"]) == 51 and sheet["rows"][0][0] == "M399" and not sheet["has_more"]
+    assert all(len(row) == 46 for row in sheet["rows"])
+    # The same page again comes from what this process kept.
+    again = (
+        await http.get(f"/v1/uploads/{upload}/preview?sheet=Compras&offset=400&limit=100")
+    ).json()
+    assert again == page
+
+    missing = await http.get(f"/v1/uploads/{upload}/preview?sheet=Estoque")
+    assert missing.status_code == 404 and missing.json()["detail"] == "sheet not found"
+    for bad in ("limit=0", "limit=1001", "offset=-1"):
+        response = await http.get(f"/v1/uploads/{upload}/preview?{bad}")
+        assert response.status_code == 422, bad
+    files.clear_caches()

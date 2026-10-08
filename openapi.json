@@ -8948,9 +8948,21 @@
       },
       "SheetPreview": {
         "properties": {
+          "has_more": {
+            "default": false,
+            "description": "Rows follow this page",
+            "title": "Has More",
+            "type": "boolean"
+          },
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "offset": {
+            "default": 0,
+            "description": "Index of the first row of this page",
+            "title": "Offset",
+            "type": "integer"
           },
           "rows": {
             "items": {
@@ -8968,13 +8980,19 @@
             "type": "integer"
           },
           "total_rows": {
-            "description": "Rows with at least one value, in the whole sheet",
+            "description": "Rows in the whole sheet: every row an .xlsx has (an empty one shows as an empty row), or a csv's lines that have a value",
             "title": "Total Rows",
             "type": "integer"
           },
           "truncated": {
-            "description": "Rows, columns or cells were cut for the preview",
+            "description": "Rows outside this page, columns past the cap, or cut cells",
             "title": "Truncated",
+            "type": "boolean"
+          },
+          "truncated_columns": {
+            "default": false,
+            "description": "The sheet is wider than the columns returned",
+            "title": "Truncated Columns",
             "type": "boolean"
           }
         },
@@ -10507,7 +10525,7 @@
         "type": "object"
       },
       "UploadPreview": {
-        "description": "What to show for an uploaded file.\n\n* `table`: spreadsheets (xlsx, csv) as `sheets`, values only (formulas are\n  never evaluated: a formula shows its last saved result, or nothing).\n* `inline`: PDF and images, as a short-lived `url` served inline with the\n  file's exact type, for an iframe or an img.\n* `none`: no preview (`reason`); the file can still be downloaded.",
+        "description": "What to show for an uploaded file.\n\n* `table`: spreadsheets (xlsx, csv) as `sheets`, values only (formulas are\n  never evaluated: a formula shows its last saved result, or nothing). One\n  page of rows each: the first rows of every sheet, or, with `sheet`, the\n  `limit` rows of that sheet from `offset`.\n* `inline`: PDF and images, as a short-lived `url` served inline with the\n  file's exact type, for an iframe or an img.\n* `none`: no preview (`reason`); the file can still be downloaded.",
         "properties": {
           "content_type": {
             "title": "Content Type",
@@ -10558,6 +10576,14 @@
               }
             ],
             "title": "Reason"
+          },
+          "sheet_names": {
+            "description": "Every sheet of a table, in order; `sheets` may hold only the requested one",
+            "items": {
+              "type": "string"
+            },
+            "title": "Sheet Names",
+            "type": "array"
           },
           "sheets": {
             "items": {
@@ -20106,6 +20132,53 @@
               "format": "uuid",
               "title": "Upload Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Page this sheet only",
+            "in": "query",
+            "name": "sheet",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Page this sheet only",
+              "title": "Sheet"
+            }
+          },
+          {
+            "description": "First row of the page",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "First row of the page",
+              "maximum": 1000000,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Rows in the page",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "description": "Rows in the page",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
             }
           },
           {
