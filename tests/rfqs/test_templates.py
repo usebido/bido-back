@@ -252,7 +252,9 @@ async def test_preview_and_template_routes_over_http(
     made = await http.post(f"/v1/rfq-templates/{variant.json()['id']}/default")
     assert made.status_code == 200 and made.json()["is_default"] is True
 
-    rfq = (await http.post("/v1/rfqs", json={"text": "Need MLCC and connectors"})).json()
+    rfq = (
+        await http.post("/v1/rfqs", json={"text": "Need MLCC and connectors", "currency": "EUR"})
+    ).json()
     supplier = await make_supplier(app_engine, buyer(rfq_rows), "Rhein")
     invite = await http.post(
         f"/v1/rfqs/{rfq['id']}/invites",

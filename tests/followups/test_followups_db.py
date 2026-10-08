@@ -100,7 +100,7 @@ class World:
     async def setup(self) -> "World":
         principal = buyer(self.people)
         rfq = await rfq_service.create_rfq_from_text(
-            self.engine, principal, "Need MLCC and connectors", FakeIntake()
+            self.engine, principal, "Need MLCC and connectors", FakeIntake(), currency="EUR"
         )
         supplier = await suppliers.create_supplier(
             self.engine,

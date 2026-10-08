@@ -39,6 +39,17 @@ _NS: Final = "{http://www.ecb.int/vocabulary/2002-08-01/eurofxref}"
 _CURRENCY: Final = re.compile(r"^[A-Z]{3}$")
 _DTD: Final = re.compile(rb"<!\s*(DOCTYPE|ENTITY)", re.IGNORECASE)
 
+# The ISO 4217 codes Bido can convert: EUR and the currencies the ECB publishes a
+# daily reference rate for. An RFQ's base currency must be one of them, or the
+# comparison could not put quotes in other currencies next to each other.
+REFERENCE_CURRENCIES: Final = frozenset(
+    {
+        "EUR", "USD", "JPY", "CZK", "DKK", "GBP", "HUF", "PLN", "RON", "SEK", "CHF", "ISK",
+        "NOK", "TRY", "AUD", "BRL", "CAD", "CNY", "HKD", "IDR", "ILS", "INR", "KRW", "MXN",
+        "MYR", "NZD", "PHP", "SGD", "THB", "ZAR",
+    }
+)  # fmt: skip
+
 
 class FxError(Exception):
     """The ECB document could not be fetched or is not what we expect."""

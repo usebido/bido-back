@@ -61,9 +61,16 @@ from bido_back.purchasing.sources.mapping import Mapper
 from bido_back.purchasing.workbook import SheetMapper
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
+from bido_back.rfqs.currency import CurrencyChange, known_currency
 from bido_back.rfqs.errors import Duplicate, MailboxNotConfigured, MailboxNotConnected, RfqError
 from bido_back.rfqs.mailbox import MailboxSenderFactory
-from bido_back.rfqs.schemas import AddLineRequest, RfqDetail, UpdateLineRequest, UpdateRfqRequest
+from bido_back.rfqs.schemas import (
+    AddLineRequest,
+    CurrencySource,
+    RfqDetail,
+    UpdateLineRequest,
+    UpdateRfqRequest,
+)
 from bido_back.storage import BlobStorage
 from bido_back.templates import service as template_service
 from bido_back.templates.schemas import TemplateEdit
@@ -438,6 +445,19 @@ class UpdateTemplateIn(BaseModel):
 
 # --- create_rfq / invite_suppliers / prepare_send ------------------------------------------
 
+_CURRENCY_ARG = (
+    "ISO 4217 code (BRL, EUR, USD...), only when the buyer said which currency the RFQ is in "
+    "('em reais' = BRL). Never guess it: left empty, Bido takes it from the buyer's data"
+)
+_CURRENCY_RESULT = (
+    " The result has the RFQ's `currency` and `currency_source`: stated (the buyer said it), "
+    "analysis (the parts were bought in it) or purchase_history (most of the company's "
+    "purchases are in it). Always tell the buyer the currency and why, e.g. 'em BRL, a moeda "
+    "das suas compras'; set_rfq_terms(currency=...) changes it while the RFQ is a draft. If "
+    "the tool says the currency is unknown, ask the buyer which currency and call it again "
+    "with `currency`."
+)
+
 
 class CreateRfqIn(BaseModel):
     text: str = Field(
@@ -465,6 +485,7 @@ class CreateRfqIn(BaseModel):
             "the ones attached earlier in this conversation)"
         ),
     )
+    currency: str | None = Field(default=None, description=_CURRENCY_ARG)
 
 
 class CreateRfqOut(BaseModel):
@@ -472,6 +493,9 @@ class CreateRfqOut(BaseModel):
     ref: str
     title: str
     status: str
+    # The RFQ's currency (offers are compared in it) and where it came from.
+    currency: str
+    currency_source: CurrencySource | None
     lines: list[LineItem]
     questions: list[str]
 
@@ -550,6 +574,13 @@ _TERMS_FIELDS = Literal[
 
 class SetRfqTermsIn(BaseModel):
     rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
+    currency: str | None = Field(
+        default=None,
+        description=(
+            "The RFQ's currency, ISO 4217 (BRL, EUR, USD...), when the buyer asks to change it; "
+            "negotiation limits already set are converted at the ECB reference rate"
+        ),
+    )
     incoterm: str | None = Field(
         default=None, description="For every line. The rule only: DAP, FCA, EXW..."
     )
@@ -583,10 +614,13 @@ class EditedRfqOut(BaseModel):
     title: str
     status: str
     response_due: date | None
+    currency: str
     # What is stored now: report these, not what was asked for.
     payment_terms: str | None
     quote_validity_days: int | None
     lines: list[LineItem]
+    # What a currency change did to the negotiation limits; None when nothing to tell.
+    note: str | None = None
 
 
 def _request[M: BaseModel](model: type[M], fields: dict[str, object]) -> M:
@@ -598,13 +632,26 @@ def _request[M: BaseModel](model: type[M], fields: dict[str, object]) -> M:
         raise ToolError(f"invalid value for: {where}") from None
 
 
-def _edited(detail: RfqDetail) -> EditedRfqOut:
+def _currency_note(change: CurrencyChange | None) -> str | None:
+    if change is None or not change.converted_lines:
+        return None
+    positions = ", ".join(str(p) for p in change.converted_lines)
+    when = f" of {change.rate_date.isoformat()}" if change.rate_date else ""
+    return (
+        f"the negotiation limits of line(s) {positions} were converted from {change.old} to "
+        f"{change.new} at the ECB reference rate{when}; tell the buyer"
+    )
+
+
+def _edited(detail: RfqDetail, change: CurrencyChange | None = None) -> EditedRfqOut:
     return EditedRfqOut(
         id=detail.id,
         ref=detail.ref,
         title=detail.title,
         status=detail.status,
         response_due=detail.response_due,
+        currency=detail.base_currency,
+        note=_currency_note(change),
         payment_terms=detail.payment_terms,
         quote_validity_days=detail.quote_validity_days,
         lines=[
@@ -840,6 +887,7 @@ class PurchaseAnalysisOut(BaseModel):
 
 class RfqFromAnalysisIn(BaseModel):
     analysis_id: UUID = Field(description="The analysis_id returned by run_purchase_analysis")
+    currency: str | None = Field(default=None, description=_CURRENCY_ARG)
 
 
 class RfqFromAnalysisOut(BaseModel):
@@ -849,6 +897,7 @@ class RfqFromAnalysisOut(BaseModel):
     status: str
     # The RFQ's currency: offers are compared, and limits set, in it.
     currency: str
+    currency_source: CurrencySource | None
     lines: list[LineItem]
     invited_suppliers: list[str]
     skipped_suppliers: list[str]
@@ -1259,7 +1308,12 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         own_words = await deps.buyer_messages() if deps.buyer_messages is not None else []
         try:
             created = await rfq_service.create_rfq_from_text(
-                db, principal, text, deps.agents.intake, buyer_messages=own_words
+                db,
+                principal,
+                text,
+                deps.agents.intake,
+                buyer_messages=own_words,
+                currency=args.currency,
             )
         except RfqError as exc:
             raise _service_error(exc) from None
@@ -1274,6 +1328,8 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             ref=created.ref,
             title=created.title,
             status=created.status,
+            currency=created.base_currency,
+            currency_source=created.currency_source,
             lines=[
                 LineItem(
                     position=line.position,
@@ -1345,11 +1401,19 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         changes.update({field: None for field in args.clear})
         if not changes:
             raise ToolError("nothing to change: pass the terms to set or to clear")
+        if args.currency is not None:
+            try:
+                changes["currency"] = known_currency(args.currency)
+            except RfqError as exc:
+                raise _service_error(exc) from None
         patch = _request(UpdateRfqRequest, changes)
         try:
-            return _edited(await rfq_service.update_rfq(db, _principal(ctx), rfq.id, patch))
+            edited = await rfq_service.edit_rfq(
+                db, _principal(ctx), rfq.id, patch, today=deps.today()
+            )
         except RfqError as exc:
             raise _service_error(exc) from None
+        return _edited(edited.detail, edited.currency_change)
 
     async def invite_suppliers(ctx: ToolContext, args: InviteSuppliersIn) -> InviteSuppliersOut:
         principal = _principal(ctx)
@@ -1475,8 +1539,13 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         principal = _principal(ctx)
         analysis_id = args.analysis_id
         try:
+            currency = known_currency(args.currency) if args.currency else None
+        except RfqError as exc:
+            raise _service_error(exc) from None
+        request = RfqFromAnalysisRequest(currency=currency)
+        try:
             created = await purchasing_service.create_rfq_from_analysis(
-                db, principal, analysis_id, RfqFromAnalysisRequest()
+                db, principal, analysis_id, request
             )
         except purchasing_service.NotFound:
             # Models sometimes copy an id wrongly: fall back to this buyer's most
@@ -1486,7 +1555,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 raise ToolError(f"analysis {analysis_id} not found") from None
             try:
                 created = await purchasing_service.create_rfq_from_analysis(
-                    db, principal, latest, RfqFromAnalysisRequest()
+                    db, principal, latest, request
                 )
             except purchasing_service.PurchasingError as exc:
                 raise ToolError(str(exc)) from None
@@ -1499,6 +1568,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             title=rfq.title,
             status=rfq.status,
             currency=rfq.base_currency,
+            currency_source=created.currency_source,
             lines=[
                 LineItem(
                     position=line.position,
@@ -1784,7 +1854,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             "create_rfq_from_analysis",
             "Create a DRAFT RFQ from a purchase analysis: the parts to buy with their "
             "quantities and need-by dates, and the suggested suppliers as DRAFT invites. "
-            "Nothing is sent.",
+            "Nothing is sent." + _CURRENCY_RESULT,
             RfqFromAnalysisIn,
             RfqFromAnalysisOut,
             "draft",
@@ -1794,7 +1864,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         Tool(
             "create_rfq",
             "Create a DRAFT RFQ from a description of what to buy (and the attached "
-            "files). Nothing is sent.",
+            "files). Nothing is sent." + _CURRENCY_RESULT,
             CreateRfqIn,
             CreateRfqOut,
             "draft",
@@ -1835,9 +1905,10 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         Tool(
             "set_rfq_terms",
             "Set a draft RFQ's terms for every line at once: Incoterm, delivery location, "
-            "need-by date; and the RFQ's response date, title, payment terms (the buyer's "
-            "words, e.g. '28 DDL') and minimum quote validity in days. The RFQ email states "
-            "the payment terms and validity to suppliers. Only the fields passed change; "
+            "need-by date; and the RFQ's response date, title, currency (any negotiation "
+            "limits are converted with it; tell the buyer the `note`), payment terms (the "
+            "buyer's words, e.g. '28 DDL') and minimum quote validity in days. The RFQ email "
+            "states the payment terms and validity to suppliers. Only the fields passed change; "
             "`clear` empties optional ones. The result is what is stored: report those "
             "values, and never claim a term the result does not show." + _DRAFT_ONLY,
             SetRfqTermsIn,

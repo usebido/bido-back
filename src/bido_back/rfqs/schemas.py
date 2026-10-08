@@ -10,10 +10,11 @@ from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, StringConstraints
 
 from bido_back.agents.catalog.contracts import LineCategory
 from bido_back.awards.views import AwardApprovalView, ThreadEmailApprovalView
+from bido_back.fx import REFERENCE_CURRENCIES
 from bido_back.outbound.domains import RecipientCheck
 
 # Deliberately strict and single-line: these end up in email headers.
@@ -40,6 +41,29 @@ PaymentTerms = Annotated[
 QuoteValidityDays = Annotated[int, Field(ge=1, le=365)]
 
 
+UNKNOWN_CURRENCY = "not a currency Bido can convert: use an ISO 4217 code such as BRL, EUR or USD"
+
+
+def _convertible(code: str) -> str:
+    normalized = code.strip().upper()
+    if normalized not in REFERENCE_CURRENCIES:
+        raise ValueError(UNKNOWN_CURRENCY)
+    return normalized
+
+
+CurrencyCode = Annotated[
+    str,
+    AfterValidator(_convertible),
+    Field(
+        description="ISO 4217 code: EUR or a currency with an ECB reference rate (BRL, USD...)",
+        examples=["BRL"],
+    ),
+]
+# Where an RFQ's currency came from (`bido_back.rfqs.currency`): the buyer said it, the
+# purchase analysis's lines were all bought in it, or most of the purchase history is.
+CurrencySource = Literal["stated", "analysis", "purchase_history"]
+
+
 # --- RFQs -------------------------------------------------------------------------
 
 
@@ -47,6 +71,14 @@ class CreateRfqRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     text: str = Field(min_length=1, max_length=50_000, description="The buyer's request")
+    currency: CurrencyCode | None = Field(
+        default=None,
+        description=(
+            "The RFQ's currency, when the buyer said it. Without it the currency comes from "
+            "the purchase history; when that does not tell, the request is refused (400) and "
+            "the buyer has to say which currency"
+        ),
+    )
 
 
 class RfqLineView(BaseModel):
@@ -136,6 +168,9 @@ class RfqDetail(RfqHeader):
 
 class RfqCreated(RfqDetail):
     questions: list[str] = Field(description="What the buyer should clarify before sending")
+    currency_source: CurrencySource | None = Field(
+        default=None, description="Where base_currency came from"
+    )
 
 
 class UpdateLineRequest(BaseModel):
@@ -187,6 +222,8 @@ class UpdateRfqRequest(BaseModel):
     incoterm: str | None = None
     delivery_location: str | None = None
     need_by: date | None = None
+    # The RFQ's base currency; its negotiation limits are converted along with it.
+    currency: CurrencyCode | None = None
 
 
 # --- Suppliers and contacts ---------------------------------------------------------
