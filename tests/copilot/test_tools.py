@@ -359,7 +359,7 @@ async def test_set_rfq_terms_stores_and_clears_payment_terms_and_quote_validity(
     principal = buyer_of(copilot_rows)
     tools = make_tools(app_engine)
     ctx = context_of(principal)
-    created = await tools.call(ctx, "create_rfq", text="MLCC and connectors")
+    created = await tools.call(ctx, "create_rfq", text="MLCC and connectors", currency="EUR")
     ref = created.ref
 
     termed = await tools.call(

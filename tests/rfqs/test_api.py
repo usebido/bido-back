@@ -220,7 +220,7 @@ async def test_rfq_detail_and_list_show_payment_terms_and_quote_validity(
     api: Api, app_engine: AsyncEngine
 ) -> None:
     http = api.http
-    created = (await http.post("/v1/rfqs", json={"text": "Need MLCC"})).json()
+    created = (await http.post("/v1/rfqs", json={"text": "Need MLCC", "currency": "EUR"})).json()
     assert (created["payment_terms"], created["quote_validity_days"]) == (None, None)
 
     await rfq_service.update_rfq(
