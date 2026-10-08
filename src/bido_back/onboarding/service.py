@@ -36,6 +36,7 @@ from bido_back.onboarding.jobs import SCAN_LIMIT
 from bido_back.onboarding.schemas import (
     CandidateView,
     CreateTemplateRequest,
+    DirectUploadView,
     MailboxSummary,
     OnboardingState,
     Provider,
@@ -48,6 +49,7 @@ from bido_back.onboarding.schemas import (
 )
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
 from bido_back.storage import BlobStorage
+from bido_back.storage.direct import DirectUploads
 from bido_back.worker.envelope import Envelope
 from bido_back.worker.job_types import TEMPLATE_BUILD, TEMPLATE_SCAN
 from bido_back.worker.jobs import JobQueue
@@ -58,6 +60,10 @@ type Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
 UPLOAD_EXTENSIONS: Final = frozenset({"xlsx", "xls", "csv", "pdf", "docx"})
 MAX_UPLOAD_BYTES: Final = 10 * 1024 * 1024
+# Direct uploads skip the api and the WAF, so they are not bound by a request
+# body limit. The readers downstream still load the whole file into memory.
+MAX_DIRECT_UPLOAD_BYTES: Final = 100 * 1024 * 1024
+DIRECT_UPLOAD_TTL: Final = timedelta(minutes=15)
 # A scan started this recently and still running is reused instead of starting another.
 _SCAN_REUSE: Final = timedelta(minutes=10)
 _FILENAME_JUNK = re.compile(r"[\x00-\x1f\x7f/\\]")
@@ -263,31 +269,137 @@ async def store_upload(
     data: bytes,
 ) -> UploadView:
     name = clean_filename(filename)
-    ext = upload_extension(name)
-    if ext not in UPLOAD_EXTENSIONS:
-        raise UnsupportedUpload("accepted files: xlsx, xls, csv, pdf, docx")
+    ext = _accepted_extension(name)
     if len(data) > MAX_UPLOAD_BYTES:
         raise UploadTooLarge("files are limited to 10 MB")
     if not data:
         raise InvalidRequest("the file is empty")
     upload_id = uuid4()
-    key = f"onboarding/{principal.tenant_id}/{upload_id}.{ext}"
+    key = _upload_key(principal, upload_id, ext)
     await storage.put(key, data, content_type)
+    return await _record_upload(
+        db,
+        principal,
+        upload_id=upload_id,
+        filename=name,
+        content_type=content_type,
+        size_bytes=len(data),
+        key=key,
+    )
+
+
+async def start_direct_upload(
+    direct: DirectUploads,
+    principal: Principal,
+    *,
+    filename: str,
+    content_type: str,
+    size_bytes: int,
+) -> DirectUploadView:
+    """Sign a form for the browser to upload one file straight to storage.
+
+    Nothing is recorded yet: the upload exists once `complete_direct_upload`
+    finds the stored object.
+    """
+    ext = _accepted_extension(clean_filename(filename))
+    if size_bytes > MAX_DIRECT_UPLOAD_BYTES:
+        raise UploadTooLarge("files are limited to 100 MB")
+    upload_id = uuid4()
+    form = await direct.presign_post(
+        _upload_key(principal, upload_id, ext),
+        content_type=content_type,
+        max_bytes=size_bytes,
+        expires_in=DIRECT_UPLOAD_TTL,
+    )
+    return DirectUploadView(
+        upload_id=upload_id,
+        url=form.url,
+        fields=form.fields,
+        expires_at=form.expires_at,
+        max_bytes=size_bytes,
+    )
+
+
+async def complete_direct_upload(
+    db: Db,
+    direct: DirectUploads,
+    principal: Principal,
+    upload_id: UUID,
+    *,
+    filename: str,
+) -> UploadView:
+    """Record a direct upload once its object is in storage. Repeating it is harmless."""
+    name = clean_filename(filename)
+    ext = _accepted_extension(name)
     async with tenant_session(db, principal.tenant_id) as session:
-        session.add(
-            TemplateUpload(
-                id=upload_id,
-                tenant_id=principal.tenant_id,
-                user_id=principal.user_id,
-                filename=name,
-                content_type=content_type,
-                size_bytes=len(data),
-                storage_key=key,
-            )
+        existing = await session.get(TemplateUpload, upload_id)
+        if existing is not None:
+            if existing.user_id != principal.user_id:
+                raise NotFound(f"upload {upload_id} not found")
+            return _upload_view(existing)
+    key = _upload_key(principal, upload_id, ext)
+    stored_object = await direct.stat(key)
+    if stored_object is None:
+        raise NotFound(f"upload {upload_id} not found")
+    if stored_object.size_bytes > MAX_DIRECT_UPLOAD_BYTES:
+        raise UploadTooLarge("files are limited to 100 MB")
+    if stored_object.size_bytes == 0:
+        raise InvalidRequest("the file is empty")
+    return await _record_upload(
+        db,
+        principal,
+        upload_id=upload_id,
+        filename=name,
+        content_type=stored_object.content_type or "application/octet-stream",
+        size_bytes=stored_object.size_bytes,
+        key=key,
+    )
+
+
+def _accepted_extension(name: str) -> str:
+    ext = upload_extension(name)
+    if ext not in UPLOAD_EXTENSIONS:
+        raise UnsupportedUpload("accepted files: xlsx, xls, csv, pdf, docx")
+    return ext
+
+
+def _upload_key(principal: Principal, upload_id: UUID, ext: str) -> str:
+    return f"onboarding/{principal.tenant_id}/{upload_id}.{ext}"
+
+
+async def _record_upload(
+    db: Db,
+    principal: Principal,
+    *,
+    upload_id: UUID,
+    filename: str,
+    content_type: str,
+    size_bytes: int,
+    key: str,
+) -> UploadView:
+    async with tenant_session(db, principal.tenant_id) as session:
+        row = TemplateUpload(
+            id=upload_id,
+            tenant_id=principal.tenant_id,
+            user_id=principal.user_id,
+            filename=filename,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            storage_key=key,
         )
+        session.add(row)
         await session.flush()
     logger.info("template upload stored tenant=%s upload=%s", principal.tenant_id, upload_id)
-    return UploadView(id=upload_id, filename=name, size_bytes=len(data), ext=ext)
+    return _upload_view(row)
+
+
+def _upload_view(row: TemplateUpload) -> UploadView:
+    return UploadView(
+        id=row.id,
+        filename=row.filename,
+        size_bytes=row.size_bytes,
+        ext=upload_extension(row.filename),
+    )
 
 
 # --- Templates ------------------------------------------------------------------------------
