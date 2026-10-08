@@ -62,21 +62,27 @@ async def create_supplier(
     db: Db, principal: Principal, request: CreateSupplierRequest
 ) -> SupplierView:
     async with tenant_session(db, principal.tenant_id) as session:
-        supplier = Supplier(
-            tenant_id=principal.tenant_id,
-            name=request.name,
-            type=request.type,
-            country=request.country,
-            language=request.language,
-            email_domain=request.email_domain,
-        )
-        session.add(supplier)
-        await session.flush()
-        contacts = [
-            await _add_contact(session, principal.tenant_id, supplier.id, data)
-            for data in request.contacts
-        ]
-        return _supplier_view(supplier, contacts)
+        return await create_supplier_in(session, principal.tenant_id, request)
+
+
+async def create_supplier_in(
+    session: AsyncSession, tenant_id: UUID, request: CreateSupplierRequest
+) -> SupplierView:
+    """`create_supplier` in the caller's tenant session, as part of its transaction."""
+    supplier = Supplier(
+        tenant_id=tenant_id,
+        name=request.name,
+        type=request.type,
+        country=request.country,
+        language=request.language,
+        email_domain=request.email_domain,
+    )
+    session.add(supplier)
+    await session.flush()
+    contacts = [
+        await _add_contact(session, tenant_id, supplier.id, data) for data in request.contacts
+    ]
+    return _supplier_view(supplier, contacts)
 
 
 async def add_contact(
@@ -85,7 +91,14 @@ async def add_contact(
     async with tenant_session(db, principal.tenant_id) as session:
         if await session.get(Supplier, supplier_id) is None:
             raise NotFound(f"supplier {supplier_id} not found")
-        return _contact_view(await _add_contact(session, principal.tenant_id, supplier_id, request))
+        return await add_contact_in(session, principal.tenant_id, supplier_id, request)
+
+
+async def add_contact_in(
+    session: AsyncSession, tenant_id: UUID, supplier_id: UUID, request: ContactIn
+) -> ContactView:
+    """`add_contact` in the caller's tenant session, for a supplier the caller found in it."""
+    return _contact_view(await _add_contact(session, tenant_id, supplier_id, request))
 
 
 async def list_suppliers(db: Db, principal: Principal) -> list[SupplierView]:
