@@ -98,6 +98,8 @@ class Outgoing:
     message_id: str
     thread_message_id: str
     attachments: tuple[OutboundAttachment, ...] = ()
+    # An earlier attempt claimed `message_id` and may have sent it.
+    possibly_sent: bool = False
 
 
 async def deliver(
@@ -135,6 +137,7 @@ async def deliver(
             subject=email.subject,
             text_body=email.body,
             message_id=email.message_id,
+            possibly_sent=email.possibly_sent,
             in_reply_to=email.thread_message_id,
             references=(email.thread_message_id,),
             attachments=email.attachments,

@@ -33,11 +33,10 @@ held (e.g. an RFQ invite goes back to `draft`).
 
 Approving does not execute anything. After the commit, an `approval.execute`
 job is enqueued (idempotency key `approval:<id>`); the worker runs the tool
-(`executor.py`). Until the transactional outbox exists, the enqueue happens
-after the commit: if it fails, the approval stays `approved` with no job, the
-error propagates (the caller sees a 5xx and it reaches Sentry), and the job
-must be re-enqueued (a sweeper over approved-but-unexecuted rows, or the
-outbox, closes this gap).
+(`executor.py`). The enqueue happens after the commit: if it fails, the
+approval stays `approved` with no job and the error propagates (the caller
+sees a 5xx and it reaches Sentry). The scheduled follow-ups sweep re-enqueues
+approvals left like that (`reconcile.py`).
 """
 
 import logging

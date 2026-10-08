@@ -4,7 +4,9 @@ A connected mailbox is used in three ways. Two are confined to RFQ threads
 Bido started:
 
 * sending (`MailboxSender.send`): the first RFQ email starts a new thread in
-  the buyer's mailbox, a follow-up replies inside the stored thread;
+  the buyer's mailbox, a follow-up replies inside the stored thread. A retry of
+  a send that may already have gone out (`OutboundEmail.possibly_sent`) first
+  looks the Message-ID up in the Sent folder (`find_sent`);
 * reading (`fetch_thread_new_messages`): the messages of ONE given thread that
   were not handled yet.
 
@@ -25,6 +27,7 @@ addresses or message content.
 
 import base64
 import json
+import logging
 import time
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Mapping, Sequence
@@ -37,6 +40,8 @@ from pydantic import JsonValue
 
 from bido_back.email.mime import build_mime
 from bido_back.email.types import OutboundEmail, SentEmail
+
+logger = logging.getLogger(__name__)
 
 Provider = Literal["google", "microsoft"]
 PROVIDERS: tuple[Provider, ...] = ("google", "microsoft")
@@ -306,8 +311,18 @@ class MailboxSender(ABC):
         as_buyer = replace(email, from_address=self._address)
         msg = build_mime(as_buyer)
         raw = msg.as_bytes()
-        thread_id = await self._threads.thread_for(email)
-        sent = await self.send_raw(raw, thread_id=thread_id)
+        sent: ProviderSent | None = None
+        if email.possibly_sent and email.message_id:
+            # A retry after a crash between the provider send and our commit:
+            # the message may already be in the buyer's Sent folder. Sending it
+            # again would give the supplier a second copy. A lookup failure
+            # propagates, so the job retries later instead of risking a duplicate.
+            sent = await self.find_sent(email.message_id)
+            if sent is not None:
+                logger.info("%s: message already sent, not sending it again", self.provider)
+        if sent is None:
+            thread_id = await self._threads.thread_for(email)
+            sent = await self.send_raw(raw, thread_id=thread_id)
         result = MailboxSentEmail(
             message_id=sent.internet_message_id or str(msg["Message-ID"]),
             raw=raw,
@@ -321,6 +336,14 @@ class MailboxSender(ABC):
     @abstractmethod
     async def send_raw(self, raw: bytes, *, thread_id: str | None) -> ProviderSent:
         """Send RFC 5322 bytes, in `thread_id` when given."""
+
+    @abstractmethod
+    async def find_sent(self, message_id: str) -> ProviderSent | None:
+        """The sent message whose Message-ID header is `message_id`, or None.
+
+        Looks only in the Sent folder, by that exact header. Used before
+        resending a message an earlier attempt may have sent.
+        """
 
     @abstractmethod
     async def fetch_thread_new_messages(

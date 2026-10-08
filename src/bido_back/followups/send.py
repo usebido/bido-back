@@ -98,6 +98,8 @@ class SendFollowupEmailResult(BaseModel):
 class _Claim:
     message_id: str
     thread_message_id: str
+    # The Message-ID was claimed by an earlier attempt, which may have sent it.
+    possibly_sent: bool = False
 
 
 class _SendFollowupEmail:
@@ -175,11 +177,14 @@ class _SendFollowupEmail:
                     "followup %s skipped: row %s, invite %s", row.id, row.status, invite.status
                 )
                 return SendFollowupEmailResult(followup_id=row.id, outcome="skipped")
+            reused = row.message_id_header is not None
             if row.message_id_header is None:
                 row.message_id_header = make_message_id(self._deps.email_domain)
                 await session.flush()
             return _Claim(
-                message_id=row.message_id_header, thread_message_id=invite.thread_message_id
+                message_id=row.message_id_header,
+                thread_message_id=invite.thread_message_id,
+                possibly_sent=reused,
             )
 
     async def _send_and_record(
@@ -223,6 +228,7 @@ class _SendFollowupEmail:
                     subject=args.subject,
                     text_body=args.body,
                     message_id=claim.message_id,
+                    possibly_sent=claim.possibly_sent,
                     in_reply_to=claim.thread_message_id,
                     references=(claim.thread_message_id,),
                 )
