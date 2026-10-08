@@ -31,11 +31,12 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import time
 from collections import Counter, defaultdict
 from collections.abc import Generator, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -62,59 +63,27 @@ from bido_back.purchasing.sources.service import analyze_documents
 from evals.source_scenario import AS_OF, CURRENCY, HORIZON_END, PRODUCT, expected, scenario
 from evals.source_variants import VARIANT, VARIANTS, Corpus, Variant, render
 
-Outcome = Literal["exact", "review", "inexact", "false_ready"]
+# exact: assessed and right; review: needs_review, nothing wrong marked ready;
+# inexact: assessed but something wrong or missing; error: the run raised or timed out.
+Outcome = Literal["exact", "review", "inexact", "false_ready", "error"]
 
 # Fields without which the deterministic code cannot use a record of that kind.
 CRITICAL: Final[dict[str, frozenset[str]]] = {
-    "inventory": frozenset({"part_number", "location", "as_of", "unit"}),
-    "purchase": frozenset(
-        {
-            "part_number",
-            "po_number",
-            "po_line",
-            "location",
-            "status",
-            "ordered_at",
-            "quantity",
-            "unit",
-            "unit_price",
-            "currency",
-            "supplier_code",
-            "promised_at",
-        }
-    ),  # fmt: skip
-    "receipt": frozenset(
-        {
-            "po_number",
-            "po_line",
-            "location",
-            "received_at",
-            "quantity",
-            "unit",
-            "movement",
-            "receipt_id",
-        }
-    ),  # fmt: skip
-    "delivery_schedule": frozenset(
-        {
-            "po_number",
-            "po_line",
-            "location",
-            "part_number",
-            "quantity",
-            "unit",
-            "expected_at",
-            "status",
-        }
-    ),  # fmt: skip
-    "production_plan": frozenset(
-        {"reference", "product_code", "quantity", "unit", "location", "need_by", "status"}
-    ),
-    "bom": frozenset({"product_code", "part_number", "quantity_per", "unit", "valid_from"}),
-    "item": frozenset({"part_number", "unit"}),
-    "supplier": frozenset({"supplier_code"}),
-    "supplier_item": frozenset({"part_number", "supplier_code", "valid_from"}),
-    "material_requirement": frozenset({"part_number", "quantity", "location", "need_by"}),
+    kind: frozenset(fields.split())
+    for kind, fields in {
+        "inventory": "part_number location as_of unit",
+        "purchase": "part_number po_number po_line location status ordered_at quantity unit "
+        "unit_price currency supplier_code promised_at",
+        "receipt": "po_number po_line location received_at quantity unit movement receipt_id",
+        "delivery_schedule": "po_number po_line location part_number quantity unit expected_at "
+        "status",
+        "production_plan": "reference product_code quantity unit location need_by status",
+        "bom": "product_code part_number quantity_per unit valid_from",
+        "item": "part_number unit",
+        "supplier": "supplier_code",
+        "supplier_item": "part_number supplier_code valid_from",
+        "material_requirement": "part_number quantity location need_by",
+    }.items()
 }
 
 
@@ -593,6 +562,7 @@ async def evaluate(
     config: RunnerConfig | None = None,
     mapper: Mapper | None = None,
     usage: UsageLog | None = None,
+    context: ToolContext | None = None,
 ) -> RunResult:
     """One run of one variant through `analyze_documents`, graded."""
     chosen = VARIANT[variant] if isinstance(variant, str) else variant
@@ -601,7 +571,7 @@ async def evaluate(
     if mapper is None:
         mapper = default_mapper(config or RunnerConfig()) if live else scripted_mapper(corpus)
     # A fresh tenant per run keys this run's model usage in the runner's log lines.
-    context = ToolContext(tenant_id=uuid4(), user_id=uuid4(), run_id=uuid4())
+    context = context or ToolContext(tenant_id=uuid4(), user_id=uuid4(), run_id=uuid4())
     started = time.monotonic()
     assessment = await analyze_documents(
         list(corpus.documents),
@@ -776,6 +746,29 @@ def print_report(summary: Summary, *, mode: str, repeats: int, wall: float) -> N
             print(f"  [{count}/{row.runs - row.passed}] {reason}")
 
 
+def _errored(variant: Variant, repeat: int, live: bool, reason: str, seconds: float) -> RunResult:
+    return RunResult(
+        variant=variant.name,
+        repeat=repeat,
+        live=live,
+        passed=False,
+        outcome="error",
+        false_ready=False,
+        false_complete=False,
+        status="error",
+        checks={"quantities": False, "scope": False, "prices": False, "status": False},
+        failures=[reason],
+        parts=[],
+        blockers=[],
+        warnings={},
+        record_counts={},
+        coverage=[],
+        mapping=[],
+        infra_error=True,
+        seconds=round(seconds, 1),
+    )
+
+
 async def run_corpus(
     variants: Sequence[Variant],
     *,
@@ -783,14 +776,47 @@ async def run_corpus(
     repeats: int,
     concurrency: int,
     config: RunnerConfig | None = None,
+    run_timeout: float = 900.0,
 ) -> list[RunResult]:
-    """Runs variants concurrently, bounded; each run keeps the mapper's own page concurrency."""
+    """Runs variants concurrently, bounded; each run keeps the mapper's own page concurrency.
+
+    A run that raises or exceeds `run_timeout` seconds is an `error` outcome, not a crash.
+    """
     semaphore = asyncio.Semaphore(concurrency)
     with usage_log() as log:
 
         async def one(variant: Variant, repeat: int) -> RunResult:
             async with semaphore:
-                return await evaluate(variant, live=live, repeat=repeat, config=config, usage=log)
+                context = ToolContext(tenant_id=uuid4(), user_id=uuid4(), run_id=uuid4())
+                started = time.monotonic()
+                try:
+                    result = await asyncio.wait_for(
+                        evaluate(
+                            variant,
+                            live=live,
+                            repeat=repeat,
+                            config=config,
+                            usage=log,
+                            context=context,
+                        ),
+                        run_timeout,
+                    )
+                except TimeoutError:
+                    reason = f"timed out after {run_timeout:.0f} s"
+                    result = _errored(variant, repeat, live, reason, run_timeout)
+                except Exception as exc:  # report the run, keep the batch going
+                    result = _errored(
+                        variant, repeat, live, f"raised {type(exc).__name__}",
+                        time.monotonic() - started,
+                    )  # fmt: skip
+                if result.usage is None:
+                    result = replace(result, usage=log.by_tenant.get(str(context.tenant_id)))
+                print(
+                    f"{variant.name} #{repeat}: {result.outcome} in {result.seconds} s",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return result
 
         return list(
             await asyncio.gather(*(one(v, r) for r in range(1, repeats + 1) for v in variants))
@@ -809,6 +835,7 @@ def main() -> int:
     parser.add_argument("--write-dir", type=Path, help="write each variant's files there")
     parser.add_argument("--concurrency", type=int, default=3, help="variant runs at once")
     parser.add_argument("--json", type=Path, help="write the full report (every run) there")
+    parser.add_argument("--timeout", type=float, default=900.0, help="seconds per run")
     args = parser.parse_args()
     live = bool(args.live)
     if live and not os.environ.get("OPENAI_API_KEY"):
@@ -820,7 +847,13 @@ def main() -> int:
     repeats = int(args.repeats)
     started = time.monotonic()
     results = asyncio.run(
-        run_corpus(variants, live=live, repeats=repeats, concurrency=max(1, int(args.concurrency)))
+        run_corpus(
+            variants,
+            live=live,
+            repeats=repeats,
+            concurrency=max(1, int(args.concurrency)),
+            run_timeout=float(args.timeout),
+        )
     )
     summary = summarize(results, variants)
     mode = "live" if live else "mock"
