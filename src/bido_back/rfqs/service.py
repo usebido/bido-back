@@ -51,6 +51,8 @@ from bido_back.agents.context import ToolContext
 from bido_back.agents.events import args_hash
 from bido_back.approvals import ApprovalConflict, PostgresApprovalSink
 from bido_back.auth import Principal
+from bido_back.branding.service import NotFound as BrandingNotFound
+from bido_back.branding.service import check_logo_exists
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
@@ -189,6 +191,8 @@ def _summary_fields(rfq: Rfq) -> dict[str, object]:
         "send_blockers": send_blockers(rfq.status, rfq.response_due, utc_today()),
         "payment_terms": rfq.payment_terms,
         "quote_validity_days": rfq.quote_validity_days,
+        "logo_asset_id": rfq.logo_asset_id,
+        "footer_override": rfq.footer_override,
     }
 
 
@@ -561,7 +565,21 @@ async def edit_rfq(
             currency_change = await change_currency(
                 session, rfq, changes["currency"], today or datetime.now(UTC).date()
             )
-        for field in ("title", "response_due", "payment_terms", "quote_validity_days"):
+        if changes.get("logo_asset_id") is not None:
+            try:
+                await check_logo_exists(session, changes["logo_asset_id"])
+            except BrandingNotFound:
+                raise NotFound(f"logo {changes['logo_asset_id']} not found") from None
+        if "footer_override" in changes:
+            changes["footer_override"] = changes["footer_override"] or None
+        for field in (
+            "title",
+            "response_due",
+            "payment_terms",
+            "quote_validity_days",
+            "logo_asset_id",
+            "footer_override",
+        ):
             if field in changes:
                 setattr(rfq, field, changes[field])
         line_fields = {
