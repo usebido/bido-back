@@ -9,6 +9,12 @@ the browser posts the file, and `complete_logo_upload` reads it back, checks it
 (`images.check_logo`: real image, 2 MB, an SVG rewritten safe) and records it.
 The first logo of a company becomes its default.
 
+Raster logos are prepared on upload (`images.prepare_raster_logo`): orientation applied,
+transparency kept, blank margins trimmed, always stored as PNG. The file exactly as
+uploaded stays under `original_storage_key`; when an opaque plain or checkerboard
+background is detected the buyer can remove it (`remove_logo_background`) and bring it
+back (`restore_logo_background`), each rebuilt from the original.
+
 Deleting a logo removes the row; the default and any RFQ using it fall back
 (`ON DELETE SET NULL`). The stored bytes stay: the api role cannot delete objects.
 
@@ -19,6 +25,7 @@ footer when it chose one, else the company's defaults.
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Final, cast
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
@@ -35,11 +42,14 @@ from bido_back.branding.images import (
     LogoType,
     check_logo,
     logo_type_for,
+    prepare_raster_logo,
 )
 from bido_back.branding.schemas import (
     BrandingView,
     CompleteLogoUploadRequest,
+    LogoAlign,
     LogoFileLink,
+    LogoPlacement,
     LogoUploadForm,
     LogoView,
     UpdateBrandingRequest,
@@ -106,6 +116,10 @@ async def update_branding(
         row.default_footer = request.default_footer or None
         row.accent_color = request.accent_color.upper() if request.accent_color else None
         row.default_logo_asset_id = request.default_logo_id
+        placement = request.logo_placement or LogoPlacement()
+        row.logo_scale = Decimal(str(placement.scale))
+        row.logo_align = placement.align
+        row.logo_offset_y = placement.offset_y
         row.updated_by = principal.user_id
         row.updated_at = datetime.now(UTC)
         await session.flush()
@@ -132,6 +146,7 @@ async def _branding_view(session: AsyncSession, tenant_id: UUID) -> BrandingView
         default_footer=row.default_footer,
         accent_color=row.accent_color,
         default_logo=_logo_view(default, default_id=row.default_logo_asset_id) if default else None,
+        logo_placement=company_logo_placement(row),
         updated_at=row.updated_at,
     )
 
@@ -234,6 +249,79 @@ async def logo_link(
         expires_in=LINK_TTL,
     )
     return LogoFileLink(url=link.url, expires_at=link.expires_at, content_type=content_type)
+
+
+async def set_logo_background(
+    db: Db, storage: BlobStorage, principal: Principal, logo_id: UUID, *, remove: bool
+) -> LogoView:
+    """Remove the detected background (made transparent) or keep/restore it, rebuilding
+    the prepared image from the original upload either way. Also prepares a logo
+    uploaded before preparation existed."""
+    return await _reprepare(db, storage, principal, logo_id, remove_background=remove)
+
+
+async def _reprepare(
+    db: Db, storage: BlobStorage, principal: Principal, logo_id: UUID, *, remove_background: bool
+) -> LogoView:
+    async with tenant_session(db, principal.tenant_id) as session:
+        row = await _logo(session, logo_id)
+        original_key = row.original_storage_key or row.storage_key
+        original_type = cast(LogoType, row.original_content_type or row.content_type)
+    if original_type == "image/svg+xml":
+        raise LogoRejected("an SVG logo has no background to remove")
+    try:
+        original = await storage.get(original_key)
+    except BlobNotFound:
+        raise NotFound(f"logo {logo_id} not found") from None
+    try:
+        prepared = prepare_raster_logo(original, original_type, remove_background=remove_background)
+    except InvalidLogo as exc:
+        raise LogoRejected(str(exc)) from None
+    if prepared is None:
+        raise LogoRejected("an SVG logo has no background to remove")
+    if remove_background and not prepared.background_removable:
+        raise LogoRejected("no plain or checkerboard background was found to remove")
+    key = _prepared_key(principal.tenant_id, logo_id, removed=prepared.background_removed)
+    await storage.put(key, prepared.data, prepared.content_type)
+    async with tenant_session(db, principal.tenant_id) as session:
+        row = await _logo(session, logo_id)
+        row.original_storage_key = original_key
+        row.original_content_type = original_type
+        row.storage_key = key
+        row.content_type = prepared.content_type
+        row.size_bytes = len(prepared.data)
+        row.width, row.height = prepared.width, prepared.height
+        row.background_removable = prepared.background_removable
+        row.background_removed = prepared.background_removed
+        await session.flush()
+        logger.info(
+            "company logo background %s",
+            "removed" if remove_background else "restored",
+            extra={"logo_id": str(logo_id)},
+        )
+        return _logo_view(row, default_id=await _default_logo_id(session, principal.tenant_id))
+
+
+# --- Placement ------------------------------------------------------------------------
+
+
+def company_logo_placement(row: CompanyBranding) -> LogoPlacement:
+    return LogoPlacement(
+        scale=float(row.logo_scale),
+        align=cast(LogoAlign, row.logo_align or "left"),
+        offset_y=row.logo_offset_y or 0,
+    )
+
+
+def rfq_logo_placement(rfq: Rfq) -> LogoPlacement | None:
+    """The RFQ's own placement, or None when it uses the company default."""
+    if rfq.logo_scale is None and rfq.logo_align is None and rfq.logo_offset_y is None:
+        return None
+    return LogoPlacement(
+        scale=float(rfq.logo_scale if rfq.logo_scale is not None else 1),
+        align=cast(LogoAlign, rfq.logo_align or "left"),
+        offset_y=rfq.logo_offset_y or 0,
+    )
 
 
 # --- Import from Clerk ------------------------------------------------------------------
@@ -408,21 +496,34 @@ async def _add_logo(
 ) -> LogoView:
     try:
         checked = check_logo(data, content_type)
+        prepared = prepare_raster_logo(checked.data, checked.content_type)
     except InvalidLogo as exc:
         raise LogoRejected(str(exc)) from None
     if checked.data != data:
         # The sanitized SVG replaces what was uploaded.
         await storage.put(key, checked.data, checked.content_type)
+    stored_key, stored_type, stored = key, checked.content_type, checked.data
+    width, height = checked.width, checked.height
+    if prepared is not None:
+        # The original stays under `key`; documents use the prepared PNG.
+        stored_key = _prepared_key(principal.tenant_id, logo_id, removed=False)
+        stored_type, stored = prepared.content_type, prepared.data
+        width, height = prepared.width, prepared.height
+        await storage.put(stored_key, stored, stored_type)
     async with tenant_session(db, principal.tenant_id) as session:
         row = CompanyLogo(
             id=logo_id,
             tenant_id=principal.tenant_id,
             name=name[:200],
-            content_type=checked.content_type,
-            size_bytes=len(checked.data),
-            width=checked.width,
-            height=checked.height,
-            storage_key=key,
+            content_type=stored_type,
+            size_bytes=len(stored),
+            width=width,
+            height=height,
+            storage_key=stored_key,
+            original_storage_key=key if prepared is not None else None,
+            original_content_type=checked.content_type if prepared is not None else None,
+            background_removable=prepared.background_removable if prepared else False,
+            background_removed=False,
             created_by=principal.user_id,
         )
         session.add(row)
@@ -482,6 +583,9 @@ def _logo_view(row: CompanyLogo, *, default_id: UUID | None) -> LogoView:
         height=row.height,
         created_at=row.created_at,
         is_default=row.id == default_id,
+        background_removable=row.background_removable,
+        background_removed=row.background_removed,
+        prepared=row.original_storage_key is not None or row.content_type == "image/svg+xml",
     )
 
 
@@ -494,6 +598,12 @@ def _declared_type(filename: str) -> LogoType:
 
 def _logo_key(tenant_id: UUID, logo_id: UUID, content_type: LogoType) -> str:
     return f"branding/{tenant_id}/{logo_id}.{STORED_EXTENSION[content_type]}"
+
+
+def _prepared_key(tenant_id: UUID, logo_id: UUID, *, removed: bool) -> str:
+    """Where the prepared PNG lives; with and without the background are kept apart so a
+    restore never has to recompute what a removal overwrote."""
+    return f"branding/{tenant_id}/{logo_id}.{'nobg' if removed else 'prepared'}.png"
 
 
 def _name_from(filename: str) -> str:

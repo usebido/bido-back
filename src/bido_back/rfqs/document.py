@@ -216,6 +216,10 @@ class DocumentBranding(BaseModel):
     accent_color: str | None = Field(default=None, pattern=r"^#[0-9a-fA-F]{6}$")
     logo_media_type: LogoMediaType | None = None
     logo_base64: str | None = Field(default=None, max_length=_MAX_LOGO_BASE64)
+    # Where the logo sits in its reserved box (the buyer's choice; part of the approval).
+    logo_scale: float = Field(default=1.0, ge=0.5, le=2.0)
+    logo_align: Literal["left", "center", "right"] = "left"
+    logo_offset_y: int = Field(default=0, ge=-20, le=20)
 
     @model_validator(mode="after")
     def _logo_is_complete(self) -> Self:
@@ -237,6 +241,9 @@ class DocumentBranding(BaseModel):
         address: str | None = None,
         footer_text: str | None = None,
         accent_color: str | None = None,
+        logo_scale: float = 1.0,
+        logo_align: Literal["left", "center", "right"] = "left",
+        logo_offset_y: int = 0,
     ) -> Self:
         """Branding from plain values; `logo` is the image's bytes."""
         return cls(
@@ -246,6 +253,9 @@ class DocumentBranding(BaseModel):
             address=address,
             footer_text=footer_text,
             accent_color=accent_color,
+            logo_scale=logo_scale,
+            logo_align=logo_align,
+            logo_offset_y=logo_offset_y,
             logo_media_type=logo_media_type if logo is not None else None,
             logo_base64=base64.b64encode(logo).decode("ascii") if logo is not None else None,
         )
@@ -445,7 +455,8 @@ _CSS: Final = """
 body { font-family: "Inter", "DejaVu Sans", "Liberation Sans", Arial, sans-serif;
   font-size: 9.5pt; color: #1f2430; line-height: 1.35; margin: 0; }
 .header { display: flex; justify-content: space-between; align-items: center; gap: 18px; }
-.header img { max-height: 40px; max-width: 200px; }
+.header .logo-box { width: 240px; height: 80px; position: relative; }
+.header .logo-box img { position: absolute; }
 .header .company { font-size: 15pt; font-weight: 700; }
 .header .doc-title { font-size: 17pt; font-weight: 400; text-align: right; }
 .company-details { margin-top: 6px; font-size: 7.5pt; color: #6b7280; }
@@ -498,11 +509,45 @@ def _accent_css(accent: str | None) -> str:
     )
 
 
+# The logo's reserved box at the top left: 240 x 80 px. At scale 1 the logo fits a
+# 200 x 40 px frame (the size before placement existed); the buyer's scale multiplies
+# that frame, always kept inside the box, and the logo is drawn as large as fits the frame
+# (up or down, keeping its proportions). `align` places it across the box and `offset_y`
+# nudges it from the vertical centre.
+_LOGO_BOX: Final = (240, 80)
+_LOGO_BASE: Final = (200, 40)
+
+
+def logo_box_style(scale: float, offset_y: int) -> dict[str, float]:
+    """The logo's frame in its box and its vertical nudge, in px: what the PDF applies and
+    what the app's preview mirrors."""
+    width = min(_LOGO_BOX[0], _LOGO_BASE[0] * scale)
+    height = min(_LOGO_BOX[1], _LOGO_BASE[1] * scale)
+    room = (_LOGO_BOX[1] - height) / 2
+    return {"width": width, "height": height, "offset_y": max(-room, min(room, offset_y))}
+
+
+def _logo_style(brand: DocumentBranding) -> str:
+    frame = logo_box_style(brand.logo_scale, brand.logo_offset_y)
+    left = {
+        "left": "0px",
+        "center": f"{(_LOGO_BOX[0] - frame['width']) / 2:.1f}px",
+        "right": f"{_LOGO_BOX[0] - frame['width']:.1f}px",
+    }[brand.logo_align]
+    top = (_LOGO_BOX[1] - frame["height"]) / 2 + frame["offset_y"]
+    return (
+        f"left: {left}; top: {top:.1f}px; width: {frame['width']:.1f}px; "
+        f"height: {frame['height']:.1f}px; object-fit: contain; "
+        f"object-position: {brand.logo_align} center;"
+    )
+
+
 def _header(document: RfqDocument, words: dict[str, str]) -> str:
     brand = document.branding
     logo = brand.logo_base64
     left = (
-        f'<img src="data:{_e(brand.logo_media_type)};base64,{logo}" alt="{_e(brand.company_name)}">'
+        f'<div class="logo-box"><img src="data:{_e(brand.logo_media_type)};base64,{logo}" '
+        f'alt="{_e(brand.company_name)}" style="{_logo_style(brand)}"></div>'
         if logo is not None
         else f'<span class="company">{_e(brand.company_name)}</span>'
     )

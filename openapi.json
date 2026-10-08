@@ -1761,6 +1761,9 @@
             ],
             "title": "Legal Name"
           },
+          "logo_placement": {
+            "$ref": "#/components/schemas/LogoPlacement"
+          },
           "phone": {
             "anyOf": [
               {
@@ -5572,6 +5575,21 @@
         "title": "LineLimitsView",
         "type": "object"
       },
+      "LogoBackgroundRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "remove": {
+            "description": "true: make the detected background transparent; false: keep or restore it",
+            "title": "Remove",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "remove"
+        ],
+        "title": "LogoBackgroundRequest",
+        "type": "object"
+      },
       "LogoFileLink": {
         "description": "A short-lived link serving the image inline, for an `<img>` tag.",
         "properties": {
@@ -5619,6 +5637,40 @@
         "title": "LogoList",
         "type": "object"
       },
+      "LogoPlacement": {
+        "additionalProperties": false,
+        "description": "Where the logo sits in its reserved box at the top of the RFQ document.",
+        "properties": {
+          "align": {
+            "default": "left",
+            "enum": [
+              "left",
+              "center",
+              "right"
+            ],
+            "title": "Align",
+            "type": "string"
+          },
+          "offset_y": {
+            "default": 0,
+            "description": "Vertical nudge in document points (−20 to 20)",
+            "maximum": 20.0,
+            "minimum": -20.0,
+            "title": "Offset Y",
+            "type": "integer"
+          },
+          "scale": {
+            "default": 1.0,
+            "description": "1 = the standard logo height; 0.5 to 2",
+            "maximum": 2.0,
+            "minimum": 0.5,
+            "title": "Scale",
+            "type": "number"
+          }
+        },
+        "title": "LogoPlacement",
+        "type": "object"
+      },
       "LogoUploadForm": {
         "description": "POST `url` as multipart/form-data with every entry of `fields`, the file last as\n`file`; then `POST /v1/company/logos/{logo_id}/complete`.",
         "properties": {
@@ -5660,6 +5712,18 @@
       },
       "LogoView": {
         "properties": {
+          "background_removable": {
+            "default": false,
+            "description": "An opaque plain or checkerboard background was detected and can be removed",
+            "title": "Background Removable",
+            "type": "boolean"
+          },
+          "background_removed": {
+            "default": false,
+            "description": "The background was removed; restore brings it back",
+            "title": "Background Removed",
+            "type": "boolean"
+          },
           "content_type": {
             "enum": [
               "image/png",
@@ -5699,6 +5763,12 @@
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "prepared": {
+            "default": true,
+            "description": "False for a raster logo uploaded before preparation existed: POST its /background with remove=false once to trim it and detect a background",
+            "title": "Prepared",
+            "type": "boolean"
           },
           "size_bytes": {
             "title": "Size Bytes",
@@ -8609,6 +8679,17 @@
             "description": "The company logo this RFQ's document shows; null = the company default",
             "title": "Logo Asset Id"
           },
+          "logo_placement": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LogoPlacement"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where this RFQ's logo sits in its box; null = the company default"
+          },
           "payment_terms": {
             "anyOf": [
               {
@@ -8753,6 +8834,17 @@
             ],
             "description": "The company logo this RFQ's document shows; null = the company default",
             "title": "Logo Asset Id"
+          },
+          "logo_placement": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LogoPlacement"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where this RFQ's logo sits in its box; null = the company default"
           },
           "payment_terms": {
             "anyOf": [
@@ -9426,6 +9518,17 @@
             ],
             "description": "The company logo this RFQ's document shows; null = the company default",
             "title": "Logo Asset Id"
+          },
+          "logo_placement": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LogoPlacement"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where this RFQ's logo sits in its box; null = the company default"
           },
           "need_by": {
             "anyOf": [
@@ -11474,6 +11577,16 @@
             ],
             "title": "Legal Name"
           },
+          "logo_placement": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LogoPlacement"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "phone": {
             "anyOf": [
               {
@@ -11761,6 +11874,16 @@
               }
             ],
             "title": "Logo Asset Id"
+          },
+          "logo_placement": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/LogoPlacement"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "need_by": {
             "anyOf": [
@@ -13403,6 +13526,123 @@
           }
         ],
         "summary": "Rename Logo",
+        "tags": [
+          "company"
+        ]
+      }
+    },
+    "/v1/company/logos/{logo_id}/background": {
+      "post": {
+        "description": "Remove the detected plain or checkerboard background (`remove: true`), or keep\nor restore it (`remove: false`). Rebuilt from the original upload each time; 422\nwhen there is no background to remove or the logo is an SVG.",
+        "operationId": "set_logo_background_v1_company_logos__logo_id__background_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "logo_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Logo Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LogoBackgroundRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LogoView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Set Logo Background",
         "tags": [
           "company"
         ]

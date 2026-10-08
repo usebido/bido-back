@@ -54,7 +54,13 @@ from bido_back.approvals import ApprovalConflict, PostgresApprovalSink
 from bido_back.auth import Principal
 from bido_back.branding.images import logo_for_document
 from bido_back.branding.service import NotFound as BrandingNotFound
-from bido_back.branding.service import check_logo_exists, logo_bytes, rfq_branding_rows
+from bido_back.branding.service import (
+    check_logo_exists,
+    company_logo_placement,
+    logo_bytes,
+    rfq_branding_rows,
+    rfq_logo_placement,
+)
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
@@ -204,6 +210,7 @@ def _summary_fields(rfq: Rfq) -> dict[str, object]:
         "quote_validity_days": rfq.quote_validity_days,
         "logo_asset_id": rfq.logo_asset_id,
         "footer_override": rfq.footer_override,
+        "logo_placement": rfq_logo_placement(rfq),
     }
 
 
@@ -583,6 +590,11 @@ async def edit_rfq(
                 raise NotFound(f"logo {changes['logo_asset_id']} not found") from None
         if "footer_override" in changes:
             changes["footer_override"] = changes["footer_override"] or None
+        if "logo_placement" in changes:
+            placement = patch.logo_placement
+            rfq.logo_scale = Decimal(str(placement.scale)) if placement else None
+            rfq.logo_align = placement.align if placement else None
+            rfq.logo_offset_y = placement.offset_y if placement else None
         for field in (
             "title",
             "response_due",
@@ -823,7 +835,8 @@ async def _document_branding(
         logo = logo_for_document(data, rows.logo.content_type) if data is not None else None
         if logo is None:
             logger.warning("rfq logo left out of the document logo=%s", rows.logo.id)
-    if row is None and logo is None and rows.footer is None:
+    placement = rfq_logo_placement(rfq) or (company_logo_placement(row) if row else None)
+    if row is None and logo is None and rows.footer is None and placement is None:
         return default_branding(tenant_name)
     details = [part for part in (row.phone, row.website) if part] if row else []
     address = row.address if row else None
@@ -839,6 +852,9 @@ async def _document_branding(
         accent_color=row.accent_color if row else None,
         logo=logo[0] if logo else None,
         logo_media_type=logo[1] if logo else None,
+        logo_scale=placement.scale if placement else 1.0,
+        logo_align=placement.align if placement else "left",
+        logo_offset_y=placement.offset_y if placement else 0,
     )
 
 

@@ -14,6 +14,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue, St
 
 from bido_back.agents.catalog.contracts import LineCategory
 from bido_back.awards.views import AwardApprovalView, ThreadEmailApprovalView
+from bido_back.branding.schemas import LogoPlacement
 from bido_back.fx import REFERENCE_CURRENCIES
 from bido_back.outbound.domains import RecipientCheck
 
@@ -141,6 +142,10 @@ class RfqHeader(BaseModel):
         default=None,
         description="Terms printed on this RFQ's document; null = the company default footer",
     )
+    logo_placement: LogoPlacement | None = Field(
+        default=None,
+        description="Where this RFQ's logo sits in its box; null = the company default",
+    )
 
 
 RfqStage = Literal["draft", "bidding", "review", "awarded", "completed", "cancelled"]
@@ -250,6 +255,8 @@ class UpdateRfqRequest(BaseModel):
     footer_override: (
         Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] | None
     ) = None
+    # Where the logo sits in its box on this RFQ's document; null = the company default.
+    logo_placement: LogoPlacement | None = None
 
 
 # --- Suppliers and contacts ---------------------------------------------------------
