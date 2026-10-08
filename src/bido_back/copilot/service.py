@@ -60,7 +60,6 @@ from bido_back.db import tenant_session
 from bido_back.db.models import CopilotConversation, TemplateUpload
 from bido_back.documents import DocumentText, extract_text, render_documents
 from bido_back.logs import annotate
-from bido_back.purchasing.planning_agents import WorkbookAgents, default_workbook_agents
 from bido_back.purchasing.workbook import SheetMapper, default_sheet_mapper
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
@@ -89,7 +88,6 @@ class CopilotDeps:
     runner_config: RunnerConfig
     # Reads sheets the import rules cannot; None = the default agent.
     sheet_mapper: SheetMapper | None = None
-    workbook_agents: WorkbookAgents | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,7 +257,6 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
             buyer_messages=own_words,
             storage=deps.storage,
             sheet_mapper=deps.sheet_mapper or default_sheet_mapper(deps.runner_config),
-            workbook_agents=deps.workbook_agents or default_workbook_agents(deps.runner_config),
         )
     )
     agent = copilot_agent(tools)

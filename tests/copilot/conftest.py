@@ -31,7 +31,6 @@ from bido_back.db.models import (
     RfqTemplate,
     TemplateUpload,
 )
-from bido_back.purchasing.planning_agents import WorkbookAgents
 from bido_back.rfqs import service
 from bido_back.rfqs.schemas import RfqCreated, SupplierView
 from bido_back.storage import BlobStorage
@@ -85,7 +84,6 @@ def make_tools(
     earlier_attachments_text: str | None = None,
     storage: BlobStorage | None = None,
     buyer_messages: tuple[str, ...] | None = None,
-    workbook_agents: WorkbookAgents | None = None,
 ) -> Tools:
     mailboxes = FakeMailboxes()
     agents = fake_agents()
@@ -101,7 +99,6 @@ def make_tools(
             earlier_attachments_text=_text_of(earlier_attachments_text),
             buyer_messages=_messages_of(buyer_messages),
             storage=storage,
-            workbook_agents=workbook_agents,
             today=lambda: date(2026, 10, 7),
         )
     )
