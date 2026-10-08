@@ -63,6 +63,9 @@ class Tenant(Base):
     # The Clerk organization this company is (migration 0018); NULL for tenants
     # created before organizations were used, e.g. the seeded dev tenants.
     clerk_org_id: Mapped[str | None] = mapped_column(Text)
+    # Emails go out only to reserved test domains or domains a person confirmed
+    # (migration 0023). Set at creation; the app role cannot UPDATE tenants.
+    outbound_requires_confirmed_domains: Mapped[bool] = mapped_column(server_default=text("true"))
 
 
 class User(Base):
@@ -1061,6 +1064,26 @@ class AwardNotice(Base):
     message_id_header: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class OutboundDomainConfirmation(Base):
+    """A recipient domain a person of the tenant confirmed for outbound email (0023)."""
+
+    __tablename__ = "outbound_domain_confirmations"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "domain", name="outbound_domain_confirmations_tenant_domain_key"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    domain: Mapped[str] = mapped_column(Text)
+    confirmed_by: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    approval_id: Mapped[UUID | None]
+    confirmed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
 
 class CopilotConversation(Base):

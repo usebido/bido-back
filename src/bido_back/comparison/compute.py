@@ -279,6 +279,11 @@ class Recommendation(BaseModel):
     justification: str
     runner_up: RunnerUp | None
     excluded: list[ExcludedOffer]
+    # Warnings about the recommended offer, e.g. "only_unauthorized_offers": the
+    # winner is a reseller because no authorized distributor or manufacturer
+    # offered the line (brokers never win against them). A free list rather
+    # than new `reasons` values, so existing clients keep validating.
+    advisories: list[str] = Field(default_factory=list[str])
 
 
 class Comparison(BaseModel):

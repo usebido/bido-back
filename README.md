@@ -165,6 +165,21 @@ in-bounds ones on the buyer's behalf right away; out-of-bounds drafts are held
 for a person, and `POST .../negotiation/mandate/pause` stops it all. Locally,
 trigger a sweep with `curl -X POST localhost:8080/dev/followups/sweep`.
 
+## Outbound recipient guard
+
+A spreadsheet can carry made-up supplier addresses whose domains belong to real
+companies. By default (`tenants.outbound_requires_confirmed_domains`), Bido
+sends only to reserved test domains (`example.com`, `.test`, `.example`,
+`.invalid`, `.localhost`) or domains someone in the company confirmed:
+
+- `GET /v1/approvals` and a mandate proposal show each recipient with its DNS
+  status (`real_domain`, `no_mail`, `unknown`, `test`) and whether it would go out;
+- approving takes `confirmed_domains` (a 409 lists what is missing);
+- `GET/POST /v1/outbound/domains` lists and confirms domains, and
+  `POST /v1/outbound/check` classifies addresses.
+
+The flag is set by seeds or the migration role, never by a request.
+
 ## Spreadsheets
 
 Buyers send what they have. `POST /v1/data/workbook-imports` (and the
