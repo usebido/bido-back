@@ -100,6 +100,18 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str | None = None
     otel_service_name: str = "bido-back"
     sentry_dsn: str | None = Field(default=None, repr=False)
+    # Logs: one JSON object per line on stdout (CloudWatch reads the fields).
+    # "text" is for a terminal; unset means text locally and JSON elsewhere.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+    log_format: Literal["json", "text"] | None = None
+    # The commit the image was built from (set by the deploy); tags logs and
+    # Sentry events with the release.
+    git_sha: str | None = None
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def _upper_log_level(cls, value: object) -> object:
+        return value.strip().upper() if isinstance(value, str) else value
 
     @field_validator("cors_allowed_origin_regex")
     @classmethod

@@ -326,3 +326,41 @@ def test_scrubber_redacts_validation_error_values_and_log_params() -> None:
     assert "secret" not in values[0]["value"]
     assert values[1]["value"] == "timed out"
     assert scrubbed["logentry"] == {"message": "extract failed for %s"}
+
+
+def test_scrubber_masks_messages_and_keeps_only_ids_in_log_breadcrumbs() -> None:
+    event: dict[str, object] = {
+        "exception": {"values": [{"type": "KeyError", "value": f"'{CONTENT}'"}]},
+        "breadcrumbs": {
+            "values": [
+                {
+                    "type": "default",
+                    "category": "bido_back.copilot",
+                    "message": f"no RFQ {CONTENT!r}; mailed {CONTENT}@acme.example",
+                    "data": {"run_id": "run-1", "reason": CONTENT, "tool": "list_rfqs"},
+                },
+            ]
+        },
+    }
+    serialized = json.dumps(scrub_sentry_event(cast("Event", event), {}))
+    scrubbed: dict[str, Any] = json.loads(serialized)
+
+    assert CONTENT not in serialized
+    assert scrubbed["exception"]["values"][0]["value"] == "'…'"
+    (crumb,) = scrubbed["breadcrumbs"]["values"]
+    assert crumb["message"] == "no RFQ '…'; mailed <email>"
+    assert crumb["data"] == {"run_id": "run-1"}
+
+
+def test_sentry_events_are_tagged_with_the_request() -> None:
+    from bido_back.logs import bind
+    from bido_back.observability import _before_send  # pyright: ignore[reportPrivateUsage]
+
+    with bind(request_id="req-9", tenant_id="t-1", job="mailbox.sync"):
+        event = _before_send(cast("Event", {"tags": {"service": "api"}}), {})
+    assert cast(dict[str, Any], event)["tags"] == {
+        "service": "api",
+        "request_id": "req-9",
+        "tenant_id": "t-1",
+        "job": "mailbox.sync",
+    }

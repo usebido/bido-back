@@ -36,6 +36,7 @@ from bido_back.auth import (
 )
 from bido_back.awards.agents import NoticeWriter, default_notice_writer
 from bido_back.db import create_engine, create_sessionmaker
+from bido_back.logs import annotate
 from bido_back.orgs import ClerkDirectory, OrgPolicy, clerk_directory_for, principal_for_org
 from bido_back.rfqs.agents import RfqAgents, default_rfq_agents
 from bido_back.rfqs.mailbox import MailboxSenderFactory, mailbox_senders_for
@@ -216,13 +217,19 @@ async def get_principal(
         if verified is not None:
             if verified.org is None:
                 raise OrganizationRequired("select an organization")
-            return await principal_for_org(
+            principal = await principal_for_org(
                 resources.sessionmaker(), verified, resources.org_policy, resources.clerk_directory
             )
-        if clerk_user_id is None:
+        elif clerk_user_id is None:
             raise _unauthorized("missing credentials")
-        return await resolve_principal(resources.sessionmaker(), clerk_user_id, x_tenant_id)
+        else:
+            principal = await resolve_principal(
+                resources.sessionmaker(), clerk_user_id, x_tenant_id
+            )
     except (NotAMember, OrganizationRequired, OrganizationNotEnabled) as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from None
     except TenantSelectionRequired as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from None
+    # Every later log line of this request names the tenant and user (ids only).
+    annotate(tenant_id=principal.tenant_id, user_id=principal.user_id)
+    return principal

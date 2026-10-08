@@ -42,6 +42,7 @@ How our rules map onto Agno:
 import asyncio
 import logging
 import os
+import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -90,6 +91,7 @@ from bido_back.agents.events import (
     args_hash,
 )
 from bido_back.agents.tools import AnyTool, ToolError
+from bido_back.logs import safe_reason
 
 logger = logging.getLogger(__name__)
 
@@ -295,17 +297,44 @@ def _entrypoint(
             parsed = tool.parse_input(kwargs)
         except ValidationError as exc:
             state.outcomes[call_id] = _Outcome(status="invalid_args")
-            return f"error: invalid arguments: {validation_errors(exc)}"
+            reason = validation_errors(exc)
+            _log_tool_call(tool, context, call_id, "invalid_args", 0.0, reason=reason)
+            return f"error: invalid arguments: {reason}"
 
         async with state.lock:
+            started = time.perf_counter()
             try:
                 output = await tool.invoke(context, parsed)
             except ToolError as exc:
                 message = str(exc) or "tool error"
-            except Exception:
-                logger.exception("tool %s failed in run %s", tool.name, context.run_id)
+                cause = exc.__cause__ or exc.__context__
+                _log_tool_call(
+                    tool,
+                    context,
+                    call_id,
+                    "error",
+                    started,
+                    reason=message,
+                    error_class=type(cause).__name__ if cause is not None else "ToolError",
+                )
+            except Exception as exc:
+                logger.exception(
+                    "tool %s failed in run %s",
+                    tool.name,
+                    context.run_id,
+                    extra={"tool": tool.name, "run_id": str(context.run_id)},
+                )
                 message = _INTERNAL_ERROR
+                _log_tool_call(
+                    tool,
+                    context,
+                    call_id,
+                    "internal_error",
+                    started,
+                    error_class=type(exc).__name__,
+                )
             else:
+                _log_tool_call(tool, context, call_id, "ok", started)
                 state.outcomes[call_id] = _Outcome(
                     status="ok", output=output.model_dump(mode="json")
                 )
@@ -315,6 +344,32 @@ def _entrypoint(
         return f"error: {message}"
 
     return entrypoint
+
+
+def _log_tool_call(
+    tool: AnyTool,
+    context: ToolContext,
+    call_id: str,
+    status: Literal["ok", "error", "invalid_args", "internal_error"],
+    started: float,
+    *,
+    reason: str | None = None,
+    error_class: str | None = None,
+) -> None:
+    """One line per tool call: name, outcome, duration; for errors a masked reason."""
+    fields: dict[str, object] = {
+        "tool": tool.name,
+        "tool_kind": tool.kind,
+        "run_id": str(context.run_id),
+        "call_id": call_id,
+        "status": status,
+        "duration_ms": round((time.perf_counter() - started) * 1000, 1) if started else 0.0,
+    }
+    if reason is not None:
+        fields["reason"] = safe_reason(reason)
+    if error_class is not None:
+        fields["error_class"] = error_class
+    logger.log(logging.INFO if status == "ok" else logging.WARNING, "tool call", extra=fields)
 
 
 def _refusing_entrypoint(tool: AnyTool) -> Callable[..., Awaitable[str]]:

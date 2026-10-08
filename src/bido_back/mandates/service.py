@@ -379,6 +379,13 @@ def _hold(
             reason=reason,
         )
     )
+    logger.info(
+        "mandate held approval=%s mandate=%s reason=%s",
+        approval.id,
+        mandate.id,
+        reason,
+        extra={"approval_id": str(approval.id), "mandate_id": str(mandate.id), "reason": reason},
+    )
     session.add(
         AuditEvent(
             tenant_id=mandate.tenant_id,
@@ -735,12 +742,6 @@ async def auto_approve_pending(
                 if reason is not None:
                     _hold(session, approval, mandate, invite_id, reason)
                     result.held += 1
-                    logger.info(
-                        "mandate held approval=%s mandate=%s reason=%s",
-                        approval.id,
-                        mandate.id,
-                        reason,
-                    )
                     continue
                 await _mark_auto_approved(session, approval, mandate, invite_id, at)
                 await session.flush()

@@ -60,7 +60,7 @@ async def test_dev_header_is_ignored_unless_dev_mode() -> None:
     response = await _get(app, "/v1/me", {"X-Dev-User": "user_dev_buyer"})
 
     assert response.status_code == 401
-    assert response.json() == {"detail": "dev authentication is disabled"}
+    assert response.json()["detail"] == "dev authentication is disabled"
 
 
 async def test_bearer_without_clerk_configuration_is_503() -> None:

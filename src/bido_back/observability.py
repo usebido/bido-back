@@ -35,6 +35,7 @@ from opentelemetry.trace import Span
 from sqlalchemy import Engine
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from bido_back.logs import bound, safe_reason
 from bido_back.settings import Settings
 
 if TYPE_CHECKING:
@@ -171,6 +172,8 @@ _SAFE_HEADERS = frozenset(
 _SAFE_EXTRA_KEYS = frozenset({"job_type", "model"})
 _CONTENT_BEARING_EXCEPTIONS = frozenset({"ValidationError", "RequestValidationError"})
 _AGNO_LOGGERS = ("agno", "agno-team", "agno-workflow")
+# Log context fields (bido_back.logs) copied onto Sentry events as tags.
+_TAGGED_FIELDS = ("request_id", "tenant_id", "user_id", "conversation_id", "run_id", "job")
 
 
 def scrub_sentry_event(event: "Event", hint: "Hint") -> "Event":
@@ -180,7 +183,10 @@ def scrub_sentry_event(event: "Event", hint: "Hint") -> "Event":
       headers. Body, cookies, query string and environment are dropped.
     - extra: only `*_id`, `*_tokens`, `job_type` and `model`, with scalar values.
     - user: only `id`.
-    - breadcrumbs: query strings and fragments removed from HTTP breadcrumbs.
+    - exception messages and breadcrumb messages: quoted values and email
+      addresses masked (`bido_back.logs.safe_reason`).
+    - breadcrumbs: query strings and fragments removed from HTTP breadcrumbs;
+      other breadcrumbs keep only identifier data.
     """
     data = cast(dict[str, object], event)
 
@@ -229,6 +235,11 @@ def _scrub_exception(exc: dict[str, object]) -> None:
     # Validation errors embed the offending input values in their message.
     if exc.get("type") in _CONTENT_BEARING_EXCEPTIONS:
         exc["value"] = "<redacted: may contain input values>"
+        return
+    # Other messages are ours or a library's; mask quoted values and addresses.
+    value = exc.get("value")
+    if isinstance(value, str):
+        exc["value"] = safe_reason(value, 1000)
 
 
 def _scrub_request(request: Mapping[str, object]) -> dict[str, object]:
@@ -256,10 +267,18 @@ def _is_safe_extra(key: str, value: object) -> bool:
 
 
 def _scrub_breadcrumb(crumb: dict[str, object]) -> None:
+    message = crumb.get("message")
+    if isinstance(message, str):
+        crumb["message"] = safe_reason(message, 1000)
     data = crumb.get("data")
     if not isinstance(data, dict):
         return
     fields = cast(dict[str, object], data)
+    if crumb.get("type") != "http":
+        # Log breadcrumbs carry the record's `extra`: keep the identifiers only.
+        for key in [k for k, v in fields.items() if not _is_safe_extra(k, v)]:
+            del fields[key]
+        return
     fields.pop("http.query", None)
     fields.pop("http.fragment", None)
     url = fields.get("url")
@@ -315,13 +334,26 @@ def _init_sentry(settings: Settings, service: Service) -> None:
     sentry_sdk.init(
         dsn=settings.sentry_dsn,
         environment=settings.environment,
+        release=settings.git_sha or None,
         send_default_pii=False,
         max_request_body_size="never",
         include_local_variables=False,
-        before_send=scrub_sentry_event,
+        before_send=_before_send,
         traces_sample_rate=0,
     )
     sentry_sdk.set_tag("service", service)
+
+
+def _before_send(event: "Event", hint: "Hint") -> "Event":
+    """Scrub, then tag the event with the request or job it came from (ids only)."""
+    scrubbed = scrub_sentry_event(event, hint)
+    tags = cast(dict[str, object], scrubbed).setdefault("tags", {})
+    if isinstance(tags, dict):
+        for name in _TAGGED_FIELDS:
+            value = bound(name)
+            if value is not None:
+                cast(dict[str, object], tags)[name] = value
+    return scrubbed
 
 
 def _server_request_hook(span: Span, scope: dict[str, Any]) -> None:

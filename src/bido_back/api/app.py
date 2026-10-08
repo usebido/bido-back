@@ -29,10 +29,12 @@ from bido_back.api.onboarding import onboarding_router
 from bido_back.api.outbound import outbound_router
 from bido_back.api.proposals import proposals_router
 from bido_back.api.purchasing import purchasing_router
+from bido_back.api.request_context import add_request_context
 from bido_back.api.rfqs import rfqs_router
 from bido_back.api.search import search_router
 from bido_back.api.suppliers import suppliers_router
 from bido_back.api.templates import templates_router
+from bido_back.logs import configure_logging
 from bido_back.observability import init_observability, instrument_fastapi
 from bido_back.settings import Settings, get_settings
 
@@ -49,6 +51,8 @@ class HealthResponse(BaseModel):
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or get_settings()
+    # JSON lines on stdout (CloudWatch); once per process.
+    configure_logging(resolved, service="api")
     # Off unless OTEL_EXPORTER_OTLP_ENDPOINT / SENTRY_DSN are set; once per process.
     init_observability(resolved, service="api")
 
@@ -91,6 +95,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         from bido_back.api.dev import dev_router
 
         app.include_router(dev_router)
+    # Request ids, the access log and error bodies; inside tracing (so log
+    # lines carry the trace id) and inside CORS (so a 500 still has its headers).
+    add_request_context(app)
     instrument_fastapi(app)
     # Last, so it is the outermost middleware: preflights are answered before
     # tracing, routing or auth.

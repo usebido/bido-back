@@ -197,4 +197,14 @@ async def _check_recipients(
         )
     blocked = await unconfirmed_domains(session, principal.tenant_id, addresses)
     if blocked:
+        # Domains are the supplier's; count them, never name them.
+        logger.warning(
+            "recipient guard blocked",
+            extra={
+                "approval_id": str(approval.id),
+                "tool": approval.tool,
+                "recipients": len(addresses),
+                "unconfirmed_domains": len(blocked),
+            },
+        )
         raise ApprovalRecipientsUnconfirmed(blocked)

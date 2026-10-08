@@ -438,3 +438,62 @@ def test_conversation_title_collapses_and_truncates() -> None:
         attachment_ids=[uuid4(), uuid4()],
     )
     assert conversation_title(dropped) == "bom.xlsx, estoque.csv"
+
+
+@pytest.mark.db
+async def test_a_turn_is_logged_with_ids_and_counts_but_no_content(
+    api: Api, copilot_rows: People, script: Script
+) -> None:
+    import logging
+
+    from bido_back.logs import JsonFormatter
+
+    secret = "customer-content-7f3a"  # noqa: S105 - a marker, not a credential
+
+    class Lines(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.setFormatter(JsonFormatter(service="api", release=None))
+            self.text: list[str] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.text.append(self.format(record))
+
+    handler = Lines()
+    logger = logging.getLogger("bido_back")
+    previous = logger.level
+    logger.addHandler(handler)
+    logger.setLevel(logging.INFO)
+    try:
+        script(
+            # A tool error that quotes what the model typed, and invalid arguments.
+            reply(tool_use("fc_1", "invite_suppliers", rfq=secret, supplier_ids=[str(uuid4())])),
+            reply(tool_use("fc_2", "list_rfqs", limit=999)),
+            reply(text(f"I could not find {secret}.")),
+        )
+        response = await api.http.post(
+            "/v1/copilot/messages", json={"message": f"invite {secret} to it"}
+        )
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+    assert parse_sse(response.text)[-1]["ok"] is True
+    lines = [json.loads(line) for line in handler.text]
+    assert secret not in "\n".join(handler.text)
+    by_msg: dict[str, list[dict[str, Any]]] = {}
+    for line in lines:
+        by_msg.setdefault(line["msg"], []).append(line)
+    calls = by_msg["tool call"]
+    assert [(c["tool"], c["status"]) for c in calls] == [
+        ("invite_suppliers", "error"),
+        ("list_rfqs", "invalid_args"),
+    ]
+    assert calls[0]["reason"] == "no RFQ '…'; use list_rfqs to find it"
+    # Calls with invalid arguments never reach the event stream; only their log line.
+    (run,) = by_msg["agent run"]
+    assert (run["agent"], run["outcome"], run["tool_calls"]) == ("copilot", "completed", 1)
+    (finished,) = by_msg["copilot turn finished"]
+    assert (finished["outcome"], finished["tool_errors"]) == ("ok", 1)
+    assert finished["tools"] == ["invite_suppliers"]
+    assert finished["conversation_id"] == parse_sse(response.text)[0]["conversation_id"]

@@ -25,6 +25,7 @@ src/bido_back/
   purchasing/        data imports (BOM, stock, purchase history, plan) and the purchase analysis
   db/                SQLAlchemy models, sessions, tenant-scoped transactions
   observability.py   OpenTelemetry tracing and Sentry; off when unset
+  logs.py            JSON log lines on stdout, request/job context, redaction
 prompts/             versioned agent prompts (`<name>.v<N>.md`)
 migrations/          Alembic migrations (run as the migration role)
 docker/postgres/     local/CI database bootstrap (roles, extensions)
@@ -192,6 +193,22 @@ names become supplier contacts.
 
 ## Observability
 
+- **Logs:** one JSON object per line on stdout (CloudWatch reads the fields;
+  `LOG_FORMAT=text` or a local run gives plain lines), at `LOG_LEVEL` (default
+  INFO). Every line has `ts`, `level`, `logger`, `msg`, `service`, `release`
+  (the image's commit), whatever is bound to the request or job
+  (`request_id`, `tenant_id`, `user_id`, `conversation_id`, `run_id`, `job`),
+  and `trace_id`/`span_id` when tracing is on. What is logged: every request
+  (route template, status, duration), unhandled errors with a traceback
+  (no local variables), HTTP errors and validation failures (field paths only),
+  each Copilot turn (start and end: outcome, duration, tools), each agent run
+  (agent, prompt version, model, outcome, error code), each tool call (status,
+  duration, masked reason), each workbook import and section (type, row counts,
+  error reasons), each job (type, outcome, duration, attempt), sends, recipient
+  guard blocks, mandate holds and mailbox syncs.
+- **Request ids:** every response has `X-Request-ID` (the caller's, when it
+  sends a plain token) and every error body has `request_id`. Quote it to find
+  the request's lines (queries below).
 - **Traces:** OpenTelemetry, exported over OTLP/HTTP to
   `OTEL_EXPORTER_OTLP_ENDPOINT` (in AWS, an ADOT collector sidecar that
   forwards to CloudWatch). Requests, outbound HTTP, AWS calls, and queries on
@@ -306,6 +323,98 @@ region = us-east-2
 ```
 
 The tasks ask for the profile name and default to `bido-dev-temp`.
+
+## Debugging in AWS
+
+Logs are in CloudWatch: `/ecs/bido-dev/api` and `/ecs/bido-dev/worker`
+(30 days). Open **CloudWatch → Logs Insights**, pick both groups, and paste a
+query. Or from a terminal (`aws: login (SSO)` first):
+
+```bash
+aws logs start-query --profile bido-dev-temp \
+  --log-group-names /ecs/bido-dev/api /ecs/bido-dev/worker \
+  --start-time $(date -d '-1 hour' +%s) --end-time $(date +%s) \
+  --query-string 'filter level in ["ERROR", "WARNING"] | sort @timestamp desc'
+aws logs get-query-results --profile bido-dev-temp --query-id <queryId>
+```
+
+Errors and warnings in the last hour:
+
+```text
+fields @timestamp, level, logger, msg, request_id, tenant_id, job, reason, code, exc_type
+| filter level in ["ERROR", "WARNING"]
+| sort @timestamp desc
+| limit 100
+```
+
+Everything one request did (the `request_id` from the error body or the
+`X-Request-ID` header):
+
+```text
+fields @timestamp, level, logger, msg, route, status, tool, reason, exc
+| filter request_id = "<request id>"
+| sort @timestamp asc
+```
+
+One Copilot turn, or a whole conversation (`conversation_id` is in the
+conversation's URL and in the stream's first event):
+
+```text
+fields @timestamp, msg, run_id, agent, tool, status, outcome, code, reason, duration_ms
+| filter conversation_id = "<conversation id>"
+| sort @timestamp asc
+```
+
+Copilot turns that did not end well:
+
+```text
+fields @timestamp, conversation_id, outcome, code, tool_errors, tools, duration_ms
+| filter msg = "copilot turn finished" and outcome != "ok"
+| sort @timestamp desc
+```
+
+Slowest tools and how often they fail:
+
+```text
+filter msg = "tool call"
+| stats count(*) as calls, avg(duration_ms) as avg_ms, pct(duration_ms, 95) as p95_ms
+  by tool, status
+| sort p95_ms desc
+```
+
+Tool errors by reason (reasons are masked: quoted values show as `'…'`):
+
+```text
+filter msg = "tool call" and status != "ok"
+| stats count(*) as n by tool, status, error_class, reason
+| sort n desc
+```
+
+Spreadsheet sections with rejected rows or missing columns (logged as
+warnings; sections are numbered because sheet names are the buyer's):
+
+```text
+fields @timestamp, upload_id, section, type, source, rows_total, rows_ok, rows_failed,
+       missing_required, error_reasons
+| filter msg = "workbook section" and level = "WARNING"
+| sort @timestamp desc
+```
+
+Jobs that failed or retried:
+
+```text
+fields @timestamp, job, tenant_id, outcome, attempt, duration_ms
+| filter msg = "job" and (outcome != "handled" or attempt > 1)
+| sort @timestamp desc
+```
+
+Slow or failing endpoints:
+
+```text
+filter msg = "request"
+| stats count(*) as n, pct(duration_ms, 95) as p95_ms by method, route, status
+| sort status desc, p95_ms desc
+```
 
 ## Deploy (dev)
 

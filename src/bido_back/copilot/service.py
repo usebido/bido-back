@@ -21,6 +21,7 @@ A failed run sends the runner's `run_failed`, then `done` with ok=false.
 """
 
 import logging
+import time
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -57,6 +58,7 @@ from bido_back.copilot.tools import CopilotToolDeps, Db, copilot_tools
 from bido_back.db import tenant_session
 from bido_back.db.models import CopilotConversation, TemplateUpload
 from bido_back.documents import DocumentText, extract_text, render_documents
+from bido_back.logs import annotate
 from bido_back.purchasing.workbook import SheetMapper, default_sheet_mapper
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
@@ -214,6 +216,9 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
         )
     )
     agent = copilot_agent(tools)
+    # Every later log line of this request names the conversation and the run.
+    annotate(conversation_id=prepared.conversation_id, run_id=context.run_id)
+    turn = _TurnLog(prepared, context.run_id, agent.prompt_version, agent.model)
     yield ConversationEvent(conversation_id=prepared.conversation_id, run_id=context.run_id)
     await _record_turn(deps.db, principal, prepared)
 
@@ -229,46 +234,104 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
         approvals=PostgresApprovalSink(deps.db),
         config=deps.runner_config,
     )
-    async for event in events:
-        if isinstance(event, RunCompleted):
-            try:
-                reply = CopilotReply.model_validate(event.output)
-            except ValidationError:
-                yield RunFailed(
-                    run_id=event.run_id, seq=event.seq, code="invalid_output", message="no answer"
-                ).model_dump(mode="json")
-                break
-            ok = True
-            yield AnswerEvent(run_id=context.run_id, text=reply.answer)
-            continue
-        if isinstance(event, ToolCalled):
-            called[event.call_id] = event.tool
-        elif isinstance(event, ToolResult) and kinds.get(event.tool) == "draft":
-            actions.append(
-                CopilotAction(
-                    call_id=event.call_id,
-                    tool=event.tool,
-                    ok=event.ok,
-                    output=event.output,
-                    error=event.error,
-                )
-            )
-        yield event.model_dump(mode="json")
-
-    logger.info(
-        "copilot message tenant=%s run=%s ok=%s tools=%d actions=%d",
-        principal.tenant_id,
-        context.run_id,
-        ok,
-        len(called),
-        len(actions),
-    )
+    try:
+        async for event in events:
+            if isinstance(event, RunCompleted):
+                try:
+                    reply = CopilotReply.model_validate(event.output)
+                except ValidationError:
+                    turn.failed("invalid_output")
+                    yield RunFailed(
+                        run_id=event.run_id,
+                        seq=event.seq,
+                        code="invalid_output",
+                        message="no answer",
+                    ).model_dump(mode="json")
+                    break
+                ok = True
+                yield AnswerEvent(run_id=context.run_id, text=reply.answer)
+                continue
+            if isinstance(event, ToolCalled):
+                called[event.call_id] = event.tool
+            elif isinstance(event, ToolResult):
+                if not event.ok:
+                    turn.tool_errors += 1
+                if kinds.get(event.tool) == "draft":
+                    actions.append(
+                        CopilotAction(
+                            call_id=event.call_id,
+                            tool=event.tool,
+                            ok=event.ok,
+                            output=event.output,
+                            error=event.error,
+                        )
+                    )
+            elif isinstance(event, RunFailed):
+                turn.failed(event.code)
+            yield event.model_dump(mode="json")
+        turn.finished("ok" if ok else "failed")
+    except Exception:
+        # Logged with its traceback by the request middleware.
+        turn.finished("error")
+        raise
+    finally:
+        turn.write(tools=sorted(set(called.values())), tool_calls=len(called), actions=len(actions))
     yield DoneEvent(
         run_id=context.run_id,
         conversation_id=prepared.conversation_id,
         ok=ok,
         actions=actions,
     )
+
+
+class _TurnLog:
+    """A line when a Copilot turn starts and one when it ends (ids and counts only).
+
+    The end line says how it ended: `ok`, `failed` (with the run's error code),
+    `error` on an exception, or `aborted` when the buyer closed the stream
+    before the end.
+    """
+
+    def __init__(
+        self, prepared: PreparedMessage, run_id: UUID, prompt_version: int, model: str
+    ) -> None:
+        self._started = time.perf_counter()
+        self._outcome = "aborted"
+        self._code: str | None = None
+        self.tool_errors = 0
+        self._fields: dict[str, object] = {
+            # Also bound to the request's other lines; repeated here so the turn
+            # lines name it wherever they are written (evals, scripts).
+            "conversation_id": str(prepared.conversation_id),
+            "run_id": str(run_id),
+            "prompt_version": prompt_version,
+            "model": model,
+            "attachments": len(prepared.input.attachment_ids),
+            "earlier_attachments": len(prepared.input.earlier_attachment_ids),
+            "files_only": _files_only(prepared.input),
+        }
+        logger.info("copilot turn started", extra=self._fields)
+
+    def failed(self, code: str) -> None:
+        self._code = code
+
+    def finished(self, outcome: str) -> None:
+        self._outcome = outcome
+
+    def write(self, *, tools: list[str], tool_calls: int, actions: int) -> None:
+        fields = {
+            **self._fields,
+            "outcome": self._outcome,
+            "duration_ms": round((time.perf_counter() - self._started) * 1000, 1),
+            "tool_calls": tool_calls,
+            "tool_errors": self.tool_errors,
+            "tools": tools,
+            "actions": actions,
+        }
+        if self._code is not None:
+            fields["code"] = self._code
+        level = logging.INFO if self._outcome == "ok" else logging.WARNING
+        logger.log(level, "copilot turn finished", extra=fields)
 
 
 def conversation_title(input: CopilotInput) -> str:
