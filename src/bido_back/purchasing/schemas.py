@@ -119,13 +119,23 @@ class AnalysisLineView(BaseModel):
     rfq_line_id: UUID | None
 
 
+class CurrencyTotalView(BaseModel):
+    currency: str
+    items_to_buy: int
+    total_at_target: Decimal
+    total_at_last_price: Decimal
+
+
 class AnalysisSummary(BaseModel):
     items: int
     items_to_buy: int
+    # Set when every line to buy is in one currency; otherwise see `totals`.
     currency: str | None
     total_at_target: Decimal | None
     total_at_last_price: Decimal | None
     flagged_items: int
+    # Spend per currency (amounts in different currencies are never added up).
+    totals: list[CurrencyTotalView] = []
 
 
 class AnalysisView(BaseModel):
@@ -164,3 +174,6 @@ class RfqFromAnalysis(BaseModel):
     rfq: RfqDetail
     invited: list[InvitedSupplier]
     skipped: list[SkippedSupplier]
+    # Line positions left without a target/maximum price: bought in another
+    # currency than the RFQ's, with no exchange rate to convert the limits.
+    lines_without_limits: list[int] = []

@@ -52,7 +52,7 @@ from bido_back.negotiation import service as negotiation_service
 from bido_back.negotiation.agents import NegotiationWriter, default_negotiation_writer
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
 from bido_back.purchasing import service as purchasing_service
-from bido_back.purchasing.schemas import AnalysisRequest, RfqFromAnalysisRequest
+from bido_back.purchasing.schemas import AnalysisRequest, CurrencyTotalView, RfqFromAnalysisRequest
 from bido_back.purchasing.workbook import SheetMapper
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
@@ -566,9 +566,12 @@ class PurchaseAnalysisOut(BaseModel):
     need_by: date | None
     items: int
     items_to_buy: int
+    # Set when every part to buy is in one currency; otherwise use `totals`.
     currency: str | None
     total_at_target: Decimal | None
     total_at_last_price: Decimal | None
+    # Spend per currency; never add amounts in different currencies together.
+    totals: list[CurrencyTotalView]
     lines: list[AnalysisLineItem]
 
 
@@ -581,9 +584,14 @@ class RfqFromAnalysisOut(BaseModel):
     ref: str
     title: str
     status: str
+    # The RFQ's currency: offers are compared, and limits set, in it.
+    currency: str
     lines: list[LineItem]
     invited_suppliers: list[str]
     skipped_suppliers: list[str]
+    # Positions without a target/maximum price (no history, or another currency
+    # with no exchange rate): the buyer must give them before negotiating.
+    lines_without_limits: list[int]
 
 
 def _line_item(line: RfqLine) -> LineItem:
@@ -1010,6 +1018,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             currency=view.summary.currency,
             total_at_target=view.summary.total_at_target,
             total_at_last_price=view.summary.total_at_last_price,
+            totals=view.summary.totals,
             lines=[
                 AnalysisLineItem(
                     part_number=line.part_number,
@@ -1079,6 +1088,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             ref=rfq.ref,
             title=rfq.title,
             status=rfq.status,
+            currency=rfq.base_currency,
             lines=[
                 LineItem(
                     position=line.position,
@@ -1092,6 +1102,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             ],
             invited_suppliers=[s.name for s in created.invited],
             skipped_suppliers=[f"{s.name} ({s.reason})" for s in created.skipped],
+            lines_without_limits=created.lines_without_limits,
         )
 
     async def get_negotiation_status(ctx: ToolContext, args: RfqRef) -> NegotiationStatusOut:

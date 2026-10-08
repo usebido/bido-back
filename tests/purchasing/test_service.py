@@ -1,17 +1,18 @@
 """Imports, analyses and the RFQ draft, against Postgres (skipped without it)."""
 
 from collections.abc import Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
-from bido_back.db.models import AnalysisLine, Invite, Item, PoLine, RfqLine
+from bido_back.db.models import AnalysisLine, FxRate, Invite, Item, PoLine, Rfq, RfqLine
+from bido_back.fx.ecb import DailyRates, upsert_rates
 from bido_back.onboarding import service as onboarding
 from bido_back.purchasing import service
 from bido_back.purchasing.importers import TableImportType
@@ -283,3 +284,55 @@ async def test_uploads_of_other_users_cannot_be_imported(
             app_engine, storage, colleague, ImportRequest(type="bom", upload_id=upload.id)
         )
     assert isinstance(upload.id, UUID)
+
+
+MIXED_HISTORY = [
+    ["Numero Ordine", "Fornitore", "Codice Articolo", "Quantità", "Prezzo Unitario",
+     "Data Ordine", "Valuta"],
+    ["PO-1", "Cuscinetti Precisione S.r.l.", "BRG-6205", 100, 12.0, date(2026, 8, 1), "BRL"],
+    ["PO-2", "Rame Brasil Ltda", "CU-WIRE", 100, 60.0, date(2026, 8, 1), "BRL"],
+    ["PO-3", "Fonderia Veneta S.p.A.", "HSG-AL", 10, 30.0, date(2026, 8, 1), "EUR"],
+]  # fmt: skip
+
+
+async def test_rfq_from_analysis_takes_the_main_currency_and_converts_the_rest(
+    app_engine: AsyncEngine, migrator_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = buyer(purchasing_rows)
+    storage = FakeStorage()
+    await load(app_engine, storage, who, "bom", BOM)
+    await load(app_engine, storage, who, "purchase_history", MIXED_HISTORY)
+    view = await service.create_analysis(
+        app_engine, who, AnalysisRequest(product="Motor EV-120", quantity=Decimal(100)), today=TODAY
+    )
+    assert view.summary.currency is None  # BRL and EUR: totals per currency
+    assert {t.currency for t in view.summary.totals} == {"BRL", "EUR"}
+
+    today = datetime.now(UTC).date()
+    async with migrator_engine.connect() as conn:
+        had_rates = await conn.scalar(select(FxRate.currency).where(FxRate.rate_date == today))
+    if had_rates is None:
+        await upsert_rates(app_engine, DailyRates(today, {"BRL": Decimal("6.0")}))
+    try:
+        created = await service.create_rfq_from_analysis(
+            app_engine, who, view.id, RfqFromAnalysisRequest()
+        )
+        async with tenant_session(app_engine, who.tenant_id) as session:
+            rfq = await session.get(Rfq, created.rfq.id)
+            limits = {
+                line.description: (line.target_unit_price, line.max_unit_price)
+                for line in await session.scalars(
+                    select(RfqLine).where(RfqLine.rfq_id == created.rfq.id)
+                )
+            }
+    finally:
+        if had_rates is None:
+            async with migrator_engine.begin() as conn:
+                await conn.execute(delete(FxRate).where(FxRate.rate_date == today))
+
+    assert rfq is not None and rfq.base_currency == "BRL"  # two lines of three
+    assert limits["Cuscinetto 6205 2RS"] == (Decimal("12.0000"), Decimal("12.6000"))
+    if had_rates is None:
+        # The EUR housing's limits at 6 BRL per EUR: 30 -> 180, max 31.50 -> 189.
+        assert limits["Carcassa in alluminio"] == (Decimal("180.0000"), Decimal("189.0000"))
+        assert created.lines_without_limits == []

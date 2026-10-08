@@ -335,6 +335,14 @@
               }
             ],
             "title": "Total At Target"
+          },
+          "totals": {
+            "default": [],
+            "items": {
+              "$ref": "#/components/schemas/CurrencyTotalView"
+            },
+            "title": "Totals",
+            "type": "array"
           }
         },
         "required": [
@@ -2145,6 +2153,36 @@
           "source"
         ],
         "title": "CreateTemplateRequest",
+        "type": "object"
+      },
+      "CurrencyTotalView": {
+        "properties": {
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "items_to_buy": {
+            "title": "Items To Buy",
+            "type": "integer"
+          },
+          "total_at_last_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total At Last Price",
+            "type": "string"
+          },
+          "total_at_target": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total At Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "currency",
+          "items_to_buy",
+          "total_at_target",
+          "total_at_last_price"
+        ],
+        "title": "CurrencyTotalView",
         "type": "object"
       },
       "DecisionRequest": {
@@ -6204,6 +6242,14 @@
             "title": "Invited",
             "type": "array"
           },
+          "lines_without_limits": {
+            "default": [],
+            "items": {
+              "type": "integer"
+            },
+            "title": "Lines Without Limits",
+            "type": "array"
+          },
           "rfq": {
             "$ref": "#/components/schemas/RfqDetail"
           },
@@ -6869,6 +6915,14 @@
             "title": "Missing Required",
             "type": "array"
           },
+          "notes": {
+            "default": [],
+            "items": {
+              "type": "string"
+            },
+            "title": "Notes",
+            "type": "array"
+          },
           "question": {
             "anyOf": [
               {
@@ -6886,6 +6940,11 @@
           },
           "rows_ok": {
             "title": "Rows Ok",
+            "type": "integer"
+          },
+          "rows_skipped": {
+            "default": 0,
+            "title": "Rows Skipped",
             "type": "integer"
           },
           "rows_total": {

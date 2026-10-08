@@ -1,11 +1,11 @@
 """Golden expectations: what a correct import and analysis produce for a dataset.
 
 The analysis numbers come from the production formulas (`purchasing.analysis`)
-applied to the dataset itself, the way a perfect import would load it: every
-supplier read from a spreadsheet is a "distributor", a received line without a
-received quantity counts the whole ordered quantity, prices are EUR. So a
-mismatch in an eval means the spreadsheet was read wrong, not that the math
-changed.
+applied to the dataset itself, the way a perfect import would load it: a
+supplier is a "distributor" unless the dataset gives its type, a received line
+without a received quantity counts the whole ordered quantity, every line keeps
+its currency. So a mismatch in an eval means the spreadsheet was read wrong, not
+that the math changed.
 """
 
 from datetime import date
@@ -55,14 +55,16 @@ def golden_analysis(
             item_id=items[row.part].id,
             supplier_id=_id("supplier", row.supplier.lower()),
             supplier_name=row.supplier,
-            supplier_type="distributor",
+            supplier_type=dataset.supplier(row.supplier).type,
             currency=row.currency,
             ordered_at=row.ordered_at,
             quantity=row.quantity,
             unit_price=row.unit_price,
             promised_at=row.promised_at,
             received_at=row.received_at,
-            received_qty=row.quantity if row.received_at else None,
+            received_qty=row.received_qty
+            if row.received_qty is not None
+            else (row.quantity if row.received_at else None),
             rejected_qty=row.rejected_qty,
         )
         for row in dataset.purchases

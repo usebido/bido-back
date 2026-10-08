@@ -29,7 +29,7 @@ def test_fixtures_are_deterministic_and_use_test_domains_only() -> None:
     assert [[(g.name, g.rows) for g in read_workbook(f.data, f.filename)] for f in first] == [
         [(g.name, g.rows) for g in read_workbook(f.data, f.filename)] for f in second
     ]
-    assert len(first) == 10
+    assert len(first) == 12
     for fixture in first:
         for supplier in fixture.dataset.suppliers:
             assert supplier.email.endswith((".example.test", ".example.com"))
