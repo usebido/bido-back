@@ -43,6 +43,7 @@ from bido_back.observability import init_observability
 from bido_back.settings import Settings, get_settings
 from bido_back.worker.envelope import Envelope
 from bido_back.worker.job_types import (
+    FILES_INDEX,
     FOLLOWUPS_SWEEP,
     FX_REFRESH,
     MAILBOX_SYNC,
@@ -198,6 +199,9 @@ def build_worker_registry(
     )
     registry.register(TEMPLATE_SCAN, TemplateScanHandler(onboarding))
     registry.register(TEMPLATE_BUILD, TemplateBuildHandler(onboarding))
+    from bido_back.files.index import FilesIndexHandler
+
+    registry.register(FILES_INDEX, FilesIndexHandler(engine, storage, jobs))
     return registry
 
 

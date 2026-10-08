@@ -14,3 +14,5 @@ FOLLOWUPS_SWEEP = (
 NEGOTIATION_SWEEP = (
     "negotiation.sweep"  # payload: {}. tenant_id = all-zeros for every tenant (scheduled)
 )
+# payload: {}. Reads one company's files not yet read, for content search.
+FILES_INDEX = "files.index"

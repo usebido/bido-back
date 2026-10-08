@@ -7,13 +7,17 @@ to the caller's tenant, and `tenant_session` sets it.
 
 Results are ordered by kind (RFQs, then lines, suppliers, quoted parts), then
 newest first, and paged with limit / offset. Each hit says which field matched.
+
+`files` adds the company file library's best matches (`bido_back.files`): by
+name, or by content with a snippet. They are not paged (the first page only,
+at most `MAX_FILE_HITS`) and not counted in `total`.
 """
 
 from datetime import datetime
 from typing import Final, Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import ColumnElement, Integer, String, Subquery, case, cast, func, literal, select
 from sqlalchemy import null as sql_null
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -22,6 +26,7 @@ from sqlalchemy.orm import InstrumentedAttribute
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import Invite, Proposal, ProposalLine, Rfq, RfqLine, Supplier
+from bido_back.files.service import FileFilters, FileItem, list_files
 
 Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
@@ -30,6 +35,7 @@ SearchKind = Literal["rfq", "rfq_line", "supplier", "quoted_part"]
 MIN_QUERY: Final = 2
 MAX_QUERY: Final = 100
 MAX_LIMIT: Final = 50
+MAX_FILE_HITS: Final = 5
 
 
 class SearchHit(BaseModel):
@@ -49,6 +55,10 @@ class SearchResults(BaseModel):
     limit: int
     offset: int
     items: list[SearchHit]
+    files: list[FileItem] = Field(
+        default_factory=list[FileItem],
+        description="The company files that match (name or content), first page only",
+    )
 
 
 def like_pattern(query: str) -> str:
@@ -156,4 +166,16 @@ async def search(
             )
             for row in rows
         ]
-    return SearchResults(query=query, total=total, limit=limit, offset=offset, items=items)
+    files = (
+        await list_files(db, principal, FileFilters(q=query), limit=MAX_FILE_HITS)
+        if offset == 0
+        else None
+    )
+    return SearchResults(
+        query=query,
+        total=total,
+        limit=limit,
+        offset=offset,
+        items=items,
+        files=files.items if files is not None else [],
+    )

@@ -415,13 +415,20 @@ async def test_download_link_is_an_attachment_with_a_type_from_the_extension(
 
 
 @pytest.mark.db
-async def test_only_the_uploader_can_read_an_upload(
+async def test_company_members_read_an_upload_other_companies_do_not(
     app_engine: AsyncEngine, uploads_api: UploadsApi, onboarding_rows: Onboarding
 ) -> None:
+    # Company-wide read (bido_back.files.policy): a colleague reads it too.
     upload_id = await _upload(app_engine, uploads_api, "a.csv", b"a;b\n1;2\n")
     people = onboarding_rows.people
+    uploads_api.as_user["principal"] = Principal(
+        tenant_id=people.tenant, user_id=people.member, role="member"
+    )
+    for path in ("download", "preview"):
+        response = await uploads_api.http.get(f"/v1/uploads/{upload_id}/{path}")
+        assert response.status_code == 200, path
+    uploads_api.links.calls.clear()
     strangers = [
-        Principal(tenant_id=people.tenant, user_id=people.member, role="member"),
         Principal(tenant_id=people.other_tenant, user_id=people.other_approver, role="owner"),
         # Right user id, wrong tenant: the row is invisible under the other tenant's RLS.
         Principal(tenant_id=people.other_tenant, user_id=people.owner, role="owner"),

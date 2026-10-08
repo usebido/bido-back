@@ -30,11 +30,13 @@ from bido_back.api.deps import (
     get_db,
     get_direct_uploads,
     get_job_queue,
+    get_optional_job_queue,
     get_principal,
     get_storage,
 )
 from bido_back.api.rfqs import error_responses
 from bido_back.auth import Principal
+from bido_back.files.index import request_index
 from bido_back.onboarding import service
 from bido_back.onboarding.schemas import (
     CompleteUploadRequest,
@@ -54,6 +56,8 @@ from bido_back.worker.jobs import JobQueue
 Db = Annotated[async_sessionmaker[AsyncSession], Depends(get_db)]
 CurrentPrincipal = Annotated[Principal, Depends(get_principal)]
 Jobs = Annotated[JobQueue, Depends(get_job_queue)]
+# Reading a new upload for the file library's search is best effort.
+IndexJobs = Annotated[JobQueue | None, Depends(get_optional_job_queue)]
 
 
 class StartScanRequest(BaseModel):
@@ -155,6 +159,7 @@ def onboarding_router() -> APIRouter:
         db: Db,
         storage: Annotated[BlobStorage, Depends(get_storage)],
         filename: Annotated[str, Query(min_length=1, max_length=255)],
+        index_jobs: IndexJobs,
         content_type: Annotated[str, Header(alias="Content-Type")] = "application/octet-stream",
     ) -> UploadView:
         """One file per request: the raw bytes as the body, its name in `filename`."""
@@ -162,7 +167,7 @@ def onboarding_router() -> APIRouter:
             if service.upload_extension(filename) not in service.UPLOAD_EXTENSIONS:
                 raise service.UnsupportedUpload("accepted files: xlsx, xls, csv, pdf, docx")
             data = await _read_capped(request, service.MAX_UPLOAD_BYTES)
-            return await service.store_upload(
+            view = await service.store_upload(
                 db,
                 storage,
                 principal,
@@ -172,6 +177,8 @@ def onboarding_router() -> APIRouter:
             )
         except service.OnboardingError as exc:
             raise onboarding_http_error(exc) from None
+        await request_index(index_jobs, principal.tenant_id, f"upload:{view.id}")
+        return view
 
     @router.post(
         "/uploads/direct",
@@ -223,17 +230,20 @@ def onboarding_router() -> APIRouter:
         principal: CurrentPrincipal,
         db: Db,
         direct: Annotated[DirectUploads, Depends(get_direct_uploads)],
+        index_jobs: IndexJobs,
     ) -> UploadView:
         """Record a direct upload once the file is in storage (404 if it is not).
 
         Calling it again for the same upload answers the same upload.
         """
         try:
-            return await service.complete_direct_upload(
+            view = await service.complete_direct_upload(
                 db, direct, principal, upload_id, filename=body.filename
             )
         except service.OnboardingError as exc:
             raise onboarding_http_error(exc) from None
+        await request_index(index_jobs, principal.tenant_id, f"upload:{view.id}")
+        return view
 
     @router.post(
         "/templates",
