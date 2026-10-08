@@ -2,7 +2,9 @@
 
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
 from bido_back.templates.required import (
+    LINE_HEADINGS,
     REQUIRED_FIELDS,
+    accepted_terms,
     covered_keys,
     label_matches,
     missing_required,
@@ -76,3 +78,48 @@ def test_every_required_field_has_an_english_label_and_unique_key() -> None:
     assert len(keys) == len(set(keys))
     assert all("en" in f.labels for f in REQUIRED_FIELDS)
     assert [f.key for f in REQUIRED_FIELDS if f.conditional] == ["qualification"]
+
+
+def test_bido_own_labels_and_headings_cover_their_field_in_every_language() -> None:
+    """No drift: whatever Bido writes for a field is recognised as that field."""
+    for field in REQUIRED_FIELDS:
+        for language, label in field.labels.items():
+            assert field.key in covered_keys([label]), (field.key, language, label)
+    heading_field = {
+        "mpn": "mpn",
+        "manufacturer": "manufacturer",
+        "quantity": "quantity_tiers",
+        "unit": "unit",
+        "need_by": "need_by",
+        "qualification": "qualification",
+        "incoterm": "incoterm_place",
+    }
+    for language, headings in LINE_HEADINGS.items():
+        for key, heading in headings.items():
+            if key in heading_field:
+                assert heading_field[key] in covered_keys([heading]), (language, heading)
+
+
+def test_translated_labels_cover_their_field() -> None:
+    assert covered_keys(["Code fabricant"]) >= {"mpn"}
+    assert covered_keys(["Réf. fabricant"]) >= {"mpn"}
+    assert covered_keys(["Référence du fabricant"]) >= {"mpn"}
+    assert covered_keys(["Delivery time"]) == {"lead_time"}
+    assert covered_keys(["Tempo di consegna"]) == {"lead_time"}
+    assert covered_keys(["Data richiesta"]) == {"need_by"}
+    assert covered_keys(["Date souhaitée"]) == {"need_by"}
+    assert covered_keys(["Conditionnement"]) == {"packaging"}
+    assert "mpn" in accepted_terms("mpn")
+    assert "reference fabricant" in accepted_terms("mpn")  # the fr label, without "(MPN)"
+
+
+def test_neighbouring_words_do_not_cover_a_missing_field() -> None:
+    assert "lead_time" not in covered_keys(["Delivery date", "Unit price", "Data richiesta"])
+    assert "need_by" not in covered_keys(["Delivery time", "Tempi di consegna", "Lead time"])
+    assert "mpn" not in covered_keys(["Fabricant", "Désignation", "Quantité"])
+    assert "packaging" not in covered_keys(["Conditions de paiement", "Quantité"])
+    body = "Pos. | Désignation | Quantité | Unité\nDélai de livraison\nValidité de l'offre"
+    missing = [f.key for f in missing_required(body.replace("|", "\n").splitlines())]
+    assert "mpn" in missing
+    assert "packaging" in missing
+    assert "lead_time" not in missing

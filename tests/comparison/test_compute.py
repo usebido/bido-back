@@ -172,6 +172,9 @@ def test_unit_mismatch_is_flagged_and_not_totalled() -> None:
     assert mismatch.line_total_base is None
     assert "unit_mismatch" not in same.flags and same.line_total_base == D("40.00")
     assert normalize_unit(" PCS ") == normalize_unit("each") == "pcs"
+    # Suppliers write "pieces" in their own language.
+    for written in ("Stück", "pz", "pz.", "pièces", "peças", "unidades", "Stk."):
+        assert normalize_unit(written) == "pcs", written
 
 
 def test_flags_alternative_review_low_confidence_lead_time_moq_and_minimums() -> None:

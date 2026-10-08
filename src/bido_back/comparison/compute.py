@@ -48,7 +48,15 @@ LOW_CONFIDENCE: Final = 0.8
 
 _UNIT_PRICE_PLACES: Final = Decimal("0.000001")
 _MONEY_PLACES: Final = Decimal("0.01")
-_PIECES: Final = frozenset({"pcs", "pc", "pce", "piece", "pieces", "ea", "each", "stk", "st"})
+# "Pieces" as suppliers write it (quote extraction keeps the unit as written).
+_PIECES: Final = frozenset(
+    {"pcs", "pc", "pce", "piece", "pieces", "ea", "each", "unit", "units",
+     "stk", "st", "stück", "stueck", "stck",
+     "pz", "pezzi", "pezzo",
+     "pièce", "pièces", "unité", "unités",
+     "un", "und", "unid", "peça", "peças", "peca", "pecas",
+     "ud", "uds", "unidad", "unidades"}
+)  # fmt: skip
 
 Flag = Literal[
     "alternative_part",

@@ -2,10 +2,12 @@
 
 A template's labels are the buyer's own words, in their language ("Prazo de
 entrega", "Lieferzeit (Wochen)", "MOQ"). Each required field has synonyms in
-the languages we see (pt, en, de, fr, es, it); a label covers a field when it
-contains one of them. Short synonyms (seven letters or fewer, like "un",
-"menge" or "einheit") must be whole words of the label, so "un" does not
-match "fundo" nor "menge" match "Mindestbestellmenge".
+the languages we see (pt, en, de, fr, es, it), and Bido's own words for it
+(its labels and the render's headings, in every language) count as synonyms
+too; a label covers a field when it contains one of them. Short synonyms
+(seven letters or fewer, like "un", "menge" or "einheit") must be whole words
+of the label, so "un" does not match "fundo" nor "menge" match
+"Mindestbestellmenge".
 
 Two kinds of required fields:
 
@@ -62,6 +64,12 @@ REQUIRED_FIELDS: Final[tuple[RequiredField, ...]] = (
             "teilenummer",
             "artikelnummer",
             "reference fabricant",
+            "reference du fabricant",
+            "ref. fabricant",
+            "ref fabricant",
+            "code fabricant",
+            "code du fabricant",
+            "numero de piece",
             "numero de pieza",
             "numero de peca",
             "codice",
@@ -269,13 +277,18 @@ REQUIRED_FIELDS: Final[tuple[RequiredField, ...]] = (
         kind="ask",
         synonyms=(
             "lead time",
+            "delivery time",
+            "delivery period",
             "prazo de entrega",
             "prazo",
             "lieferzeit",
+            "lieferfrist",
             "delai",
             "plazo de entrega",
             "plazo",
             "tempi di consegna",
+            "tempo di consegna",
+            "termine di consegna",
         ),
         labels={
             "en": "Lead time",
@@ -337,6 +350,87 @@ REQUIRED_FIELDS: Final[tuple[RequiredField, ...]] = (
     ),
 )
 
+# Short headings for the line-data columns the render adds.
+LINE_HEADINGS: Final[dict[str, dict[str, str]]] = {
+    "en": {
+        "position": "Pos.",
+        "description": "Description",
+        "mpn": "MPN",
+        "manufacturer": "Manufacturer",
+        "quantity": "Quantity",
+        "unit": "Unit",
+        "need_by": "Need by",
+        "qualification": "Qualification",
+        "incoterm": "Incoterm",
+    },
+    "pt": {
+        "position": "Item",
+        "description": "Descrição",
+        "mpn": "Código (MPN)",
+        "manufacturer": "Fabricante",
+        "quantity": "Quantidade",
+        "unit": "Un.",
+        "need_by": "Data de entrega",
+        "qualification": "Qualificação",
+        "incoterm": "Incoterm",
+    },
+    "de": {
+        "position": "Pos.",
+        "description": "Bezeichnung",
+        "mpn": "MPN",
+        "manufacturer": "Hersteller",
+        "quantity": "Menge",
+        "unit": "Einheit",
+        "need_by": "Liefertermin",
+        "qualification": "Qualifikation",
+        "incoterm": "Incoterm",
+    },
+    "fr": {
+        "position": "Pos.",
+        "description": "Désignation",
+        "mpn": "Réf. fabricant",
+        "manufacturer": "Fabricant",
+        "quantity": "Quantité",
+        "unit": "Unité",
+        "need_by": "Date souhaitée",
+        "qualification": "Qualification",
+        "incoterm": "Incoterm",
+    },
+    "es": {
+        "position": "Pos.",
+        "description": "Descripción",
+        "mpn": "MPN",
+        "manufacturer": "Fabricante",
+        "quantity": "Cantidad",
+        "unit": "Unidad",
+        "need_by": "Fecha requerida",
+        "qualification": "Calificación",
+        "incoterm": "Incoterm",
+    },
+    "it": {
+        "position": "Pos.",
+        "description": "Descrizione",
+        "mpn": "Codice produttore",
+        "manufacturer": "Produttore",
+        "quantity": "Quantità",
+        "unit": "Unità",
+        "need_by": "Data richiesta",
+        "qualification": "Qualifica",
+        "incoterm": "Incoterm",
+    },
+}
+
+# The render's heading key -> the required field it carries.
+_HEADING_FIELD: Final[dict[str, str]] = {
+    "mpn": "mpn",
+    "manufacturer": "manufacturer",
+    "quantity": "quantity_tiers",
+    "unit": "unit",
+    "need_by": "need_by",
+    "qualification": "qualification",
+    "incoterm": "incoterm_place",
+}
+
 _BY_KEY: Final = {f.key: f for f in REQUIRED_FIELDS}
 _WHOLE_WORD_MAX: Final = 7
 
@@ -360,12 +454,43 @@ def label_matches(label: str, synonym: str) -> bool:
     return synonym in text
 
 
+def _own_words(text: str) -> str:
+    """A label or heading of ours as a synonym: normalized, without "(MPN)"-style asides."""
+    return normalize(re.sub(r"\([^)]*\)", " ", text))
+
+
+def _accepted(field: RequiredField) -> tuple[str, ...]:
+    own = [
+        *field.labels.values(),
+        *(
+            heading
+            for headings in LINE_HEADINGS.values()
+            for key, heading in headings.items()
+            if _HEADING_FIELD.get(key) == field.key
+        ),
+    ]
+    return tuple(dict.fromkeys([*field.synonyms, *(w for w in map(_own_words, own) if w)]))
+
+
+# What covers each field: its synonyms plus Bido's own words for it in every
+# language (its labels and the render's headings), so what Bido writes is
+# always recognised and the two lists cannot drift apart.
+_ACCEPTED: Final[dict[str, tuple[str, ...]]] = {f.key: _accepted(f) for f in REQUIRED_FIELDS}
+
+
+def accepted_terms(key: str) -> tuple[str, ...]:
+    """The normalized terms that cover a required field."""
+    return _ACCEPTED[key]
+
+
 def covered_keys(labels: Iterable[str]) -> set[str]:
     """Which required fields the labels cover."""
     found: set[str] = set()
     for label in labels:
         for field in REQUIRED_FIELDS:
-            if field.key not in found and any(label_matches(label, s) for s in field.synonyms):
+            if field.key not in found and any(
+                label_matches(label, s) for s in _ACCEPTED[field.key]
+            ):
                 found.add(field.key)
     return found
 
