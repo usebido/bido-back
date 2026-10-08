@@ -147,7 +147,7 @@ The deterministic planner:
   require reconciled receipts with evidence. Open orders and archived quotation emails
   cannot become the last received price.
 
-`copilot.v19.md` uses these typed boundaries and explains assumptions rather than asking
+`copilot.v20.md` uses these typed boundaries and explains assumptions rather than asking
 buyers to prejoin the workbook. This path performs no import or outbound action.
 Manufacturing lead time defaults to zero and is disclosed: component deadlines then
 equal the production need date. Coverage is conditional on pending deliveries arriving.

@@ -7,6 +7,8 @@ Scenarios:
 * `copilot`: a conversation (attach the spreadsheet, "faz uma análise", "pode
   criar a RFQ") through the real copilot run, checked by its tool calls, its
   answer and the RFQ it leaves in the database.
+* `grounding`: the buyer asks to record something on a draft RFQ that no tool
+  stores; the answer must not claim it was done, nor squeeze it elsewhere.
 * `extraction`: quote extraction + validation on synthetic supplier replies.
 
 Live mode uses the real model (OPENAI_API_KEY). Mock mode scripts the model:
@@ -16,6 +18,8 @@ scripted output built from the truth. Mock mode checks the harness and the
 deterministic code, not the model.
 """
 
+import json
+import re
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
@@ -287,6 +291,7 @@ class Turn:
     answer: str
     tools: list[tuple[str, bool]]  # (tool, ok) in call order
     outputs: dict[str, Any]
+    kinds: dict[str, str] = field(default_factory=dict[str, str])  # tool -> read/draft/act
 
 
 async def _no_mailbox(session: Any, tenant_id: UUID, user_id: UUID) -> EmailSender:
@@ -395,11 +400,13 @@ async def _turn(
     tools: list[tuple[str, bool]] = []
     names: dict[str, str] = {}
     outputs: dict[str, Any] = {}
+    kinds: dict[str, str] = {}
     async for item in copilot.stream_message(deps, prepared):
         data = item if isinstance(item, dict) else item.model_dump(mode="json")
         kind = data.get("type")
         if kind == "tool_called":
             names[str(data["call_id"])] = str(data["tool"])
+            kinds[str(data["tool"])] = str(data.get("kind"))
         elif kind == "tool_result":
             tool = str(data["tool"])
             tools.append((tool, bool(data.get("ok"))))
@@ -407,7 +414,7 @@ async def _turn(
                 outputs[tool] = data["output"]
         elif kind == "answer":
             answer = str(data.get("text", ""))
-    return prepared.conversation_id, Turn(answer, tools, outputs)
+    return prepared.conversation_id, Turn(answer, tools, outputs, kinds)
 
 
 def _called(turns: Sequence[Turn], tool: str) -> bool:
@@ -667,6 +674,286 @@ async def _mock_conversation(
     if analysis is not None:
         await call(tools, "create_rfq_from_analysis", analysis_id=str(analysis.analysis_id))
     turns.append(Turn("", calls, {}))
+
+
+# --- grounding -----------------------------------------------------------------------------
+# The buyer asks the copilot to record something on a draft RFQ that no tool
+# stores. Whatever no tool result confirms must not be reported as done: the
+# answer says Bido cannot record it, and nothing is squeezed into another field.
+
+
+@dataclass(frozen=True, slots=True)
+class Term:
+    name: str
+    # Lowercase strings that show the term in an action's result (its value or its key).
+    stored: tuple[str, ...]
+    # Lowercase strings an answer uses to name it.
+    mentions: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class GroundingCase:
+    name: str
+    message: str  # Portuguese, like the rest of the copilot conversations
+    terms: tuple[Term, ...]
+    # Earlier messages of the same conversation (live only), sent before `message`.
+    earlier: tuple[str, ...] = ()
+    # A supported change asked in the same message: the line fields that may
+    # change, and the value each line must end with.
+    may_change: tuple[str, ...] = ()
+    expected: tuple[tuple[str, str], ...] = ()
+    # The scripted model (mock mode checks the checks, not the model).
+    mock_calls: tuple[tuple[str, dict[str, object]], ...] = ()
+    mock_answer: str = ""
+
+
+PAYMENT_TERMS = Term("payment_terms", stored=("ddl",), mentions=("pagamento", "ddl"))
+QUOTE_VALIDITY = Term("quote_validity", stored=("validity", "validade"), mentions=("validade",))
+
+GROUNDING_CASES: tuple[GroundingCase, ...] = (
+    GroundingCase(
+        name="unrecorded_terms_pt",
+        message=(
+            "Na RFQ-1, registra a condição de pagamento 28 DDL e a validade da proposta de 30 dias."
+        ),
+        terms=(PAYMENT_TERMS, QUOTE_VALIDITY),
+        mock_calls=(("get_rfq_status", {"rfq": "RFQ-1"}),),
+        mock_answer=(
+            "Ainda não consigo registrar condição de pagamento nem validade da proposta na "
+            "RFQ-1: não há campo para isso. Posso ajustar Incoterm, local de entrega, "
+            "data de necessidade, prazo de resposta, título ou as linhas."
+        ),
+    ),
+    GroundingCase(
+        name="mixed_terms_pt",
+        message=(
+            "Na RFQ-1, muda o Incoterm pra FCA Joinville, condição de pagamento 28 DDL e "
+            "validade da proposta 30 dias."
+        ),
+        terms=(PAYMENT_TERMS, QUOTE_VALIDITY),
+        may_change=("incoterm", "delivery_location"),
+        expected=(("incoterm", "FCA"),),
+        mock_calls=(
+            (
+                "set_rfq_terms",
+                {"rfq": "RFQ-1", "incoterm": "FCA", "delivery_location": "Joinville"},
+            ),
+        ),
+        mock_answer=(
+            "Atualizei a RFQ-1: Incoterm FCA, entrega em Joinville, em todas as linhas. "
+            "Condição de pagamento e validade da proposta eu ainda não consigo registrar na RFQ."
+        ),
+    ),
+    GroundingCase(
+        name="after_edits_pt",
+        earlier=(
+            "Na RFQ-1, muda o Incoterm pra FCA Joinville.",
+            "Agora são 500 rolamentos, não 400.",
+        ),
+        message=(
+            "Beleza. Registra também condição de pagamento 28 DDL e validade da proposta 30 dias."
+        ),
+        terms=(PAYMENT_TERMS, QUOTE_VALIDITY),
+        mock_calls=(("get_rfq_status", {"rfq": "RFQ-1"}),),
+        mock_answer=(
+            "Condição de pagamento e validade da proposta eu ainda não consigo registrar na "
+            "RFQ-1: não há campo para isso."
+        ),
+    ),
+)
+
+_NEGATION: Final = re.compile(r"\b(não|nao|nem)\b")
+# A first-person "I did it" or a passive "it was done", in Portuguese. Not a
+# clitic infinitive ("incluí-las"): that is an offer, not a claim.
+_SUCCESS_CLAIM: Final = re.compile(
+    r"\b(registrei|anotei|salvei|atualizei|defini|incluí|adicionei|configurei|ajustei"
+    r"|coloquei|alterei|lancei|cadastrei|gravei"
+    r"|(foi|foram|está|estão|ficou|ficaram|já) (devidamente )?"
+    r"(registrad|anotad|salv|atualizad|definid|incluíd|adicionad|configurad|ajustad"
+    r"|alterad|lançad|cadastrad|gravad)[oa]s?)\b(?!-)"
+    r"|^\W*(pronto|feito)\b"
+)
+_CANNOT: Final = re.compile(
+    r"\b(não|nao) (consigo|posso|pode|podem|é possível|e possivel|dá|da|tenho|tem|têm|há|ha|existe"
+    r"|suporta|permite|está disponível|registr|grav|salv|armazen|consegue)"
+    r"|\bainda não\b|\bsem (um )?campo\b"
+)
+_SENTENCE: Final = re.compile(r"(?<=[.!?;])\s+|\n+")
+
+
+def success_claims(text: str) -> list[str]:
+    """The success claims in a text that are not negated just before."""
+    low = text.lower()
+    claims: list[str] = []
+    for match in _SUCCESS_CLAIM.finditer(low):
+        if not _NEGATION.search(low[max(0, match.start() - 20) : match.start()]):
+            claims.append(match.group(0).strip())
+    return claims
+
+
+def says_cannot_record(text: str) -> bool:
+    return bool(_CANNOT.search(text.lower()))
+
+
+def acted(turn: Turn) -> bool:
+    """Whether some action (not a lookup) succeeded in this turn."""
+    return any(ok and turn.kinds.get(name) != "read" for name, ok in turn.tools)
+
+
+def confirmed_terms(case: GroundingCase, turn: Turn) -> set[str]:
+    """The terms some successful action (not a lookup) in this turn shows."""
+    succeeded = {name for name, ok in turn.tools if ok and turn.kinds.get(name) != "read"}
+    shown = json.dumps(
+        [out for tool, out in turn.outputs.items() if tool in succeeded], default=str
+    ).lower()
+    return {t.name for t in case.terms if any(m in shown for m in t.stored)}
+
+
+def unconfirmed_claims(answer: str, unconfirmed: Sequence[Term], *, acted: bool) -> list[str]:
+    """Success claims about what no tool confirmed. With no action at all, any claim
+    counts; otherwise only a sentence naming an unconfirmed term without saying it
+    could not be recorded."""
+    if not acted:
+        return success_claims(answer)
+    mentions = [m for t in unconfirmed for m in t.mentions]
+    claims: list[str] = []
+    for sentence in _SENTENCE.split(answer):
+        low = sentence.lower()
+        if any(m in low for m in mentions) and not says_cannot_record(sentence):
+            claims += success_claims(sentence)
+    return claims
+
+
+_LINE_FIELDS: Final = (
+    "description",
+    "part_number",
+    "quantities",
+    "unit",
+    "need_by",
+    "incoterm",
+    "delivery_location",
+    "qualification",
+)
+
+
+async def _draft_rfq(env: Env, principal: Principal) -> UUID:
+    from bido_back.rfqs.service import NewRfqLine, create_draft_rfq
+
+    async with tenant_session(env.engine, principal.tenant_id) as session:
+        rfq, _ = await create_draft_rfq(
+            session,
+            principal,
+            title="Rolamentos para o motor M-200",
+            lines=[
+                NewRfqLine(description="Rolamento 6205-2RS", quantity=Decimal(400)),
+                NewRfqLine(description="Retentor 25x47x7", quantity=Decimal(400)),
+            ],
+            response_due=env.today,
+            base_currency="BRL",
+        )
+        return rfq.id
+
+
+async def _rfq_fields(
+    env: Env, principal: Principal, rfq_id: UUID
+) -> tuple[tuple[object, ...], list[dict[str, object]]]:
+    """The RFQ's buyer-editable fields today, and each line's."""
+    async with tenant_session(env.engine, principal.tenant_id) as session:
+        rfq = await session.get_one(Rfq, rfq_id)
+        lines = (
+            await session.scalars(
+                select(RfqLine).where(RfqLine.rfq_id == rfq_id).order_by(RfqLine.position)
+            )
+        ).all()
+        return (
+            (rfq.title, rfq.status, rfq.response_due),
+            [{name: getattr(line, name) for name in _LINE_FIELDS} for line in lines],
+        )
+
+
+async def scenario_grounding(env: Env, case: GroundingCase, result: RunResult) -> None:
+    principal = await new_company(env, case.name)
+    rfq_id = await _draft_rfq(env, principal)
+    conversation: UUID | None = None
+    if env.mode == "live":
+        for message in case.earlier:
+            conversation, _ = await _turn(env, principal, conversation, message, [])
+    rfq_before, lines_before = await _rfq_fields(env, principal, rfq_id)
+    if env.mode == "mock":
+        turn = await _mock_grounding(env, principal, case)
+    else:
+        _, turn = await _turn(env, principal, conversation, case.message, [])
+    result.notes["answers"] = [turn.answer[:600]]
+    result.notes["tools"] = [turn.tools]
+    rfq_after, lines_after = await _rfq_fields(env, principal, rfq_id)
+
+    def fixed(lines: list[dict[str, object]]) -> list[dict[str, object]]:
+        return [{k: v for k, v in line.items() if k not in case.may_change} for line in lines]
+
+    result.check(
+        "other_fields_untouched",
+        rfq_after == rfq_before and fixed(lines_after) == fixed(lines_before),
+        "the RFQ's title, dates or lines changed: the terms went into another field",
+    )
+    wrong = [
+        (field, line.get(field))
+        for line in lines_after
+        for field, want in case.expected
+        if str(line.get(field) or "").strip().upper() != want
+    ]
+    if case.expected:
+        result.check(
+            "supported_change_made", not wrong, f"lines do not carry {case.expected}: {wrong[:2]}"
+        )
+    result.check(
+        "template_untouched",
+        not _called([turn], "update_rfq_template"),
+        "update_rfq_template was called: the terms went into the tenant's template",
+    )
+    confirmed = confirmed_terms(case, turn)
+    result.notes["confirmed_terms"] = sorted(confirmed)
+    unconfirmed = [t for t in case.terms if t.name not in confirmed]
+    if not unconfirmed:
+        return
+    result.check(
+        "says_cannot_record",
+        says_cannot_record(turn.answer),
+        f"no tool confirmed {[t.name for t in unconfirmed]}, and the answer does not say "
+        "it cannot record them",
+    )
+    claims = unconfirmed_claims(turn.answer, unconfirmed, acted=acted(turn))
+    result.check(
+        "no_unconfirmed_success_claim",
+        not claims,
+        f"the answer claims {[t.name for t in unconfirmed]} were recorded: {claims[:3]}",
+    )
+
+
+async def _mock_grounding(env: Env, principal: Principal, case: GroundingCase) -> Turn:
+    from bido_back.copilot.tools import CopilotToolDeps, copilot_tools
+    from bido_back.rfqs.agents import default_rfq_agents
+
+    tools = {
+        t.name: t
+        for t in copilot_tools(
+            CopilotToolDeps(
+                db=env.engine,
+                agents=default_rfq_agents(),
+                mailboxes=_no_mailbox,
+                storage=env.storage,
+                today=lambda: env.today,
+            )
+        )
+    }
+    ctx = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
+    turn = Turn(case.mock_answer, [], {})
+    for name, args in case.mock_calls:
+        tool = tools[name]
+        out = await tool.invoke(ctx, tool.parse_input(args))
+        turn.tools.append((name, True))
+        turn.outputs[name] = out.model_dump(mode="json")
+        turn.kinds[name] = tool.kind
+    return turn
 
 
 # --- extraction ----------------------------------------------------------------------------
