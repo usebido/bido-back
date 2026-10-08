@@ -849,6 +849,7 @@ async def _draft_rfq(env: Env, principal: Principal) -> UUID:
                 NewRfqLine(description="Retentor 25x47x7", quantity=Decimal(400)),
             ],
             response_due=env.today,
+            base_currency="BRL",
         )
         return rfq.id
 
