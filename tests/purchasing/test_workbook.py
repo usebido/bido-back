@@ -217,6 +217,8 @@ async def test_import_asks_when_unsure_then_imports_after_confirmation(
     reports = {(r.sheet, r.type): r for r in done.sections}
     assert reports[("Compras", "purchase_history")].rows_ok == 3
     assert reports[("Disp", "inventory")].rows_ok == 2
+    assert reports[("Disp", "inventory")].unknown_columns == ["Obs"]
+    assert done.unimported_sheets == []
     assert reports[("Compras", "supplier_contacts")].created.get("contacts") == 2
     async with tenant_session(app_engine, who.tenant_id) as session:
         emails = set(
@@ -444,135 +446,8 @@ async def test_a_sheet_the_rules_read_only_in_part_also_goes_to_the_mapper() -> 
     assert [(s.import_type, s.source) for s in sections] == [("purchase_history", "model")]
 
 
-ERP_STOCK: list[list[object]] = [
-    ["Material", "Descricao do material", "Unidade de medida", "Unidade de preco",
-     "Centro", "Deposito", "Estoque total", "Estoque bloqueado", "Estoque disponivel",
-     "Quantidade reservada", "Quantidade em pedido", "Estoque de seguranca"],
-    ["PART-01", "Sheet metal", "UN", "KG", "PLANT-A", "0001", 100, 10, 80, 20, 30, 40],
-]  # fmt: skip
-ERP_PURCHASES: list[list[object]] = [
-    ["Pedido", "Data do pedido", "Fornecedor", "Material", "Quantidade pedida",
-     "Preco liquido", "Valor liquido", "Moeda", "Status"],
-    ["PO-101", "2026-07-03", "SUP-01", "PART-01", 100, 2.5, 250, "BRL", "Recebido"],
-]  # fmt: skip
-
-
-async def test_erp_stock_and_purchases_preserve_quantities_and_item_metadata() -> None:
-    grids = read_workbook(workbook({"Stock": ERP_STOCK, "Purchases": ERP_PURCHASES}), "erp.xlsx")
-    sections, problems = await map_workbook(grids, "erp.xlsx", mapper=None, context=ctx())
-    assert problems == []
-    by_sheet = {g.name: g for g in grids}
-    tables = {s.import_type: parse_section(s, by_sheet[s.sheet], None) for s in sections}
-    stock = tables["inventory"]
-    assert stock.rows == [
-        (
-            2,
-            {
-                "part_number": "PART-01",
-                "description": "Sheet metal",
-                "unit": "UN",
-                "on_hand": Decimal(80),
-                "on_order": Decimal(30),
-                "location": "0001",
-            },
-        )
-    ]
-    assert "Unidade de preco" in stock.unknown_columns
-    assert "Estoque de seguranca" in stock.unknown_columns
-    purchase = tables["purchase_history"]
-    assert purchase.rows[0][1]["quantity"] == Decimal(100)
-    assert purchase.rows[0][1]["unit_price"] == Decimal("2.5")
-    assert "Valor liquido" in purchase.unknown_columns
-    assert "received_at" not in purchase.rows[0][1]
-
-
-@pytest.mark.parametrize("first,last", [(4, None), (2, 4), (1, 3)])
-async def test_mapper_cannot_reference_data_outside_the_sheet(first: int, last: int | None) -> None:
-    mapper = StubMapper(
-        SheetMappingOutput(
-            sections=[
-                SheetSection(
-                    sheet="Odd",
-                    import_type="inventory",
-                    header_row=1,
-                    first_data_row=first,
-                    last_data_row=last,
-                    columns=[
-                        ColumnAssignment(field="part_number", column=0),
-                        ColumnAssignment(field="on_hand", column=1),
-                    ],
-                    confidence=1,
-                    question=None,
-                )
-            ]
-        )
-    )
-    sections, problems = await map_workbook(
-        [SheetGrid("Odd", ODD)], "odd.xlsx", mapper=mapper, context=ctx()
-    )
-    assert sections == [] and problems == ["Odd: rows out of range"]
-
-
-async def test_mapper_cannot_import_overlapping_ranges_twice() -> None:
-    section = SheetSection(
-        sheet="Odd",
-        import_type="inventory",
-        header_row=1,
-        first_data_row=2,
-        last_data_row=None,
-        columns=[
-            ColumnAssignment(field="part_number", column=0),
-            ColumnAssignment(field="on_hand", column=1),
-        ],
-        confidence=1,
-        question=None,
-    )
-    mapper = StubMapper(SheetMappingOutput(sections=[section, section.model_copy()]))
-    sections, problems = await map_workbook(
-        [SheetGrid("Odd", ODD)], "odd.xlsx", mapper=mapper, context=ctx()
-    )
-    assert len(sections) == 1
-    assert problems == ["Odd: overlapping sections for inventory"]
-
-
-async def test_mapper_can_map_two_tables_side_by_side() -> None:
-    mapper = StubMapper(
-        SheetMappingOutput(
-            sections=[
-                SheetSection(
-                    sheet="Side by side",
-                    import_type="inventory",
-                    header_row=1,
-                    first_data_row=2,
-                    last_data_row=2,
-                    columns=[
-                        ColumnAssignment(field="part_number", column=start),
-                        ColumnAssignment(field="on_hand", column=start + 1),
-                    ],
-                    confidence=1,
-                    question=None,
-                )
-                for start in (0, 3)
-            ]
-        )
-    )
-    grid = SheetGrid(
-        "Side by side",
-        [
-            ["Ref.", "Qty ready", None, "Ref.", "Qty ready"],
-            ["PART-A", 3, None, "PART-B", 5],
-        ],
-    )
-    sections, problems = await map_workbook([grid], "side.xlsx", mapper=mapper, context=ctx())
-    assert problems == []
-    assert [parse_section(s, grid, None).rows[0][1] for s in sections] == [
-        {"part_number": "PART-A", "on_hand": Decimal(3)},
-        {"part_number": "PART-B", "on_hand": Decimal(5)},
-    ]
-
-
 @pytest.mark.db
-async def test_partial_workbook_is_disclosed_before_writing(
+async def test_legacy_import_retains_published_omission_metadata(
     app_engine: AsyncEngine, purchasing_rows: People
 ) -> None:
     who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
@@ -581,87 +456,11 @@ async def test_partial_workbook_is_disclosed_before_writing(
         app_engine,
         storage,
         who,
-        filename="erp.xlsx",
+        filename="legacy.xlsx",
         content_type=XLSX,
-        data=workbook(
-            {
-                "Stock": ERP_STOCK,
-                "Purchases": ERP_PURCHASES,
-                "Suppliers": [
-                    ["Fornecedor", "Nome do fornecedor", "E-mail"],
-                    ["SUP-01", "Metal Supplier", "sales@metal.example.test"],
-                ],
-                "Ratings": [["Fornecedor", "OTIF %"], ["SUP-01", 95]],
-                "MRP": [
-                    ["Material", "Quantidade necessaria", "Unidade", "Data necessidade"],
-                    ["PART-01", 120, "KG", "2026-10-31"],
-                ],
-            }
-        ),
+        data=workbook({"Stock": STOCK, "Notes": [["Unstructured note"]]}),
     )
     report = await import_workbook(app_engine, storage, who, upload.id, mapper=None)
-    assert report.status == "needs_confirmation"
-    assert report.unimported_sheets == ["Ratings", "MRP"]
-    assert all(not s.created for s in report.sections)
-    stock = next(s for s in report.sections if s.type == "inventory")
-    assert "Estoque de seguranca" in stock.unknown_columns
-    history = next(s for s in report.sections if s.type == "purchase_history")
-    assert any("by code" in note for note in history.notes)
-    async with tenant_session(app_engine, who.tenant_id) as session:
-        assert await session.scalar(select(func.count()).select_from(PoLine)) == 0
-
-    done = await import_workbook(app_engine, storage, who, upload.id, mapper=None, confirmed=True)
-    assert done.status == "imported"
-    assert done.unimported_sheets == ["Ratings", "MRP"]
-    async with tenant_session(app_engine, who.tenant_id) as session:
-        item = await session.scalar(select(Item).where(Item.part_number == "PART-01"))
-        assert item is not None and item.description == "Sheet metal" and item.unit == "UN"
-        assert set(await session.scalars(select(Supplier.name))) == {"Metal Supplier"}
-
-
-@pytest.mark.db
-async def test_explicit_mapping_normalizes_an_unfamiliar_layout(
-    app_engine: AsyncEngine, purchasing_rows: People
-) -> None:
-    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
-    storage = FakeStorage()
-    upload = await onboarding.store_upload(
-        app_engine,
-        storage,
-        who,
-        filename="custom.xlsx",
-        content_type=XLSX,
-        data=workbook(
-            {
-                "Custom": [
-                    *([[]] * 40),
-                    ["Reference", "Ready", "Inbound"],
-                    ["PART-01", 80, 30],
-                ]
-            }
-        ),
-    )
-    mapping = SheetMappingOutput(
-        sections=[
-            SheetSection(
-                sheet="Custom",
-                import_type="inventory",
-                header_row=41,
-                first_data_row=42,
-                last_data_row=42,
-                columns=[
-                    ColumnAssignment(field=f, column=c)
-                    for f, c in [("part_number", 0), ("on_hand", 1), ("on_order", 2)]
-                ],
-                confidence=0.95,
-                question=None,
-            )
-        ]
-    )
-    report = await import_workbook(
-        app_engine, storage, who, upload.id, mapper=None, mapping=mapping
-    )
-    assert report.status == "imported" and report.unimported_sheets == []
-    assert report.sections[0].rows_ok == 1
-    assert report.sections[0].source == "model"
-    assert report.sections[0].columns["on_order"] == "Inbound"
+    assert report.status == "imported"
+    assert report.unimported_sheets == ["Notes"]
+    assert report.questions == []

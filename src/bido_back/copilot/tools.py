@@ -50,14 +50,12 @@ from bido_back.awards.schemas import AwardLine, AwardRequest, AwardSelection, Pu
 from bido_back.comparison.loader import load_comparison
 from bido_back.copilot import queries
 from bido_back.copilot.journey_tools import journey_tools
-from bido_back.copilot.workbook_tools import workbook_tools
 from bido_back.db import tenant_session
 from bido_back.db.models import Analysis, Invite, Rfq, RfqLine, RfqTemplate
 from bido_back.negotiation import service as negotiation_service
 from bido_back.negotiation.agents import NegotiationWriter, default_negotiation_writer
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
 from bido_back.purchasing import service as purchasing_service
-from bido_back.purchasing.planning_agents import WorkbookAgents
 from bido_back.purchasing.schemas import AnalysisRequest, CurrencyTotalView, RfqFromAnalysisRequest
 from bido_back.purchasing.workbook import SheetMapper
 from bido_back.rfqs import service as rfq_service
@@ -105,7 +103,6 @@ class CopilotToolDeps:
     buyer_messages: Callable[[], Awaitable[list[str]]] | None = None
     storage: BlobStorage | None = None
     sheet_mapper: SheetMapper | None = None
-    workbook_agents: WorkbookAgents | None = None
     today: Callable[[], date] = lambda: datetime.now(UTC).date()
 
 
@@ -1915,5 +1912,4 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             artifact_kind="approvals",
         ),
         *journey_tools(deps),
-        *workbook_tools(deps),
     )

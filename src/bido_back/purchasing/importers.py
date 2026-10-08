@@ -98,7 +98,7 @@ _PRODUCT = ("product", "produto", "prodotto", "model", "modelo", "modello", "ass
 _QTY = (
     "quantity", "quantidade", "qtd", "qty", "quantita", "qta", "qt", "qtd do pedido",
     "quantidade do pedido", "qtd pedido", "order qty", "order quantity", "ordered qty",
-    "qty ordered", "quantita ordinata", "qta ordinata", "quantidade pedida",
+    "qty ordered", "quantita ordinata", "qta ordinata",
 )  # fmt: skip
 _SUPPLIER_NAME = (
     "supplier name", "nome do fornecedor", "nome fornecedor", "fornecedor nome", "vendor name",
@@ -180,8 +180,6 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
     ),
     "inventory": (
         FieldSpec("part_number", "text", True, _PART, weak=_PART_WEAK),
-        FieldSpec("description", "text", False, _DESC),
-        FieldSpec("unit", "text", False, _UNIT),
         FieldSpec(
             "on_hand",
             "number",
@@ -228,7 +226,6 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             (
                 "on order",
                 "em pedido",
-                "quantidade em pedido",
                 "pedido em aberto",
                 "pedidos abertos",
                 "ordinato",
