@@ -109,12 +109,9 @@ def direct_scope(records: Sequence[Record], request: ScopeRequest) -> ResolvedSc
     if end is None and request.as_of is not None and request.horizon_days is not None:
         end = request.as_of + timedelta(days=request.horizon_days)
         assumptions.append(_horizon_assumption(request.as_of, request.horizon_days, end))
-    plants = _places(
-        source_text(r, "location")
-        for r in records
-        if r.kind in {"material_requirement", "inventory"}
-    )
-    location = next((p for p in plants if same_place(p, request.location)), request.location)
+    location = request.location
+    if location is not None:
+        location = _plant_spellings(records).get(norm(location), location)
     if (
         (request.product_code is None and request.area is None)
         or location is None
@@ -174,6 +171,8 @@ class _Resolver:
         self.records = records
         self.request = request
         self.masters = [r for r in records if r.kind == "item"]
+        # Joins downstream compare plants exactly: settle on the spelling most records use.
+        self.spellings = _plant_spellings(records)
         self.demands = [d for r in records if (d := self._demand(r)) is not None]
         self.assumptions: list[ScopeAssumption] = []
         self.questions: list[ScopeQuestion] = []
@@ -238,9 +237,12 @@ class _Resolver:
             record=record,
             code=code,
             area=source_text(record, "area") or _only(self._master_areas(code)),
-            location=source_text(record, "location"),
+            location=self._plant(source_text(record, "location")),
             need_by=source_date(record, "need_by", []),
         )
+
+    def _plant(self, location: str | None) -> str | None:
+        return None if location is None else self.spellings.get(norm(location), location)
 
     def _master_areas(self, code: str) -> list[str]:
         return _places(
@@ -379,7 +381,9 @@ class _Resolver:
         else:
             message = "No order or requirement names a plant; which plant?"
             plants = _places(
-                source_text(r, "location") for r in self.records if r.kind == "inventory"
+                self._plant(source_text(r, "location"))
+                for r in self.records
+                if r.kind == "inventory"
             )
         self._ask("missing_location", "location", message, self._plant_options(relevant, plants))
         return None
@@ -534,13 +538,23 @@ def _horizon_assumption(as_of: date, days: int, end: date) -> ScopeAssumption:
     )
 
 
-def _places(values: Iterable[str | None]) -> list[str]:
-    """Distinct plants or areas; each in the spelling most of its records use."""
+def _plant_spellings(records: Sequence[Record]) -> dict[str, str]:
+    """Each plant as most records of every kind spell it (case, accents and spacing aside)."""
+    counts = _spelling_counts(source_text(record, "location") for record in records)
+    return {key: _spelling(spellings.elements()) for key, spellings in counts.items()}
+
+
+def _spelling_counts(values: Iterable[str | None]) -> dict[str, Counter[str]]:
     spellings: dict[str, Counter[str]] = defaultdict(Counter)
     for value in values:
         if value is not None and norm(value):
             spellings[norm(value)][value] += 1
-    return sorted(_spelling(counts.elements()) for counts in spellings.values())
+    return spellings
+
+
+def _places(values: Iterable[str | None]) -> list[str]:
+    """Distinct plants or areas; each in the spelling most of its records use."""
+    return sorted(_spelling(counts.elements()) for counts in _spelling_counts(values).values())
 
 
 def _spelling(values: Iterable[str]) -> str:

@@ -186,6 +186,17 @@ def test_the_plant_matches_without_case_accents_spacing_or_punctuation(location:
     assert resolved.scope is not None and resolved.scope.location == "Plant A"
 
 
+def test_a_plant_spelled_differently_by_the_orders_uses_the_spelling_of_most_records() -> None:
+    records = motor_records()
+    for record in records:
+        if record.kind == "production_plan" and record.values.get("location") == "Plant A":
+            record.values["location"] = "PLANT A"
+    resolved = resolve(BUYER, records)
+    assert resolved.scope == SCOPE
+    plan = assess_plan(records, SCOPE)
+    assert {line.part_number: line.calculated_to_buy for line in plan.lines} == EXPECTED
+
+
 def test_reference_date_is_the_latest_snapshot_of_that_plant_ignoring_older_ones() -> None:
     later_elsewhere = fact(
         "inventory",
