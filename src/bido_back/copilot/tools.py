@@ -5,7 +5,10 @@ from the model's arguments, and works in that tenant's RLS-scoped session.
 
 - `read` tools answer questions: RFQs and their status, who responded, what is
   missing, proposals, the comparison, quoted price history, supplier
-  suggestions, the RFQ template.
+  suggestions, the RFQ template, and the company's imported data: its
+  suppliers with their contacts and what was bought from each
+  (`list_suppliers`) and the prices it paid (`purchase_history`). That data
+  belongs to the company, not to a conversation: these work in any chat.
 - `draft` tools change only drafts or the tenant's own settings: run a
   purchase analysis (stored, from the imported BOM, stock and purchase
   history), create an RFQ (draft, from text or from an analysis), invite
@@ -296,8 +299,91 @@ class PricePointItem(BaseModel):
 
 class PriceHistoryOut(BaseModel):
     mpn: str
-    # Quoted prices: Bido does not record purchase orders yet.
+    # Quoted prices from RFQs; what was paid is purchase_history.
     points: list[PricePointItem]
+
+
+# --- list_suppliers / purchase_history (the company's imported data) -----------------------
+
+
+class ListSuppliersIn(BaseModel):
+    supplier: str | None = Field(default=None, description="Part of the supplier's name")
+    category: str | None = Field(
+        default=None, description="Only suppliers the company bought this part category from"
+    )
+    part_number: str | None = Field(
+        default=None, description="Only suppliers the company bought this part (or MPN) from"
+    )
+    limit: int = Field(default=MAX_LIST, ge=1, le=MAX_LIST)
+
+
+class SupplierContactItem(BaseModel):
+    name: str | None
+    email: str
+
+
+class PartBought(BaseModel):
+    part_number: str
+    description: str
+
+
+class SupplierEntryItem(BaseModel):
+    supplier_id: UUID
+    name: str
+    type: str
+    country: str | None
+    contacts: list[SupplierContactItem]
+    # From the imported purchase history.
+    purchase_orders: int
+    last_ordered_at: date | None
+    categories: list[str]
+    # What was bought from it (at most 20), to tell its part families apart.
+    parts: list[PartBought]
+    # From RFQs sent through Bido.
+    rfq_invites: int
+    rfq_responses: int
+
+
+class ListSuppliersOut(BaseModel):
+    total: int
+    suppliers: list[SupplierEntryItem]
+
+
+class PurchaseHistoryIn(BaseModel):
+    part_numbers: list[str] = Field(
+        default_factory=list[str],
+        max_length=MAX_LIST,
+        description="Internal part numbers or MPNs; empty = the parts bought most recently",
+    )
+    supplier: str | None = Field(default=None, description="Part of a supplier's name")
+    limit: int = Field(default=10, ge=1, le=MAX_LIST, description="Parts to return")
+
+
+class PaidLineItem(BaseModel):
+    supplier_name: str
+    po_number: str
+    ordered_at: date
+    quantity: Decimal
+    unit_price: Decimal
+    currency: str
+
+
+class PaidPartItem(BaseModel):
+    part_number: str
+    description: str
+    mpn: str | None
+    category: str | None
+    unit: str
+    last_paid: PaidLineItem
+    # Every purchase of the part, newest first (at most 10).
+    purchases: list[PaidLineItem]
+    purchase_count: int
+
+
+class PurchaseHistoryOut(BaseModel):
+    # Part numbers asked for that the purchase history does not have.
+    not_found: list[str]
+    parts: list[PaidPartItem]
 
 
 class SuggestSuppliersIn(BaseModel):
@@ -980,6 +1066,76 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             ],
         )
 
+    async def list_suppliers(ctx: ToolContext, args: ListSuppliersIn) -> ListSuppliersOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            entries = await queries.supplier_directory(
+                session, name=args.supplier, category=args.category, part_number=args.part_number
+            )
+        return ListSuppliersOut(
+            total=len(entries),
+            suppliers=[
+                SupplierEntryItem(
+                    supplier_id=e.supplier.id,
+                    name=e.supplier.name,
+                    type=e.supplier.type,
+                    country=e.supplier.country,
+                    contacts=[SupplierContactItem(name=n, email=m) for n, m in e.contacts],
+                    purchase_orders=e.purchase_orders,
+                    last_ordered_at=e.last_ordered_at,
+                    categories=sorted(e.categories),
+                    parts=[
+                        PartBought(part_number=n, description=d)
+                        for n, d in sorted(e.parts.items())[:MAX_LIST]
+                    ],
+                    rfq_invites=e.invited,
+                    rfq_responses=e.responded,
+                )
+                for e in entries[: args.limit]
+            ],
+        )
+
+    async def purchase_history(ctx: ToolContext, args: PurchaseHistoryIn) -> PurchaseHistoryOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            found = await queries.purchase_history(
+                session,
+                part_numbers=args.part_numbers,
+                supplier=args.supplier,
+                limit=max(args.limit, len(args.part_numbers)),
+            )
+        known = {
+            queries.normalize_mpn(code)
+            for p in found
+            for code in (p.item.part_number, p.item.mpn)
+            if code
+        }
+
+        def item(line: queries.PaidLine) -> PaidLineItem:
+            return PaidLineItem(
+                supplier_name=line.supplier_name,
+                po_number=line.po_number,
+                ordered_at=line.ordered_at,
+                quantity=line.quantity,
+                unit_price=line.unit_price,
+                currency=line.currency,
+            )
+
+        return PurchaseHistoryOut(
+            not_found=[p for p in args.part_numbers if queries.normalize_mpn(p) not in known],
+            parts=[
+                PaidPartItem(
+                    part_number=p.item.part_number,
+                    description=p.item.description,
+                    mpn=p.item.mpn,
+                    category=p.item.category,
+                    unit=p.item.unit,
+                    last_paid=item(p.lines[0]),
+                    purchases=[item(line) for line in p.lines[:10]],
+                    purchase_count=len(p.lines),
+                )
+                for p in found
+            ],
+        )
+
     async def suggest_suppliers(ctx: ToolContext, args: SuggestSuppliersIn) -> SuggestSuppliersOut:
         async with tenant_session(db, ctx.tenant_id) as session:
             records, matched = await queries.supplier_records(
@@ -1523,6 +1679,28 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             PriceHistoryOut,
             "read",
             price_history,
+        ),
+        Tool(
+            "list_suppliers",
+            "The company's suppliers, stored from its imported data and RFQs: contacts "
+            "(emails), what it bought from each (part categories, part numbers, purchase "
+            "orders, last order date) and RFQ invites. Filter by name, category or part "
+            "number. Works in any conversation, with no file attached.",
+            ListSuppliersIn,
+            ListSuppliersOut,
+            "read",
+            list_suppliers,
+        ),
+        Tool(
+            "purchase_history",
+            "What the company PAID for parts, from its imported purchase orders: the last "
+            "price paid (supplier, date, currency) and earlier purchases. Give part numbers "
+            "or MPNs, or none for the parts bought most recently. Needs no BOM and no file "
+            "attached.",
+            PurchaseHistoryIn,
+            PurchaseHistoryOut,
+            "read",
+            purchase_history,
         ),
         Tool(
             "suggest_suppliers",

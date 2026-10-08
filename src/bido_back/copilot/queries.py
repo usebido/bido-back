@@ -3,7 +3,7 @@
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID
@@ -16,8 +16,11 @@ from sqlalchemy.sql.elements import ColumnElement
 from bido_back.db.models import (
     Contact,
     Invite,
+    Item,
+    PoLine,
     Proposal,
     ProposalLine,
+    PurchaseOrder,
     Rfq,
     RfqLine,
     RfqTemplate,
@@ -221,6 +224,164 @@ async def supplier_records(
         stats.values(), key=lambda r: (-r.responded, -r.invited, r.supplier.name.lower())
     )
     return records, matched
+
+
+# --- The company's suppliers and what it paid (imported data) ---------------------------
+
+
+@dataclass(slots=True)
+class SupplierEntry:
+    supplier: Supplier
+    contacts: list[tuple[str | None, str]] = field(default_factory=list[tuple[str | None, str]])
+    purchase_orders: int = 0
+    last_ordered_at: date | None = None
+    categories: set[str] = field(default_factory=set[str])
+    # Part number -> description, for every part bought from the supplier.
+    parts: dict[str, str] = field(default_factory=dict[str, str])
+    # Part numbers and MPNs, normalized, for the part filter.
+    codes: set[str] = field(default_factory=set[str])
+    invited: int = 0
+    responded: int = 0
+
+
+async def supplier_directory(
+    session: AsyncSession,
+    *,
+    name: str | None = None,
+    category: str | None = None,
+    part_number: str | None = None,
+) -> list[SupplierEntry]:
+    """Every supplier of the company with its contacts, what it was bought from it
+    (imported purchase history) and its RFQ invites.
+
+    `name` matches part of the supplier's name; `category` and `part_number`
+    keep the suppliers the company bought that category or part from. Sorted by
+    the most recent purchase, then by name.
+    """
+    entries = {s.id: SupplierEntry(s) for s in await session.scalars(select(Supplier))}
+    contacts = await session.execute(
+        select(SupplierContact.supplier_id, Contact.name, Contact.email)
+        .join(Contact, Contact.id == SupplierContact.contact_id)
+        .where(Contact.email.is_not(None), Contact.pseudonymized_at.is_(None))
+        .order_by(Contact.created_at, Contact.id)
+    )
+    for supplier_id, contact_name, email in contacts:
+        if supplier_id in entries and email:
+            entries[supplier_id].contacts.append((contact_name, email))
+    bought = await session.execute(
+        select(
+            PurchaseOrder.supplier_id,
+            PurchaseOrder.id,
+            PurchaseOrder.ordered_at,
+            Item.category,
+            Item.part_number,
+            Item.mpn,
+            Item.description,
+        )
+        .join(PoLine, PoLine.purchase_order_id == PurchaseOrder.id)
+        .join(Item, Item.id == PoLine.item_id)
+    )
+    orders: dict[UUID, set[UUID]] = defaultdict(set)
+    for supplier_id, order_id, ordered_at, item_category, item_part, item_mpn, item_text in bought:
+        entry = entries.get(supplier_id)
+        if entry is None:
+            continue
+        orders[supplier_id].add(order_id)
+        if entry.last_ordered_at is None or ordered_at > entry.last_ordered_at:
+            entry.last_ordered_at = ordered_at
+        if item_category:
+            entry.categories.add(item_category)
+        entry.parts[item_part] = item_text
+        entry.codes.add(normalize_mpn(item_part))
+        if item_mpn:
+            entry.codes.add(normalize_mpn(item_mpn))
+    for supplier_id, order_ids in orders.items():
+        entries[supplier_id].purchase_orders = len(order_ids)
+    for supplier_id, status in await session.execute(select(Invite.supplier_id, Invite.status)):
+        entry = entries.get(supplier_id)
+        if entry is not None:
+            entry.invited += 1
+            if status == "responded":
+                entry.responded += 1
+
+    def keep(entry: SupplierEntry) -> bool:
+        if name and name.strip().lower() not in entry.supplier.name.lower():
+            return False
+        if category and category.strip().lower() not in {c.lower() for c in entry.categories}:
+            return False
+        if part_number:
+            return normalize_mpn(part_number) in entry.codes
+        return True
+
+    found = [e for e in entries.values() if keep(e)]
+    return sorted(
+        found,
+        key=lambda e: (
+            e.last_ordered_at is None,
+            -(e.last_ordered_at or date.min).toordinal(),
+            e.supplier.name.lower(),
+        ),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PaidLine:
+    supplier_name: str
+    po_number: str
+    ordered_at: date
+    quantity: Decimal
+    unit_price: Decimal
+    currency: str
+
+
+@dataclass(slots=True)
+class PaidPart:
+    item: Item
+    lines: list[PaidLine] = field(default_factory=list[PaidLine])
+
+
+async def purchase_history(
+    session: AsyncSession, *, part_numbers: list[str], supplier: str | None, limit: int
+) -> list[PaidPart]:
+    """What the company PAID per part, from its imported purchase orders, newest first.
+
+    With no part numbers, the parts bought most recently (up to `limit`). A part
+    number matches the internal part number or the MPN, ignoring punctuation.
+    """
+    query = (
+        select(PoLine, PurchaseOrder, Supplier.name, Item)
+        .join(PurchaseOrder, PurchaseOrder.id == PoLine.purchase_order_id)
+        .join(Supplier, Supplier.id == PurchaseOrder.supplier_id)
+        .join(Item, Item.id == PoLine.item_id)
+        .order_by(PurchaseOrder.ordered_at.desc(), PurchaseOrder.po_number, PoLine.line_no)
+    )
+    if part_numbers:
+        query = query.where(
+            or_(
+                *(_mpn_matches(Item.part_number, p) for p in part_numbers),
+                *(_mpn_matches(Item.mpn, p) for p in part_numbers),
+            )
+        )
+    if supplier:
+        query = query.where(Supplier.name.ilike(f"%{supplier.strip()}%"))
+    parts: dict[UUID, PaidPart] = {}
+    for line, order, supplier_name, item in await session.execute(query):
+        part = parts.get(item.id)
+        if part is None:
+            if len(parts) >= limit:
+                continue
+            part = parts[item.id] = PaidPart(item)
+        part.lines.append(
+            PaidLine(
+                supplier_name=supplier_name,
+                po_number=order.po_number,
+                ordered_at=order.ordered_at,
+                quantity=line.quantity,
+                unit_price=line.unit_price,
+                currency=order.currency,
+            )
+        )
+    return list(parts.values())
 
 
 async def first_contacts(session: AsyncSession, supplier_ids: list[UUID]) -> dict[UUID, UUID]:
