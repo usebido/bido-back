@@ -203,6 +203,10 @@ async def test_rfq_flow_over_http(api: Api, rfq_rows: People) -> None:
     assert email["to"] == ["jonas@rhein.example.test"]
     assert email["subject"].startswith("[RFQ-1] ")
     assert email["sender_user_id"] == str(rfq_rows.owner)
+    # The approver previews the HTML version and the attached RFQ document.
+    assert "<table" in (email["html_body"] or "")
+    attachment = email["attachment_name"]
+    assert attachment.startswith("RFQ-1-") and attachment.endswith(".pdf")
 
     comparison = await http.get(f"/v1/rfqs/{rfq['id']}/comparison")
     assert comparison.status_code == 200, comparison.text
