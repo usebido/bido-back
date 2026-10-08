@@ -134,7 +134,12 @@ def test_only_pure_number_cells_vote_at_sheet_level() -> None:
 @pytest.mark.parametrize(
     ("kind", "field", "spellings", "canonical"),
     [
-        ("purchase", "status", ["Encerrado", "Fechado", "Concluído", "Closed", "Completed"], "closed"),
+        (
+            "purchase",
+            "status",
+            ["Encerrado", "Fechado", "Concluído", "Closed", "Completed"],
+            "closed",
+        ),
         ("purchase", "status", ["Cerrado", "Chiuso", "Evaso", "Erledigt", "Clôturé"], "closed"),
         ("purchase", "status", ["Em aberto", "Open", "Abierto", "Aperto", "Offen"], "open"),
         ("purchase", "status", ["Firme", "Confirmada", "Released", "Freigegeben"], "open"),
@@ -162,7 +167,10 @@ def test_built_in_vocabulary_reads_six_languages(
 @pytest.mark.parametrize(
     ("spellings", "canonical"),
     [
-        (["UN", "EA", "pcs", "pç", "Pç.", "Stk", "Stück", "pz", "pezzi", "pieza", "unidade"], "count"),
+        (
+            ["UN", "EA", "pcs", "pç", "Pç.", "Stk", "Stück", "pz", "pezzi", "pieza", "unidade"],
+            "count",
+        ),
         (["KG", "quilo", "Kilos", "kilogramm"], "kg"),
         (["L", "litro", "Liter"], "l"),
         (["m²", "M2"], "m2"),
@@ -203,7 +211,9 @@ def test_a_checked_value_map_wins_and_a_conflict_stays_unknown() -> None:
     record.canonical["unit"] = CanonicalValue(value="count", source="szt", basis="value_map")
     assert categorical(record, "status") == "closed"
     assert unit_key(record) == "count"
-    record.canonical["status"] = CanonicalValue(value=None, source="Zrealizowane", basis="value_map")
+    record.canonical["status"] = CanonicalValue(
+        value=None, source="Zrealizowane", basis="value_map"
+    )
     assert categorical(record, "status") is None
     # A canonical reading never outlives a changed source value.
     record.values["status"] = "Encerrado"
@@ -212,7 +222,13 @@ def test_a_checked_value_map_wins_and_a_conflict_stays_unknown() -> None:
 
 @pytest.mark.parametrize(
     ("left", "right"),
-    [("000101", "101"), ("101.0", "101"), ("00010", "10"), ("Planta A", " planta  a "), ("0", "000")],
+    [
+        ("000101", "101"),
+        ("101.0", "101"),
+        ("00010", "10"),
+        ("Planta A", " planta  a "),
+        ("0", "000"),
+    ],
 )
 def test_join_keys_ignore_formatting_but_not_content(left: str, right: str) -> None:
     assert join_key(left) == join_key(right)
@@ -237,8 +253,8 @@ def test_join_keys_keep_distinct_codes_apart(left: str, right: str) -> None:
 def test_repeated_facts_compare_by_meaning(
     kind: RecordKind, field: str, left: str, right: str
 ) -> None:
-    first: Record = fact(kind, **{field: left})
-    second: Record = fact(kind, 3, **{field: right})
+    first = Record(kind=kind, values={field: left}, evidence={})
+    second = Record(kind=kind, values={field: right}, evidence={})
     assert fact_key(first, field) == fact_key(second, field)
 
 
