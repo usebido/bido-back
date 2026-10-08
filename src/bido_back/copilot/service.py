@@ -101,9 +101,10 @@ async def prepare_message(
 ) -> PreparedMessage:
     """Everything that can fail before streaming starts (so it fails as a plain HTTP error)."""
     documents = await _attachments(deps, principal, request.attachment_ids)
-    text = render_documents(documents) if documents else ""
-    if len(text) > MAX_ATTACHMENT_CHARS:
-        text = text[:MAX_ATTACHMENT_CHARS] + "\n[attachments truncated]"
+    text = _attachments_text(documents)
+    earlier: tuple[UUID, ...] = ()
+    if request.conversation_id is not None:
+        earlier = await earlier_attachment_ids(deps, principal, request.conversation_id)
     return PreparedMessage(
         principal=principal,
         conversation_id=request.conversation_id or uuid4(),
@@ -114,8 +115,42 @@ async def prepare_message(
             attachments=[d.filename for d in documents],
             attachment_ids=list(dict.fromkeys(request.attachment_ids)),
             attachments_text=text,
+            earlier_attachment_ids=[i for i in earlier if i not in request.attachment_ids],
         ),
     )
+
+
+def _attachments_text(documents: Sequence[DocumentText]) -> str:
+    text = render_documents(documents) if documents else ""
+    if len(text) > MAX_ATTACHMENT_CHARS:
+        text = text[:MAX_ATTACHMENT_CHARS] + "\n[attachments truncated]"
+    return text
+
+
+async def earlier_attachment_ids(
+    deps: CopilotDeps, principal: Principal, conversation_id: UUID
+) -> tuple[UUID, ...]:
+    """Upload ids attached in the caller's earlier turns of a conversation, oldest first.
+
+    Read from the conversation's stored runs, which are scoped to the caller's
+    tenant and user (`load_session_runs`); the request never names them.
+    Empty without run storage or for a conversation the caller does not have.
+    """
+    from bido_back.agents.agno_adapter import load_session_runs
+
+    context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
+    runs = await load_session_runs(
+        context, session_key(principal, conversation_id), deps.runner_config
+    )
+    ids: list[UUID] = []
+    for stored in runs or []:
+        if not stored.input:
+            continue
+        try:
+            ids.extend(CopilotInput.model_validate_json(stored.input).attachment_ids)
+        except ValidationError:
+            continue
+    return tuple(dict.fromkeys(ids))
 
 
 async def _attachments(
@@ -149,6 +184,22 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
 
     principal = prepared.principal
     context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
+
+    earlier_ids = tuple(prepared.input.earlier_attachment_ids)
+
+    async def earlier_text() -> str:
+        try:
+            documents = await _attachments(deps, principal, earlier_ids)
+        except AttachmentNotFound:
+            # A file was deleted since that turn; read none rather than a part.
+            logger.warning(
+                "copilot earlier attachments gone tenant=%s conversation=%s",
+                principal.tenant_id,
+                prepared.conversation_id,
+            )
+            return ""
+        return _attachments_text(documents)
+
     tools = copilot_tools(
         CopilotToolDeps(
             db=deps.db,
@@ -156,6 +207,8 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
             mailboxes=deps.mailboxes,
             attachments_text=prepared.input.attachments_text,
             attachment_ids=tuple(prepared.input.attachment_ids),
+            earlier_attachment_ids=earlier_ids,
+            earlier_attachments_text=earlier_text if earlier_ids else None,
             storage=deps.storage,
             sheet_mapper=deps.sheet_mapper or default_sheet_mapper(deps.runner_config),
         )

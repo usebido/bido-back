@@ -30,6 +30,10 @@ class CopilotInput(BaseModel):
     attachments_text: str = Field(
         default="", description="Text read from the attachments, with [file] markers"
     )
+    earlier_attachment_ids: list[UUID] = Field(
+        default_factory=list[UUID],
+        description="Files attached in earlier messages of this conversation (still usable)",
+    )
 
 
 class CopilotReply(BaseModel):
