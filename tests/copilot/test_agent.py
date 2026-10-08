@@ -1,6 +1,7 @@
 """The copilot definition: prompt, tool set, and schemas OpenAI accepts."""
 
 import json
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -8,6 +9,8 @@ from bido_back.agents.catalog.definitions import DEFAULT_MODEL
 from bido_back.copilot.agent import copilot_agent
 from bido_back.copilot.tools import CopilotToolDeps, copilot_tools
 from tests.rfqs.conftest import FakeMailboxes, fake_agents
+
+PROMPTS = Path(__file__).parents[2] / "prompts"
 
 EXPECTED_TOOLS = {
     "list_rfqs": "read",
@@ -62,6 +65,10 @@ def test_definition_and_tools() -> None:
     agent = copilot_agent(tools)
 
     assert agent.model == DEFAULT_MODEL
+    assert (agent.prompt_file, agent.prompt_version) == ("copilot.v19.md", 19)
+    # The copilot runs its newest prompt: a new version is never left unused.
+    newest = max(int(p.stem.removeprefix("copilot.v")) for p in PROMPTS.glob("copilot.v*.md"))
+    assert agent.prompt_version == newest
     assert len(agent.load_prompt()) > 500
     assert {tool.name: tool.kind for tool in agent.tools} == EXPECTED_TOOLS
     assert agent.history_runs > 0
