@@ -838,6 +838,54 @@
         "title": "ApprovalRequested",
         "type": "object"
       },
+      "AssessmentInvitedSupplier": {
+        "description": "A supplier on the draft RFQ as a DRAFT invite; nothing was sent to it.",
+        "properties": {
+          "contact_created": {
+            "default": false,
+            "title": "Contact Created",
+            "type": "boolean"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "part_numbers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Part Numbers",
+            "type": "array"
+          },
+          "supplier_created": {
+            "default": false,
+            "title": "Supplier Created",
+            "type": "boolean"
+          },
+          "supplier_id": {
+            "format": "uuid",
+            "title": "Supplier Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "supplier_id",
+          "name"
+        ],
+        "title": "AssessmentInvitedSupplier",
+        "type": "object"
+      },
       "AssessmentLine": {
         "properties": {
           "available": {
@@ -1136,6 +1184,14 @@
             "title": "Base Currency",
             "type": "string"
           },
+          "max_suppliers_per_line": {
+            "default": 3,
+            "description": "How many of each line's assessed suppliers (the suggested, best-ranked first) to invite as DRAFT invites. Nothing is sent.",
+            "maximum": 3.0,
+            "minimum": 1.0,
+            "title": "Max Suppliers Per Line",
+            "type": "integer"
+          },
           "pending_validation": {
             "anyOf": [
               {
@@ -1183,9 +1239,23 @@
             "title": "Assessment Id",
             "type": "string"
           },
+          "invited": {
+            "items": {
+              "$ref": "#/components/schemas/AssessmentInvitedSupplier"
+            },
+            "title": "Invited",
+            "type": "array"
+          },
           "lines": {
             "title": "Lines",
             "type": "integer"
+          },
+          "lines_without_limits": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Lines Without Limits",
+            "type": "array"
           },
           "preliminary": {
             "default": false,
@@ -1212,6 +1282,13 @@
             "title": "Skipped",
             "type": "array"
           },
+          "skipped_suppliers": {
+            "items": {
+              "$ref": "#/components/schemas/AssessmentSkippedSupplier"
+            },
+            "title": "Skipped Suppliers",
+            "type": "array"
+          },
           "title": {
             "default": "",
             "title": "Title",
@@ -1226,6 +1303,80 @@
           "reused"
         ],
         "title": "AssessmentRfqResult",
+        "type": "object"
+      },
+      "AssessmentSkippedSupplier": {
+        "description": "An assessed supplier that was not invited.",
+        "properties": {
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "part_numbers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Part Numbers",
+            "type": "array"
+          },
+          "reason": {
+            "description": "no_contact_email: no address in the evidence nor on the buyer's supplier; invalid_email: the evidence's email is not one valid address; no_company_name: an address no supplier of the buyer has, without a company name to create one; ambiguous_identity: the email or name matches several of the buyer's suppliers; disqualified: the buyer's approved-source data blocks it",
+            "enum": [
+              "no_contact_email",
+              "invalid_email",
+              "no_company_name",
+              "ambiguous_identity",
+              "disqualified"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "supplier_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Code"
+          },
+          "supplier_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Id"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "AssessmentSkippedSupplier",
         "type": "object"
       },
       "AssessmentSnapshotSummary": {

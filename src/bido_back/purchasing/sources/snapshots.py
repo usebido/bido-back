@@ -1,6 +1,7 @@
 """Immutable buyer-owned evidence snapshots and validated, idempotent draft handoff."""
 
-from datetime import date, datetime
+import logging
+from datetime import UTC, date, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -10,12 +11,24 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.auth import Principal
+from bido_back.comparison.loader import load_rates
 from bido_back.db import tenant_session
 from bido_back.db.models import ProcurementAssessment, Rfq
 from bido_back.purchasing.service import Conflict, InvalidRequest, NotFound
 from bido_back.purchasing.sources.contracts import PlanningScope, SourceAssessment
+from bido_back.purchasing.sources.handoff import (
+    AssessmentInvitedSupplier,
+    AssessmentSkippedSupplier,
+    default_limits,
+    invite_suppliers,
+    invited_suppliers,
+    lines_without_limits,
+    wanted_suppliers,
+)
 from bido_back.rfqs.schemas import CurrencyCode
 from bido_back.rfqs.service import NewRfqLine, create_draft_rfq, preliminary_title
+
+logger = logging.getLogger(__name__)
 
 Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
@@ -45,6 +58,15 @@ class AssessmentRfqRequest(BaseModel):
             "sending until the mark is removed."
         ),
     )
+    max_suppliers_per_line: int = Field(
+        default=3,
+        ge=1,
+        le=3,
+        description=(
+            "How many of each line's assessed suppliers (the suggested, best-ranked first) "
+            "to invite as DRAFT invites. Nothing is sent."
+        ),
+    )
 
 
 class AssessmentRfqResult(BaseModel):
@@ -57,6 +79,18 @@ class AssessmentRfqResult(BaseModel):
     preliminary: bool = False
     # Preliminary only: assessed lines left out (no quantity or unit yet), by part number.
     skipped: list[str] = Field(default_factory=list[str])
+    # The suppliers on the draft as DRAFT invites (nothing is sent), and the assessed
+    # suppliers that could not be invited, with why.
+    invited: list[AssessmentInvitedSupplier] = Field(
+        default_factory=list[AssessmentInvitedSupplier]
+    )
+    skipped_suppliers: list[AssessmentSkippedSupplier] = Field(
+        default_factory=list[AssessmentSkippedSupplier]
+    )
+    # Line positions without a default target/maximum unit price: no internal estimate,
+    # or no exchange rate into the RFQ's currency. The others' defaults come from the
+    # internal estimate; nothing is approved until the buyer approves the mandate.
+    lines_without_limits: list[int] = Field(default_factory=list[int])
 
 
 class AssessmentSnapshotSummary(BaseModel):
@@ -221,6 +255,7 @@ async def draft_from_snapshot(
         ]
         if not lines:
             raise InvalidRequest("the assessment has no validated positive purchase requirements")
+        wanted = wanted_suppliers(lines, request.max_suppliers_per_line)
         if row.rfq_id is not None:
             rfq = await session.get(Rfq, row.rfq_id)
             if rfq is None:
@@ -231,6 +266,8 @@ async def draft_from_snapshot(
                 request.response_due,
             ):
                 raise Conflict("this assessment already has a draft RFQ with different settings")
+            # The same answer, read from the draft as it is now: nothing is written again.
+            invited, skipped_suppliers = await invited_suppliers(session, principal, rfq, wanted)
             return AssessmentRfqResult(
                 assessment_id=row.id,
                 rfq_id=rfq.id,
@@ -240,6 +277,9 @@ async def draft_from_snapshot(
                 title=rfq.title,
                 preliminary=preliminary,
                 skipped=skipped,
+                invited=invited,
+                skipped_suppliers=skipped_suppliers,
+                lines_without_limits=await lines_without_limits(session, rfq.id),
             )
         new_lines = [
             NewRfqLine(
@@ -261,6 +301,8 @@ async def draft_from_snapshot(
             response_due=request.response_due,
             base_currency=request.base_currency,
         )
+        rates = await load_rates(session, datetime.now(UTC).date())
+        without_limits: list[int] = []
         for assessed, rfq_line in zip(lines, rfq_lines, strict=True):
             # JSON decimal strings round-trip exactly; the common RFQ constructor
             # uses floats for legacy callers and can lose source precision.
@@ -270,14 +312,36 @@ async def draft_from_snapshot(
                 "assessment_id": str(row.id),
                 "line": assessed.model_dump(mode="json"),
             }
+            # The internal estimate becomes the negotiation's default limits, in the
+            # RFQ's currency; the buyer approves (or changes) them in the mandate.
+            limits = default_limits(assessed.price, request.base_currency, rates)
+            if limits is None:
+                without_limits.append(rfq_line.position)
+            else:
+                rfq_line.target_unit_price, rfq_line.max_unit_price = limits
+        invited, skipped_suppliers = await invite_suppliers(session, principal, rfq, wanted)
         row.rfq_id = rfq.id
-        return AssessmentRfqResult(
-            assessment_id=row.id,
-            rfq_id=rfq.id,
-            ref=rfq.ref,
-            lines=len(lines),
-            reused=False,
-            title=rfq.title,
-            preliminary=preliminary,
-            skipped=skipped,
-        )
+    logger.info(
+        "rfq from assessment tenant=%s assessment=%s rfq=%s invites=%d created_suppliers=%d "
+        "skipped_suppliers=%d lines_without_limits=%d",
+        principal.tenant_id,
+        assessment_id,
+        rfq.id,
+        len(invited),
+        sum(1 for supplier in invited if supplier.supplier_created),
+        len(skipped_suppliers),
+        len(without_limits),
+    )
+    return AssessmentRfqResult(
+        assessment_id=assessment_id,
+        rfq_id=rfq.id,
+        ref=rfq.ref,
+        lines=len(lines),
+        reused=False,
+        title=rfq.title,
+        preliminary=preliminary,
+        skipped=skipped,
+        invited=invited,
+        skipped_suppliers=skipped_suppliers,
+        lines_without_limits=without_limits,
+    )
