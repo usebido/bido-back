@@ -12,7 +12,8 @@ Events, in order (the SSE contract the API documents):
    steps, `tool_called` / `tool_result` per tool, `artifact` cards (a draft RFQ,
    prepared approvals, a comparison, the template), and `approval_requested`
    if an `act` tool was ever proposed (the copilot has none today).
-3. `answer` - the reply text, when the run completed.
+   The reply itself streams as `text_delta` events while the model writes it.
+3. `answer` - the whole reply text, when the run completed (the deltas joined).
 4. `done` - always last: whether it worked and the draft actions it ran
    (RFQs created, suppliers invited, sends prepared, template changes).
 
@@ -325,6 +326,9 @@ async def conversation(
 def _answer(output: dict[str, JsonValue] | str | None) -> str | None:
     try:
         if isinstance(output, str):
+            # Streamed replies are stored as the text itself; older turns as JSON.
+            if not output.lstrip().startswith("{"):
+                return output or None
             return CopilotReply.model_validate_json(output).answer
         if output is not None:
             return CopilotReply.model_validate(output).answer
