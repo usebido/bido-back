@@ -1,0 +1,49 @@
+{
+  "cluster": "devnet",
+  "programId": "7992GKVq51ChvsVJQ9GFto2aBozUGuMcuY93SUSxexJw",
+  "upgradeAuthority": "3BrHHKNPbJxKNyQKZYDzVnfQeXTmyhbe7k7JAxg6TpHP",
+  "configPda": "AmwPNnamKz7TihheU7jiTwvApezJ3VTmCuk3uCegtGjD",
+  "eventAuthority": "pnVMRiecFLrWMcpXZ16ihgL995J9AMTxerTwG7GxfSW",
+  "operator": "4VgMVa3qDwpaExX8ADP7jymwUSGDR9jJ1EepNVibmrYS",
+  "relayer": "",
+  "tusdMint": "J2a18XLaidHWyeStUyEz6Jf11NEYPAQoK3gZ6m9AYnYw",
+  "tusdTreasuryOwner": "79ZYdZog1f6gFGzaTamNT82vpPAM6Ner8y6jNWnQLiVo",
+  "tusdSupply": "1000000000000000",
+  "circleDevnetUsdcMint": "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+  "sasProgramId": "22zoJMtdu4tQc2PzL74ZUT7FrwgB1Udec8DdW4yw4BdG",
+  "sasIssuer": "7SQkxGhoRJaEAZterSXvWUNbLSPMtaEnDcvfh8f1Z3ZP",
+  "sasCredential": "ByhHwn6nU8fZ1LNpGcoyzxHsgoXDJBrJ5sYvyp4j6vGv",
+  "sasSchema": "DpKcfRPxRoqUqS1QKquMZsbpoz8wrrySZx8KCgTPYmhm",
+  "sasSignerLabels": {
+    "6fEeU7mqkYkxujiv9VS9X5Fq3LVEoAoMqXS49CDMYXqi": "smoke-gate1",
+    "DZVkUPevNJv1bT4ZbooNfDEokAmtrZLB7MoRMyejUAtN": "smoke-gate0"
+  },
+  "smokeSigners": [
+    "DZVkUPevNJv1bT4ZbooNfDEokAmtrZLB7MoRMyejUAtN",
+    "6fEeU7mqkYkxujiv9VS9X5Fq3LVEoAoMqXS49CDMYXqi"
+  ],
+  "payoutOwner": "Gzxqt1qeLD3cMZqTd9hJTyoq5sdx8XaM9jvye99BPw32",
+  "payoutOwnerLabel": "Tazapay deposit (devnet stand-in)",
+  "sasSoSha256": "afacc7215d6ab6759bcf5edb958a1ad1d9de7559d53ac807c6aa4775a1a5a357",
+  "sasSoDumpSlot": 508216959,
+  "build": {
+    "commit": "",
+    "executableHash": "",
+    "solanaVerifyVersion": "",
+    "frozenAt": ""
+  },
+  "measurements": {
+    "cu": {
+      "createPo": 88021,
+      "fund": 15723,
+      "approval": 22814,
+      "release": 16359,
+      "refund": 0
+    },
+    "txBytes": {
+      "create_po": 1045,
+      "approve_ppap": 0
+    }
+  },
+  "circleProof": null
+}

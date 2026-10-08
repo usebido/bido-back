@@ -1,0 +1,46 @@
+[package]
+name = "bido_escrow"
+version = "0.1.0"
+description = "Bido escrow: pays a purchase order's fixed payout by milestones, only against SAS gate attestations (Solana devnet)"
+edition.workspace = true
+rust-version.workspace = true
+# No `license` field until the founder picks the licence (spec 01 section 7).
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "bido_escrow"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = { version = "=1.2.0", features = ["init-if-needed", "event-cpi"] }
+# `token_2022` is required by `anchor_spl::token_interface` (spec 01 section 3.5) and by
+# anchor-spl's own `idl-build` module; Token-2022 extensions stay off (out of scope).
+anchor-spl = { version = "=1.2.0", default-features = false, features = ["token", "token_2022", "associated_token"] }
+# `sol_sha256` syscall (`hashv`).
+solana-sha256-hasher = "=3.1.0"
+
+# LiteSVM pairing recorded by FD-147 (spec 01 section 3.1): 0.17.0 runs the Agave 4.3 runtime that
+# loads the SBPF v3 `.so` of a plain `anchor build`. Its Solana v4 crates stay test-only; every
+# other type comes from anchor-lang re-exports.
+[dev-dependencies]
+litesvm = "=0.17.0"
+# `tests/vectors.rs` merge-writes `vectors.json`; `raw_value` keeps other sections' text as is.
+serde_json = { version = "1.0.151", features = ["raw_value"] }
+solana-account = "4.3.0"
+solana-keypair = "3.1.2"
+solana-message = "4.2.4"
+solana-signer = "3.0.1"
+solana-transaction = "4.1.5"
+solana-transaction-error = "3.4.0"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

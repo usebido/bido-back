@@ -22,6 +22,10 @@ env:
   OASDIFF_SHA256: "7c8939fc49b75ee11fec66a5b83b37a2fca6aee109fed85013b1ba2ac2a1ee7f"
 
 jobs:
+  solana:
+    name: Solana program and setup tooling
+    uses: ./.github/workflows/solana.yml
+
   lint:
     name: Lint and type-check
     runs-on: ubuntu-latest
@@ -205,7 +209,7 @@ jobs:
   ci-ok:
     name: ci-ok
     if: always()
-    needs: [lint, test, openapi, docker]
+    needs: [lint, test, openapi, docker, solana]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

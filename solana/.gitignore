@@ -1,0 +1,10 @@
+/target/
+/.anchor/
+/test-ledger/
+/node_modules/
+.env
+.env.*
+!.env.example
+*-keypair.json
+keys/
+!tests/fixtures/sas.so

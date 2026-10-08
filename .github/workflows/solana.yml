@@ -1,0 +1,76 @@
+name: Solana
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  AVM_REV: 035797c63267e3f48e87db8f7caff572ae23bb95
+
+defaults:
+  run:
+    shell: bash
+    working-directory: solana
+
+jobs:
+  program:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Read the toolchain versions
+        run: |
+          solana=$(sed -n '/^\[workspace\.metadata\.cli\]/,/^\[/ s/^solana = "\([^"]*\)"$/\1/p' Cargo.toml)
+          anchor=$(sed -n '/^\[toolchain\]/,/^\[/ s/^anchor_version = "\([^"]*\)"$/\1/p' Anchor.toml)
+          [[ "$solana" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$anchor" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] ||
+            { echo "unreadable versions: solana='$solana' anchor='$anchor'" >&2; exit 1; }
+          echo "SOLANA_VERSION=$solana" >> "$GITHUB_ENV"
+          echo "ANCHOR_VERSION=$anchor" >> "$GITHUB_ENV"
+
+      # Stable, never below the LiteSVM floor of spec 01 section 3.1 (Rust >= 1.97.1).
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
+      # Node also runs the standalone devnet setup tooling tests.
+      - name: Install Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+
+      - name: Install the Agave CLI
+        run: sh -c "$(curl -sSfL "https://release.anza.xyz/v$SOLANA_VERSION/install")"
+
+      - name: Install avm and Anchor
+        run: |
+          cargo install --git https://github.com/solana-foundation/anchor --rev "$AVM_REV" avm --locked
+          avm install "$ANCHOR_VERSION"
+
+      - name: Put the tools on PATH
+        run: |
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+          echo "$HOME/.avm/bin" >> "$GITHUB_PATH"
+
+      - name: Select Anchor and check the versions
+        run: |
+          avm use "$ANCHOR_VERSION"
+          rustc --version
+          solana --version | grep -F "solana-cli $SOLANA_VERSION "
+          anchor --version | grep -Fx "anchor-cli $ANCHOR_VERSION"
+
+      - name: Install pnpm and setup dependencies
+        run: |
+          npm install --global pnpm@11.21.0
+          pnpm install --frozen-lockfile
+
+      - name: Build, test and check IDL drift
+        run: |
+          bash scripts/check.sh
+          solana --version | grep -F "solana-cli $SOLANA_VERSION "
