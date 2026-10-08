@@ -5,7 +5,9 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import delete, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.context import ToolContext
@@ -643,6 +645,67 @@ async def test_add_remove_lines_and_rfq_wide_terms(
         await service.remove_line(app_engine, principal, rfq.id, removed.lines[1].id)
     with pytest.raises(NotFound):
         await service.remove_line(app_engine, principal, rfq.id, uuid4())
+
+
+async def test_payment_terms_and_quote_validity_are_stored_shown_and_emailed(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    principal = buyer(rfq_rows)
+    rfq = await make_rfq(app_engine, principal)
+    supplier = await make_supplier(app_engine, principal, "Rhein")
+    invite = await service.add_invite(
+        app_engine, principal, rfq.id, supplier.id, supplier.contacts[0].id
+    )
+    assert (rfq.payment_terms, rfq.quote_validity_days) == (None, None)
+    plain = await service.preview_email(app_engine, principal, rfq.id, invite.id, FakeWriter())
+
+    termed = await service.update_rfq(
+        app_engine,
+        principal,
+        rfq.id,
+        UpdateRfqRequest(payment_terms=" 28 DDL ", quote_validity_days=30),
+    )
+    shown = await service.get_rfq(app_engine, principal, rfq.id)
+    preview = await service.preview_email(app_engine, principal, rfq.id, invite.id, FakeWriter())
+
+    assert (termed.payment_terms, termed.quote_validity_days) == ("28 DDL", 30)
+    assert (shown.payment_terms, shown.quote_validity_days) == ("28 DDL", 30)
+    # The supplier writes German: fixed phrases in German, the buyer's terms verbatim.
+    for statement in (
+        "Unsere Zahlungsbedingungen: 28 DDL",
+        "Bitte halten Sie Ihr Angebot mindestens 30 Tage gültig.",
+    ):
+        assert statement in preview.text and statement in preview.html
+        assert statement not in plain.text
+    assert "Unsere Zahlungsbedingungen" not in plain.text
+    assert "mindestens" not in plain.text
+
+    # Only what is passed changes; null clears.
+    validity_only = await service.update_rfq(
+        app_engine, principal, rfq.id, UpdateRfqRequest(quote_validity_days=None)
+    )
+    assert (validity_only.payment_terms, validity_only.quote_validity_days) == ("28 DDL", None)
+    cleared = await service.update_rfq(
+        app_engine, principal, rfq.id, UpdateRfqRequest(payment_terms=None)
+    )
+    assert (cleared.payment_terms, cleared.quote_validity_days) == (None, None)
+
+    for days in (0, -5, 366):
+        with pytest.raises(ValidationError):
+            UpdateRfqRequest(quote_validity_days=days)
+    with pytest.raises(ValidationError):
+        UpdateRfqRequest(payment_terms="  ")
+    # The database holds the same bound, whatever the caller.
+    with pytest.raises(IntegrityError, match="rfqs_quote_validity_days_check"):
+        async with tenant_session(app_engine, rfq_rows.tenant) as session:
+            await session.execute(update(Rfq).where(Rfq.id == rfq.id).values(quote_validity_days=0))
+
+    # Frozen once an email was prepared, like every other term.
+    await service.prepare_send(app_engine, principal, rfq.id, FakeWriter(), FakeMailboxes())
+    with pytest.raises(InvalidState, match="frozen"):
+        await service.update_rfq(
+            app_engine, principal, rfq.id, UpdateRfqRequest(payment_terms="60 DDL")
+        )
 
 
 def test_preliminary_titles() -> None:

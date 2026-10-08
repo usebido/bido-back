@@ -238,6 +238,10 @@ class Rfq(Base):
     status: Mapped[str] = mapped_column(Text, server_default=text("'draft'"))
     base_currency: Mapped[str] = mapped_column(Text, server_default=text("'EUR'"))
     response_due: Mapped[date | None] = mapped_column(Date)
+    # The buyer's commercial terms for suppliers (migration 0025): payment terms
+    # verbatim ("28 DDL"), and the minimum quote validity, 1 to 365 days.
+    payment_terms: Mapped[str | None] = mapped_column(Text)
+    quote_validity_days: Mapped[int | None] = mapped_column(Integer)
     source_text: Mapped[str | None] = mapped_column(Text)
     created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

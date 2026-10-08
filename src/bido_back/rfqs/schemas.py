@@ -32,6 +32,12 @@ RfqStatus = Literal["draft", "open", "closed", "cancelled"]
 InviteStatus = Literal["draft", "pending_approval", "sent", "responded", "declined"]
 PositiveQuantity = Annotated[Decimal, Field(gt=0, max_digits=18, decimal_places=4)]
 ShortText = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=500)]
+# The buyer's payment terms, verbatim ("28 DDL", "30 days net"); they go into the email.
+PaymentTerms = Annotated[
+    str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
+]
+# How long a quote must stay valid, in days (the database checks the same range).
+QuoteValidityDays = Annotated[int, Field(ge=1, le=365)]
 
 
 # --- RFQs -------------------------------------------------------------------------
@@ -87,6 +93,12 @@ class RfqHeader(BaseModel):
         description="Why preparing a send would be refused now (reply_by_missing: no "
         "response_due; reply_by_past: response_due before today, UTC); empty when nothing "
         "blocks. Only draft and open RFQs can have blockers",
+    )
+    payment_terms: str | None = Field(
+        default=None, description="The buyer's payment terms for suppliers, verbatim"
+    )
+    quote_validity_days: int | None = Field(
+        default=None, description="How many days a quote must stay valid, at least"
     )
 
 
@@ -181,6 +193,8 @@ class UpdateRfqRequest(BaseModel):
 
     title: ShortText | None = None
     response_due: date | None = None
+    payment_terms: PaymentTerms | None = None
+    quote_validity_days: QuoteValidityDays | None = None
     incoterm: str | None = None
     delivery_location: str | None = None
     need_by: date | None = None

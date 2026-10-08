@@ -6015,6 +6015,18 @@
             "title": "Lines",
             "type": "array"
           },
+          "payment_terms": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The buyer's payment terms for suppliers, verbatim",
+            "title": "Payment Terms"
+          },
           "questions": {
             "description": "What the buyer should clarify before sending",
             "items": {
@@ -6022,6 +6034,18 @@
             },
             "title": "Questions",
             "type": "array"
+          },
+          "quote_validity_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How many days a quote must stay valid, at least",
+            "title": "Quote Validity Days"
           },
           "ref": {
             "title": "Ref",
@@ -6110,6 +6134,30 @@
             },
             "title": "Lines",
             "type": "array"
+          },
+          "payment_terms": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The buyer's payment terms for suppliers, verbatim",
+            "title": "Payment Terms"
+          },
+          "quote_validity_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How many days a quote must stay valid, at least",
+            "title": "Quote Validity Days"
           },
           "ref": {
             "title": "Ref",
@@ -6727,6 +6775,30 @@
             ],
             "description": "The buyer who created the RFQ",
             "title": "Owner"
+          },
+          "payment_terms": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The buyer's payment terms for suppliers, verbatim",
+            "title": "Payment Terms"
+          },
+          "quote_validity_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How many days a quote must stay valid, at least",
+            "title": "Quote Validity Days"
           },
           "ref": {
             "title": "Ref",

@@ -5,12 +5,20 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.tools import ToolError
 from bido_back.db import tenant_session
-from bido_back.db.models import Approval, Invite, Rfq, RfqLine, RfqTemplate, RfqTemplateVersion
+from bido_back.db.models import (
+    Approval,
+    Invite,
+    Rfq,
+    RfqLine,
+    RfqTemplate,
+    RfqTemplateVersion,
+)
 from bido_back.rfqs.send import SEND_RFQ_EMAIL
 from tests.approvals.conftest import People
 
@@ -383,6 +391,45 @@ async def test_without_a_reply_by_date_the_model_is_told_to_ask_for_one(
     await tools.call(ctx, "set_rfq_terms", rfq=created.ref, response_due=due)
     prepared = await tools.call(ctx, "prepare_send", rfq=created.ref)
     assert len(prepared.approvals) == 1
+
+
+async def test_set_rfq_terms_stores_and_clears_payment_terms_and_quote_validity(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+    created = await tools.call(ctx, "create_rfq", text="MLCC and connectors")
+    ref = created.ref
+
+    termed = await tools.call(
+        ctx, "set_rfq_terms", rfq=ref, payment_terms="28 DDL", quote_validity_days=30
+    )
+    status = await tools.call(ctx, "get_rfq_status", rfq=ref)
+    # Another term leaves them as they are.
+    renamed = await tools.call(ctx, "set_rfq_terms", rfq=ref, title="Capacitors")
+    cleared = await tools.call(
+        ctx, "set_rfq_terms", rfq=ref, clear=["payment_terms", "quote_validity_days"]
+    )
+
+    # The result is what is stored, so the copilot reports exactly that.
+    assert (termed.payment_terms, termed.quote_validity_days) == ("28 DDL", 30)
+    assert (status.payment_terms, status.quote_validity_days) == ("28 DDL", 30)
+    assert (renamed.payment_terms, renamed.quote_validity_days) == ("28 DDL", 30)
+    assert (cleared.payment_terms, cleared.quote_validity_days) == (None, None)
+    assert cleared.title == "Capacitors"
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        stored = await session.get(Rfq, created.id)
+    assert stored is not None
+    assert (stored.payment_terms, stored.quote_validity_days) == (None, None)
+
+    for days in (0, -1, 366):
+        with pytest.raises(ValidationError):
+            await tools.call(ctx, "set_rfq_terms", rfq=ref, quote_validity_days=days)
+    with pytest.raises(ValidationError):
+        await tools.call(ctx, "set_rfq_terms", rfq=ref, clear=["title"])
+    with pytest.raises(ToolError, match="nothing to change"):
+        await tools.call(ctx, "set_rfq_terms", rfq=ref)
 
 
 async def test_a_preliminary_rfq_is_not_prepared_for_sending(
