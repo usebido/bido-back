@@ -3805,6 +3805,23 @@
             "format": "uuid",
             "title": "Rfq Id",
             "type": "string"
+          },
+          "waiting_emails": {
+            "default": 0,
+            "title": "Waiting Emails",
+            "type": "integer"
+          },
+          "waiting_reason": {
+            "anyOf": [
+              {
+                "const": "mailbox_not_connected",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Waiting Reason"
           }
         },
         "required": [
@@ -5110,6 +5127,11 @@
           "lines": {
             "title": "Lines",
             "type": "integer"
+          },
+          "mailbox_connected": {
+            "default": true,
+            "title": "Mailbox Connected",
+            "type": "boolean"
           },
           "recipients": {
             "items": {

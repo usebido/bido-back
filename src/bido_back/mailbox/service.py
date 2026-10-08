@@ -48,7 +48,7 @@ Logs carry ids and counts only, never addresses, tokens or content.
 """
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Final, Protocol, cast
@@ -725,6 +725,9 @@ class MailboxSyncDeps:
     settings: Settings
     cipher: TokenCipher | None = None
     http: httpx.AsyncClient | None = field(default=None)
+    # Run for each synced tenant after its sync (the worker releases negotiation
+    # mandates' emails that were waiting for a mailbox). Failures are logged.
+    after_sync: Callable[[UUID], Awaitable[object]] | None = None
 
 
 async def handle_mailbox_sync(envelope: Envelope, deps: MailboxSyncDeps) -> None:
@@ -757,6 +760,11 @@ async def handle_mailbox_sync(envelope: Envelope, deps: MailboxSyncDeps) -> None
             )
             if single:
                 raise
+        if deps.after_sync is not None:
+            try:
+                await deps.after_sync(tenant_id)
+            except Exception:
+                logger.exception("mailbox after-sync failed tenant=%s", tenant_id)
 
 
 class MailboxSyncHandler:

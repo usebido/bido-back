@@ -1,5 +1,6 @@
 """Thread sync without a database: one thread, the buyer's own mail, state, the job."""
 
+from dataclasses import replace
 from uuid import UUID, uuid4
 
 import httpx
@@ -169,6 +170,32 @@ async def test_real_tenant_syncs_only_that_tenant_and_reraises(
         await handle_mailbox_sync(_envelope(tenant), _deps())
 
     assert synced == [tenant]
+
+
+async def test_after_sync_runs_for_every_tenant_and_its_failure_is_contained(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a, b = uuid4(), uuid4()
+    after: list[UUID] = []
+
+    async def tenants(db: object) -> list[UUID]:
+        return [a, b]
+
+    async def sync(db: object, tenant_id: UUID, **kwargs: object) -> None:
+        if tenant_id == a:
+            raise RuntimeError("a failed sync still releases waiting mandate emails")
+
+    async def release(tenant_id: UUID) -> None:
+        after.append(tenant_id)
+        if tenant_id == a:
+            raise RuntimeError("one tenant failing must not stop the others")
+
+    monkeypatch.setattr(service, "active_mailbox_tenants", tenants)
+    monkeypatch.setattr(service, "sync_rfq_threads", sync)
+    deps = replace(_deps(), after_sync=release)
+    await handle_mailbox_sync(_envelope(ALL_TENANTS), deps)
+
+    assert after == [a, b]
 
 
 def test_job_type_name() -> None:

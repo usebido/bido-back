@@ -106,7 +106,11 @@ def build_worker_registry(
     from bido_back.fx.ecb import FxRefreshHandler
     from bido_back.intake.consumer import build_inbound_service, sqs_client
     from bido_back.mailbox import MailboxSyncDeps, MailboxSyncHandler, open_connection
-    from bido_back.mandates.service import MandateActDeps, register_mandate_act_tools
+    from bido_back.mandates.service import (
+        MandateActDeps,
+        auto_approve_pending,
+        register_mandate_act_tools,
+    )
     from bido_back.negotiation.agents import default_negotiation_writer
     from bido_back.negotiation.jobs import NegotiationSweepHandler
     from bido_back.negotiation.send import register_negotiation_act_tools
@@ -162,10 +166,20 @@ def build_worker_registry(
     )
     registry.register(FX_REFRESH, FxRefreshHandler(engine))
     inbound = build_inbound_service(settings, engine, sqs=sqs)
+
+    async def release_mandate_sends(tenant_id: UUID) -> None:
+        await auto_approve_pending(engine, tenant_id, jobs=jobs)
+
     registry.register(
         MAILBOX_SYNC,
         MailboxSyncHandler(
-            MailboxSyncDeps(db=engine, ingest=inbound.ingest_for_invite, settings=settings)
+            MailboxSyncDeps(
+                db=engine,
+                ingest=inbound.ingest_for_invite,
+                settings=settings,
+                # A mailbox just connected: mandate emails waiting for it go out.
+                after_sync=release_mandate_sends,
+            )
         ),
     )
 
