@@ -366,6 +366,40 @@ async def test_an_erp_export_imports_with_codes_types_and_notes(
         "Rolamentos Precisão": "authorized_distributor",
     }
     assert bom == {"IM-N48H-40": Decimal(64), "EX-120-42": Decimal(1), "RL-6206": Decimal(1)}
+    # Every supplier came with a contact email.
+    assert report.suppliers_without_email == []
+
+
+async def test_an_import_names_the_suppliers_still_without_an_email(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
+    storage = FakeStorage()
+    orders_only = await onboarding.store_upload(
+        app_engine,
+        storage,
+        who,
+        filename="me2m.xlsx",
+        content_type=XLSX,
+        data=workbook({"ME2M": ME2M}),
+    )
+    # A contact list whose email column has a heading the rules knew no synonym for.
+    contacts = await onboarding.store_upload(
+        app_engine, storage, who, filename="contatos.xlsx", content_type=XLSX,
+        data=workbook({"Contatos": [
+            ["Fornecedor", "Pessoa de contato", "Endereço de e-mail"],
+            ["Rolamentos Precisão", "Carla Nunes", "cotacao@rolprecisao.example.test"],
+        ]}),
+    )  # fmt: skip
+
+    first = await import_workbook(app_engine, storage, who, orders_only.id, mapper=None)
+    second = await import_workbook(app_engine, storage, who, contacts.id, mapper=None)
+
+    # The purchase orders bring two suppliers and no contacts: say so at import time.
+    assert first.status == "imported"
+    assert first.suppliers_without_email == ["Global Parts Brokers Ltd", "Rolamentos Precisão"]
+    assert second.status == "imported", second.questions
+    assert second.suppliers_without_email == ["Global Parts Brokers Ltd"]
 
 
 async def test_a_sheet_the_rules_read_only_in_part_also_goes_to_the_mapper() -> None:
