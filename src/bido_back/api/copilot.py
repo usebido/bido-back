@@ -69,14 +69,18 @@ from bido_back.api.rfqs import error_responses
 from bido_back.auth import Principal
 from bido_back.copilot import service
 from bido_back.copilot.contracts import (
+    MAX_ATTACHMENTS,
+    MAX_MESSAGE_CHARS,
     ConversationList,
     ConversationSummary,
     ConversationView,
+    CopilotLimits,
     CopilotMessageRequest,
     RenameConversationRequest,
     StreamItem,
 )
 from bido_back.copilot.titles import Titler, default_titler
+from bido_back.onboarding.service import MAX_DIRECT_UPLOAD_BYTES, UPLOAD_EXTENSIONS
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.storage import BlobStorage
@@ -158,6 +162,19 @@ def copilot_router() -> APIRouter:
             _stream(service.stream_message(deps, prepared)),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @router.get("/limits")
+    async def limits(  # pyright: ignore[reportUnusedFunction]
+        principal: CurrentPrincipal,
+    ) -> CopilotLimits:
+        """What one message may carry: files, text and upload size. The front reads it."""
+        del principal  # signed-in callers only, like the rest of the copilot
+        return CopilotLimits(
+            max_attachments=MAX_ATTACHMENTS,
+            max_message_chars=MAX_MESSAGE_CHARS,
+            max_upload_bytes=MAX_DIRECT_UPLOAD_BYTES,
+            accepted_extensions=sorted(UPLOAD_EXTENSIONS),
         )
 
     @router.get("/conversations")
