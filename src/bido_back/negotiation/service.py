@@ -104,6 +104,7 @@ from bido_back.negotiation.strategy import (
     ready_to_close,
 )
 from bido_back.rfqs.errors import AgentFailed, InvalidState, NotFound
+from bido_back.rfqs.language import supplier_email_language
 from bido_back.rfqs.send import SEND_RFQ_EMAIL, send_proposal_ids
 from bido_back.rfqs.service import buyer_display_name
 
@@ -889,7 +890,7 @@ async def _due(
             buyer_company=tenant.name,
             buyer_name=await buyer_display_name(session, user, tenant.name),
             supplier_name=supplier.name,
-            supplier_language=supplier.language,
+            supplier_language=supplier_email_language(supplier),
             round=round_number,
             reply_by=rfq.negotiation_deadline.date() if rfq.negotiation_deadline else None,
             mention_competition=decision.mention_competition,

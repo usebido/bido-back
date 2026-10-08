@@ -11,11 +11,20 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
-from bido_back.db.models import AnalysisLine, FxRate, Invite, Item, PoLine, Rfq, RfqLine
+from bido_back.db.models import (
+    AnalysisLine,
+    FxRate,
+    Invite,
+    Item,
+    PoLine,
+    Rfq,
+    RfqLine,
+    Supplier,
+)
 from bido_back.fx.ecb import DailyRates, upsert_rates
 from bido_back.onboarding import service as onboarding
 from bido_back.purchasing import service
-from bido_back.purchasing.importers import TableImportType
+from bido_back.purchasing.importers import TableImportType, parse_rows
 from bido_back.purchasing.schemas import (
     AnalysisRequest,
     ImportRequest,
@@ -390,3 +399,58 @@ async def test_parts_never_bought_take_the_history_currency_or_ask(
         app_engine, who, view.id, RfqFromAnalysisRequest()
     )
     assert (created.rfq.base_currency, created.currency_source) == ("BRL", "purchase_history")
+
+
+async def test_suppliers_without_a_language_get_their_countrys(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    # Pedro's supplier master (2026-10-08) has a "País" column and no language: Brazilian
+    # suppliers must not be written to in English.
+    table = parse_rows(
+        "supplier_contacts",
+        [
+            ["Fornecedor", "País", "E-mail", "Idioma"],
+            ["Metalúrgica Horizonte Ltda.", "BR", "supply@horizonte.example.test", None],
+            ["Rhein Bauteile GmbH", "DE", "sales@rhein.example.test", "en"],
+            ["Acme Corp", "US", "sales@acme.example.test", None],
+        ],
+    )
+    assert not table.missing_required and len(table.rows) == 3
+    async with tenant_session(app_engine, purchasing_rows.tenant) as session:
+        await service.apply_parsed(session, purchasing_rows.tenant, table)
+
+    async with tenant_session(app_engine, purchasing_rows.tenant) as session:
+        languages = dict(
+            (await session.execute(select(Supplier.name, Supplier.language))).tuples().all()
+        )
+    assert languages["Metalúrgica Horizonte Ltda."] == "pt"
+    # Stated by the buyer: kept as stored. (Emails still follow the country while the
+    # stored value is the column default "en": the two cannot be told apart yet.)
+    assert languages["Rhein Bauteile GmbH"] == "en"
+    assert languages["Acme Corp"] == "en"
+
+
+async def test_a_preliminary_rfq_from_an_analysis_keeps_its_units(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = buyer(purchasing_rows)
+    await make_supplier(app_engine, who, "Cuscinetti Precisione S.r.l.")
+    await seed(app_engine, who)
+    view = await service.create_analysis(
+        app_engine, who, AnalysisRequest(product="Motor EV-120", quantity=Decimal(100)), today=TODAY
+    )
+
+    created = await service.create_rfq_from_analysis(
+        app_engine,
+        who,
+        view.id,
+        RfqFromAnalysisRequest(pending_validation="engineering validation of the BOM"),
+    )
+
+    assert created.rfq.title.startswith(
+        "PRELIMINARY (pending engineering validation of the BOM): Motor EV-120"
+    )
+    assert [(line.part_number, line.unit) for line in created.rfq.lines] == [
+        ("BRG-6205", "pz"),
+        ("CU-WIRE", "kg"),
+    ]

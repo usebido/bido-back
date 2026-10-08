@@ -201,6 +201,9 @@ class AnalysisView(BaseModel):
 
 class RfqFromAnalysisRequest(_Strict):
     title: str | None = Field(default=None, max_length=200)
+    # Marks the draft PRELIMINARY, waiting for someone's sign-off: it cannot be prepared
+    # for sending until the mark is removed (rfqs.service.preliminary_hold).
+    pending_validation: str | None = Field(default=None, min_length=1, max_length=200)
     response_due: date | None = None
     # Suggested suppliers invited per line (the best-ranked ones).
     max_suppliers_per_line: int = Field(default=3, ge=1, le=3)

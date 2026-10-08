@@ -70,6 +70,7 @@ from bido_back.outbound.domains import RecipientCheck, check_recipients, recipie
 from bido_back.rfqs.agents import EmailWriterAgent, IntakeAgent
 from bido_back.rfqs.currency import CurrencyChange, change_currency, resolve_currency
 from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound, ReplyByRequired
+from bido_back.rfqs.language import supplier_email_language
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.readiness import reply_by_refusal, send_blockers, utc_today
 from bido_back.rfqs.schemas import (
@@ -617,6 +618,28 @@ async def add_invite(
         return _invite_view(invite, supplier.name)
 
 
+async def remove_invite(db: Db, principal: Principal, rfq_id: UUID, invite_id: UUID) -> RfqDetail:
+    """Take a supplier off a draft RFQ before any email was prepared for it.
+
+    Only a `draft` invite on a `draft` RFQ can go: once an email is pending approval or
+    sent, the supplier stays on the record.
+    """
+    async with tenant_session(db, principal.tenant_id) as session:
+        rfq = await _rfq(session, rfq_id, lock=True)
+        if rfq.status != "draft":
+            raise InvalidState(f"rfq {rfq_id} is {rfq.status}; its invites are frozen")
+        invite = await session.scalar(
+            select(Invite).where(Invite.id == invite_id, Invite.rfq_id == rfq_id)
+        )
+        if invite is None:
+            raise NotFound(f"invite {invite_id} not found")
+        if invite.status not in _EDITABLE_INVITES:
+            raise InvalidState(f"invite {invite_id} is {invite.status}; it cannot be removed")
+        await session.delete(invite)
+        await session.flush()
+        return await _detail(session, rfq)
+
+
 # --- Preparing the send ---------------------------------------------------------------
 
 
@@ -633,7 +656,9 @@ async def buyer_display_name(session: AsyncSession, user: User, company: str) ->
         .order_by(Contact.created_at)
         .limit(1)
     )
-    return name or f"{company} purchasing"
+    # Without a name the company signs alone: "<company> purchasing" read as a
+    # department nobody asked for.
+    return name or company
 
 
 def with_marker(subject: str, rfq_ref: str) -> str:
@@ -707,7 +732,7 @@ async def _render_for(
     localized: dict[str, TemplateContent],
 ) -> RenderedRfq:
     """The supplier's email; refuses one that fails the deterministic checks."""
-    language = supplier.language
+    language = supplier_email_language(supplier)
     display = localized.get(language)
     if display is None:
         display = await localize(ctx.template.content, language, writer, context)
@@ -857,6 +882,7 @@ async def prepare_send(
             to=[contact.email],
             subject=with_marker(rendered.subject, rfq.ref),
             body=rendered.text,
+            html_body=rendered.html,
         )
         payload = cast(dict[str, JsonValue], args.model_dump(mode="json"))
         call_id = send_proposal_ids(invite.id)[1]
