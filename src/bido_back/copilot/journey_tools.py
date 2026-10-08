@@ -143,6 +143,9 @@ class ProposeMandateOut(BaseModel):
     recipients: list[RecipientCheck]
     # Domains the buyer must confirm in the approval before anything is sent.
     domains_to_confirm: list[str]
+    # False: approving is fine now, but nothing goes out until the buyer
+    # connects their mailbox (Gmail or Outlook); the emails then send on their own.
+    mailbox_connected: bool = True
 
 
 class MandateStateOut(BaseModel):
@@ -200,8 +203,13 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         ctx: ToolContext, args: ImportSpreadsheetIn
     ) -> WorkbookImportReport:
         principal = _principal(ctx)
-        if args.upload_id not in deps.attachment_ids:
-            raise ToolError("that id is not one of this message's attachments")
+        upload_id = args.upload_id
+        if upload_id not in deps.attachment_ids:
+            # Models sometimes copy an id wrongly. With a single attachment there
+            # is only one file it can mean.
+            if len(deps.attachment_ids) != 1:
+                raise ToolError("that id is not one of this message's attachments")
+            upload_id = next(iter(deps.attachment_ids))
         if deps.storage is None:
             raise ToolError("file storage is not available")
         try:
@@ -209,7 +217,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
                 db,
                 deps.storage,
                 principal,
-                args.upload_id,
+                upload_id,
                 mapper=deps.sheet_mapper,
                 confirmed=args.confirmed,
             )
@@ -330,11 +338,19 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
                 "those limits go out automatically until the deadline or until closed. "
                 "Emails go only to test domains or domains the buyer confirms in that "
                 "approval: list every recipient and warn about domains of real companies."
+                + (
+                    ""
+                    if proposed.mailbox_connected
+                    else " The buyer has not connected a mailbox yet: the approval can be given "
+                    "now, but sending starts only once they connect Gmail or Outlook "
+                    "(onboarding); tell them so."
+                )
             ),
             recipients=proposed.recipients,
             domains_to_confirm=sorted(
                 {r.domain for r in proposed.recipients if not r.will_send and r.domain}
             ),
+            mailbox_connected=proposed.mailbox_connected,
         )
 
     async def _set_paused(ctx: ToolContext, args: RfqArg, *, paused: bool) -> MandateStateOut:

@@ -22,10 +22,12 @@ Bido uses a connection only in the RFQ threads it started; see
 `bido_back.mailbox.service`.
 """
 
+import logging
 from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Annotated, Literal
 from urllib.parse import urlencode
+from uuid import UUID
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -33,7 +35,7 @@ from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bido_back.api.deps import ApiResources, get_db, get_principal
+from bido_back.api.deps import ApiResources, get_db, get_optional_job_queue, get_principal
 from bido_back.api.errors import ErrorResponse
 from bido_back.auth import Principal
 from bido_back.mailbox.base import MailboxNotConfigured, Provider, ProviderError
@@ -57,7 +59,11 @@ from bido_back.mailbox.service import (
     store_connection,
     user_is_member,
 )
+from bido_back.mandates.service import auto_approve_pending
 from bido_back.settings import Settings
+from bido_back.worker.jobs import JobQueue
+
+logger = logging.getLogger(__name__)
 
 _NO_STORE = {"Cache-Control": "no-store"}
 
@@ -200,6 +206,7 @@ def mailbox_router() -> APIRouter:
         db: Annotated[async_sessionmaker[AsyncSession], Depends(get_db)],
         http: Annotated[httpx.AsyncClient, Depends(get_mailbox_http)],
         cipher: Annotated[TokenCipher, Depends(get_token_cipher)],
+        jobs: Annotated[JobQueue | None, Depends(get_optional_job_queue)],
         response: Response,
     ) -> MailboxConnectionResponse:
         response.headers.update(_NO_STORE)
@@ -240,6 +247,7 @@ def mailbox_router() -> APIRouter:
             tokens=tokens,
             cipher=cipher,
         )
+        await _release_waiting_mandate_sends(db, sealed.tenant_id, jobs)
         return _response(view)
 
     @router.get("", responses=_errors(status.HTTP_401_UNAUTHORIZED))
@@ -269,3 +277,18 @@ def mailbox_router() -> APIRouter:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "no mailbox connection")
 
     return router
+
+
+async def _release_waiting_mandate_sends(
+    db: async_sessionmaker[AsyncSession], tenant_id: UUID, jobs: JobQueue | None
+) -> None:
+    """A mailbox was just connected: approved mandates' waiting emails can go out now.
+
+    Best effort: the mailbox sync (every couple of minutes) releases them too.
+    """
+    if jobs is None:
+        return
+    try:
+        await auto_approve_pending(db, tenant_id, jobs=jobs)
+    except Exception:
+        logger.exception("mandate release after mailbox connect failed tenant=%s", tenant_id)

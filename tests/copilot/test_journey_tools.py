@@ -48,6 +48,21 @@ async def test_only_this_messages_attachments_can_be_imported(
         )
 
 
+async def test_a_miscopied_id_falls_back_to_the_only_attachment(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    ctx = context_of(buyer_of(copilot_rows))
+    single = make_tools(app_engine, attachment_ids=(uuid4(),))
+    several = make_tools(app_engine, attachment_ids=(uuid4(), uuid4()))
+
+    # Past the id check: the only attachment is used (no storage in tests).
+    with pytest.raises(ToolError, match="storage"):
+        await single.call(ctx, "import_spreadsheet", upload_id=str(uuid4()))
+    # With several attachments a wrong id stays an error.
+    with pytest.raises(ToolError, match="attachments"):
+        await several.call(ctx, "import_spreadsheet", upload_id=str(uuid4()))
+
+
 async def test_extra_offers_are_listed_as_not_requested(
     app_engine: AsyncEngine, copilot_rows: People
 ) -> None:

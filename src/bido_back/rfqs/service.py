@@ -599,18 +599,23 @@ async def prepare_send(
     rfq_id: UUID,
     writer: EmailWriterAgent,
     mailboxes: MailboxSenderFactory,
+    *,
+    require_mailbox: bool = True,
 ) -> PrepareSendResponse:
     """Render one email per draft invite and record each as a pending approval.
 
     The emails will go out from the caller's connected mailbox; without one
-    this fails with `MailboxNotConnected` before anything is rendered.
+    this fails with `MailboxNotConnected` before anything is rendered, unless
+    `require_mailbox` is False (a negotiation mandate, whose sends wait for the
+    mailbox instead).
     """
     async with tenant_session(db, principal.tenant_id) as session:
         rfq = await _rfq(session, rfq_id, lock=True)
         if rfq.status not in ("draft", "open"):
             raise InvalidState(f"rfq {rfq_id} is {rfq.status}")
         # Fail early: nobody should approve an email that cannot be sent.
-        await mailboxes(session, principal.tenant_id, principal.user_id)
+        if require_mailbox:
+            await mailboxes(session, principal.tenant_id, principal.user_id)
         rows = await session.execute(
             select(Invite, Supplier, Contact)
             .join(Supplier, Supplier.id == Invite.supplier_id)

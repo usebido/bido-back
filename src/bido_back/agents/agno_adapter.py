@@ -80,6 +80,7 @@ from bido_back.agents.events import (
     ApprovalRequested,
     Artifact,
     Event,
+    ReasoningDelta,
     ReasoningStep,
     RunCompleted,
     RunFailed,
@@ -384,6 +385,7 @@ class _Emitter:
     def __call__[
         E: (
             TextDelta,
+            ReasoningDelta,
             ReasoningStep,
             ToolCalled,
             ToolResult,
@@ -413,6 +415,12 @@ class _Translator:
         self._text_interrupted = False
         # Reasoning already emitted in the current run segment (see _on_completed).
         self._segment_reasoning = ""
+        # The reasoning step being streamed: its id and the deltas so far. The
+        # provider streams a summary in tiny pieces; they are one step, closed
+        # (emitted whole as ReasoningStep) when anything else happens.
+        self._steps = 0
+        self._step_id: str | None = None
+        self._step_text: list[str] = []
         # Set by consume(): how the segment ended.
         self.completed = False
         self.final_content: object = None
@@ -434,6 +442,8 @@ class _Translator:
                     yield event
                 if self.failure is not None:
                     return
+            for event in self._close_step():
+                yield event
         finally:
             # Leaving early (turn limit) must stop Agno before its next request.
             aclose = getattr(stream, "aclose", None)
@@ -443,6 +453,26 @@ class _Translator:
     def _translate(self, item: RunOutputEvent) -> list[Event]:
         emit = self._emit
         events: list[Event] = []
+        has_text = (
+            isinstance(item, RunContentEvent)
+            and item.content_type == "str"
+            and isinstance(item.content, str)
+            and bool(item.content)
+        )
+        # The reasoning step being streamed ends when text, a tool call, a new
+        # model request or the end of the run comes; other provider events
+        # (empty deltas, bookkeeping) don't split it.
+        if has_text or isinstance(
+            item,
+            ToolCallStartedEvent
+            | ModelRequestStartedEvent
+            | RunStartedEvent
+            | RunContinuedEvent
+            | RunPausedEvent
+            | RunErrorEvent
+            | RunCancelledEvent,
+        ):
+            events.extend(self._close_step())
         if isinstance(item, RunStartedEvent | RunContinuedEvent):
             self._segment_reasoning = ""
         elif isinstance(item, ModelRequestStartedEvent):
@@ -455,8 +485,12 @@ class _Translator:
         elif isinstance(item, RunContentEvent):
             if item.reasoning_content:
                 self._segment_reasoning += item.reasoning_content
-                events.append(emit(ReasoningStep, text=item.reasoning_content))
-            if item.content_type == "str" and isinstance(item.content, str) and item.content:
+                events.extend(self._reasoning(item.reasoning_content))
+                if has_text:
+                    # Reasoning and text in one event: the reasoning is a step of its own.
+                    events.extend(self._close_step())
+            if has_text:
+                assert isinstance(item.content, str)
                 chunk = item.content
                 if self._text_interrupted and self._text:
                     chunk = "\n\n" + chunk.lstrip("\n")
@@ -477,6 +511,22 @@ class _Translator:
         elif isinstance(item, RunCancelledEvent):
             self.failure = ("cancelled", "the run was cancelled")
         return events
+
+    def _reasoning(self, piece: str) -> list[Event]:
+        if self._step_id is None:
+            self._steps += 1
+            self._step_id = f"r{self._steps}"
+        self._step_text.append(piece)
+        return [self._emit(ReasoningDelta, step_id=self._step_id, text=piece)]
+
+    def _close_step(self) -> list[Event]:
+        if self._step_id is None:
+            return []
+        step_id, text = self._step_id, "".join(self._step_text)
+        self._step_id, self._step_text = None, []
+        if not text.strip():
+            return []
+        return [self._emit(ReasoningStep, step_id=step_id, text=text)]
 
     @property
     def text(self) -> str:
@@ -529,12 +579,13 @@ class _Translator:
         return events
 
     def _on_completed(self, item: RunCompletedEvent) -> list[Event]:
-        events: list[Event] = []
+        events: list[Event] = self._close_step()
         # With structured output Agno does not put the final turn's reasoning on
         # a content event; it only accumulates it on the run. Emit what is left.
         full = item.reasoning_content or ""
         if full.startswith(self._segment_reasoning) and len(full) > len(self._segment_reasoning):
-            events.append(self._emit(ReasoningStep, text=full[len(self._segment_reasoning) :]))
+            events.extend(self._reasoning(full[len(self._segment_reasoning) :]))
+            events.extend(self._close_step())
             self._segment_reasoning = full
         self.completed = True
         self.final_content = item.content

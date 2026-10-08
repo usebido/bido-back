@@ -1897,6 +1897,13 @@
             ],
             "title": "Answer"
           },
+          "attachments": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Attachments",
+            "type": "array"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -1978,15 +1985,12 @@
             "title": "Conversation Id"
           },
           "message": {
+            "default": "",
             "maxLength": 8000,
-            "minLength": 1,
             "title": "Message",
             "type": "string"
           }
         },
-        "required": [
-          "message"
-        ],
         "title": "CopilotMessageRequest",
         "type": "object"
       },
@@ -3805,6 +3809,23 @@
             "format": "uuid",
             "title": "Rfq Id",
             "type": "string"
+          },
+          "waiting_emails": {
+            "default": 0,
+            "title": "Waiting Emails",
+            "type": "integer"
+          },
+          "waiting_reason": {
+            "anyOf": [
+              {
+                "const": "mailbox_not_connected",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Waiting Reason"
           }
         },
         "required": [
@@ -5110,6 +5131,11 @@
           "lines": {
             "title": "Lines",
             "type": "integer"
+          },
+          "mailbox_connected": {
+            "default": true,
+            "title": "Mailbox Connected",
+            "type": "boolean"
           },
           "recipients": {
             "items": {

@@ -292,6 +292,71 @@ async def _no_mailbox(session: Any, tenant_id: UUID, user_id: UUID) -> EmailSend
     raise RuntimeError("evals never send e-mail")
 
 
+# Function words that tell Portuguese from the languages of the fixtures' data
+# (Italian, German, English). Enough to catch an answer in the wrong language.
+_LANGUAGE_MARKERS: dict[str, frozenset[str]] = {
+    "pt": frozenset(
+        {
+            "não",
+            "você",
+            "foram",
+            "foi",
+            "para",
+            "com",
+            "uma",
+            "são",
+            "está",
+            "itens",
+            "peças",
+            "criada",
+            "nenhum",
+            "também",
+            "preço",
+            "fornecedores",
+            "aos",
+            "linhas",
+            "unidades",
+            "estoque",
+            "planilha",
+            "importei",
+        }
+    ),
+    "it": frozenset(
+        {
+            "della",
+            "delle",
+            "sono",
+            "stata",
+            "stati",
+            "nessuna",
+            "bozza",
+            "fornitori",
+            "consegna",
+            "prezzo",
+            "anche",
+            "articoli",
+            "è",
+            "gli",
+            "per",
+            "con",
+        }
+    ),
+    "de": frozenset(
+        {"und", "nicht", "der", "die", "das", "wurde", "lieferanten", "preis", "für", "mit"}
+    ),
+    "en": frozenset(
+        {"the", "and", "was", "were", "suppliers", "price", "with", "for", "have", "not"}
+    ),
+}
+
+
+def _language(text: str) -> str | None:
+    words = [w.strip(".,;:!?()*|\"'«»").lower() for w in text.split()]
+    scores = {lang: sum(w in markers for w in words) for lang, markers in _LANGUAGE_MARKERS.items()}
+    best = max(scores, key=lambda lang: scores[lang])
+    return best if scores[best] >= 3 else None
+
+
 def _opening(fixture: Fixture) -> str:
     quantity = f" pra {fixture.quantity:f} unidades" if fixture.quantity is not None else ""
     return (
@@ -398,6 +463,19 @@ async def scenario_copilot(env: Env, fixture: Fixture, result: RunResult) -> Non
     result.check(
         "import_called", _called(turns, "import_spreadsheet"), "import_spreadsheet not called ok"
     )
+    if env.mode == "live":
+        # Every message in these conversations is Portuguese, whatever the
+        # workbook's language: every answer must be too.
+        wrong = [
+            (i, lang)
+            for i, t in enumerate(turns)
+            if (lang := _language(t.answer)) not in (None, "pt")
+        ]
+        result.check(
+            "answers_in_buyer_language",
+            not wrong,
+            f"answers not in Portuguese (turn, detected language): {wrong}",
+        )
     if golden is None:
         result.check(
             "no_rfq_without_bom", await _rfq_state(env, principal) is None, "an RFQ was created"

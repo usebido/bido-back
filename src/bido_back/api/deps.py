@@ -122,6 +122,11 @@ def get_job_queue(request: Request) -> JobQueue:
     return jobs
 
 
+def get_optional_job_queue(request: Request) -> JobQueue | None:
+    """The job queue, or None where none is configured (best-effort follow-ups)."""
+    return _resources(request).job_queue()
+
+
 def get_storage(request: Request) -> BlobStorage:
     return _resources(request).storage()
 

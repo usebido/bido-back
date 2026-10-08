@@ -28,8 +28,9 @@ from bido_back.api.deps import (
     get_storage,
 )
 from bido_back.auth import Principal
+from bido_back.copilot.contracts import ATTACHMENTS_ONLY_MESSAGE
 from bido_back.db import create_sessionmaker, tenant_session
-from bido_back.db.models import Approval
+from bido_back.db.models import Approval, TemplateUpload
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.settings import Settings
@@ -72,6 +73,7 @@ class Api:
     http: httpx.AsyncClient
     mailboxes: FakeMailboxes
     principal: Principal
+    storage: FakeStorage
     runner_config: RunnerConfig = CONFIG
 
 
@@ -98,7 +100,7 @@ async def api(app_engine: AsyncEngine, copilot_rows: People) -> AsyncIterator[Ap
 
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
-        state = Api(http=http, mailboxes=mailboxes, principal=principal)
+        state = Api(http=http, mailboxes=mailboxes, principal=principal, storage=storage)
 
         def current_principal() -> Principal:
             return state.principal
@@ -230,6 +232,61 @@ async def test_unknown_attachment_is_404_before_streaming(api: Api, copilot_rows
 
 
 @pytest.mark.db
+@pytest.mark.parametrize(
+    "body", [{}, {"message": ""}, {"message": "  \n "}, {"message": "", "attachment_ids": []}]
+)
+async def test_a_message_needs_text_or_files(
+    api: Api, copilot_rows: People, body: dict[str, Any]
+) -> None:
+    response = await api.http.post("/v1/copilot/messages", json=body)
+    assert response.status_code == 422, response.text
+
+
+@pytest.mark.db
+async def test_files_alone_are_imported_and_analysed(
+    api: Api,
+    app_engine: AsyncEngine,
+    agno_engine: AsyncEngine,
+    copilot_rows: People,
+    script: Script,
+) -> None:
+    api.runner_config = RunnerConfig(
+        openai_api_key="test-not-a-real-key",
+        agno_database_url=agno_engine.url.render_as_string(hide_password=False),
+    )
+    async with tenant_session(app_engine, api.principal.tenant_id) as session:
+        upload = TemplateUpload(
+            tenant_id=api.principal.tenant_id,
+            user_id=api.principal.user_id,
+            filename="pecas.csv",
+            content_type="text/csv",
+            size_bytes=24,
+            storage_key="uploads/pecas.csv",
+        )
+        session.add(upload)
+        await session.flush()
+        upload_id = str(upload.id)
+    api.storage.blobs["uploads/pecas.csv"] = b"part,qty\n6205,400\n"
+    stub = script(reply(text("Importei pecas.csv.")))
+    conversation = str(uuid4())
+
+    response = await api.http.post(
+        "/v1/copilot/messages",
+        json={"message": " ", "attachment_ids": [upload_id], "conversation_id": conversation},
+    )
+
+    assert parse_sse(response.text)[-1]["ok"] is True
+    # The model is asked to import and analyse the files, in Portuguese.
+    sent = json.dumps(stub.calls[0]["input"], ensure_ascii=False)
+    assert ATTACHMENTS_ONLY_MESSAGE in sent and "[pecas.csv A2] 6205" in sent
+    # The buyer's turn shows the files, not the instruction; the title names them.
+    turns = (await api.http.get(f"/v1/copilot/conversations/{conversation}")).json()["turns"]
+    assert [(t["message"], t["attachments"]) for t in turns] == [("", ["pecas.csv"])]
+    items = (await api.http.get("/v1/copilot/conversations")).json()["items"]
+    assert [i["title"] for i in items] == ["pecas.csv"]
+
+
+@pytest.mark.db
 async def test_a_conversation_keeps_its_history_for_its_owner_only(
     api: Api, agno_engine: AsyncEngine, copilot_rows: People, script: Script
 ) -> None:
@@ -251,9 +308,9 @@ async def test_a_conversation_keeps_its_history_for_its_owner_only(
     history = await api.http.get(f"/v1/copilot/conversations/{conversation}")
     assert history.status_code == 200, history.text
     turns = history.json()["turns"]
-    assert [(t["message"], t["answer"]) for t in turns] == [
-        ("oi", "Olá! Como posso ajudar?"),
-        ("o que eu perguntei?", "Você perguntou 'oi'."),
+    assert [(t["message"], t["answer"], t["attachments"]) for t in turns] == [
+        ("oi", "Olá! Como posso ajudar?", []),
+        ("o que eu perguntei?", "Você perguntou 'oi'.", []),
     ]
 
     # Same tenant, another user: not theirs.
@@ -374,3 +431,10 @@ def test_conversation_title_collapses_and_truncates() -> None:
     assert len(long) == TITLE_CHARS and long.endswith("…")
     files_only = CopilotInput(message="", today=today, attachment_ids=[uuid4()])
     assert conversation_title(files_only) == "(attachments)"
+    dropped = CopilotInput(
+        message=ATTACHMENTS_ONLY_MESSAGE,
+        today=today,
+        attachments=["bom.xlsx", "estoque.csv"],
+        attachment_ids=[uuid4(), uuid4()],
+    )
+    assert conversation_title(dropped) == "bom.xlsx, estoque.csv"

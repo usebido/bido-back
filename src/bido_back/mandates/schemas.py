@@ -104,6 +104,9 @@ class ProposedMandate(BaseModel):
     # mail (a real company) and whether it is confirmed: approving needs the
     # unconfirmed non-test domains confirmed (outbound guard).
     recipients: list[RecipientCheck] = Field(default_factory=list[RecipientCheck])
+    # False: the mandate can still be approved, but sending starts only once the
+    # buyer connects a mailbox (the emails wait, then go out on their own).
+    mailbox_connected: bool = True
 
 
 class MandateView(BaseModel):
@@ -138,3 +141,8 @@ class MandateActivity(BaseModel):
     rfq_id: UUID
     mandate: MandateView | None
     items: list[MandateActivityItem]
+    # Why the mandate's emails are not going out (`mailbox_not_connected`: the
+    # buyer has no connected mailbox yet), and how many are waiting. They go out
+    # on their own once the reason clears. Null while nothing holds them back.
+    waiting_reason: Literal["mailbox_not_connected"] | None = None
+    waiting_emails: int = 0
