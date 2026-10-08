@@ -69,7 +69,10 @@ def field_infos(raw: Mapping[str, object]) -> dict[str, FieldInfo]:
         if name.startswith("_") or not isinstance(value, dict):
             continue
         entry = cast(dict[str, object], value)
-        confidence = entry.get("confidence")
+        # An absent value (the supplier did not state it) carries no confidence: the
+        # extraction records 0 for it, which must not make the offer doubtful.
+        absent = "value" in entry and entry["value"] is None
+        confidence = None if absent else entry.get("confidence")
         infos[name] = FieldInfo(
             confidence=float(confidence) if isinstance(confidence, int | float) else None,
             needs_review=entry.get("needs_review") is True,
