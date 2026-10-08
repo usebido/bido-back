@@ -16,7 +16,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.auth import Principal
-from bido_back.comparison.assessment_history import BASIS_ISSUE
 from bido_back.comparison.compute import Cell, Comparison
 from bido_back.comparison.loader import load_comparison
 from bido_back.comparison.policy import ComparisonPolicy, SupplierPerformance
@@ -150,7 +149,12 @@ async def quote(
                 unit_price=D(price),
                 unit="pcs",
                 lead_time_days=10,
-                fields={},
+                tooling_cost=D(0),
+                # Freight and tax stated too: nothing but the history can hold it back.
+                fields={
+                    "freight_cost": {"parsed": "0", "confidence": 0.95, "needs_review": False},
+                    "tax_rate_percent": {"parsed": "0", "confidence": 0.95, "needs_review": False},
+                },
             )
         )
 
@@ -262,15 +266,17 @@ async def test_the_comparison_uses_the_history_the_assessment_measured(
         quality_samples=5,
         accepted_quantity_rate=D("0.9"),
         latest_observation_on=date(2026, 9, 1),
-        issues=[BASIS_ISSUE],
     )
     assert offers["Aços Sul"].performance.basis == "source_assessment"
     assert offers["Aços Sul"].performance.on_time_rate == 1
     [rec] = comparison.recommendations
-    # Cost first: the cheaper offer wins, its weaker history shown with its basis.
+    # Cost first: the cheaper offer wins, its weaker history shown with its basis. The
+    # basis is a disclosure, not an evidence gap: with every cost and term stated, the
+    # recommendation is ready for the buyer.
     assert rec.supplier_name == "MetalNova"
     assert rec.performance == offers["MetalNova"].performance
-    assert BASIS_ISSUE in rec.evidence_gaps
+    assert rec.evidence_gaps == []
+    assert rec.readiness == comparison.readiness == "ready_for_buyer_review"
     assert [(a.supplier_name, a.performance.basis) for a in rec.alternatives] == [
         ("Aços Sul", "source_assessment")
     ]
@@ -285,6 +291,8 @@ async def test_the_comparison_uses_the_history_the_assessment_measured(
     [line] = outcome.lines
     assert line.supplier == "Aços Sul" and line.covered
     assert line.performance == offers["Aços Sul"].performance
+    assert line.evidence_gaps == []
+    assert line.readiness == outcome.readiness == "ready_for_buyer_review"
     assert [(e.supplier_name, e.reasons) for e in line.excluded] == [
         ("MetalNova", ["delivery_history_below_policy"])
     ]
@@ -294,6 +302,7 @@ async def test_the_comparison_uses_the_history_the_assessment_measured(
     [closed] = await negotiation.close(app_engine, world.principal, world.rfq_id, now=now)
     assert closed.supplier_name == "Aços Sul"
     assert closed.performance == line.performance
+    assert closed.readiness == "ready_for_buyer_review"
     view = await negotiation.get_negotiation(app_engine, world.principal, world.rfq_id, now=now)
     assert view.outcome is not None
     assert view.outcome[0].performance == line.performance
@@ -353,7 +362,8 @@ async def test_imported_purchase_history_wins_over_the_assessment(
     assert offers["Aços Sul"].performance.basis == "source_assessment"
     [rec] = comparison.recommendations
     assert rec.supplier_name == "MetalNova"
-    assert BASIS_ISSUE not in rec.evidence_gaps
+    assert rec.performance == history
+    assert rec.readiness == "ready_for_buyer_review"
 
 
 async def test_lines_without_usable_links_keep_imported_behavior_and_tenants_stay_apart(

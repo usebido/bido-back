@@ -17,12 +17,16 @@ from pydantic import JsonValue
 from bido_back.comparison.assessment_history import (
     AFTER_TODAY,
     AMBIGUOUS,
-    BASIS_ISSUE,
     UNDATED,
     assessment_performance,
     with_assessment_history,
 )
-from bido_back.comparison.compute import RequestedLine, compute_comparison
+from bido_back.comparison.compute import (
+    Comparison,
+    RequestedLine,
+    SupplierQuote,
+    compute_comparison,
+)
 from bido_back.comparison.policy import ComparisonPolicy, SupplierPerformance, evidence_issues
 from bido_back.comparison.rules import apply_rules
 from bido_back.purchasing.sources.contracts import AssessmentLine, SupplierEvidence
@@ -117,7 +121,6 @@ def assessed_history(on_time: str, quality: str, samples: int, latest: date) -> 
         quality_samples=samples,
         accepted_quantity_rate=D(quality),
         latest_observation_on=latest,
-        issues=[BASIS_ISSUE],
     )
 
 
@@ -145,7 +148,8 @@ def test_an_invited_supplier_gets_the_history_its_assessment_measured() -> None:
     # No imported purchase line backs it, and the start of its window is not known.
     assert result[metalnova].evidence_po_line_ids == []
     assert result[metalnova].oldest_observation_on is None
-    assert evidence_issues(result[metalnova], POLICY) == [BASIS_ISSUE]
+    # Its basis is disclosed, not reported as an evidence gap.
+    assert evidence_issues(result[metalnova], POLICY) == []
 
 
 def test_the_policy_window_applies_to_the_whole_aggregate() -> None:
@@ -162,11 +166,8 @@ def test_the_policy_window_applies_to_the_whole_aggregate() -> None:
 
     assert within.latest_observation_on == date(2026, 9, 15)
     assert (within.observations, within.delivery_samples) == (5, 5)
-    assert stale == SupplierPerformance(
-        basis="source_assessment", excluded_stale_observations=5, issues=[BASIS_ISSUE]
-    )
+    assert stale == SupplierPerformance(basis="source_assessment", excluded_stale_observations=5)
     assert evidence_issues(stale, ComparisonPolicy(history_window_days=21)) == [
-        BASIS_ISSUE,
         "delivery_history_insufficient",
         "quality_history_insufficient",
         "stale_history_excluded",
@@ -188,9 +189,7 @@ def test_undated_or_future_statistics_are_not_used(
 
     result = assessment_performance(line, [SUPPLIER], today=TODAY, policy=POLICY)
 
-    assert result == {
-        SUPPLIER: SupplierPerformance(basis="source_assessment", issues=[BASIS_ISSUE, issue])
-    }
+    assert result == {SUPPLIER: SupplierPerformance(basis="source_assessment", issues=[issue])}
 
 
 def test_rates_without_samples_or_samples_without_rates_stay_unknown() -> None:
@@ -205,7 +204,6 @@ def test_rates_without_samples_or_samples_without_rates_stay_unknown() -> None:
     assert (history.delivery_samples, history.on_time_rate) == (0, None)
     assert (history.quality_samples, history.accepted_quantity_rate) == (0, None)
     assert evidence_issues(history, POLICY) == [
-        BASIS_ISSUE,
         "delivery_history_insufficient",
         "quality_history_insufficient",
     ]
@@ -364,7 +362,7 @@ def test_a_supplier_is_never_credited_with_another_ones_history() -> None:
             links=[link(partial, METALNOVA), link(partial, QUALIFIED_ONLY)],
         )
     )
-    unattributed = SupplierPerformance(basis="source_assessment", issues=[BASIS_ISSUE, AMBIGUOUS])
+    unattributed = SupplierPerformance(basis="source_assessment", issues=[AMBIGUOUS])
 
     assert assessment_performance(one_to_many, [merged], today=TODAY, policy=POLICY) == {
         merged: unattributed
@@ -414,6 +412,7 @@ def test_imported_history_in_the_window_wins_and_is_never_mixed() -> None:
 
 
 def test_rules_consume_assessment_history_like_imported_history() -> None:
+    """Same numbers, same decision and readiness: `basis` only discloses the source."""
     metalnova, acos = uuid4(), uuid4()
     line = requested(
         source_evidence(
@@ -424,27 +423,31 @@ def test_rules_consume_assessment_history_like_imported_history() -> None:
     measured = {"MetalNova": assessed[metalnova], "Aços Sul": assessed[acos]}
     # The same numbers, as if they came from imported purchase lines.
     imported = {
-        name: history.model_copy(update={"basis": "imported_history", "issues": []})
+        name: history.model_copy(update={"basis": "imported_history"})
         for name, history in measured.items()
     }
     prices = {"MetalNova": "9.00", "Aços Sul": "10.50"}
 
-    def decide(
-        histories: dict[str, SupplierPerformance], policy: ComparisonPolicy
-    ) -> tuple[str | None, dict[str, list[str]], list[str]]:
-        quotes = [
-            replace(offer(line, name, prices[name]), performance={line.id: history})
-            for name, history in histories.items()
-        ]
+    def decide(histories: dict[str, SupplierPerformance], policy: ComparisonPolicy) -> Comparison:
+        quotes: list[SupplierQuote] = []
+        for name, history in histories.items():
+            quoted = offer(line, name, prices[name])
+            # Every cost and term stated: only the history can hold an offer back.
+            costed = replace(
+                quoted.lines[0], tooling_cost=D(0), freight_cost=D(0), tax_rate_percent=D(0)
+            )
+            quotes.append(
+                replace(
+                    quoted,
+                    payment_terms="Net 30",
+                    lines=(costed,),
+                    performance={line.id: history},
+                )
+            )
         raw = compute_comparison(
             rfq_id=uuid4(), base_currency="EUR", lines=[line], quotes=quotes, rates={}, today=TODAY
         )
-        rec = apply_rules(raw, [line], TODAY, policy).recommendations[0]
-        return (
-            rec.supplier_name,
-            {e.supplier_name: e.reasons for e in rec.excluded},
-            rec.evidence_gaps,
-        )
+        return apply_rules(raw, [line], TODAY, policy)
 
     insufficient = ["delivery_history_insufficient", "quality_history_insufficient"]
     cases: list[tuple[ComparisonPolicy, str, dict[str, list[str]]]] = [
@@ -468,8 +471,11 @@ def test_rules_consume_assessment_history_like_imported_history() -> None:
     ]
     for policy, winner, excluded in cases:
         from_assessment = decide(measured, policy)
-        from_imports = decide(imported, policy)
-        assert from_assessment[:2] == from_imports[:2] == (winner, excluded)
-        # Only the basis note sets them apart, as an evidence gap of the recommendation.
-        assert BASIS_ISSUE in from_assessment[2]
-        assert [gap for gap in from_assessment[2] if gap != BASIS_ISSUE] == from_imports[2]
+        for result in (from_assessment, decide(imported, policy)):
+            [rec] = result.recommendations
+            assert rec.supplier_name == winner
+            assert {e.supplier_name: e.reasons for e in rec.excluded} == excluded
+            # A winner with assessment history is ready when nothing else is missing.
+            assert rec.evidence_gaps == []
+            assert rec.readiness == result.readiness == "ready_for_buyer_review"
+        assert from_assessment.recommendations[0].performance.basis == "source_assessment"

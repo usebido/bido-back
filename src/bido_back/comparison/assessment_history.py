@@ -45,9 +45,11 @@ Differences, because the assessment is an aggregate taken at another date:
   rounded (the legacy analysis keeps 4 places); invalid receipt quantities are
   left out there instead of being reported as
   `invalid_received_quality_quantities`.
-- No imported PO line backs it: `evidence_po_line_ids` stays empty, the
-  evidence is the assessed line in `source_evidence`, and the history carries
-  the issue `history_from_source_assessment`. Undated or future-dated
+- No imported PO line backs it: `evidence_po_line_ids` stays empty and the
+  evidence is the assessed line in `source_evidence`, with its cell references.
+  `basis` discloses this; it is not an evidence gap and does not change
+  readiness, since Bido computed it from the buyer's own reconciled orders and
+  receipts, the facts an import would store. Undated or future-dated
   statistics are not used (`source_assessment_history_undated`,
   `source_assessment_history_after_today`).
 - Supplier percentages the source itself reports (`otif_pct`, `quality_pct`)
@@ -68,7 +70,6 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 from bido_back.comparison.compute import RequestedLine
 from bido_back.comparison.policy import ComparisonPolicy, SupplierPerformance
 
-BASIS_ISSUE: Final = "history_from_source_assessment"
 UNDATED: Final = "source_assessment_history_undated"
 AFTER_TODAY: Final = "source_assessment_history_after_today"
 AMBIGUOUS: Final = "source_assessment_supplier_ambiguous"
@@ -185,14 +186,11 @@ def _performance(
     latest = max(dates, default=None)
     if latest is None or latest > today:
         return SupplierPerformance(
-            basis="source_assessment",
-            issues=[BASIS_ISSUE, UNDATED if latest is None else AFTER_TODAY],
+            basis="source_assessment", issues=[UNDATED if latest is None else AFTER_TODAY]
         )
     if latest < today - timedelta(days=policy.history_window_days):
         return SupplierPerformance(
-            basis="source_assessment",
-            excluded_stale_observations=measured.observed,
-            issues=[BASIS_ISSUE],
+            basis="source_assessment", excluded_stale_observations=measured.observed
         )
     delivery = measured.delivery_observations if measured.on_time_rate is not None else 0
     quality = measured.quality_observations if measured.quality_rate is not None else 0
@@ -204,7 +202,6 @@ def _performance(
         quality_samples=quality,
         accepted_quantity_rate=measured.quality_rate if quality else None,
         latest_observation_on=latest,
-        issues=[BASIS_ISSUE],
     )
 
 
@@ -237,9 +234,7 @@ def assessment_performance(
         if len(linked) == 1 and not linked[0][1]:
             result[supplier_id] = _performance(linked[0][0], today=today, policy=policy)
         elif linked:
-            result[supplier_id] = SupplierPerformance(
-                basis="source_assessment", issues=[BASIS_ISSUE, AMBIGUOUS]
-            )
+            result[supplier_id] = SupplierPerformance(basis="source_assessment", issues=[AMBIGUOUS])
     return result
 
 
