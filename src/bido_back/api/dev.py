@@ -1,5 +1,5 @@
 """Local-only dev endpoints: `POST /dev/inbound`, `POST /dev/followups/sweep`,
-`POST /dev/negotiation/sweep` and `POST /dev/uploads`.
+`POST /dev/negotiation/sweep`, `POST /dev/uploads` and `GET /dev/files`.
 
 `POST /dev/inbound` simulates an inbound email locally.
 
@@ -11,6 +11,10 @@ request body itself or as the first file of a multipart/form-data upload
 `POST /dev/uploads` stands in for S3 for direct uploads: it takes the form
 signed by `LocalDirectUploads` (multipart/form-data, the fields then `file`)
 and answers 204 like S3, or 403 when the form does not match its signature.
+
+`GET /dev/files` stands in for S3 presigned GETs: it serves the file a link
+signed by `LocalDownloadLinks` points at, with the content type and
+disposition the link fixed, or 403 when the link does not verify.
 
 Local only, twice over: mount the router only when
 `settings.environment == "local"`, and every request is refused with 404
@@ -31,7 +35,7 @@ from email.parser import BytesParser
 from typing import Annotated, Literal
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -39,8 +43,9 @@ from bido_back.api.deps import get_db, get_job_queue, get_storage
 from bido_back.intake.service import InboundService
 from bido_back.onboarding.service import MAX_DIRECT_UPLOAD_BYTES
 from bido_back.settings import Settings, get_settings
-from bido_back.storage import BlobStorage
+from bido_back.storage import BlobNotFound, BlobStorage
 from bido_back.storage.direct import InvalidUploadForm, LocalDirectUploads
+from bido_back.storage.links import InvalidFileLink, LocalDownloadLinks
 from bido_back.storage.local import LocalFileStorage
 from bido_back.worker.envelope import Envelope
 from bido_back.worker.job_types import FOLLOWUPS_SWEEP, NEGOTIATION_SWEEP
@@ -140,6 +145,29 @@ async def post_upload(
         await LocalDirectUploads(storage, str(request.base_url)).receive(fields, data)
     except InvalidUploadForm as exc:
         raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from None
+
+
+@dev_router.get("/files", dependencies=[Depends(require_local)])
+async def get_file(
+    storage: Annotated[BlobStorage, Depends(get_storage)],
+    token: Annotated[str, Query()] = "",
+    signature: Annotated[str, Query()] = "",
+) -> Response:
+    """Serve a file through a link signed by `LocalDownloadLinks` (the S3 stand-in)."""
+    if not isinstance(storage, LocalFileStorage):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not Found")
+    try:
+        key, content_type, disposition = LocalDownloadLinks.verify(token, signature)
+        data = await storage.get(key)
+    except InvalidFileLink as exc:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, str(exc)) from None
+    except BlobNotFound:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not Found") from None
+    return Response(
+        content=data,
+        media_type=content_type,
+        headers={"Content-Disposition": disposition, "X-Content-Type-Options": "nosniff"},
+    )
 
 
 async def _read_capped(request: Request, limit: int) -> bytes:
