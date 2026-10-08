@@ -18,8 +18,9 @@ ALLOWED_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 # Authorization: the Clerk bearer token. Accept/Cache-Control/Last-Event-ID:
 # the Copilot's Server-Sent Events stream.
 ALLOWED_HEADERS = ["Authorization", "Content-Type", "Accept", "Cache-Control", "Last-Event-ID"]
-# Exports name their file in Content-Disposition.
-EXPOSED_HEADERS = ["Content-Disposition"]
+# Exports name their file in Content-Disposition; the RFQ list returns its total
+# in X-Total-Count.
+EXPOSED_HEADERS = ["Content-Disposition", "X-Total-Count"]
 # How long a browser may cache a preflight answer.
 PREFLIGHT_MAX_AGE_S = 600
 

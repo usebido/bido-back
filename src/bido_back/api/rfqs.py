@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bido_back.api.deps import get_db, get_mailbox_senders, get_principal, get_rfq_agents
@@ -19,7 +19,8 @@ from bido_back.auth import Principal
 from bido_back.comparison.compute import Comparison
 from bido_back.comparison.loader import load_comparison
 from bido_back.compliance import service as compliance_service
-from bido_back.rfqs import service
+from bido_back.rfqs import activity as activity_service
+from bido_back.rfqs import overview, service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.errors import (
     AgentFailed,
@@ -36,9 +37,12 @@ from bido_back.rfqs.schemas import (
     CreateRfqRequest,
     InviteView,
     PrepareSendResponse,
+    RfqActivityItem,
     RfqCreated,
     RfqDetail,
     RfqLineView,
+    RfqStage,
+    RfqStatus,
     RfqSummary,
     UpdateLineRequest,
 )
@@ -100,9 +104,43 @@ def rfqs_router() -> APIRouter:
 
     @router.get("", responses=error_responses())
     async def list_rfqs(  # pyright: ignore[reportUnusedFunction]
-        principal: CurrentPrincipal, db: Db
+        principal: CurrentPrincipal,
+        db: Db,
+        response: Response,
+        status_filter: Annotated[RfqStatus | None, Query(alias="status")] = None,
+        stage: RfqStage | None = None,
+        q: Annotated[str | None, Query(max_length=200)] = None,
+        limit: Annotated[int, Query(ge=1, le=overview.MAX_LIMIT)] = overview.DEFAULT_LIMIT,
+        offset: Annotated[int, Query(ge=0)] = 0,
     ) -> list[RfqSummary]:
-        return await service.list_rfqs(db, principal)
+        """Newest first. The total that matched is in the `X-Total-Count` header."""
+        page = await overview.list_rfq_overviews(
+            db,
+            principal,
+            today=datetime.now(UTC).date(),
+            status=status_filter,
+            stage=stage,
+            q=q,
+            limit=limit,
+            offset=offset,
+        )
+        response.headers["X-Total-Count"] = str(page.total)
+        return page.items
+
+    @router.get("/{rfq_id}/activity", responses=error_responses(status.HTTP_404_NOT_FOUND))
+    async def activity(  # pyright: ignore[reportUnusedFunction]
+        rfq_id: UUID,
+        principal: CurrentPrincipal,
+        db: Db,
+        limit: Annotated[
+            int, Query(ge=1, le=activity_service.MAX_LIMIT)
+        ] = activity_service.DEFAULT_LIMIT,
+    ) -> list[RfqActivityItem]:
+        """Newest first: what was sent, received, approved and decided. No email content."""
+        try:
+            return await activity_service.rfq_activity(db, principal, rfq_id, limit=limit)
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
 
     @router.get("/{rfq_id}", responses=error_responses(status.HTTP_404_NOT_FOUND))
     async def get_rfq(  # pyright: ignore[reportUnusedFunction]
