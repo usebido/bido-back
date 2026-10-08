@@ -13,6 +13,17 @@ class InvalidState(RfqError):
     """The operation does not fit the current status of the RFQ or invite."""
 
 
+class ReplyByRequired(InvalidState):
+    """An RFQ email needs a reply-by date (`rfqs.response_due`) of today or later.
+
+    `draft` says whether the RFQ is still a draft, whose terms the copilot can set;
+    an open RFQ's reply-by date is set through its follow-up settings."""
+
+    def __init__(self, message: str, *, draft: bool) -> None:
+        super().__init__(message)
+        self.draft = draft
+
+
 class Duplicate(RfqError):
     """The row already exists (e.g. the supplier is already invited to this RFQ)."""
 

@@ -13,6 +13,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.api.approvals import approvals_router
@@ -28,7 +29,8 @@ from bido_back.api.rfqs import rfqs_router
 from bido_back.api.suppliers import suppliers_router
 from bido_back.api.templates import templates_router
 from bido_back.auth import Principal
-from bido_back.db import create_sessionmaker
+from bido_back.db import create_sessionmaker, tenant_session
+from bido_back.db.models import Rfq
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
@@ -248,6 +250,38 @@ async def test_send_without_a_connected_mailbox_is_409(api: Api, rfq_rows: Peopl
 
 
 @pytest.mark.db
+async def test_send_without_a_reply_by_date_is_409_and_the_rfq_says_so(
+    api: Api, app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    http = api.http
+    rfq = (await http.post("/v1/rfqs", json={"text": "Need parts", "currency": "EUR"})).json()
+    assert rfq["send_blockers"] == []
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        await session.execute(update(Rfq).where(Rfq.id == rfq["id"]).values(response_due=None))
+    detail = (await http.get(f"/v1/rfqs/{rfq['id']}")).json()
+    assert detail["send_blockers"] == ["reply_by_missing"]
+    listed = (await http.get("/v1/rfqs")).json()
+    assert [r["send_blockers"] for r in listed] == [["reply_by_missing"]]
+    supplier = (
+        await http.post(
+            "/v1/suppliers",
+            json={"name": "Rhein", "contacts": [{"email": "jonas@rhein.example.test"}]},
+        )
+    ).json()
+    invite = await http.post(
+        f"/v1/rfqs/{rfq['id']}/invites",
+        json={"supplier_id": supplier["id"], "contact_id": supplier["contacts"][0]["id"]},
+    )
+    assert invite.status_code == 201, invite.text
+
+    response = await http.post(f"/v1/rfqs/{rfq['id']}/send")
+
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith(f"{rfq['ref']} has no reply-by date")
+    assert (await http.get("/v1/approvals")).json() == []
+    assert api.mailboxes.calls == []
+
+
 async def test_create_needs_a_currency_it_can_tell(api: Api, rfq_rows: People) -> None:
     http = api.http
 

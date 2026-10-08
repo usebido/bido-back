@@ -335,6 +335,8 @@ class World:
                 session,
                 self.principal,
                 title=title,
+                # Suppliers answer within two weeks of the eval clock's today.
+                response_due=self.today + timedelta(days=14),
                 base_currency="EUR",
                 lines=[
                     NewRfqLine(

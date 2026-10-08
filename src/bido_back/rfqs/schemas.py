@@ -109,6 +109,11 @@ class InviteView(BaseModel):
     responded_at: datetime | None
 
 
+# Why the RFQ's draft invites cannot be prepared for sending right now
+# (`bido_back.rfqs.readiness`): no reply-by date, or one already in the past.
+SendBlocker = Literal["reply_by_missing", "reply_by_past"]
+
+
 class RfqHeader(BaseModel):
     id: UUID
     ref: str
@@ -116,6 +121,12 @@ class RfqHeader(BaseModel):
     status: RfqStatus
     response_due: date | None
     created_at: datetime
+    send_blockers: list[SendBlocker] = Field(
+        default_factory=list[SendBlocker],
+        description="Why preparing a send would be refused now (reply_by_missing: no "
+        "response_due; reply_by_past: response_due before today, UTC); empty when nothing "
+        "blocks. Only draft and open RFQs can have blockers",
+    )
     payment_terms: str | None = Field(
         default=None, description="The buyer's payment terms for suppliers, verbatim"
     )

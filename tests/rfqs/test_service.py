@@ -1,5 +1,6 @@
 """The RFQ services against Postgres, with fake agents and a fake mailbox."""
 
+from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -29,7 +30,13 @@ from bido_back.db.models import (
     Tenant,
 )
 from bido_back.rfqs import service, suppliers
-from bido_back.rfqs.errors import Duplicate, InvalidState, MailboxNotConnected, NotFound
+from bido_back.rfqs.errors import (
+    Duplicate,
+    InvalidState,
+    MailboxNotConnected,
+    NotFound,
+    ReplyByRequired,
+)
 from bido_back.rfqs.schemas import (
     AddLineRequest,
     ContactIn,
@@ -228,7 +235,7 @@ async def test_prepare_send_records_pending_approvals_with_the_exact_email(
     ):
         assert ask in body
     assert "Gültigkeit des Angebots" not in body  # covered by "Validade da proposta"
-    assert "Bitte senden Sie Ihr Angebot bis 01.11.2026." in body
+    assert "Bitte senden Sie Ihr Angebot bis 01.11.2099." in body
     assert body.endswith(f"{company} purchasing\n{company}\n")
     assert preview.template_id is None and preview.template_version == 0
     assert "<table" in preview.html and "GRM188R71H104KA93D" in preview.html
@@ -365,6 +372,86 @@ async def test_prepare_send_without_a_mailbox_fails_before_any_draft(
     assert writer.calls == []
     detail = await service.get_rfq(app_engine, principal, rfq.id)
     assert [i.status for i in detail.invites if i.id == invite.id] == ["draft"]
+
+
+async def _approvals(engine: AsyncEngine, tenant_id: UUID) -> list[Approval]:
+    async with tenant_session(engine, tenant_id) as session:
+        return list(await session.scalars(select(Approval)))
+
+
+@pytest.mark.parametrize(
+    ("due", "blocker", "reason"),
+    [
+        (None, "reply_by_missing", "has no reply-by date"),
+        (date(2099, 10, 31), "reply_by_past", "reply-by date 2099-10-31 is in the past"),
+    ],
+)
+async def test_prepare_send_needs_a_reply_by_date_of_today_or_later(
+    app_engine: AsyncEngine, rfq_rows: People, due: date | None, blocker: str, reason: str
+) -> None:
+    principal = buyer(rfq_rows)
+    rfq = await make_rfq(app_engine, principal)
+    await service.update_rfq(app_engine, principal, rfq.id, UpdateRfqRequest(response_due=due))
+    supplier = await make_supplier(app_engine, principal, "Rhein")
+    invite = await service.add_invite(
+        app_engine, principal, rfq.id, supplier.id, supplier.contacts[0].id
+    )
+    today = date(2099, 11, 1)
+    detail = await service.get_rfq(app_engine, principal, rfq.id)
+    assert detail.send_blockers == ([blocker] if due is None else [])  # real today: not past
+    writer, mailboxes = FakeWriter(), FakeMailboxes()
+
+    with pytest.raises(ReplyByRequired, match=f"{rfq.ref}.*{reason}") as refused:
+        await service.prepare_send(app_engine, principal, rfq.id, writer, mailboxes, today=today)
+
+    assert refused.value.draft is True
+    # Refused before the mailbox, the writer, the template pin and the approvals.
+    assert mailboxes.calls == [] and writer.calls == []
+    assert await _approvals(app_engine, rfq_rows.tenant) == []
+    detail = await service.get_rfq(app_engine, principal, rfq.id)
+    assert [i.status for i in detail.invites if i.id == invite.id] == ["draft"]
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        stored = await session.get(Rfq, rfq.id)
+    assert stored is not None and stored.template_version is None
+
+    # The buyer sets a date (today counts) and the same invite is prepared.
+    await service.update_rfq(app_engine, principal, rfq.id, UpdateRfqRequest(response_due=today))
+    result = await service.prepare_send(
+        app_engine, principal, rfq.id, writer, mailboxes, today=today
+    )
+    assert [p.invite_id for p in result.approvals] == [invite.id]
+
+
+async def test_prepare_send_with_nothing_to_prepare_needs_no_reply_by_date(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    # e.g. a mandate proposed after the RFQ went out: no new RFQ email, no date needed.
+    mailboxes = FakeMailboxes()
+    rfq, _, _, _ = await prepared(app_engine, rfq_rows, mailboxes)
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        await session.execute(update(Rfq).where(Rfq.id == rfq.id).values(response_due=None))
+
+    again = await service.prepare_send(app_engine, buyer(rfq_rows), rfq.id, FakeWriter(), mailboxes)
+    assert again.approvals == []
+
+
+async def test_send_blockers_on_the_rfq_views(app_engine: AsyncEngine, rfq_rows: People) -> None:
+    principal = buyer(rfq_rows)
+    rfq = await make_rfq(app_engine, principal)
+    assert rfq.send_blockers == []
+    yesterday = date.today() - timedelta(days=2)  # clear of the UTC date boundary
+    edited = await service.update_rfq(
+        app_engine, principal, rfq.id, UpdateRfqRequest(response_due=yesterday)
+    )
+    assert edited.send_blockers == ["reply_by_past"]
+    edited = await service.update_rfq(
+        app_engine, principal, rfq.id, UpdateRfqRequest(response_due=None)
+    )
+    assert edited.send_blockers == ["reply_by_missing"]
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        await session.execute(update(Rfq).where(Rfq.id == rfq.id).values(status="cancelled"))
+    # A cancelled RFQ sends nothing anyway: nothing to block.
+    assert (await service.get_rfq(app_engine, principal, rfq.id)).send_blockers == []
 
 
 async def test_approved_send_goes_out_from_the_requesters_mailbox(
