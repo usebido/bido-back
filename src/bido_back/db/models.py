@@ -18,6 +18,7 @@ from pydantic import JsonValue
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Computed,
     Date,
     DateTime,
     ForeignKey,
@@ -34,7 +35,7 @@ from sqlalchemy import (
     text,
     true,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 MEMBERSHIP_ROLES = ("member", "approver", "owner")
@@ -694,6 +695,30 @@ class TemplateUpload(Base):
     size_bytes: Mapped[int] = mapped_column(Integer)
     storage_key: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # A reference to a library file (migration 0032): set when a buyer attaches a
+    # colleague's upload or a supplier attachment; same storage key, no copy.
+    source_kind: Mapped[str | None] = mapped_column(Text)
+    source_id: Mapped[UUID | None] = mapped_column()
+
+
+class FileText(Base):
+    """The text read from one library file, for content search (migration 0032).
+
+    `tsv` is computed by Postgres (`to_tsvector('simple', text)`), never written.
+    """
+
+    __tablename__ = "file_texts"
+
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    file_kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    file_id: Mapped[UUID] = mapped_column(primary_key=True)
+    status: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str | None] = mapped_column(Text)
+    text: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    tsv: Mapped[str | None] = mapped_column(
+        TSVECTOR, Computed("to_tsvector('simple'::regconfig, text)", persisted=True)
+    )
+    indexed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class FollowupMessage(Base):

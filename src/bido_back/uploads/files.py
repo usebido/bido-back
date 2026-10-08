@@ -1,9 +1,9 @@
-"""Download links and previews for the files a buyer uploaded (`template_uploads`).
+"""Download links and previews for stored files: buyers' uploads and suppliers' attachments.
 
-An upload belongs to the user who made it, inside their tenant: anyone else
-gets `UploadNotFound` (404), the same answer as for an id that does not exist.
-The Copilot's attachments are these uploads, and a conversation belongs to
-the user who had it, so this is also the rule for a chat's files.
+Who may read an upload is `bido_back.files.policy` (company-wide read for the
+company's members); anyone else gets `UploadNotFound` (404), the same answer as
+for an id that does not exist. The library (`bido_back.files`) serves supplier
+attachments through the same `download_link_for` / `preview_for`.
 
 What a file is served as comes from its extension in the storage key (set by
 us at upload), never from the content type the browser declared: downloads
@@ -32,7 +32,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
-from bido_back.db.models import TemplateUpload
+from bido_back.db.models import Attachment, TemplateUpload
+from bido_back.files.policy import can_read_upload
 from bido_back.storage import BlobNotFound, BlobStorage
 from bido_back.storage.links import DownloadLinks
 from bido_back.uploads.schemas import FileLinkView, SheetPreview, UploadPreview
@@ -78,19 +79,53 @@ class UploadNotFound(LookupError):
     """No upload with that id for the caller (another user's, another tenant's, or none)."""
 
 
+class StoredFile(Protocol):
+    """What serving a file needs: an upload row or a supplier attachment row."""
+
+    @property
+    def id(self) -> UUID: ...
+    @property
+    def filename(self) -> str: ...
+    @property
+    def size_bytes(self) -> int: ...
+    @property
+    def storage_key(self) -> str: ...
+
+
+@dataclass(frozen=True, slots=True)
+class FileRef:
+    """A `StoredFile` made from an upload or attachment row."""
+
+    id: UUID
+    filename: str
+    size_bytes: int
+    storage_key: str
+
+
+def file_ref(row: TemplateUpload | Attachment) -> FileRef:
+    return FileRef(
+        id=row.id, filename=row.filename, size_bytes=row.size_bytes, storage_key=row.storage_key
+    )
+
+
 async def owned_upload(db: Db, principal: Principal, upload_id: UUID) -> TemplateUpload:
+    """An upload the caller may read (`bido_back.files.policy`), else `UploadNotFound`."""
     async with tenant_session(db, principal.tenant_id) as session:
         row = await session.get(TemplateUpload, upload_id)
-    if row is None or row.user_id != principal.user_id:
+    if row is None or not can_read_upload(row.user_id, principal):
         raise UploadNotFound(f"upload {upload_id} not found")
     return row
 
 
-def extension(row: TemplateUpload) -> str:
-    return PurePosixPath(row.storage_key).suffix.lstrip(".").lower()
+def extension(row: StoredFile) -> str:
+    """The served extension: the storage key's, else the file name's (lowercase)."""
+    ext = PurePosixPath(row.storage_key).suffix.lstrip(".").lower()
+    if ext in CONTENT_TYPES:
+        return ext
+    return PurePosixPath(row.filename.replace("\\", "/")).suffix.lstrip(".").lower() or ext
 
 
-def served_type(row: TemplateUpload) -> str:
+def served_type(row: StoredFile) -> str:
     return CONTENT_TYPES.get(extension(row), FALLBACK_TYPE)
 
 
@@ -98,6 +133,11 @@ async def download_link(
     db: Db, links: DownloadLinks, principal: Principal, upload_id: UUID
 ) -> FileLinkView:
     row = await owned_upload(db, principal, upload_id)
+    return await download_link_for(links, file_ref(row))
+
+
+async def download_link_for(links: DownloadLinks, row: StoredFile) -> FileLinkView:
+    """A 5-minute link that downloads `row` under its original name."""
     content_type = served_type(row)
     link = await links.presign_get(
         row.storage_key,
@@ -106,7 +146,7 @@ async def download_link(
         disposition="attachment",
         expires_in=LINK_TTL,
     )
-    logger.info("upload download link", extra={"upload_id": str(upload_id)})
+    logger.info("file download link", extra={"file_id": str(row.id)})
     return FileLinkView(
         url=link.url, expires_at=link.expires_at, filename=row.filename, content_type=content_type
     )
@@ -124,8 +164,18 @@ async def preview(
 
     Raises `UploadNotFound`, and `SheetNotFound` for a `page.sheet` the file does not have.
     """
-    page = page or PageRequest()
     row = await owned_upload(db, principal, upload_id)
+    return await preview_for(storage, links, file_ref(row), page)
+
+
+async def preview_for(
+    storage: BlobStorage,
+    links: DownloadLinks,
+    row: StoredFile,
+    page: "PageRequest | None" = None,
+) -> UploadPreview:
+    """`preview` for a row the caller was already allowed to read."""
+    page = page or PageRequest()
     ext = extension(row)
     base = UploadPreview(
         id=row.id,
@@ -137,9 +187,9 @@ async def preview(
     started = time.monotonic()
     result = await _preview(storage, links, row, ext, base, page)
     logger.info(
-        "upload preview",
+        "file preview",
         extra={
-            "upload_id": str(upload_id),
+            "file_id": str(row.id),
             "kind": result.kind,
             "reason": result.reason,
             "sheets": len(result.sheets),
@@ -156,7 +206,7 @@ async def preview(
 async def _preview(
     storage: BlobStorage,
     links: DownloadLinks,
-    row: TemplateUpload,
+    row: StoredFile,
     ext: str,
     base: UploadPreview,
     page: "PageRequest",
