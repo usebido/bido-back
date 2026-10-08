@@ -370,6 +370,8 @@ async def test_an_erp_export_imports_with_codes_types_and_notes(
     assert bom == {"IM-N48H-40": Decimal(64), "EX-120-42": Decimal(1), "RL-6206": Decimal(1)}
     # Every supplier came with a contact email.
     assert report.suppliers_without_email == []
+    # The copilot analyses this exact name when the buyer says "this product".
+    assert report.products == ["MT-120-ASM"]
 
 
 async def test_an_import_names_the_suppliers_still_without_an_email(
@@ -656,3 +658,52 @@ def test_a_wide_sheet_previews_fewer_rows_but_profiles_every_row() -> None:
     grid = SheetGrid(name="Wide", rows=rows)
     assert len([ln for ln in preview(grid).splitlines() if ln]) == 15
     assert "[3] Ord_Q: number, 3 distinct, 100..102, 0% empty" in profile(grid)
+
+
+async def test_a_retry_that_only_reads_fewer_rows_is_not_kept(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
+    bad: list[object] = ["OA-4", "Rame Italia", "CU-03", "Filo", "KG", "n/d", 8.1, date(2026, 7, 2)]
+    rows = [*ORDINI, bad]
+    storage, upload_id = await stored(app_engine, who, rows)
+    narrower = ordini(*BASE, ("unit_price", 6))
+    narrower.sections[0].last_data_row = 4  # leaves out the unreadable row
+    mapper = SequenceMapper(ordini(*BASE, ("unit_price", 6)), narrower)
+
+    report = await import_workbook(app_engine, storage, who, upload_id, mapper=mapper)
+
+    # Same valid rows: the first reading stays, and the unreadable row is asked about.
+    assert len(mapper.calls) == 2
+    assert report.status == "needs_confirmation"
+    assert [(r.rows_ok, r.rows_failed) for r in report.sections] == [(3, 1)]
+
+
+async def test_a_retry_does_not_add_a_new_kind_of_data_to_a_sheet_that_partly_worked(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = Principal(tenant_id=purchasing_rows.tenant, user_id=purchasing_rows.owner, role="owner")
+    bad: list[object] = ["OA-4", "Rame Italia", "CU-03", "Filo", "KG", "n/d", 8.1, date(2026, 7, 2)]
+    rows = [*ORDINI, bad]
+    storage, upload_id = await stored(app_engine, who, rows)
+    extra = ordini(*BASE, ("unit_price", 6))
+    extra.sections.append(
+        SheetSection(
+            sheet="Ordini",
+            import_type="items",
+            header_row=1,
+            first_data_row=2,
+            last_data_row=None,
+            columns=[
+                ColumnAssignment(field="part_number", column=2),
+                ColumnAssignment(field="description", column=3),
+            ],  # fmt: skip
+            confidence=0.9,
+            question=None,
+        )
+    )
+    mapper = SequenceMapper(ordini(*BASE, ("unit_price", 6)), extra)
+
+    report = await import_workbook(app_engine, storage, who, upload_id, mapper=mapper)
+
+    assert [r.type for r in report.sections] == ["purchase_history"]

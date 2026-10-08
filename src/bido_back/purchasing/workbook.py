@@ -569,6 +569,7 @@ def _partly_read(found: Sequence[Section], grid: SheetGrid) -> bool:
 # --- Validating and importing ---------------------------------------------------------------
 
 MAX_SUPPLIERS_WITHOUT_EMAIL: Final = 50
+MAX_PRODUCTS: Final = 20
 
 
 class SectionReport(BaseModel):
@@ -607,6 +608,14 @@ class WorkbookImportReport(BaseModel):
             "After an import: the buyer's suppliers that still have no contact email, by "
             f"name (at most {MAX_SUPPLIERS_WITHOUT_EMAIL}). They cannot be invited to an RFQ "
             "until one is added: tell the buyer now, not when the RFQ is created"
+        ),
+    )
+    products: list[str] = Field(
+        default_factory=list[str],
+        description=(
+            f"The products the BOMs and production plans name (at most {MAX_PRODUCTS}), as "
+            "written. Analyse one of these by this exact name when the buyer says 'this "
+            "product'; never a name from an example"
         ),
     )
 
@@ -923,6 +932,7 @@ async def import_workbook(
             sections=[p.report for p in parsed],
             questions=questions,
             problems=problems,
+            products=_products(parsed),
         )
     order = {t: i for i, t in enumerate(_ORDER)}
     async with tenant_session(db, principal.tenant_id) as session:
@@ -940,6 +950,7 @@ async def import_workbook(
         questions=[],
         problems=problems,
         suppliers_without_email=without_email,
+        products=_products(parsed),
     )
 
 
@@ -998,8 +1009,8 @@ async def _retry_mapping(
     """Map the sheets whose rows still fail once more, told what was wrong.
 
     One retry per import, for every failing sheet at once. Per sheet, the
-    reading that imports more rows (then fails fewer) is kept; either way its
-    sections are marked as retried.
+    retry is kept only when it reads more valid rows (`_comparable`); either
+    way its sections are marked as retried.
     """
     sheets = list(dict.fromkeys(p.section.sheet for p in parsed if p.failing()))
     if not sheets:
@@ -1017,8 +1028,8 @@ async def _retry_mapping(
     chosen: dict[str, list[_Parsed]] = {}
     for name in sheets:
         before = [p for p in parsed if p.section.sheet == name]
-        after = [p for p in again if p.section.sheet == name]
-        better = after if after and _score(after) > _score(before) else before
+        after = _comparable(before, [p for p in again if p.section.sheet == name])
+        better = after if after and _ok_rows(after) > _ok_rows(before) else before
         for item in better:
             item.retried = True
         chosen[name] = better
@@ -1035,10 +1046,34 @@ async def _retry_mapping(
     return result
 
 
-def _score(items: Sequence[_Parsed]) -> tuple[int, int]:
-    ok = sum(len(p.table.rows) for p in items)
-    failed = sum(p.table.total_rows - len(p.table.rows) for p in items)
-    return ok, -failed
+def _products(parsed: Sequence[_Parsed]) -> list[str]:
+    """Products named by the BOM and production plan rows, in first-seen order."""
+    names: dict[str, None] = {}
+    for item in parsed:
+        if item.section.import_type in ("bom", "production_plan"):
+            for _, values in item.table.rows:
+                product = values.get("product")
+                if isinstance(product, str) and product.strip():
+                    names.setdefault(product.strip(), None)
+    return list(names)[:MAX_PRODUCTS]
+
+
+def _ok_rows(items: Sequence[_Parsed]) -> int:
+    return sum(len(p.table.rows) for p in items)
+
+
+def _comparable(before: Sequence[_Parsed], after: Sequence[_Parsed]) -> list[_Parsed]:
+    """The retry's sections that can replace the first reading of a sheet.
+
+    A retry is kept only when it reads MORE valid rows, never because it reads
+    fewer rows (a narrower range would hide the failing ones from the buyer).
+    When the first reading imported something, only sections of the same types
+    count: a retry does not add a new kind of data to a sheet that partly worked.
+    """
+    if _ok_rows(before) == 0:
+        return list(after)
+    types = {p.section.import_type for p in before}
+    return [p for p in after if p.section.import_type in types]
 
 
 def _feedback(item: _Parsed, grid: SheetGrid) -> list[str]:
