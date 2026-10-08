@@ -393,7 +393,13 @@ _DRAFT_ONLY = (
     "lines are frozen."
 )
 _LINE_FIELDS = Literal[
-    "mpn", "manufacturer", "need_by", "incoterm", "delivery_location", "qualification"
+    "part_number",
+    "mpn",
+    "manufacturer",
+    "need_by",
+    "incoterm",
+    "delivery_location",
+    "qualification",
 ]
 
 
@@ -401,6 +407,9 @@ class UpdateRfqLineIn(BaseModel):
     rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
     position: int = Field(ge=1, description="The line's position, as shown")
     description: str | None = Field(default=None, min_length=1, max_length=500)
+    part_number: str | None = Field(
+        default=None, description="The buyer's own code for the part, exactly as written"
+    )
     mpn: str | None = Field(default=None, description="A manufacturer part number, as given")
     manufacturer: str | None = None
     category: LineCategory | None = None
@@ -422,6 +431,9 @@ class AddRfqLineIn(BaseModel):
     description: str = Field(min_length=1, max_length=500)
     quantities: list[ModelDecimal] = Field(min_length=1, max_length=20)
     unit: str = Field(default="pcs", min_length=1)
+    part_number: str | None = Field(
+        default=None, description="The buyer's own code for the part, exactly as written"
+    )
     mpn: str | None = Field(default=None, description="A manufacturer part number, as given")
     manufacturer: str | None = None
     category: LineCategory = "catalog"
@@ -476,10 +488,13 @@ def _edited(detail: RfqDetail) -> EditedRfqOut:
             LineItem(
                 position=line.position,
                 description=line.description,
+                part_number=line.part_number,
                 mpn=line.mpn,
                 quantities=list(line.quantities),
                 unit=line.unit,
                 need_by=line.need_by,
+                incoterm=line.incoterm,
+                delivery_location=line.delivery_location,
             )
             for line in detail.lines
         ],
@@ -1571,8 +1586,9 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         Tool(
             "update_rfq_line",
             "Change one line of a draft RFQ (by its position): description, quantities, unit, "
-            "MPN, manufacturer, need-by date, Incoterm, delivery location, qualification. Only "
-            "the fields passed change; `clear` empties optional ones." + _DRAFT_ONLY,
+            "the buyer's part number, MPN, manufacturer, need-by date, Incoterm, delivery "
+            "location, qualification. Only the fields passed change; `clear` empties optional "
+            "ones." + _DRAFT_ONLY,
             UpdateRfqLineIn,
             EditedRfqOut,
             "draft",

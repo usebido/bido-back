@@ -268,7 +268,16 @@ async def test_editing_a_draft_rfq_by_position(
         ctx, "update_rfq_line", rfq=ref, position=1, quantities=[5000], clear=["manufacturer"]
     )
     added = await tools.call(
-        ctx, "add_rfq_line", rfq=ref, description="Cable 2.5 mm2", quantities=[50], unit="m"
+        ctx,
+        "add_rfq_line",
+        rfq=ref,
+        description="Cable 2.5 mm2",
+        quantities=[50],
+        unit="m",
+        part_number="CB-2.5",
+    )
+    renamed = await tools.call(
+        ctx, "update_rfq_line", rfq=ref, position=1, part_number="CAP-0603-104-B"
     )
     removed = await tools.call(ctx, "remove_rfq_line", rfq=ref, position=2)
     terms = await tools.call(
@@ -281,13 +290,20 @@ async def test_editing_a_draft_rfq_by_position(
     )
 
     assert edited.lines[0].quantities == [Decimal(5000)]
-    assert [line.description for line in added.lines][-1] == "Cable 2.5 mm2"
+    assert [(line.part_number, line.description) for line in added.lines][-1] == (
+        "CB-2.5",
+        "Cable 2.5 mm2",
+    )
+    assert renamed.lines[0].part_number == "CAP-0603-104-B"
     # The connector (line 2) is gone and the cable moved up to position 2.
     assert [(line.position, line.description) for line in removed.lines] == [
         (1, "MLCC 100nF 50V X7R 0603"),
         (2, "Cable 2.5 mm2"),
     ]
     assert terms.response_due == datetime(2026, 11, 20, tzinfo=UTC).date()
+    assert {(line.incoterm, line.delivery_location) for line in terms.lines} == {
+        ("FCA", "Joinville")
+    }
     async with tenant_session(app_engine, principal.tenant_id) as session:
         lines = list(
             await session.scalars(

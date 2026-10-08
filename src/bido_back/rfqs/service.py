@@ -418,6 +418,7 @@ async def add_line(
                 rfq_id=rfq_id,
                 position=(last or 0) + 1,
                 description=request.description,
+                part_number=request.part_number,
                 mpn=request.mpn,
                 manufacturer=request.manufacturer,
                 category=request.category,

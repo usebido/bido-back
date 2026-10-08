@@ -150,6 +150,7 @@ class AddLineRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: ShortText
+    part_number: str | None = None
     mpn: str | None = None
     manufacturer: str | None = None
     category: LineCategory = "catalog"
