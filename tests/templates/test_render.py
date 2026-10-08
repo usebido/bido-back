@@ -1,5 +1,6 @@
 """The RFQ email render: deterministic, from the template and the RFQ lines."""
 
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -17,6 +18,7 @@ from bido_back.templates.render import (
 THERMISTOR = RenderLine(
     position=1,
     description="NTC thermistor 10k",
+    part_number=None,
     mpn="NCP18XH103F03RB",
     manufacturer="Murata",
     quantities=[Decimal(10000), Decimal("50000.000")],
@@ -29,6 +31,7 @@ THERMISTOR = RenderLine(
 CAPACITOR = RenderLine(
     position=2,
     description="MLCC 100nF X7R 0603",
+    part_number=None,
     mpn="GCM188R71H104KA57D",
     manufacturer="Murata",
     quantities=[Decimal(20000)],
@@ -190,6 +193,7 @@ def test_mixed_incoterms_go_per_line_and_no_due_date_no_due_sentence() -> None:
     ex_works = RenderLine(
         position=3,
         description="Connector",
+        part_number=None,
         mpn=None,
         manufacturer=None,
         quantities=[Decimal(500)],
@@ -222,3 +226,21 @@ def test_html_escapes_the_buyers_text() -> None:
     assert "Hello &lt;script&gt;alert(1)&lt;/script&gt; &amp; welcome" in rendered.html
     assert "<li>Terms &lt;b&gt;</li>" in rendered.html
     assert "<table" in rendered.html and "<td" in rendered.html
+
+
+def test_the_part_number_column_leads_with_the_buyers_code() -> None:
+    own = replace(THERMISTOR, part_number="TH-NTC-10K")
+    same = replace(THERMISTOR, part_number="NCP18XH103F03RB")
+    only_own = replace(THERMISTOR, part_number="TH-NTC-10K", mpn=None)
+
+    cells = [
+        table_rows(render(STANDARD_TEMPLATE, language="en", lines=(line,), due=None).text)[1]
+        for line in (own, same, only_own, THERMISTOR)
+    ]
+
+    assert [next(c for c in row if "NCP" in c or "TH-" in c) for row in cells] == [
+        "TH-NTC-10K (NCP18XH103F03RB)",
+        "NCP18XH103F03RB",
+        "TH-NTC-10K",
+        "NCP18XH103F03RB",
+    ]

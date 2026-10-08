@@ -271,6 +271,8 @@ class RfqLine(Base):
     rfq_id: Mapped[UUID] = mapped_column(ForeignKey("rfqs.id", ondelete="CASCADE"))
     position: Mapped[int] = mapped_column(Integer)
     description: Mapped[str] = mapped_column(Text)
+    # The buyer's own code for the part, verbatim (migration 0024).
+    part_number: Mapped[str | None] = mapped_column(Text)
     mpn: Mapped[str | None] = mapped_column(Text)
     manufacturer: Mapped[str | None] = mapped_column(Text)
     category: Mapped[str] = mapped_column(Text, server_default=text("'catalog'"))

@@ -105,6 +105,13 @@ async def test_create_rfq_persists_lines_and_returns_questions(
     assert stored is not None and stored.created_by == rfq_rows.owner
     assert stored.source_text == "some text"
     assert sorted(line.quantities for line in lines) == [[500], [4000, 10000]]
+    assert [
+        (line.part_number, line.mpn, line.incoterm, line.delivery_location) for line in first.lines
+    ] == [
+        ("CAP-0603-104", "GRM188R71H104KA93D", "DAP", "Curitiba"),
+        (None, None, None, None),
+    ]
+    assert intake.calls[0][0].buyer_messages == []
 
     # Another tenant neither sees it nor numbers after it.
     other = Principal(tenant_id=rfq_rows.other_tenant, user_id=rfq_rows.other_approver)

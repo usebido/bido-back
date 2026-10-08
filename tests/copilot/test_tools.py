@@ -193,6 +193,27 @@ async def test_create_rfq_reads_earlier_files_only_when_this_message_has_none(
     assert [call[0].text for call in fresh.intake.calls] == ["Quote this one\n\n[new.xlsx] new"]
 
 
+async def test_create_rfq_hands_the_buyers_own_words_to_intake(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    said = ("Preciso de 4000 CAP-0603-104, DAP Curitiba", "sim, cria a RFQ")
+    tools = make_tools(app_engine, buyer_messages=said)
+    ctx = context_of(buyer_of(copilot_rows))
+
+    created = await tools.call(ctx, "create_rfq", text="4000 capacitors")
+
+    [(task, _)] = tools.intake.calls
+    assert task.text == "4000 capacitors" and task.buyer_messages == list(said)
+    # The buyer's code, the MPN and the terms all come back for the Copilot to show.
+    first = created.lines[0]
+    assert (first.part_number, first.mpn, first.incoterm, first.delivery_location) == (
+        "CAP-0603-104",
+        "GRM188R71H104KA93D",
+        "DAP",
+        "Curitiba",
+    )
+
+
 async def test_template_tools(app_engine: AsyncEngine, copilot_rows: People) -> None:
     tools = make_tools(app_engine)
     ctx = context_of(buyer_of(copilot_rows))
