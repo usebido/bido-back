@@ -34,7 +34,8 @@ Formulas (per item of the product's BOM):
   recent price and the year's average (a recent increase is not accepted as
   the new normal). `max_price = max(last_price, avg_price) * (1 +
   max_over_pct / 100)` (5% by default): the most the buyer should accept
-  without escalating.
+  without escalating, a historical escalation threshold rather than a
+  walk-away price (a walk-away comes from a current alternative).
 * Per supplier: `on_time_rate` measures complete, timely receipts and overdue
   open lines; partial receipts are failures, missing receipt quantities unknown.
   `quality_rate = 1 - rejected / received` over validated, dated receipts.
@@ -479,7 +480,10 @@ def price_trend(rows: Sequence[PricedPurchase], today: date) -> Decimal | None:
 
 
 def price_limits(last: Decimal, avg: Decimal, max_over_pct: Decimal) -> tuple[Decimal, Decimal]:
-    """`target = min(last, avg)`, `max = max(last, avg) * (1 + max_over_pct / 100)`."""
+    """`target = min(last, avg)`, `max = max(last, avg) * (1 + max_over_pct / 100)`.
+
+    The maximum is a historical escalation threshold, not a walk-away price.
+    """
     return min(last, avg), round_price(max(last, avg) * (1 + max_over_pct / 100))
 
 

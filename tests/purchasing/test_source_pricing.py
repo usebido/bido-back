@@ -278,10 +278,58 @@ def test_covered_and_never_bought_items_are_flagged_without_a_price() -> None:
     housing = next(line for line in result.lines if line.part_number == "000103")
     assert housing.calculated_to_buy == 0
     assert [f.code for f in housing.flags] == ["covered_by_stock", "single_source"]
-    assert housing.price is not None and housing.price.estimated_cost_at_target == 0
     screw = next(line for line in result.lines if line.part_number == SCREW)
     assert (screw.price, screw.suppliers) == (None, [])
     assert [f.code for f in screw.flags] == ["no_history"]
+    assert "insufficient_price_history" not in {i.code for i in screw.issues}
+
+
+def test_thin_history_proposes_no_target_or_maximum() -> None:
+    # The fixture has one completed purchase per part: below the minimum of 2.
+    line = line_of(motor_records())
+    assert line.price is None
+    supplier = line.suppliers[0]
+    assert (supplier.last_price, supplier.last_price_basis) == (Decimal("10.50"), "received_order")
+    assert (supplier.orders, supplier.on_time_rate) == (2, Decimal(1))
+    thin = next(i for i in line.issues if i.code == "insufficient_price_history")
+    assert thin.severity == "warning" and thin.evidence
+    assert line.ready  # A missing benchmark never blocks the quantity.
+
+
+def test_stale_purchases_are_not_history() -> None:
+    stale = [
+        order(140, "PO-S1", "V2", "10", "5.00", "2025-08-01", "2025-08-10"),
+        receipt(140, "PO-S1", "10", "2025-08-09"),
+        order(141, "PO-S2", "V2", "10", "5.00", "2025-09-01", "2025-09-10"),
+        receipt(141, "PO-S2", "10", "2025-09-09"),
+    ]
+    line = line_of(history(*MIXED, *stale))
+    assert line.price is not None
+    assert (line.price.observations, line.price.min_price) == (4, Decimal("9.0000"))
+    assert by_code(line)["V2"].orders == 2
+    only_stale = line_of(history(*stale))
+    assert only_stale.price is None
+    # V2 is listed (it has orders in the file) but nothing inside the window is measured.
+    stale_supplier = by_code(only_stale)["V2"]
+    assert (stale_supplier.orders, stale_supplier.on_time_rate, stale_supplier.suggested) == (
+        0,
+        None,
+        False,
+    )
+    assert [f.code for f in only_stale.flags] == ["single_source"]
+
+
+def test_purchases_in_another_unit_are_not_comparable_prices() -> None:
+    boxes = order(150, "PO-BOX", "V2", "2", "120.00", "2026-09-20", "2026-09-28")
+    boxes.values["unit"] = "box"
+    other_unit = receipt(150, "PO-BOX", "2", "2026-09-27")
+    other_unit.values["unit"] = "box"
+    line = line_of(history(*MIXED, boxes, other_unit))
+    assert line.price is not None
+    assert (line.price.observations, line.price.last_price) == (4, Decimal("12.6000"))
+    assert "unpriced_purchase_history" in {i.code for i in line.issues}
+    # Still a measured delivery for the supplier (on time, complete).
+    assert by_code(line)["V2"].delivery_observations == 3
 
 
 def test_a_completed_purchase_without_currency_is_history_but_not_a_price() -> None:

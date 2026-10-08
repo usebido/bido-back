@@ -8,17 +8,25 @@ this module. It applies the imported-data analysis's rules and defaults
   quantity, ordered in the last `lookback_days` (365) up to the snapshot date. Each line
   is joined to its physical receipts by order/item/plant (`joins.receipts_for`); receipts
   after the snapshot date do not count. Cancelled lines are not history.
-* Prices come only from completed purchases: closed orders whose reconciled receipts
-  equal the ordered quantity, with a positive unit price, an explicit currency and the
-  line's unit. Open orders and archived quotations never set a price. The line's
-  currency is the one most completed purchases were bought in (on a tie, the most recent
-  one's); history in another currency is ignored and the line is flagged
-  `mixed_currency`. Amounts in different currencies are never added up or converted.
-* Benchmark: the last price (the most recent completed purchase; on the same day, the
-  highest order number), the quantity-weighted average, the minimum, the trend (last 90
-  days against before), `target = min(last, avg)` and
-  `max = max(last, avg) * (1 + max_over_pct / 100)`. Estimated costs are Bido's
-  calculated quantity times the target and last prices.
+* Prices come only from comparable completed purchases: closed orders whose reconciled
+  receipts equal the ordered quantity, with a positive unit price, an explicit currency
+  and the line's physical unit. Open orders and archived quotations never set a price.
+  The line's currency is the one most completed purchases were bought in (on a tie, the
+  most recent one's); history in another currency is ignored and the line is flagged
+  `mixed_currency`; completed purchases left out for their unit, price or currency are
+  disclosed (`unpriced_purchase_history`). Amounts in different currencies are never
+  added up or converted.
+* Benchmark (v1, the imported-data analysis's formulas): the last price (the most recent
+  completed purchase; on the same day, the highest order number), the quantity-weighted
+  average, the minimum, the trend (last 90 days against before),
+  `target = min(last, avg)` and `max = max(last, avg) * (1 + max_over_pct / 100)`.
+  Every figure carries its sample size and age: `observations`, `window_days` and
+  `last_ordered_at`. Estimated costs are Bido's calculated quantity times the target and
+  last prices.
+* Thin or stale evidence proposes no target or maximum: with fewer than
+  `MIN_OBSERVATIONS` (2) comparable completed purchases in the window, `price` stays None
+  and the line says why (`insufficient_price_history`). Purchases ordered before the
+  window are not history at all. The suppliers' last prices stay visible either way.
 * Supplier performance learns from every reconciled order, including short, late and
   overdue ones. On time: complete and last received on or before the promised date; a
   short delivery fails and an open order past its promised date is late. Orders not yet
@@ -32,7 +40,9 @@ this module. It applies the imported-data analysis's rules and defaults
 
 A price benchmark is an internal, company-only reference before any supplier contact:
 never a quotation, an accepted price or an approved negotiation limit until the buyer
-approves one. Unknown performance stays None; it is never treated as perfect.
+approves one. Its maximum is a historical escalation threshold (above it, a person
+decides), not a walk-away price: a walk-away comes from a current alternative the buyer
+confirms. Unknown performance stays None; it is never treated as perfect.
 """
 
 import re
@@ -84,6 +94,8 @@ from bido_back.purchasing.sources.joins import CLOSED, OPEN, receipts_for, state
 # The imported-data analysis's defaults: 365-day window, max 5% over, flags at 5% price
 # increase, 80% on time and 98% quality.
 PARAMS: Final = Params()
+# Fewer comparable completed purchases than this propose no target or maximum price.
+MIN_OBSERVATIONS: Final = 2
 ORDER_KEY: Final = ("po_number", "po_line", "location")
 _CENTS: Final = Decimal("0.01")
 _DAYS: Final = Decimal("0.1")
@@ -386,7 +398,9 @@ def measure(
 
     `suppliers` maps each order's supplier key to its evidence in `line.suppliers`. Call
     it once the quantity is calculated: estimated costs and `covered_by_stock` use it.
-    The benchmark is an internal reference, never a quotation or an approved limit.
+    The benchmark is an internal reference, never a quotation or an approved limit; its
+    maximum is a historical escalation threshold, not a walk-away price. Below
+    `MIN_OBSERVATIONS` comparable completed purchases there is no benchmark at all.
     """
     history: list[OrderFacts] = []
     if as_of is not None:
@@ -421,7 +435,18 @@ def measure(
         supplier.suggested = id(supplier) in chosen
 
     line.price = None
-    if points and as_of is not None:
+    if history and len(points) < MIN_OBSERVATIONS:
+        add_issue(
+            line.issues,
+            "insufficient_price_history",
+            f"Fewer than {MIN_OBSERVATIONS} comparable completed purchases (received in full, "
+            "same unit and currency) in the lookback window: no internal target or maximum "
+            "price is proposed. Suppliers' last prices stay visible.",
+            [o.order for o in current if (p := o.price) is not None and p.currency == currency],
+            "unit_price",
+            warning=True,
+        )
+    if len(points) >= MIN_OBSERVATIONS and as_of is not None:
         last = latest(points)
         average = weighted_avg(points)
         assert average is not None  # Price points have positive quantities.
@@ -470,16 +495,18 @@ def measure(
         )
     line.flags = flags
 
-    unpriced = [o.order for o in current if o.completed and o.same_unit and o.price is None]
+    unpriced = [o.order for o in current if o.completed and o.price is None]
     if unpriced:
         add_issue(
             line.issues,
             "unpriced_purchase_history",
-            "Completed purchases without a positive unit price or an explicit currency are "
-            "left out of the internal price benchmark.",
+            "Completed purchases without a positive unit price, an explicit currency or the "
+            "line's physical unit are not comparable and are left out of the internal price "
+            "benchmark.",
             unpriced,
             "unit_price",
             "currency",
+            "unit",
             warning=True,
         )
 
