@@ -2,6 +2,7 @@
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
@@ -166,6 +167,30 @@ async def test_create_rfq_reads_the_attachments_and_no_tool_acts(
     texts = [call[0].text for call in tools.intake.calls]
     assert texts == ["Quote this BOM\n\n[bom.xlsx] 4000 MLCC", "Only this"]
     assert {tool.kind for tool in tools.tools.values()} == {"read", "draft"}
+
+
+async def test_create_rfq_reads_earlier_files_only_when_this_message_has_none(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    ctx = context_of(buyer_of(copilot_rows))
+    later = make_tools(
+        app_engine, earlier_attachment_ids=(uuid4(),), earlier_attachments_text="[bom.xlsx] old"
+    )
+    fresh = make_tools(
+        app_engine,
+        attachments_text="[new.xlsx] new",
+        attachment_ids=(uuid4(),),
+        earlier_attachment_ids=(uuid4(),),
+        earlier_attachments_text="[bom.xlsx] old",
+    )
+
+    await later.call(ctx, "create_rfq", text="Quote the BOM I sent")
+    await fresh.call(ctx, "create_rfq", text="Quote this one")
+
+    assert [call[0].text for call in later.intake.calls] == [
+        "Quote the BOM I sent\n\n[bom.xlsx] old"
+    ]
+    assert [call[0].text for call in fresh.intake.calls] == ["Quote this one\n\n[new.xlsx] new"]
 
 
 async def test_template_tools(app_engine: AsyncEngine, copilot_rows: People) -> None:

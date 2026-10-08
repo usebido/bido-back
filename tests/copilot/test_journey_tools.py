@@ -38,14 +38,33 @@ async def test_contacts_from_the_chat_are_saved_once(
     assert emails == ["vendite@rame.example.test"]
 
 
-async def test_only_this_messages_attachments_can_be_imported(
+async def test_only_this_conversations_attachments_can_be_imported(
     app_engine: AsyncEngine, copilot_rows: People
 ) -> None:
     tools = make_tools(app_engine)
-    with pytest.raises(ToolError, match="attachments"):
+    with pytest.raises(ToolError, match="attached in this conversation"):
         await tools.call(
             context_of(buyer_of(copilot_rows)), "import_spreadsheet", upload_id=str(uuid4())
         )
+
+
+async def test_a_file_from_an_earlier_turn_can_be_imported(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    ctx = context_of(buyer_of(copilot_rows))
+    earlier = uuid4()
+    one = make_tools(app_engine, earlier_attachment_ids=(earlier,))
+    two = make_tools(app_engine, earlier_attachment_ids=(uuid4(), uuid4()))
+
+    # Past the id check (no storage in tests): the earlier file by its id, and,
+    # with a single file in the conversation, a miscopied id means that one.
+    with pytest.raises(ToolError, match="storage"):
+        await one.call(ctx, "import_spreadsheet", upload_id=str(earlier), confirmed=True)
+    with pytest.raises(ToolError, match="storage"):
+        await one.call(ctx, "import_spreadsheet", upload_id=str(uuid4()), confirmed=True)
+    # Several earlier files and an id that is none of them: refused.
+    with pytest.raises(ToolError, match="attached in this conversation"):
+        await two.call(ctx, "import_spreadsheet", upload_id=str(uuid4()))
 
 
 async def test_a_miscopied_id_falls_back_to_the_only_attachment(
@@ -59,7 +78,7 @@ async def test_a_miscopied_id_falls_back_to_the_only_attachment(
     with pytest.raises(ToolError, match="storage"):
         await single.call(ctx, "import_spreadsheet", upload_id=str(uuid4()))
     # With several attachments a wrong id stays an error.
-    with pytest.raises(ToolError, match="attachments"):
+    with pytest.raises(ToolError, match="attached in this conversation"):
         await several.call(ctx, "import_spreadsheet", upload_id=str(uuid4()))
 
 

@@ -196,6 +196,24 @@ def _deadline(day: date) -> datetime:
     return datetime.combine(day, time(23, 59), tzinfo=UTC)
 
 
+def _conversation_upload(
+    requested: UUID, current: tuple[UUID, ...], earlier: tuple[UUID, ...]
+) -> UUID:
+    """The file a call means: one attached to this message or an earlier turn of it.
+
+    Models sometimes copy an id wrongly. With a single attachment in this
+    message there is only one file it can mean; with none, the only file of
+    the conversation. Anything else is refused.
+    """
+    if requested in current or requested in earlier:
+        return requested
+    if len(current) == 1:
+        return current[0]
+    if not current and len(set(earlier)) == 1:
+        return earlier[0]
+    raise ToolError("that id is not one of the files attached in this conversation")
+
+
 def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
     db = deps.db
 
@@ -203,13 +221,9 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         ctx: ToolContext, args: ImportSpreadsheetIn
     ) -> WorkbookImportReport:
         principal = _principal(ctx)
-        upload_id = args.upload_id
-        if upload_id not in deps.attachment_ids:
-            # Models sometimes copy an id wrongly. With a single attachment there
-            # is only one file it can mean.
-            if len(deps.attachment_ids) != 1:
-                raise ToolError("that id is not one of this message's attachments")
-            upload_id = next(iter(deps.attachment_ids))
+        upload_id = _conversation_upload(
+            args.upload_id, deps.attachment_ids, deps.earlier_attachment_ids
+        )
         if deps.storage is None:
             raise ToolError("file storage is not available")
         try:

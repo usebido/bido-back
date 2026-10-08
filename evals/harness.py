@@ -450,10 +450,18 @@ async def scenario_copilot(env: Env, fixture: Fixture, result: RunResult) -> Non
         )
         if status == "needs_confirmation":
             result.notes["asked_confirmation"] = True
+            # As buyers do: the answer comes as text alone, without the file again.
             conversation, turn = await _turn(
-                env, principal, conversation, "Sim, pode importar assim.", [upload_id]
+                env, principal, conversation, "Sim, pode importar assim.", []
             )
             turns.append(turn)
+            confirmed: object = turn.outputs.get("import_spreadsheet")
+            result.check(
+                "confirmed_import_without_reattaching",
+                isinstance(confirmed, dict)
+                and cast(dict[str, object], confirmed).get("status") == "imported",
+                "the text-only confirmation did not import the earlier file",
+            )
         if golden is not None:
             conversation, turn = await _turn(env, principal, conversation, "Pode criar a RFQ.", [])
             turns.append(turn)
