@@ -43,6 +43,7 @@ from bido_back.rfqs.mailbox import MailboxSenderFactory, mailbox_senders_for
 from bido_back.settings import Settings
 from bido_back.storage import BlobStorage, build_storage
 from bido_back.storage.direct import DirectUploads, LocalDirectUploads
+from bido_back.storage.links import DownloadLinks, LocalDownloadLinks
 from bido_back.storage.local import LocalFileStorage
 from bido_back.storage.s3 import S3Storage
 from bido_back.worker.jobs import JobQueue, SqsJobQueue
@@ -147,6 +148,20 @@ def get_direct_uploads(request: Request) -> DirectUploads:
     if isinstance(storage, LocalFileStorage) and resources.settings.environment == "local":
         return LocalDirectUploads(storage, str(request.base_url))
     raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "direct uploads need S3 storage")
+
+
+def get_download_links(request: Request) -> DownloadLinks:
+    """Signs short-lived file links: S3 in AWS, `GET /dev/files` locally.
+
+    503 when neither applies (local storage outside `ENVIRONMENT=local`).
+    """
+    resources = _resources(request)
+    storage = resources.storage()
+    if isinstance(storage, S3Storage):
+        return storage
+    if isinstance(storage, LocalFileStorage) and resources.settings.environment == "local":
+        return LocalDownloadLinks(storage, str(request.base_url))
+    raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "file links need S3 storage")
 
 
 def get_rfq_agents() -> RfqAgents:

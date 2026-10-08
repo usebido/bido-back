@@ -7,6 +7,7 @@ from typing import Protocol, cast
 
 from bido_back.storage.direct import PresignedPost, StoredObject
 from bido_back.storage.keys import BlobNotFound, validate_key
+from bido_back.storage.links import Disposition, FileLink, content_disposition
 
 
 class _Body(Protocol):
@@ -20,6 +21,7 @@ class _S3Api(Protocol):
     def get_object(self, **kwargs: object) -> Mapping[str, object]: ...
     def head_object(self, **kwargs: object) -> Mapping[str, object]: ...
     def generate_presigned_post(self, **kwargs: object) -> Mapping[str, object]: ...
+    def generate_presigned_url(self, *args: object, **kwargs: object) -> str: ...
 
 
 class S3Storage:
@@ -101,6 +103,37 @@ class S3Storage:
         )
         form = cast(Mapping[str, str], signed["fields"])
         return PresignedPost(url=str(signed["url"]), fields=dict(form), expires_at=expires_at)
+
+    async def presign_get(
+        self,
+        key: str,
+        *,
+        filename: str,
+        content_type: str,
+        disposition: Disposition,
+        expires_in: timedelta,
+    ) -> FileLink:
+        """A presigned GET for `key`, served with this type and disposition.
+
+        S3 sends the `response-content-*` overrides instead of the stored
+        metadata, so what the browser does with the file is decided here, not
+        by whatever content type the uploader declared. Signing is local; the
+        read uses the signer's credentials (the task role's GetObject and KMS
+        decrypt grants).
+        """
+        validate_key(key)
+        expires_at = datetime.now(UTC) + expires_in
+        url = self._s3.generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": self._bucket,
+                "Key": key,
+                "ResponseContentType": content_type,
+                "ResponseContentDisposition": content_disposition(disposition, filename),
+            },
+            ExpiresIn=int(expires_in.total_seconds()),
+        )
+        return FileLink(url=url, expires_at=expires_at)
 
     async def stat(self, key: str) -> StoredObject | None:
         validate_key(key)
