@@ -87,6 +87,7 @@ from bido_back.db.models import (
     User,
 )
 from bido_back.rfqs.errors import AgentFailed, InvalidState, NotFound, RfqError
+from bido_back.rfqs.language import supplier_email_language
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.service import buyer_display_name
 
@@ -348,7 +349,7 @@ async def request_notices(
                         buyer_company=tenant.name,
                         buyer_name=await buyer_display_name(session, sender, tenant.name),
                         supplier_name=thread.supplier.name,
-                        supplier_language=thread.supplier.language,
+                        supplier_language=supplier_email_language(thread.supplier),
                     ),
                 )
             )
@@ -511,7 +512,7 @@ async def request_po_send(
         doc = await po_document(session, po)
         body = po_email_body(
             doc,
-            thread.supplier.language,
+            supplier_email_language(thread.supplier),
             await buyer_display_name(session, sender, tenant.name),
         )
         call_id = po_send_proposal_ids(po.id)[1]

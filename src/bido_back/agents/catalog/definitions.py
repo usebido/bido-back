@@ -54,11 +54,12 @@ _MAX_TURNS: Final = 2
 def rfq_intake(model: str = DEFAULT_MODEL) -> AgentDefinition[RfqIntakeOutput]:
     """v2: the buyer's own code goes to `part_number` verbatim, never into `mpn`; the
     buyer's own messages win over the Copilot's summary; RFQ-wide Incoterm and delivery
-    location reach every line."""
+    location reach every line. v3: the unit is the requested quantity's (the need's), never
+    a stock table's or a price unit; conflicting units become a question."""
     return AgentDefinition(
         name="rfq_intake",
-        prompt_file="rfq_intake.v2.md",
-        prompt_version=2,
+        prompt_file="rfq_intake.v3.md",
+        prompt_version=3,
         model=model,
         output_model=RfqIntakeOutput,
         max_turns=_MAX_TURNS,

@@ -34,6 +34,7 @@ from bido_back.rfqs.schemas import (
     AddLineRequest,
     ContactIn,
     CreateSupplierRequest,
+    InviteView,
     RfqCreated,
     SupplierView,
     UpdateLineRequest,
@@ -209,6 +210,7 @@ async def test_prepare_send_records_pending_approvals_with_the_exact_email(
         # The supplier writes German; no template yet, so Bido's standard one.
         "subject": f"[{rfq.ref}] Angebotsanfrage: {rfq.title}",
         "body": preview.text,  # the preview is exactly what goes to approval
+        "html_body": preview.html,  # and its HTML twin
     }
     body = preview.text
     company = await _tenant_name(app_engine, rfq_rows.tenant)
@@ -229,7 +231,8 @@ async def test_prepare_send_records_pending_approvals_with_the_exact_email(
         assert ask in body
     assert "Gültigkeit des Angebots" not in body  # covered by "Validade da proposta"
     assert "Bitte senden Sie Ihr Angebot bis 01.11.2026." in body
-    assert body.endswith(f"{company} purchasing\n{company}\n")
+    # No buyer name known: the company signs alone (never "<company> purchasing").
+    assert body.endswith(f"\n{company}\n") and "purchasing" not in body
     assert preview.template_id is None and preview.template_version == 0
     assert "<table" in preview.html and "GRM188R71H104KA93D" in preview.html
     assert invite.status == "pending_approval"
@@ -337,7 +340,8 @@ async def test_prepare_send_renders_the_tenants_default_template_and_pins_its_ve
         "Bezeichnung",
         "Menge",
         "Stückpreis",  # the supplier fills it
-        "MPN",
+        "Artikelnr.",  # the buyer's own code...
+        "MPN",  # ...and the manufacturer's, each in its own column
         "Hersteller",
         "Einheit",
         "Incoterm",  # only one line has it, so per line rather than under the table
@@ -631,3 +635,31 @@ def test_preliminary_titles() -> None:
     title = service.preliminary_title("Motor parts", " engineering validation ")
     assert title == "PRELIMINARY (pending engineering validation): Motor parts"
     assert service.is_preliminary(title) and not service.is_preliminary("Motor parts")
+
+
+async def test_each_suppliers_email_names_no_other_invited_supplier(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    # RFQ-3 (2026-10-08) invited eight competing suppliers to one RFQ: each email must
+    # address its own supplier only and never reveal who else was asked.
+    principal = buyer(rfq_rows)
+    rfq = await make_rfq(app_engine, principal)
+    names = ["Horizonte", "Paulista", "Tintas"]
+    invites: list[InviteView] = []
+    for name in names:
+        supplier = await make_supplier(app_engine, principal, name)
+        invites.append(
+            await service.add_invite(
+                app_engine, principal, rfq.id, supplier.id, supplier.contacts[0].id
+            )
+        )
+
+    for invite in invites:
+        preview = await service.preview_email(
+            app_engine, principal, rfq.id, invite.id, FakeWriter()
+        )
+        others = [n for n in names if n != invite.supplier_name]
+        for other in others:
+            assert other not in preview.subject
+            assert other not in preview.text
+            assert other not in preview.html

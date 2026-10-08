@@ -38,6 +38,8 @@ def build_mime(email: OutboundEmail, *, now: datetime | None = None) -> EmailMes
     if references:
         msg["References"] = " ".join(references)
     msg.set_content(email.text_body)
+    if email.html_body:
+        msg.add_alternative(email.html_body, subtype="html")
     for attachment in email.attachments:
         maintype, _, subtype = attachment.content_type.partition("/")
         if not maintype or not subtype:

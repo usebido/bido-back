@@ -82,6 +82,7 @@ from bido_back.quotes.parsing import DecimalSeparator
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.currency import fx_factor, resolve_currency
 from bido_back.rfqs.errors import RfqError
+from bido_back.rfqs.language import DEFAULT_LANGUAGE, country_language
 from bido_back.storage import BlobStorage
 
 logger = logging.getLogger(__name__)
@@ -266,6 +267,11 @@ async def _apply_contacts(
         language = row.get("language")
         if isinstance(language, str) and len(language.strip()) == 2:
             supplier.language = language.strip().lower()
+        elif supplier.language in (None, DEFAULT_LANGUAGE):
+            # No language column: write to them in their country's language.
+            spoken = country_language(supplier.country)
+            if spoken is not None:
+                supplier.language = spoken
         kind = supplier_type(row.get("type"))
         if kind is not None:
             supplier.type = kind  # the buyer's supplier master says what it is

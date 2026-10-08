@@ -49,6 +49,7 @@ _PHRASES: Final[dict[str, dict[str, str]]] = {
         "reference": "Our reference: {ref}. Please keep it in the subject of your reply.",
         "items": "Requested items:",
         "prices": "Please quote the unit price for each quantity tier, with the currency.",
+        "price": "Please quote the unit price, with the currency.",
         "asks": "Please also let us know:",
         "alternative": (
             "If you offer an alternative part, please say so clearly and give its MPN "
@@ -64,6 +65,7 @@ _PHRASES: Final[dict[str, dict[str, str]]] = {
         "reference": "Nossa referência: {ref}. Por favor, mantenha-a no assunto da resposta.",
         "items": "Itens solicitados:",
         "prices": "Por favor, informe o preço unitário para cada quantidade, com a moeda.",
+        "price": "Por favor, informe o preço unitário, com a moeda.",
         "asks": "Por favor, informe também:",
         "alternative": (
             "Se oferecer um item alternativo, indique claramente, com o código e o fabricante."
@@ -80,6 +82,7 @@ _PHRASES: Final[dict[str, dict[str, str]]] = {
         ),
         "items": "Angefragte Positionen:",
         "prices": "Bitte nennen Sie den Stückpreis je Mengenstaffel mit Währung.",
+        "price": "Bitte nennen Sie den Stückpreis mit Währung.",
         "asks": "Bitte teilen Sie uns außerdem mit:",
         "alternative": (
             "Falls Sie einen alternativen Artikel anbieten, kennzeichnen Sie ihn bitte "
@@ -97,6 +100,7 @@ _PHRASES: Final[dict[str, dict[str, str]]] = {
         ),
         "items": "Articles demandés :",
         "prices": "Merci d'indiquer le prix unitaire pour chaque quantité, avec la devise.",
+        "price": "Merci d'indiquer le prix unitaire, avec la devise.",
         "asks": "Merci de nous indiquer également :",
         "alternative": (
             "Si vous proposez un article alternatif, merci de l'indiquer clairement avec "
@@ -114,6 +118,7 @@ _PHRASES: Final[dict[str, dict[str, str]]] = {
         ),
         "items": "Artículos solicitados:",
         "prices": "Por favor, indique el precio unitario para cada cantidad, con la moneda.",
+        "price": "Por favor, indique el precio unitario, con la moneda.",
         "asks": "Por favor, indíquenos también:",
         "alternative": (
             "Si ofrece una pieza alternativa, indíquelo claramente con su número de pieza "
@@ -131,6 +136,7 @@ _PHRASES: Final[dict[str, dict[str, str]]] = {
         ),
         "items": "Articoli richiesti:",
         "prices": "Vi preghiamo di indicare il prezzo unitario per ogni quantità, con la valuta.",
+        "price": "Vi preghiamo di indicare il prezzo unitario, con la valuta.",
         "asks": "Vi preghiamo di indicarci inoltre:",
         "alternative": (
             "Se offrite un articolo alternativo, indicatelo chiaramente con codice e produttore."
@@ -271,6 +277,13 @@ def _part(line: RenderLine) -> str:
     return line.part_number or line.mpn or ""
 
 
+def _real_mpn(line: RenderLine) -> str | None:
+    """The manufacturer part number, when there is one besides the buyer's own code."""
+    if line.mpn and line.mpn != line.part_number:
+        return line.mpn
+    return None
+
+
 def _incoterm(line: RenderLine) -> str:
     return " ".join(p for p in (line.incoterm, line.delivery_location) if p)
 
@@ -282,7 +295,13 @@ def _cell(key: str | None, line: RenderLine, language: str) -> str:
         case "description":
             return line.description
         case "mpn":
+            # A template column naming a code ("Código", "Part number"): the buyer's own
+            # code, with a different manufacturer part number in brackets.
             return _part(line)
+        case "part_number":
+            return line.part_number or ""
+        case "mpn_only":
+            return _real_mpn(line) or ""
         case "manufacturer":
             return line.manufacturer or ""
         case "quantity":
@@ -304,6 +323,8 @@ def table(data: RenderInput) -> tuple[list[str], list[list[str]], str | None]:
     keys: list[str | None] = []
     headings: list[str] = []
     seen: set[str] = set()
+    shown_headings = _headings(data.language)
+    translated = data.template.language != data.language
     for original, shown in zip(data.template.columns, data.display.columns, strict=True):
         key = column_key(original)
         if key is not None and key in seen:
@@ -311,7 +332,10 @@ def table(data: RenderInput) -> tuple[list[str], list[list[str]], str | None]:
         if key is not None:
             seen.add(key)
         keys.append(key)
-        headings.append(shown)
+        # A column Bido fills keeps the buyer's own words in the buyer's language; in
+        # another language it gets Bido's fixed heading, so a translation cannot turn
+        # "Prazo" (the date we need it by) into "Lead time" (what we ask the supplier).
+        headings.append(shown_headings[key] if translated and key is not None else shown)
 
     lines = data.lines
     incoterms = {_incoterm(line) for line in lines if _incoterm(line)}
@@ -320,7 +344,8 @@ def table(data: RenderInput) -> tuple[list[str], list[list[str]], str | None]:
         uniform_incoterm = None
     wanted = [
         ("description", True),
-        ("mpn", any(line.part_number or line.mpn for line in lines)),
+        ("part_number", "mpn" not in seen and any(line.part_number for line in lines)),
+        ("mpn_only", "mpn" not in seen and any(_real_mpn(line) for line in lines)),
         ("manufacturer", any(line.manufacturer for line in lines)),
         ("quantity", True),
         ("unit", True),
@@ -328,7 +353,6 @@ def table(data: RenderInput) -> tuple[list[str], list[list[str]], str | None]:
         ("qualification", any(line.qualification for line in lines)),
         ("incoterm", bool(incoterms) and uniform_incoterm is None),
     ]
-    shown_headings = _headings(data.language)
     if "position" not in seen:
         keys.insert(0, "position")
         headings.insert(0, shown_headings["position"])
@@ -337,9 +361,16 @@ def table(data: RenderInput) -> tuple[list[str], list[list[str]], str | None]:
             # The description goes right after the position; the rest at the end.
             at = keys.index("position") + 1 if key == "description" else len(keys)
             keys.insert(at, key)
-            headings.insert(at, shown_headings[key])
+            headings.insert(at, shown_headings["mpn" if key == "mpn_only" else key])
     rows = [[_cell(key, line, data.language) for key in keys] for line in lines]
     return headings, rows, (None if "incoterm" in seen else uniform_incoterm)
+
+
+def electronic(lines: Sequence[RenderLine]) -> bool:
+    """Whether RoHS/REACH declarations apply: a line names a manufacturer part or an
+    automotive qualification (electronic components). Steel, fasteners, paint or rubber
+    bought by the buyer's own code do not get the question."""
+    return any(_real_mpn(line) or line.manufacturer or line.qualification for line in lines)
 
 
 def asks(data: RenderInput) -> list[str]:
@@ -352,6 +383,8 @@ def asks(data: RenderInput) -> list[str]:
     covered = covered_keys([*data.template.footer_fields, *supplier_columns])
     for field in REQUIRED_FIELDS:
         if field.kind != "ask" or field.key in covered:
+            continue
+        if field.key == "rohs_reach" and not electronic(data.lines):
             continue
         shown.append(field.label(data.language))
     qualification = required_field("qualification")
@@ -372,17 +405,52 @@ def _text_table(headings: list[str], rows: list[list[str]]) -> str:
     return "\n".join([fmt(headings), rule, *(fmt(r) for r in rows)])
 
 
+_CELL: Final = "border:1px solid #d0d4dc;padding:6px 10px;vertical-align:top"
+
+
+def _numeric(cell: str) -> bool:
+    return bool(cell) and all(part.replace(".", "").isdigit() for part in cell.split(" / "))
+
+
 def _html_table(headings: list[str], rows: list[list[str]]) -> str:
-    style = 'style="border:1px solid #ccc;padding:4px 8px;text-align:left"'
-    head = "".join(f"<th {style}>{html.escape(h)}</th>" for h in headings)
+    """The item table as HTML: inline styles only (mail clients drop <style>)."""
+    numeric = [
+        bool(rows) and all(_numeric(r[i]) or not r[i] for r in rows) for i in range(len(headings))
+    ]
+
+    def align(i: int) -> str:
+        return "right" if numeric[i] else "left"
+
+    head = "".join(
+        f'<th style="{_CELL};background:#f3f4f7;text-align:{align(i)}">{html.escape(h)}</th>'
+        for i, h in enumerate(headings)
+    )
     body = "".join(
-        "<tr>" + "".join(f"<td {style}>{html.escape(c)}</td>" for c in row) + "</tr>"
+        "<tr>"
+        + "".join(
+            f'<td style="{_CELL};text-align:{align(i)}">{html.escape(c)}</td>'
+            for i, c in enumerate(row)
+        )
+        + "</tr>"
         for row in rows
     )
     return (
-        '<table style="border-collapse:collapse">'
+        '<table style="border-collapse:collapse;font-size:14px">'
         f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
     )
+
+
+def tiered(lines: Sequence[RenderLine]) -> bool:
+    """Whether any line asks for more than one quantity."""
+    return any(len(line.quantities) > 1 for line in lines)
+
+
+def signature(buyer_name: str, buyer_company: str) -> list[str]:
+    """The closing's name lines: the buyer, then the company when it says something new."""
+    name, company = buyer_name.strip(), buyer_company.strip()
+    if not name or name.casefold() == company.casefold():
+        return [company] if company else []
+    return [name, company] if company else [name]
 
 
 def render_rfq(data: RenderInput) -> RenderedRfq:
@@ -410,13 +478,16 @@ def render_rfq(data: RenderInput) -> RenderedRfq:
     ]
     if incoterm:
         text_parts.append(f"{incoterm_label}: {incoterm}")
-    text_parts.append("\n".join([words["prices"], words["asks"], *(f"- {q}" for q in questions)]))
+    price = words["prices"] if tiered(data.lines) else words["price"]
+    text_parts.append("\n".join([price, words["asks"], *(f"- {q}" for q in questions)]))
     text_parts.append(words["alternative"])
     if terms:
         text_parts.append("\n".join(terms))
     if due:
         text_parts.append(due)
-    text_parts.append(f"{words['closing']}\n{data.buyer_name}\n{data.buyer_company}")
+    text_parts.append(
+        "\n".join([words["closing"], *signature(data.buyer_name, data.buyer_company)])
+    )
     text = "\n\n".join(text_parts) + "\n"
 
     def p(value: str) -> str:
@@ -430,7 +501,7 @@ def render_rfq(data: RenderInput) -> RenderedRfq:
     ]
     if incoterm:
         html_parts.append(p(f"{incoterm_label}: {incoterm}"))
-    html_parts.append(p(words["prices"]))
+    html_parts.append(p(price))
     html_parts.append(p(words["asks"]))
     html_parts.append("<ul>" + "".join(f"<li>{html.escape(q)}</li>" for q in questions) + "</ul>")
     html_parts.append(p(words["alternative"]))
@@ -440,10 +511,15 @@ def render_rfq(data: RenderInput) -> RenderedRfq:
     html_parts.append(
         "<p>"
         + "<br>".join(
-            html.escape(v) for v in (words["closing"], data.buyer_name, data.buyer_company)
+            html.escape(v)
+            for v in (words["closing"], *signature(data.buyer_name, data.buyer_company))
         )
         + "</p>"
     )
-    return RenderedRfq(
-        subject=subject, text=text, html="\n".join(html_parts), language=data.language
+    document = (
+        f'<!doctype html><html lang="{html.escape(data.language)}"><body '
+        'style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1f2330">'
+        + "\n".join(html_parts)
+        + "</body></html>"
     )
+    return RenderedRfq(subject=subject, text=text, html=document, language=data.language)

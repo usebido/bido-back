@@ -102,6 +102,9 @@ class SendRfqEmailArgs(BaseModel):
     # One line: it becomes a header.
     subject: Annotated[str, StringConstraints(min_length=1, max_length=300, pattern=r"^[^\r\n]*$")]
     body: str = Field(min_length=1, max_length=100_000)
+    # The same email as HTML (the item table as a real table). Optional: older
+    # proposals have none and go out as text only.
+    html_body: str | None = Field(default=None, max_length=200_000)
 
 
 class SendRfqEmailResult(BaseModel):
@@ -224,6 +227,7 @@ class _SendRfqEmail:
                     cc=tuple(args.cc),
                     subject=args.subject,
                     text_body=args.body,
+                    html_body=args.html_body,
                     message_id=claim.message_id,
                 )
             )
