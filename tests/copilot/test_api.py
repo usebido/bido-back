@@ -18,7 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.agents.config import RunnerConfig
-from bido_back.api.copilot import copilot_router, get_copilot_runner_config
+from bido_back.api.copilot import copilot_router, get_copilot_runner_config, get_copilot_titler
 from bido_back.api.deps import (
     ApiResources,
     get_db,
@@ -29,6 +29,7 @@ from bido_back.api.deps import (
 )
 from bido_back.auth import Principal
 from bido_back.copilot.contracts import ATTACHMENTS_ONLY_MESSAGE
+from bido_back.copilot.titles import Titler
 from bido_back.db import create_sessionmaker, tenant_session
 from bido_back.db.models import Approval, TemplateUpload
 from bido_back.rfqs.agents import RfqAgents
@@ -75,6 +76,8 @@ class Api:
     principal: Principal
     storage: FakeStorage
     runner_config: RunnerConfig = CONFIG
+    # None keeps titles as the first message; tests/copilot/test_titles.py sets a fake.
+    titler: Titler | None = None
 
 
 @pytest_asyncio.fixture
@@ -108,12 +111,16 @@ async def api(app_engine: AsyncEngine, copilot_rows: People) -> AsyncIterator[Ap
         def runner_config() -> RunnerConfig:
             return state.runner_config
 
+        def titler() -> Titler | None:
+            return state.titler
+
         app.dependency_overrides[get_principal] = current_principal
         app.dependency_overrides[get_db] = db
         app.dependency_overrides[get_rfq_agents] = rfq_agents
         app.dependency_overrides[get_mailbox_senders] = mailbox_senders
         app.dependency_overrides[get_storage] = blobs
         app.dependency_overrides[get_copilot_runner_config] = runner_config
+        app.dependency_overrides[get_copilot_titler] = titler
         yield state
 
 
