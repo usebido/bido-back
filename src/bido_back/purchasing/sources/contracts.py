@@ -142,7 +142,19 @@ class ScopeRequest(BaseModel):
         return self
 
 
-ScopeField = Literal["product_code", "area", "location", "as_of", "horizon_end"]
+ScopeField = Literal[
+    "product_code",
+    "area",
+    "location",
+    "as_of",
+    "horizon_end",
+    "safety_stock",
+    "production_lead_days",
+]
+# buyer: stated in the request (matched to the evidence's spelling); evidence: settled by
+# code from located evidence (an assumption); default: neither (lead days 0, or the
+# sources' own safety-stock policy).
+ScopeSource = Literal["buyer", "evidence", "default"]
 
 
 class ScopeOption(BaseModel):
@@ -172,10 +184,20 @@ class ScopeQuestion(BaseModel):
     options: list[ScopeOption] = Field(default_factory=list[ScopeOption])
 
 
+class ScopeProvenance(BaseModel):
+    """Where one value of the resolved scope came from."""
+
+    field: ScopeField
+    source: ScopeSource
+    evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
+
+
 class ScopeResolution(BaseModel):
     request: ScopeRequest
     assumptions: list[ScopeAssumption] = Field(default_factory=list[ScopeAssumption])
     questions: list[ScopeQuestion] = Field(default_factory=list[ScopeQuestion])
+    # One entry per value of the resolved scope; empty while questions are open.
+    provenance: list[ScopeProvenance] = Field(default_factory=list[ScopeProvenance])
 
 
 class DemandContribution(BaseModel):

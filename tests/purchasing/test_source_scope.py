@@ -186,6 +186,34 @@ def test_the_plant_matches_without_case_accents_spacing_or_punctuation(location:
     assert resolved.scope is not None and resolved.scope.location == "Plant A"
 
 
+def test_each_resolved_value_names_its_source() -> None:
+    words = resolve(BUYER).resolution.provenance
+    assert [(p.field, p.source) for p in words] == [
+        ("product_code", "buyer"),
+        ("location", "buyer"),
+        ("as_of", "evidence"),
+        ("horizon_end", "buyer"),
+        ("safety_stock", "buyer"),
+        ("production_lead_days", "default"),
+    ]
+    by_field = {p.field: p for p in words}
+    assert {r.table for r in by_field["product_code"].evidence} == {"production_plan"}
+    assert {r.table for r in by_field["as_of"].evidence} == {"inventory"}
+    records = [*motor_records(), *product_records("PMP-200", "Pump", "Plant A", "2026-10-20")]
+    described = resolve(BUYER.model_copy(update={"product": "motores"}), records)
+    assert described.resolution.provenance[0].source == "evidence"
+    explicit = resolve(as_request(SCOPE) or ScopeRequest()).resolution.provenance
+    assert {p.field: p.source for p in explicit} == {
+        "product_code": "buyer",
+        "location": "buyer",
+        "as_of": "buyer",
+        "horizon_end": "buyer",
+        "safety_stock": "buyer",
+        "production_lead_days": "default",
+    }
+    assert resolve(BUYER.model_copy(update={"horizon_days": None})).resolution.provenance == []
+
+
 def test_a_plant_spelled_differently_by_the_orders_uses_the_spelling_of_most_records() -> None:
     records = motor_records()
     for record in records:

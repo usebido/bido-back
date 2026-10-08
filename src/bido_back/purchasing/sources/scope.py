@@ -21,7 +21,7 @@ already a complete scope.
 """
 
 from collections import Counter, defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -33,6 +33,7 @@ from bido_back.purchasing.sources.contracts import (
     ScopeAssumption,
     ScopeField,
     ScopeOption,
+    ScopeProvenance,
     ScopeQuestion,
     ScopeRequest,
     ScopeResolution,
@@ -44,6 +45,10 @@ from bido_back.purchasing.sources.planning import code_key, same_code, same_plac
 
 MAX_OPTIONS = 12
 MAX_REFS = 10
+# Assumptions that settle a boundary from located evidence alone (no buyer words).
+_FROM_EVIDENCE = frozenset(
+    {"product_from_description", "location_single_plant", "as_of_latest_snapshot"}
+)
 # Words that name no product: articles, prepositions and "product" itself.
 _FILLER = frozenset(
     {
@@ -93,8 +98,13 @@ def has_production_plans(records: Sequence[Record]) -> bool:
 
 
 def as_request(scope: ScopeRequest | PlanningScope | None) -> ScopeRequest | None:
-    """A plain request; an explicit planning scope is a complete one."""
-    return None if scope is None else ScopeRequest.model_validate(scope.model_dump())
+    """A plain request; an explicit planning scope is a complete one.
+
+    Only the fields the caller set are copied, so an unset lead time stays a default.
+    """
+    if scope is None:
+        return None
+    return ScopeRequest.model_validate(scope.model_dump(exclude_unset=True))
 
 
 def resolve_scope(records: Sequence[Record], request: ScopeRequest) -> ResolvedScope:
@@ -119,17 +129,22 @@ def direct_scope(records: Sequence[Record], request: ScopeRequest) -> ResolvedSc
         or end is None
     ):
         return ResolvedScope(None, ScopeResolution(request=request))
+    scope = PlanningScope(
+        product_code=request.product_code,
+        area=request.area,
+        location=location,
+        as_of=request.as_of,
+        horizon_end=end,
+        safety_stock=request.safety_stock,
+        production_lead_days=request.production_lead_days,
+    )
     return ResolvedScope(
-        PlanningScope(
-            product_code=request.product_code,
-            area=request.area,
-            location=location,
-            as_of=request.as_of,
-            horizon_end=end,
-            safety_stock=request.safety_stock,
-            production_lead_days=request.production_lead_days,
+        scope,
+        ScopeResolution(
+            request=request,
+            assumptions=assumptions,
+            provenance=_provenance(request, scope, assumptions, {}),
         ),
-        ScopeResolution(request=request, assumptions=assumptions),
     )
 
 
@@ -176,6 +191,8 @@ class _Resolver:
         self.demands = [d for r in records if (d := self._demand(r)) is not None]
         self.assumptions: list[ScopeAssumption] = []
         self.questions: list[ScopeQuestion] = []
+        # The cells the buyer's own words matched, per field.
+        self.matched: dict[ScopeField, list[SourceRef]] = {}
 
     def run(self) -> ResolvedScope:
         request = self.request
@@ -211,18 +228,17 @@ class _Resolver:
             or horizon_end is None
         ):
             return ResolvedScope(None, resolution)
-        return ResolvedScope(
-            PlanningScope(
-                product_code=product.code if product is not None else None,
-                area=area,
-                location=location,
-                as_of=as_of,
-                horizon_end=horizon_end,
-                safety_stock=request.safety_stock,
-                production_lead_days=request.production_lead_days,
-            ),
-            resolution,
+        scope = PlanningScope(
+            product_code=product.code if product is not None else None,
+            area=area,
+            location=location,
+            as_of=as_of,
+            horizon_end=horizon_end,
+            safety_stock=request.safety_stock,
+            production_lead_days=request.production_lead_days,
         )
+        resolution.provenance = _provenance(request, scope, self.assumptions, self.matched)
+        return ResolvedScope(scope, resolution)
 
     def _demand(self, record: Record) -> _Demand | None:
         if record.kind == "production_plan":
@@ -279,6 +295,7 @@ class _Resolver:
         if given is not None:
             found = [p for p in products if _loose(p.code) == _loose(given)]
             if len(found) == 1:
+                self.matched["product_code"] = _product_refs(found[0])
                 return found[0]
             message = (
                 f"'{given}' matches several production products."
@@ -288,6 +305,7 @@ class _Resolver:
         elif words is not None:
             found = _named_in(words, products)
             if len(found) == 1:
+                self.matched["product_code"] = _product_refs(found[0])
                 return found[0]
             if not found:
                 found = [p for p in products if any(_describes(words, d) for d in p.descriptions)]
@@ -336,7 +354,11 @@ class _Resolver:
             return found
         areas = _places(d.area for d in self.demands)
         found = next((a for a in areas if same_place(a, given)), None)
-        if found is None:
+        if found is not None:
+            self.matched["area"] = self._refs(
+                [d.record for d in self.demands if same_place(d.area, found)], "area"
+            )
+        else:
             self._ask(
                 "unknown_area",
                 "area",
@@ -365,6 +387,10 @@ class _Resolver:
                     "location",
                     f"No order or requirement for {subject} is at '{given}'.",
                     self._plant_options(relevant, plants),
+                )
+            else:
+                self.matched["location"] = self._refs(
+                    [d.record for d in relevant if same_place(d.location, found)], "location"
                 )
             return found
         if len(plants) == 1:
@@ -527,6 +553,39 @@ class _Resolver:
         self.questions.append(
             ScopeQuestion(code=code, field=field, message=message, options=options[:MAX_OPTIONS])
         )
+
+
+def _provenance(
+    request: ScopeRequest,
+    scope: PlanningScope,
+    assumptions: Sequence[ScopeAssumption],
+    matched: Mapping[ScopeField, list[SourceRef]],
+) -> list[ScopeProvenance]:
+    """Where each value of the resolved scope came from: buyer, evidence or default."""
+    settled = {a.field: a.evidence for a in assumptions if a.code in _FROM_EVIDENCE}
+    stated: dict[ScopeField, bool] = {
+        "product_code": request.product_code is not None or request.product is not None,
+        "area": request.area is not None,
+        "location": request.location is not None,
+        "as_of": request.as_of is not None,
+        "horizon_end": request.horizon_end is not None or request.horizon_days is not None,
+        "safety_stock": request.safety_stock is not None,
+        "production_lead_days": "production_lead_days" in request.model_fields_set,
+    }
+    result: list[ScopeProvenance] = []
+    for field, given in stated.items():
+        # An empty safety stock is a policy too: the sources' own.
+        if getattr(scope, field) is None and field != "safety_stock":
+            continue
+        if field in settled:
+            result.append(ScopeProvenance(field=field, source="evidence", evidence=settled[field]))
+        elif given:
+            result.append(
+                ScopeProvenance(field=field, source="buyer", evidence=list(matched.get(field, [])))
+            )
+        else:
+            result.append(ScopeProvenance(field=field, source="default"))
+    return result
 
 
 def _horizon_assumption(as_of: date, days: int, end: date) -> ScopeAssumption:

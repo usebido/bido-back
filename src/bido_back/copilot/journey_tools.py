@@ -954,11 +954,19 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             "call code finds the exact product code and plant, takes the reference date from "
             "the latest stock snapshot when none was given, and derives production/BOM demand "
             "netted against stock and timely deliveries. `scope` in the result is the resolved "
-            "scope; `scope_resolution` lists the assumptions to disclose and the questions "
-            "(with options) to ask when a boundary cannot be settled without guessing. Returns "
-            "source-reported quantities separately from validated calculations, with evidence "
-            "and specific issues. No BOM required for direct demand. Read-only: nothing "
-            "imported or sent.",
+            "scope; `scope_resolution` lists the assumptions to disclose, the questions "
+            "(with options) to ask when a boundary cannot be settled without guessing, and "
+            "where each value came from (buyer, evidence or default). Returns source-reported "
+            "quantities separately from validated calculations, with evidence and specific "
+            "issues. No BOM required for direct demand. Read-only: nothing imported or sent. "
+            'Examples of scope: "Motor MTR-100 na Planta A, da exportação até 14 dias depois, '
+            'sem estoque de segurança adicional" -> {"product": "Motor MTR-100", "location": '
+            '"Planta A", "horizon_days": 14, "safety_stock": 0}; "MTR-100 at Plant A from '
+            '2026-10-08 to 2026-10-22" -> {"product_code": "MTR-100", "location": "Plant A", '
+            '"as_of": "2026-10-08", "horizon_end": "2026-10-22"}; "tudo da área de Manutenção '
+            'até 20/10/2026, a montagem leva 2 dias" -> {"area": "Manutenção", "horizon_end": '
+            '"2026-10-20", "production_lead_days": 2}; "analisa o motor" -> {"product": '
+            '"motor"}.',
             AnalyzeSourcesIn,
             SourceAssessment,
             "read",

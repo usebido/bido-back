@@ -9449,7 +9449,9 @@
               "area",
               "location",
               "as_of",
-              "horizon_end"
+              "horizon_end",
+              "safety_stock",
+              "production_lead_days"
             ],
             "title": "Field",
             "type": "string"
@@ -9503,6 +9505,46 @@
         "title": "ScopeOption",
         "type": "object"
       },
+      "ScopeProvenance": {
+        "description": "Where one value of the resolved scope came from.",
+        "properties": {
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "field": {
+            "enum": [
+              "product_code",
+              "area",
+              "location",
+              "as_of",
+              "horizon_end",
+              "safety_stock",
+              "production_lead_days"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "buyer",
+              "evidence",
+              "default"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "source"
+        ],
+        "title": "ScopeProvenance",
+        "type": "object"
+      },
       "ScopeQuestion": {
         "description": "A boundary the evidence cannot settle without guessing: ask the buyer.",
         "properties": {
@@ -9516,7 +9558,9 @@
               "area",
               "location",
               "as_of",
-              "horizon_end"
+              "horizon_end",
+              "safety_stock",
+              "production_lead_days"
             ],
             "title": "Field",
             "type": "string"
@@ -9801,6 +9845,13 @@
               "$ref": "#/components/schemas/ScopeAssumption"
             },
             "title": "Assumptions",
+            "type": "array"
+          },
+          "provenance": {
+            "items": {
+              "$ref": "#/components/schemas/ScopeProvenance"
+            },
+            "title": "Provenance",
             "type": "array"
           },
           "questions": {
