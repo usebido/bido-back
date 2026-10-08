@@ -274,6 +274,7 @@ def _email_line(line: RfqLine) -> RfqEmailLine:
     return RfqEmailLine(
         position=line.position,
         description=line.description,
+        part_number=line.part_number,
         mpn=line.mpn,
         manufacturer=line.manufacturer,
         quantities=[Decimal(str(q)) for q in line.quantities],

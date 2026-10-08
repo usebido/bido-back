@@ -144,6 +144,7 @@ def _line_view(line: RfqLine) -> RfqLineView:
         id=line.id,
         position=line.position,
         description=line.description,
+        part_number=line.part_number,
         mpn=line.mpn,
         manufacturer=line.manufacturer,
         category=cast(LineCategory, line.category),
@@ -229,11 +230,25 @@ async def _next_ref(session: AsyncSession, tenant_id: UUID) -> str:
 
 
 async def create_rfq_from_text(
-    db: Db, principal: Principal, source_text: str, intake: IntakeAgent
+    db: Db,
+    principal: Principal,
+    source_text: str,
+    intake: IntakeAgent,
+    *,
+    buyer_messages: Sequence[str] = (),
 ) -> RfqCreated:
-    """Structure the buyer's text with the intake agent and store it as a draft RFQ."""
+    """Structure the buyer's text with the intake agent and store it as a draft RFQ.
+
+    From the Copilot, `source_text` is its summary of what to quote and
+    `buyer_messages` the buyer's own words, which win on codes and terms.
+    """
     context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
-    draft = await intake(RfqIntakeInput(text=source_text, base_currency=BASE_CURRENCY), context)
+    draft = await intake(
+        RfqIntakeInput(
+            text=source_text, base_currency=BASE_CURRENCY, buyer_messages=list(buyer_messages)
+        ),
+        context,
+    )
 
     async with tenant_session(db, principal.tenant_id) as session:
         rfq = Rfq(
@@ -255,6 +270,7 @@ async def create_rfq_from_text(
                     rfq_id=rfq.id,
                     position=position,
                     description=line.description,
+                    part_number=line.part_number,
                     mpn=line.mpn,
                     manufacturer=line.manufacturer,
                     category=line.category,
@@ -280,6 +296,7 @@ class NewRfqLine:
     description: str
     quantity: Decimal
     unit: str = "pcs"
+    part_number: str | None = None
     mpn: str | None = None
     manufacturer: str | None = None
     category: LineCategory = "catalog"
@@ -317,6 +334,7 @@ async def create_draft_rfq(
             rfq_id=rfq.id,
             position=position,
             description=line.description,
+            part_number=line.part_number,
             mpn=line.mpn,
             manufacturer=line.manufacturer,
             category=line.category,
@@ -478,6 +496,7 @@ def _render_line(line: RfqLine) -> RenderLine:
     return RenderLine(
         position=line.position,
         description=line.description,
+        part_number=line.part_number,
         mpn=line.mpn,
         manufacturer=line.manufacturer,
         quantities=quantities_from_json(line.quantities),
@@ -493,6 +512,7 @@ def _email_line(line: RfqLine) -> RfqEmailLine:
     return RfqEmailLine(
         position=line.position,
         description=line.description,
+        part_number=line.part_number,
         mpn=line.mpn,
         manufacturer=line.manufacturer,
         quantities=quantities_from_json(line.quantities),

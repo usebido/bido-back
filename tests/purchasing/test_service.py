@@ -202,10 +202,11 @@ async def test_rfq_from_analysis_drafts_lines_and_invites(
     rfq = created.rfq
     assert rfq.status == "draft"
     assert [
-        (line.description, line.quantities, line.unit, line.category) for line in rfq.lines
+        (line.part_number, line.description, line.quantities, line.unit, line.category)
+        for line in rfq.lines
     ] == [
-        ("Cuscinetto 6205 2RS", [Decimal(120)], "pz", "catalog"),
-        ("Filo di rame smaltato 1,2 mm", [Decimal("94.5")], "kg", "material"),
+        ("BRG-6205", "Cuscinetto 6205 2RS", [Decimal(120)], "pz", "catalog"),
+        ("CU-WIRE", "Filo di rame smaltato 1,2 mm", [Decimal("94.5")], "kg", "material"),
     ]
     assert [s.name for s in created.invited] == ["Cuscinetti Precisione S.r.l."]
     assert created.skipped == []

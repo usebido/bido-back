@@ -22,6 +22,13 @@ class RfqIntakeInput(BaseModel):
         description="Buyer's request: free text, a forwarded email, or a sheet as text"
     )
     base_currency: str = "EUR"
+    buyer_messages: list[str] = Field(
+        default_factory=list[str],
+        description=(
+            "When the request comes from a Copilot conversation: the buyer's own messages, "
+            "oldest first. `text` is then the Copilot's summary of what to quote."
+        ),
+    )
 
 
 # Pydantic's schema for Decimal carries a regex with lookarounds, which OpenAI's
@@ -31,7 +38,12 @@ ModelDecimal = Annotated[Decimal, WithJsonSchema({"type": "number"})]
 
 class RfqLineDraft(BaseModel):
     description: str
-    mpn: str | None = None
+    part_number: str | None = Field(
+        default=None, description="The buyer's own code for the part, copied verbatim"
+    )
+    mpn: str | None = Field(
+        default=None, description="A manufacturer part number the buyer wrote as such"
+    )
     manufacturer: str | None = None
     category: LineCategory = "catalog"
     quantities: list[ModelDecimal] = Field(min_length=1, description="Requested quantity tiers")
@@ -57,6 +69,8 @@ class RfqIntakeOutput(BaseModel):
 class RfqEmailLine(BaseModel):
     position: int
     description: str
+    # The buyer's code: the line's main reference for the supplier.
+    part_number: str | None = None
     mpn: str | None = None
     manufacturer: str | None = None
     quantities: list[Decimal]

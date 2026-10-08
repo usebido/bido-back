@@ -68,6 +68,9 @@ from bido_back.storage import BlobStorage
 logger = logging.getLogger(__name__)
 
 MAX_ATTACHMENT_CHARS: Final = 40_000
+# The buyer's own messages handed to the intake agent by create_rfq.
+MAX_BUYER_MESSAGES: Final = 20
+MAX_BUYER_MESSAGES_CHARS: Final = 16_000
 TITLE_CHARS: Final = 80
 LIST_LIMIT_MAX: Final = 100
 
@@ -133,7 +136,41 @@ def _attachments_text(documents: Sequence[DocumentText]) -> str:
 async def earlier_attachment_ids(
     deps: CopilotDeps, principal: Principal, conversation_id: UUID
 ) -> tuple[UUID, ...]:
-    """Upload ids attached in the caller's earlier turns of a conversation, oldest first.
+    """Upload ids attached in the caller's earlier turns of a conversation, oldest first."""
+    ids: list[UUID] = []
+    for stored in await _earlier_inputs(deps, principal, conversation_id):
+        ids.extend(stored.attachment_ids)
+    return tuple(dict.fromkeys(ids))
+
+
+async def buyer_messages(
+    deps: CopilotDeps, principal: Principal, conversation_id: UUID, current: str
+) -> list[str]:
+    """What the buyer wrote in this conversation, oldest first, ending with `current`.
+
+    For create_rfq: the intake agent takes part numbers and terms from the
+    buyer's own words, not from the Copilot's summary of them. The standing
+    instruction sent for files alone is not the buyer's words and is left out.
+    Bounded to the latest messages that fit `MAX_BUYER_MESSAGES_CHARS`.
+    """
+    earlier = [s.message for s in await _earlier_inputs(deps, principal, conversation_id)]
+    messages = [m for m in [*earlier, current] if m.strip() and m != ATTACHMENTS_ONLY_MESSAGE][
+        -MAX_BUYER_MESSAGES:
+    ]
+    kept: list[str] = []
+    total = 0
+    for message in reversed(messages):
+        total += len(message)
+        if total > MAX_BUYER_MESSAGES_CHARS and kept:
+            break
+        kept.append(message[:MAX_BUYER_MESSAGES_CHARS])
+    return list(reversed(kept))
+
+
+async def _earlier_inputs(
+    deps: CopilotDeps, principal: Principal, conversation_id: UUID
+) -> list[CopilotInput]:
+    """The inputs of the caller's earlier turns of a conversation, oldest first.
 
     Read from the conversation's stored runs, which are scoped to the caller's
     tenant and user (`load_session_runs`); the request never names them.
@@ -145,15 +182,15 @@ async def earlier_attachment_ids(
     runs = await load_session_runs(
         context, session_key(principal, conversation_id), deps.runner_config
     )
-    ids: list[UUID] = []
+    inputs: list[CopilotInput] = []
     for stored in runs or []:
         if not stored.input:
             continue
         try:
-            ids.extend(CopilotInput.model_validate_json(stored.input).attachment_ids)
+            inputs.append(CopilotInput.model_validate_json(stored.input))
         except ValidationError:
             continue
-    return tuple(dict.fromkeys(ids))
+    return inputs
 
 
 async def _attachments(
@@ -203,6 +240,11 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
             return ""
         return _attachments_text(documents)
 
+    async def own_words() -> list[str]:
+        return await buyer_messages(
+            deps, principal, prepared.conversation_id, prepared.input.message
+        )
+
     tools = copilot_tools(
         CopilotToolDeps(
             db=deps.db,
@@ -212,6 +254,7 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
             attachment_ids=tuple(prepared.input.attachment_ids),
             earlier_attachment_ids=earlier_ids,
             earlier_attachments_text=earlier_text if earlier_ids else None,
+            buyer_messages=own_words,
             storage=deps.storage,
             sheet_mapper=deps.sheet_mapper or default_sheet_mapper(deps.runner_config),
         )
