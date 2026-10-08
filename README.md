@@ -215,8 +215,26 @@ names become supplier contacts.
   engines passed to `instrument_engine` are traced; `/health` is not.
 - **Errors:** Sentry when `SENTRY_DSN` is set, for errors only (no Sentry
   tracing).
-- Both are off when unset, so local runs and tests export nothing.
-- **IDs, never content.** Logs, spans and Sentry events carry `tenant_id`,
+- **Tokens and cost:** every `agent run` line has the run's own
+  `model_calls`, `input_tokens`, `cached_input_tokens`, `output_tokens`,
+  `reasoning_tokens` and `cost_usd` (runs its tools started log theirs);
+  `copilot turn finished` has the turn's totals, nested runs included. `cost_usd` is an estimate from the list
+  prices in `bido_back/agents/usage.py` (`None`, with `unpriced_calls`, for a
+  model missing there).
+- **LLM traces (Langfuse, dev only):** with `LANGFUSE_HOST`,
+  `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` set, each Copilot turn or
+  top-level agent run is one trace: the run, each model request (model, tokens,
+  cost, time to first token) and each tool call, with runs started by a tool
+  nested under it. A trace's session is the Copilot conversation id; it also
+  carries the user id, tenant, `request_id` (the buyer's "Referência"), job,
+  environment and release. Prompts, outputs and tool arguments/results are
+  added only with `LANGFUSE_CAPTURE_CONTENT=true`, which is refused when
+  `ENVIRONMENT=prd`; without it a trace has names, timings, tokens, costs and
+  statuses only. These spans have their own exporter and never mix with the
+  request traces above (`bido_back/agents/tracing.py`).
+- All of these are off when unset, so local runs and tests export nothing.
+- **IDs, never content** (except the opt-in Langfuse content above, in dev,
+  with synthetic data). Logs, spans and Sentry events carry `tenant_id`,
   `run_id`, the job type, the model and token counts. They never carry prompts,
   model output, documents, emails, request bodies, query strings, cookies, or
   auth headers. Sentry runs with `send_default_pii=False`, no request bodies, no
@@ -407,6 +425,35 @@ fields @timestamp, job, tenant_id, outcome, attempt, duration_ms
 | filter msg = "job" and (outcome != "handled" or attempt > 1)
 | sort @timestamp desc
 ```
+
+Model spend per day, per agent and model (`cost_usd` is an estimate; each
+`agent run` line counts that run's own requests, so the sum is the total):
+
+```text
+filter msg = "agent run"
+| stats sum(cost_usd) as usd, sum(input_tokens) as input, sum(output_tokens) as output,
+        count(*) as runs by bin(1d) as day, agent, model
+| sort day desc, usd desc
+```
+
+Spend per tenant and day (all agents), and the Copilot's share (turn totals
+include the runs its tools started):
+
+```text
+filter msg = "agent run"
+| stats sum(cost_usd) as usd, count(*) as runs by bin(1d) as day, tenant_id
+| sort day desc, usd desc
+```
+
+```text
+filter msg = "copilot turn finished"
+| stats sum(cost_usd) as usd, sum(input_tokens) as input, sum(output_tokens) as output,
+        count(*) as turns by bin(1d) as day, tenant_id
+| sort day desc, usd desc
+```
+
+In Langfuse (dev), find a turn by its conversation (Sessions) or filter traces
+by the metadata `request_id` the buyer quotes.
 
 Slow or failing endpoints:
 

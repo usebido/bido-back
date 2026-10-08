@@ -107,6 +107,14 @@ class Settings(BaseSettings):
     # The commit the image was built from (set by the deploy); tags logs and
     # Sentry events with the release.
     git_sha: str | None = None
+    # LLM traces to Langfuse (bido_back/agents/tracing.py), on only when all
+    # three are set. Content (prompts, outputs, tool arguments and results) is
+    # added only with LANGFUSE_CAPTURE_CONTENT=true, and never when
+    # ENVIRONMENT=prd.
+    langfuse_public_key: str | None = None
+    langfuse_secret_key: str | None = Field(default=None, repr=False)
+    langfuse_host: str | None = None
+    langfuse_capture_content: bool = False
 
     @field_validator("log_level", mode="before")
     @classmethod

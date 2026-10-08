@@ -54,6 +54,7 @@ from agno.db.postgres import AsyncPostgresDb, create_async_postgres_engine
 from agno.exceptions import redact_secrets
 from agno.models.openai.responses import OpenAIResponses
 from agno.run.agent import (
+    ModelRequestCompletedEvent,
     ModelRequestStartedEvent,
     RunCancelledEvent,
     RunCompletedEvent,
@@ -73,6 +74,7 @@ from agno.tools.function import Function, FunctionCall
 from pydantic import BaseModel, JsonValue, ValidationError
 from sqlalchemy.engine import URL, make_url
 
+from bido_back.agents import tracing
 from bido_back.agents.approvals import ApprovalProposal, ApprovalSink
 from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
@@ -91,6 +93,7 @@ from bido_back.agents.events import (
     args_hash,
 )
 from bido_back.agents.tools import AnyTool, ToolError
+from bido_back.agents.usage import ModelUsage, UsageMeter
 from bido_back.logs import safe_reason
 
 logger = logging.getLogger(__name__)
@@ -269,6 +272,8 @@ class _RunState:
     outcomes: dict[str, _Outcome] = field(default_factory=dict[str, _Outcome])
     # Handlers of one run execute one at a time.
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    # Where usage and traces go (the runner's; a fresh meter when called directly).
+    scope: tracing.RunScope = field(default_factory=lambda: tracing.RunScope(UsageMeter()))
 
 
 def _to_function(tool: AnyTool, context: ToolContext, state: _RunState) -> Function:
@@ -303,42 +308,52 @@ def _entrypoint(
 
         async with state.lock:
             started = time.perf_counter()
-            try:
-                output = await tool.invoke(context, parsed)
-            except ToolError as exc:
-                message = str(exc) or "tool error"
-                cause = exc.__cause__ or exc.__context__
-                _log_tool_call(
-                    tool,
-                    context,
-                    call_id,
-                    "error",
-                    started,
-                    reason=message,
-                    error_class=type(cause).__name__ if cause is not None else "ToolError",
-                )
-            except Exception as exc:
-                logger.exception(
-                    "tool %s failed in run %s",
-                    tool.name,
-                    context.run_id,
-                    extra={"tool": tool.name, "run_id": str(context.run_id)},
-                )
-                message = _INTERNAL_ERROR
-                _log_tool_call(
-                    tool,
-                    context,
-                    call_id,
-                    "internal_error",
-                    started,
-                    error_class=type(exc).__name__,
-                )
-            else:
-                _log_tool_call(tool, context, call_id, "ok", started)
-                state.outcomes[call_id] = _Outcome(
-                    status="ok", output=output.model_dump(mode="json")
-                )
-                return output.model_dump_json()
+            with tracing.tool_call(
+                state.scope,
+                tool=tool.name,
+                kind=tool.kind,
+                call_id=call_id,
+                args=parsed.model_dump(mode="json"),
+            ) as traced:
+                try:
+                    output = await tool.invoke(context, parsed)
+                except ToolError as exc:
+                    message = str(exc) or "tool error"
+                    cause = exc.__cause__ or exc.__context__
+                    error_class = type(cause).__name__ if cause is not None else "ToolError"
+                    _log_tool_call(
+                        tool,
+                        context,
+                        call_id,
+                        "error",
+                        started,
+                        reason=message,
+                        error_class=error_class,
+                    )
+                    traced.finished("error", error=message, error_class=error_class)
+                except Exception as exc:
+                    logger.exception(
+                        "tool %s failed in run %s",
+                        tool.name,
+                        context.run_id,
+                        extra={"tool": tool.name, "run_id": str(context.run_id)},
+                    )
+                    message = _INTERNAL_ERROR
+                    _log_tool_call(
+                        tool,
+                        context,
+                        call_id,
+                        "internal_error",
+                        started,
+                        error_class=type(exc).__name__,
+                    )
+                    traced.finished("internal_error", error=message, error_class=type(exc).__name__)
+                else:
+                    _log_tool_call(tool, context, call_id, "ok", started)
+                    dumped = output.model_dump(mode="json")
+                    traced.finished("ok", output=dumped)
+                    state.outcomes[call_id] = _Outcome(status="ok", output=dumped)
+                    return output.model_dump_json()
 
         state.outcomes[call_id] = _Outcome(status="error", error=message)
         return f"error: {message}"
@@ -462,6 +477,8 @@ class _Translator:
         self._definition = definition
         self._state = state
         self._emit = emit
+        # Each model request's usage (always) and span (when LLM tracing is on).
+        self._generations = tracing.GenerationRecorder(state.scope)
         self._turns = 0
         self._announced: set[str] = set()
         # Free text written to the user so far (stream_text agents), and whether
@@ -493,6 +510,7 @@ class _Translator:
                 if isinstance(item, RunOutput):
                     self.output = item
                     continue
+                self._record(item)
                 for event in self._translate(item):
                     yield event
                 if self.failure is not None:
@@ -500,10 +518,38 @@ class _Translator:
             for event in self._close_step():
                 yield event
         finally:
+            self._generations.close()
             # Leaving early (turn limit) must stop Agno before its next request.
             aclose = getattr(stream, "aclose", None)
             if aclose is not None:
                 await aclose()
+
+    def _record(self, item: RunOutputEvent) -> None:
+        generations = self._generations
+        if isinstance(item, ModelRequestStartedEvent):
+            generations.started(item.model or self._definition.model)
+        elif isinstance(item, ModelRequestCompletedEvent):
+            generations.completed(
+                item.model or self._definition.model,
+                ModelUsage(
+                    input_tokens=item.input_tokens or 0,
+                    cached_input_tokens=item.cache_read_tokens or 0,
+                    output_tokens=item.output_tokens or 0,
+                    reasoning_tokens=item.reasoning_tokens or 0,
+                ),
+                time_to_first_token_s=item.time_to_first_token,
+            )
+        elif isinstance(item, RunContentEvent):
+            generations.content(text=_as_text(item.content), reasoning=item.reasoning_content)
+        elif isinstance(item, RunCompletedEvent):
+            # With structured output the answer only arrives here, already parsed.
+            generations.final_answer(_as_text(item.content))
+        elif isinstance(item, ToolCallStartedEvent) and item.tool is not None:
+            generations.tool_call(item.tool.tool_name or "", item.tool.tool_args or {})
+        elif isinstance(item, RunPausedEvent):
+            # The act calls the model proposed: they pause the run instead of starting.
+            for execution in item.tools or []:
+                generations.tool_call(execution.tool_name or "", execution.tool_args or {})
 
     def _translate(self, item: RunOutputEvent) -> list[Event]:
         emit = self._emit
@@ -647,6 +693,14 @@ class _Translator:
         return events
 
 
+def _as_text(content: object) -> str | None:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, BaseModel):
+        return content.model_dump_json()
+    return None
+
+
 def _failure_from_error(item: RunErrorEvent) -> tuple[str, str]:
     error_type = item.error_type or "error"
     logger.warning("agno run %s failed: %s", item.run_id, error_type)
@@ -664,11 +718,19 @@ async def stream_run(
     session: str | None,
     approvals: ApprovalSink,
     config: RunnerConfig,
+    scope: tracing.RunScope | None = None,
 ) -> AsyncIterator[Event]:
-    """Run `definition` on Agno, yielding our events; always ends with one terminal event."""
+    """Run `definition` on Agno, yielding our events; always ends with one terminal event.
+
+    `scope` receives the run's model usage and parents its trace spans (the
+    runner's; a fresh one when omitted).
+    """
     emit = _Emitter(context)
+    state = _RunState(scope=scope) if scope is not None else _RunState()
     try:
-        async for event in _drive(definition, input, context, session, approvals, config, emit):
+        async for event in _drive(
+            definition, input, context, session, approvals, config, emit, state
+        ):
             yield event
     except Exception:
         logger.exception("agent %s run %s: internal error", definition.name, context.run_id)
@@ -683,9 +745,9 @@ async def _drive(
     approvals: ApprovalSink,
     config: RunnerConfig,
     emit: _Emitter,
+    state: _RunState,
 ) -> AsyncIterator[Event]:
     ids = agno_ids(context, session)
-    state = _RunState()
     agent = build_agent(definition, context, ids, config, state)
     translator = _Translator(definition, state, emit)
 
