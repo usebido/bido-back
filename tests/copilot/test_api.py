@@ -75,7 +75,6 @@ class Api:
     principal: Principal
     storage: FakeStorage
     runner_config: RunnerConfig = CONFIG
-    storage: FakeStorage | None = None
 
 
 @pytest_asyncio.fixture

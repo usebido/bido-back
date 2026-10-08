@@ -50,7 +50,6 @@ async def test_a_text_only_confirmation_imports_the_file_of_an_earlier_turn(
         openai_api_key="test-not-a-real-key",
         agno_database_url=agno_engine.url.render_as_string(hide_password=False),
     )
-    assert api.storage is not None
     upload = await onboarding.store_upload(
         app_engine,
         api.storage,
@@ -100,7 +99,6 @@ async def test_another_user_cannot_reach_the_files_of_a_conversation(
         openai_api_key="test-not-a-real-key",
         agno_database_url=agno_engine.url.render_as_string(hide_password=False),
     )
-    assert api.storage is not None
     upload = await onboarding.store_upload(
         app_engine,
         api.storage,
