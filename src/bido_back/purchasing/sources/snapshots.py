@@ -13,7 +13,7 @@ from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import ProcurementAssessment, Rfq
 from bido_back.purchasing.service import Conflict, InvalidRequest, NotFound
-from bido_back.purchasing.sources.contracts import SourceAssessment
+from bido_back.purchasing.sources.contracts import PlanningScope, SourceAssessment
 from bido_back.rfqs.schemas import CurrencyCode
 from bido_back.rfqs.service import NewRfqLine, create_draft_rfq, preliminary_title
 
@@ -25,6 +25,7 @@ class AssessmentRequest(BaseModel):
 
     upload_ids: list[UUID] = Field(min_length=1, max_length=10)
     objective: str = Field(min_length=1, max_length=2000)
+    scope: PlanningScope | None = None
 
 
 class AssessmentRfqRequest(BaseModel):

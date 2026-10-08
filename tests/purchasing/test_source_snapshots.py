@@ -24,6 +24,7 @@ from bido_back.purchasing.sources.snapshots import (
     list_snapshots,
     save_snapshot,
 )
+from evals.source_fixtures import SCOPE
 from tests.approvals.conftest import People
 from tests.copilot.test_source_tools import SourceMapper, TrackingStorage
 from tests.purchasing.test_workbook import XLSX, workbook
@@ -83,6 +84,54 @@ async def _assess(
         mapper,
         persist=True,
     )
+
+
+async def test_scope_is_persisted_and_part_of_the_snapshot_identity(
+    app_engine: AsyncEngine,
+    purchasing_rows: People,
+) -> None:
+    who = buyer(purchasing_rows)
+    storage, mapper = TrackingStorage(), SourceMapper()
+    upload_id = await upload_source(app_engine, who, storage)
+    context = ToolContext(tenant_id=who.tenant_id, user_id=who.user_id, run_id=uuid4())
+    first = await analyze_uploads(
+        app_engine,
+        storage,
+        who,
+        [upload_id],
+        "Plan",
+        context,
+        mapper,
+        persist=True,
+        scope=SCOPE,
+    )
+    repeated = await analyze_uploads(
+        app_engine,
+        storage,
+        who,
+        [upload_id],
+        "Plan",
+        context,
+        mapper,
+        persist=True,
+        scope=SCOPE,
+    )
+    changed = await analyze_uploads(
+        app_engine,
+        storage,
+        who,
+        [upload_id],
+        "Plan",
+        context,
+        mapper,
+        persist=True,
+        scope=SCOPE.model_copy(update={"safety_stock": Decimal(10)}),
+    )
+    assert first.scope == repeated.scope == SCOPE
+    assert first.assessment_id == repeated.assessment_id != changed.assessment_id
+    assert changed.scope is not None and changed.scope.safety_stock == 10
+    assert first.assessment_id is not None
+    assert (await get_snapshot(app_engine, who, first.assessment_id)).scope == SCOPE
 
 
 def _draft_request() -> AssessmentRfqRequest:

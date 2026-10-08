@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 RecordKind = Literal[
     "inventory",
@@ -14,6 +14,12 @@ RecordKind = Literal[
     "purchase",
     "supplier_performance",
     "purchase_summary",
+    "item",
+    "bom",
+    "production_plan",
+    "receipt",
+    "delivery_schedule",
+    "supplier_item",
 ]
 
 
@@ -39,6 +45,51 @@ class Record(BaseModel):
     evidence: dict[str, SourceRef]
 
 
+class PlanningScope(BaseModel):
+    """Buyer-supplied planning boundaries, kept separate from extracted evidence."""
+
+    product_code: str | None = Field(default=None, min_length=1, max_length=200)
+    area: str | None = Field(default=None, min_length=1, max_length=200)
+    location: str = Field(min_length=1, max_length=200)
+    as_of: date
+    horizon_end: date
+    safety_stock: Decimal | None = Field(default=None, ge=0, lt=10**12)
+    production_lead_days: int = Field(default=0, ge=0, le=365)
+
+    @model_validator(mode="after")
+    def valid_scope(self) -> "PlanningScope":
+        if self.product_code is None and self.area is None:
+            raise ValueError("A product code or area is required for scoped planning")
+        if self.horizon_end < self.as_of:
+            raise ValueError("The planning horizon must end on or after the snapshot date")
+        return self
+
+
+class DemandContribution(BaseModel):
+    reference: str
+    product_code: str | None = None
+    quantity: Decimal
+    need_by: date
+    evidence: list[SourceRef]
+
+
+class InboundEvidence(BaseModel):
+    po_number: str
+    po_line: str
+    quantity: Decimal
+    expected_at: date | None = None
+    eligible: bool = False
+    evidence: list[SourceRef]
+
+
+class NettingStep(BaseModel):
+    need_by: date
+    demand: Decimal
+    incoming: Decimal
+    purchase_quantity: Decimal
+    projected_balance: Decimal
+
+
 class SupplierEvidence(BaseModel):
     supplier_code: str | None = None
     name: str | None = None
@@ -49,6 +100,8 @@ class SupplierEvidence(BaseModel):
     otif_pct: Decimal | None = None
     quality_pct: Decimal | None = None
     lead_time_days: Decimal | None = None
+    last_price_basis: Literal["purchase_order", "received_order"] = "purchase_order"
+    qualification_status: str | None = None
     evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
 
 
@@ -73,6 +126,9 @@ class AssessmentLine(BaseModel):
     suppliers: list[SupplierEvidence] = Field(default_factory=list[SupplierEvidence])
     evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
     issues: list[Issue] = Field(default_factory=list[Issue])
+    demand_contributions: list[DemandContribution] = Field(default_factory=list[DemandContribution])
+    inbound: list[InboundEvidence] = Field(default_factory=list[InboundEvidence])
+    netting: list[NettingStep] = Field(default_factory=list[NettingStep])
 
 
 class Assessment(BaseModel):
@@ -98,7 +154,19 @@ class Coverage(BaseModel):
     inspected: bool = False
 
 
+class PlanningCandidate(BaseModel):
+    product_code: str
+    description: str | None = None
+    location: str | None = None
+    area: str | None = None
+    need_dates: list[date] = Field(default_factory=list[date])
+    evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
+
+
 class SourceAssessment(Assessment):
+    scope: PlanningScope | None = None
+    planning_candidates: list[PlanningCandidate] = Field(default_factory=list[PlanningCandidate])
+    snapshot_dates: list[date] = Field(default_factory=list[date])
     coverage: list[Coverage] = Field(default_factory=list[Coverage])
     status: Literal["assessed", "needs_review"] = "needs_review"
     persisted: bool = False
@@ -150,6 +218,7 @@ class TableManifest(BaseModel):
     rows: int
     columns: int
     sample: list[list[str | None]]
+    sample_rows: list[int] = Field(default_factory=list[int])
 
 
 class MappingTask(BaseModel):

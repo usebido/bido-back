@@ -59,6 +59,7 @@ def procurement_assessments_router() -> APIRouter:
                 ),
                 mapper,
                 persist=True,
+                scope=request.scope,
             )
         except SourceAccessError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
