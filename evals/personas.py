@@ -372,6 +372,8 @@ def reply_for(
                     # The cell holds a number: its text is the shortest form ("1.4").
                     unit_price=cell("E", f"{float(price):g}"),
                     unit=cell("D", "Stk."),
+                    # Live models read a per-unit price as basis 1, citing the price cell.
+                    price_basis_quantity=cell("E", "1"),
                     tooling_cost=_NONE,
                     moq=_NONE,
                     lead_time_days=cell("F", str(quote.lead)),
@@ -390,6 +392,8 @@ def reply_for(
                 min_quantity=_ev(str(int(item.quantity)), f"{qty_text} {_UNIT[lang]}", at),
                 unit_price=_ev(format(price, "f"), f"{price_text} EUR", at),
                 unit=_ev(_UNIT[lang], _UNIT[lang], at),
+                # Live models read "per unit" as a basis of 1, though "1" is not written.
+                price_basis_quantity=_ev("1", f"{price_text} EUR", at),
                 tooling_cost=_NONE,
                 moq=_NONE,
                 lead_time_days=_NONE
