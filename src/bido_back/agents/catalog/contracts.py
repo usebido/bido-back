@@ -21,7 +21,8 @@ class RfqIntakeInput(BaseModel):
     text: str = Field(
         description="Buyer's request: free text, a forwarded email, or a sheet as text"
     )
-    base_currency: str = "EUR"
+    # The RFQ's currency, resolved by the caller (`bido_back.rfqs.currency`); no default.
+    base_currency: str | None = None
     buyer_messages: list[str] = Field(
         default_factory=list[str],
         description=(

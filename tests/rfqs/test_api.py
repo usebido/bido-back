@@ -60,7 +60,7 @@ async def test_routes_require_authentication() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
         responses = [
             await http.get("/v1/rfqs"),
-            await http.post("/v1/rfqs", json={"text": "x"}),
+            await http.post("/v1/rfqs", json={"text": "x", "currency": "EUR"}),
             await http.get("/v1/suppliers"),
             await http.get("/v1/approvals"),
             await http.get(f"/v1/rfqs/{uuid4()}/comparison"),
@@ -113,7 +113,9 @@ async def api(app_engine: AsyncEngine, rfq_rows: People) -> AsyncIterator[Api]:
 async def test_rfq_flow_over_http(api: Api, rfq_rows: People) -> None:
     http = api.http
 
-    created = await http.post("/v1/rfqs", json={"text": "Need MLCC and connectors"})
+    created = await http.post(
+        "/v1/rfqs", json={"text": "Need MLCC and connectors", "currency": "EUR"}
+    )
     assert created.status_code == 201, created.text
     rfq = created.json()
     assert rfq["ref"] == "RFQ-1" and rfq["status"] == "draft"
@@ -213,10 +215,31 @@ async def test_rfq_flow_over_http(api: Api, rfq_rows: People) -> None:
 
 @pytest.mark.db
 async def test_send_without_a_connected_mailbox_is_409(api: Api, rfq_rows: People) -> None:
-    rfq = (await api.http.post("/v1/rfqs", json={"text": "Need parts"})).json()
+    rfq = (await api.http.post("/v1/rfqs", json={"text": "Need parts", "currency": "EUR"})).json()
     api.mailboxes.disconnected.add(rfq_rows.owner)
 
     response = await api.http.post(f"/v1/rfqs/{rfq['id']}/send")
 
     assert response.status_code == 409
     assert "mailbox" in response.json()["detail"]
+
+
+@pytest.mark.db
+async def test_create_needs_a_currency_it_can_tell(api: Api, rfq_rows: People) -> None:
+    http = api.http
+
+    # No purchase history and no currency in the request: refused, nothing created.
+    unknown = await http.post("/v1/rfqs", json={"text": "Need parts"})
+    assert unknown.status_code == 400, unknown.text
+    assert "ask the buyer which currency this RFQ is in" in unknown.json()["detail"]
+    assert (await http.get("/v1/rfqs")).json() == []
+
+    invalid = await http.post("/v1/rfqs", json={"text": "Need parts", "currency": "XYZ"})
+    assert invalid.status_code == 422
+
+    created = await http.post("/v1/rfqs", json={"text": "Need parts", "currency": "brl"})
+    assert created.status_code == 201, created.text
+    assert (created.json()["base_currency"], created.json()["currency_source"]) == (
+        "BRL",
+        "stated",
+    )

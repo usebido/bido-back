@@ -78,7 +78,11 @@ async def make_supplier(engine: AsyncEngine, principal: Principal, name: str) ->
 
 async def make_rfq(engine: AsyncEngine, principal: Principal) -> RfqCreated:
     return await service.create_rfq_from_text(
-        engine, principal, "Need 4k and 10k MLCC 100nF, 500 connectors", FakeIntake()
+        engine,
+        principal,
+        "Need 4k and 10k MLCC 100nF, 500 connectors",
+        FakeIntake(),
+        currency="EUR",
     )
 
 
@@ -86,7 +90,9 @@ async def test_create_rfq_persists_lines_and_returns_questions(
     app_engine: AsyncEngine, rfq_rows: People
 ) -> None:
     intake = FakeIntake()
-    first = await service.create_rfq_from_text(app_engine, buyer(rfq_rows), "some text", intake)
+    first = await service.create_rfq_from_text(
+        app_engine, buyer(rfq_rows), "some text", intake, currency="EUR"
+    )
     second = await make_rfq(app_engine, buyer(rfq_rows))
 
     assert (first.ref, second.ref) == ("RFQ-1", "RFQ-2")

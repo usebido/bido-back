@@ -2042,6 +2042,22 @@
       "CreateRfqRequest": {
         "additionalProperties": false,
         "properties": {
+          "currency": {
+            "anyOf": [
+              {
+                "description": "ISO 4217 code: EUR or a currency with an ECB reference rate (BRL, USD...)",
+                "examples": [
+                  "BRL"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The RFQ's currency, when the buyer said it. Without it the currency comes from the purchase history; when that does not tell, the request is refused (400) and the buyer has to say which currency",
+            "title": "Currency"
+          },
           "text": {
             "description": "The buyer's request",
             "maxLength": 50000,
@@ -5996,6 +6012,23 @@
             "title": "Created At",
             "type": "string"
           },
+          "currency_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "stated",
+                  "analysis",
+                  "purchase_history"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where base_currency came from",
+            "title": "Currency Source"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -6331,6 +6364,23 @@
             "title": "Analysis Id",
             "type": "string"
           },
+          "currency_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "stated",
+                  "analysis",
+                  "purchase_history"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the RFQ's base_currency came from",
+            "title": "Currency Source"
+          },
           "invited": {
             "items": {
               "$ref": "#/components/schemas/InvitedSupplier"
@@ -6369,6 +6419,22 @@
       "RfqFromAnalysisRequest": {
         "additionalProperties": false,
         "properties": {
+          "currency": {
+            "anyOf": [
+              {
+                "description": "ISO 4217 code: EUR or a currency with an ECB reference rate (BRL, USD...)",
+                "examples": [
+                  "BRL"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The RFQ's currency, when the buyer said it. Without it: the analysis's currency when its lines to buy were all bought in one, else the purchase history's; when neither tells, the request is refused (422) and the buyer has to say",
+            "title": "Currency"
+          },
           "max_suppliers_per_line": {
             "default": 3,
             "maximum": 3.0,

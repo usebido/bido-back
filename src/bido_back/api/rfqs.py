@@ -24,12 +24,14 @@ from bido_back.rfqs import overview, service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.errors import (
     AgentFailed,
+    CurrencyRequired,
     Duplicate,
     InvalidState,
     MailboxNotConfigured,
     MailboxNotConnected,
     NotFound,
     RfqError,
+    UnknownCurrency,
 )
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.schemas import (
@@ -76,6 +78,8 @@ def rfq_http_error(exc: RfqError) -> HTTPException:
             status.HTTP_409_CONFLICT,
             "sending from a mailbox is not set up on this server yet",
         )
+    if isinstance(exc, CurrencyRequired | UnknownCurrency):
+        return HTTPException(status.HTTP_400_BAD_REQUEST, str(exc))
     if isinstance(exc, Duplicate | InvalidState):
         return HTTPException(status.HTTP_409_CONFLICT, str(exc))
     if isinstance(exc, AgentFailed):
@@ -98,7 +102,9 @@ def rfqs_router() -> APIRouter:
         agents: Annotated[RfqAgents, Depends(get_rfq_agents)],
     ) -> RfqCreated:
         try:
-            return await service.create_rfq_from_text(db, principal, body.text, agents.intake)
+            return await service.create_rfq_from_text(
+                db, principal, body.text, agents.intake, currency=body.currency
+            )
         except RfqError as exc:
             raise rfq_http_error(exc) from None
 
