@@ -3882,6 +3882,22 @@
         "title": "MailboxConnectionResponse",
         "type": "object"
       },
+      "MailboxProvidersResponse": {
+        "properties": {
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderAvailability"
+            },
+            "title": "Providers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "providers"
+        ],
+        "title": "MailboxProvidersResponse",
+        "type": "object"
+      },
       "MailboxStatusResponse": {
         "properties": {
           "connections": {
@@ -5297,6 +5313,28 @@
           "deadline"
         ],
         "title": "ProposedMandate",
+        "type": "object"
+      },
+      "ProviderAvailability": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "provider": {
+            "enum": [
+              "google",
+              "microsoft"
+            ],
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "available"
+        ],
+        "title": "ProviderAvailability",
         "type": "object"
       },
       "PurchaseOrderSummary": {
@@ -10271,6 +10309,73 @@
           }
         ],
         "summary": "Connect",
+        "tags": [
+          "mailbox"
+        ]
+      }
+    },
+    "/v1/mailbox/providers": {
+      "get": {
+        "description": "Which mailbox providers this server is configured for (no secrets, no details).",
+        "operationId": "mailbox_providers_v1_mailbox_providers_get",
+        "parameters": [
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MailboxProvidersResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Mailbox Providers",
         "tags": [
           "mailbox"
         ]
