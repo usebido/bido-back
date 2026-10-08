@@ -60,9 +60,11 @@ from bido_back.db.models import (
     Tenant,
     User,
 )
+from bido_back.email.recipients import MxResolver, default_resolver
 from bido_back.followups.send import SEND_FOLLOWUP_EMAIL, SendFollowupEmailArgs
 from bido_back.negotiation.send import SEND_NEGOTIATION_EMAIL, SendNegotiationEmailArgs
 from bido_back.onboarding.standard import TemplateContent
+from bido_back.outbound.domains import RecipientCheck, check_recipients, recipients_in_args
 from bido_back.rfqs.agents import EmailWriterAgent, IntakeAgent
 from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound
 from bido_back.rfqs.mailbox import MailboxSenderFactory
@@ -72,6 +74,9 @@ from bido_back.rfqs.schemas import (
     EmailKind,
     InviteStatus,
     InviteView,
+    MandateApprovalView,
+    MandateLineView,
+    MandateSupplierView,
     NegotiationEmailDraft,
     PreparedInvite,
     PrepareSendResponse,
@@ -699,9 +704,16 @@ async def prepare_send(
 
 
 async def list_approvals(
-    db: Db, principal: Principal, status: ApprovalStatus
+    db: Db,
+    principal: Principal,
+    status: ApprovalStatus,
+    *,
+    resolver: MxResolver | None = None,
 ) -> list[ApprovalQueueItem]:
-    """Approvals in the caller's tenant by status, with the RFQ email draft to review."""
+    """Approvals in the caller's tenant by status, with the RFQ email draft to review.
+
+    Pending acts that send email carry `recipient_checks` (DNS through `resolver`,
+    the process's cached resolver by default)."""
     async with tenant_session(db, principal.tenant_id) as session:
         approvals = list(
             await session.scalars(
@@ -742,6 +754,18 @@ async def list_approvals(
         from bido_back.awards.service import queue_details
 
         details = await queue_details(session, approvals)
+
+        mandate_views = await _mandate_views(session, approvals)
+
+        checks: dict[UUID, list[RecipientCheck]] = {}
+        if status == "pending":
+            mx = resolver or default_resolver()
+            for approval in approvals:
+                addresses = recipients_in_args(approval.args)
+                if addresses:
+                    checks[approval.id] = await check_recipients(
+                        session, principal.tenant_id, addresses, mx
+                    )
 
     items: list[ApprovalQueueItem] = []
     for approval in approvals:
@@ -792,6 +816,61 @@ async def list_approvals(
                 negotiation_email=negotiation,
                 award=details.awards.get(approval.id),
                 thread_email=details.emails.get(approval.id),
+                recipient_checks=checks.get(approval.id),
+                mandate=mandate_views.get(approval.id),
             )
         )
     return items
+
+
+async def _mandate_views(
+    session: AsyncSession, approvals: Sequence[Approval]
+) -> dict[UUID, MandateApprovalView]:
+    # Imported here: the mandate service builds on this module.
+    from bido_back.mandates.schemas import ApproveMandateArgs
+    from bido_back.mandates.service import APPROVE_NEGOTIATION_MANDATE
+
+    parsed: dict[UUID, ApproveMandateArgs] = {}
+    for approval in approvals:
+        if approval.tool != APPROVE_NEGOTIATION_MANDATE:
+            continue
+        try:
+            parsed[approval.id] = ApproveMandateArgs.model_validate(approval.args)
+        except ValueError:
+            logger.error("approval %s has args that do not validate", approval.id)
+    if not parsed:
+        return {}
+    rows = await session.execute(
+        select(Rfq.id, Rfq.title).where(Rfq.id.in_({a.rfq_id for a in parsed.values()}))
+    )
+    titles: dict[UUID, str] = {rfq_id: title for rfq_id, title in rows}
+    return {
+        approval_id: MandateApprovalView(
+            rfq_id=args.rfq_id,
+            rfq_ref=args.rfq_ref,
+            rfq_title=titles.get(args.rfq_id),
+            currency=args.currency,
+            deadline=args.deadline,
+            max_rounds=args.max_rounds,
+            max_messages_per_supplier_per_day=args.max_messages_per_supplier_per_day,
+            initial_emails=len(args.initial_emails),
+            suppliers=[
+                MandateSupplierView(
+                    invite_id=s.invite_id, supplier_name=s.supplier_name, to=list(s.to)
+                )
+                for s in args.suppliers
+            ],
+            lines=[
+                MandateLineView(
+                    rfq_line_id=line.rfq_line_id,
+                    position=line.position,
+                    description=line.description,
+                    target_unit_price=line.target_unit_price,
+                    max_unit_price=line.max_unit_price,
+                    max_lead_time_days=line.max_lead_time_days,
+                )
+                for line in args.lines
+            ],
+        )
+        for approval_id, args in parsed.items()
+    }

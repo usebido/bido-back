@@ -18,7 +18,11 @@ principal's tenant, checking, in order:
 4. it is still `pending`, so a decision is made exactly once and a replayed
    request changes nothing -> 409;
 5. its stored args still hash to the proposed `args_hash` -> 409, nothing is
-   decided, and an `approval.integrity_failed` audit event is kept.
+   decided, and an `approval.integrity_failed` audit event is kept;
+6. approving an act that sends email: every recipient domain is a reserved
+   test domain or confirmed for the tenant (`bido_back.outbound`). The decision
+   may confirm domains of this email (`confirmed_domains`); anything still
+   unconfirmed -> 409 listing the domains, and nothing is decided.
 
 Then the status, `decided_by`, `decided_at` and `self_approved` are set and an
 audit event is written (ids, hash and the self-approval mark only, never the
@@ -37,7 +41,7 @@ outbox, closes this gap).
 """
 
 import logging
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final, Literal
@@ -52,12 +56,20 @@ from bido_back.approvals.errors import (
     ApprovalIntegrityError,
     ApprovalNotFound,
     ApprovalNotPending,
+    ApprovalRecipientsUnconfirmed,
 )
 from bido_back.approvals.executor import approval_execute_envelope
 from bido_back.approvals.integrity import payload_matches
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import Approval, Membership, Tenant
+from bido_back.email.recipients import domain_of
+from bido_back.outbound.domains import (
+    confirm_domains,
+    normalize_domain,
+    recipients_in_args,
+    unconfirmed_domains,
+)
 from bido_back.worker.jobs import JobQueue
 
 logger = logging.getLogger(__name__)
@@ -88,6 +100,7 @@ async def decide_approval(
     *,
     jobs: JobQueue,
     on_reject: Mapping[str, RejectHook] | None = None,
+    confirmed_domains: Sequence[str] = (),
 ) -> DecisionOutcome:
     """Record `principal`'s decision on one approval; enqueue execution if approved.
 
@@ -133,6 +146,8 @@ async def decide_approval(
             session.add(approval_audit(approval, "approval.integrity_failed", principal.user_id))
             integrity_failed = True
         else:
+            if status == "approved":
+                await _check_recipients(session, principal, approval, confirmed_domains)
             approval.status = status
             approval.decided_by = principal.user_id
             approval.decided_at = datetime.now(UTC)
@@ -162,3 +177,24 @@ async def decide_approval(
             logger.exception("approval %s approved but its job was not enqueued", approval_id)
             raise
     return DecisionOutcome(approval_id=approval_id, status=status)
+
+
+async def _check_recipients(
+    session: AsyncSession,
+    principal: Principal,
+    approval: Approval,
+    confirmed: Sequence[str],
+) -> None:
+    """Outbound guard for acts that send email (step 6 of the module docstring)."""
+    addresses = recipients_in_args(approval.args)
+    if not addresses:
+        return
+    in_email = {d for d in (domain_of(a) for a in addresses) if d is not None}
+    wanted = {d for d in (normalize_domain(x) for x in confirmed) if d in in_email}
+    if wanted:
+        await confirm_domains(
+            session, principal.tenant_id, principal.user_id, wanted, approval_id=approval.id
+        )
+    blocked = await unconfirmed_domains(session, principal.tenant_id, addresses)
+    if blocked:
+        raise ApprovalRecipientsUnconfirmed(blocked)

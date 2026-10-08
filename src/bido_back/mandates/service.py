@@ -62,6 +62,7 @@ from bido_back.db.models import (
     RfqLine,
     Supplier,
 )
+from bido_back.email.recipients import MxResolver, default_resolver
 from bido_back.followups.send import SEND_FOLLOWUP_EMAIL, SendFollowupEmailArgs
 from bido_back.mandates.policy import (
     commitment_language,
@@ -84,6 +85,7 @@ from bido_back.mandates.schemas import (
 from bido_back.negotiation.schemas import LineLimitsUpdate, NegotiationSettingsUpdate
 from bido_back.negotiation.send import SEND_NEGOTIATION_EMAIL, SendNegotiationEmailArgs
 from bido_back.negotiation.service import apply_settings
+from bido_back.outbound.domains import check_recipients, unconfirmed_domains
 from bido_back.rfqs.agents import EmailWriterAgent
 from bido_back.rfqs.errors import InvalidState, NotFound
 from bido_back.rfqs.mailbox import MailboxSenderFactory
@@ -120,6 +122,7 @@ async def propose_mandate(
     *,
     writer: EmailWriterAgent,
     mailboxes: MailboxSenderFactory,
+    resolver: MxResolver | None = None,
 ) -> ProposedMandate:
     """Render the initial emails and record the single mandate approval.
 
@@ -273,7 +276,13 @@ async def propose_mandate(
         len(mandate_lines),
         len(initial),
     )
+    addresses = list(dict.fromkeys(a for supplier in suppliers for a in supplier.to))
+    async with tenant_session(db, principal.tenant_id) as session:
+        recipients = await check_recipients(
+            session, principal.tenant_id, addresses, resolver or default_resolver()
+        )
     return ProposedMandate(
+        recipients=recipients,
         rfq_id=rfq_id,
         approval_id=approval_id,
         suppliers=len(suppliers),
@@ -440,6 +449,12 @@ class _ApproveMandate:
                     if row is not None and row.status == "pending":
                         _hold(session, row, mandate, email.invite_id, "initial_email_changed")
                     continue
+                rfq_email = SendRfqEmailArgs.model_validate(row.args)
+                if await unconfirmed_domains(
+                    session, ctx.tenant_id, [*rfq_email.to, *rfq_email.cc]
+                ):
+                    _hold(session, row, mandate, email.invite_id, "recipient_domain_unconfirmed")
+                    continue
                 await _mark_auto_approved(session, row, mandate, email.invite_id, now)
                 approved.append(row.id)
             session.add(
@@ -590,6 +605,8 @@ async def _check(
     problem = recipients_problem(to, cc, supplier.to)
     if problem is not None:
         return invite_id, problem, False
+    if await unconfirmed_domains(session, mandate.tenant_id, [*to, *cc]):
+        return invite_id, "recipient_domain_unconfirmed", False
     if texts and commitment_language(*texts):
         return invite_id, "commitment_language", False
     # Daily cap: not a reason to hold; the email waits for the next window.

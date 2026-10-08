@@ -183,6 +183,21 @@ def recommend(
         else:
             eligible.append((column, cell))
 
+    # Brokers never win against an authorized distributor or a manufacturer:
+    # they stay in the comparison, excluded from the recommendation.
+    authorized = [o for o in eligible if _kind(o[0]) in _AUTHORIZED]
+    if authorized:
+        for column, _cell in eligible:
+            if _kind(column) in _BROKERS:
+                excluded.append(
+                    ExcludedOffer(
+                        invite_id=column.invite_id,
+                        supplier_name=column.supplier_name,
+                        reasons=["reseller_not_preferred"],
+                    )
+                )
+        eligible = [o for o in eligible if _kind(o[0]) not in _BROKERS]
+
     if not eligible:
         detail = "no offers yet" if not offers else f"{len(excluded)} excluded"
         return Recommendation(
@@ -215,6 +230,8 @@ def recommend(
             reasons.append("tie_broken_by_lead_time")
     if not on_time and line.need_by is not None:
         reasons.append("no_offer_meets_need_by")
+    # A broker wins only when no authorized distributor or manufacturer offered.
+    advisories = ["only_unauthorized_offers"] if _kind(winner_column) in _BROKERS else []
 
     runner_up: RunnerUp | None = None
     if len(ranked) > 1:
@@ -241,11 +258,16 @@ def recommend(
         lead_time_days=winner.lead_time_days,
         reasons=reasons,
         justification=_justify(
-            line, winner_column, winner, runner_up, reasons, excluded, base_currency
+            line, winner_column, winner, runner_up, reasons, excluded, base_currency, advisories
         ),
         runner_up=runner_up,
         excluded=excluded,
+        advisories=advisories,
     )
+
+
+def _kind(column: SupplierColumn) -> str:
+    return (column.supplier_type or "").strip().lower()
 
 
 def _price(cell: Cell) -> Decimal:
@@ -267,6 +289,7 @@ def _justify(
     reasons: Sequence[ReasonCode],
     excluded: Sequence[ExcludedOffer],
     base_currency: str,
+    advisories: Sequence[str] = (),
 ) -> str:
     price = f"{_fmt(_price(cell))} {base_currency}"
     if "only_eligible_offer" in reasons:
@@ -288,6 +311,11 @@ def _justify(
     elif line.need_by is not None and cell.lead_time_days is not None:
         text += f", in time for {line.need_by.isoformat()}"
     text += "."
+    if "only_unauthorized_offers" in advisories:
+        text += (
+            " Only unauthorized resellers offered this line: check the parts' origin and"
+            " authenticity before buying."
+        )
     if excluded:
         text += f" {len(excluded)} other offer(s) excluded."
     return text

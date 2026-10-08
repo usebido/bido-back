@@ -462,6 +462,16 @@
             "title": "Id",
             "type": "string"
           },
+          "mandate": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MandateApprovalView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "negotiation_email": {
             "anyOf": [
               {
@@ -471,6 +481,20 @@
                 "type": "null"
               }
             ]
+          },
+          "recipient_checks": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/RecipientCheck"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recipient Checks"
           },
           "requested_by": {
             "format": "uuid",
@@ -1346,6 +1370,25 @@
         "title": "Cell",
         "type": "object"
       },
+      "CheckRecipientsRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "addresses": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "title": "Addresses",
+            "type": "array"
+          }
+        },
+        "required": [
+          "addresses"
+        ],
+        "title": "CheckRecipientsRequest",
+        "type": "object"
+      },
       "ChecklistCounts": {
         "properties": {
           "expired": {
@@ -1659,6 +1702,25 @@
           "state"
         ],
         "title": "CompleteRequest",
+        "type": "object"
+      },
+      "ConfirmDomainsRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "domains": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "minItems": 1,
+            "title": "Domains",
+            "type": "array"
+          }
+        },
+        "required": [
+          "domains"
+        ],
+        "title": "ConfirmDomainsRequest",
         "type": "object"
       },
       "ConnectResponse": {
@@ -2084,6 +2146,14 @@
       "DecisionRequest": {
         "additionalProperties": false,
         "properties": {
+          "confirmed_domains": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 50,
+            "title": "Confirmed Domains",
+            "type": "array"
+          },
           "decision": {
             "enum": [
               "approve",
@@ -3833,6 +3903,155 @@
         "title": "MandateActivityItem",
         "type": "object"
       },
+      "MandateApprovalView": {
+        "description": "What approving a negotiation mandate covers, to review before deciding.",
+        "properties": {
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "deadline": {
+            "format": "date-time",
+            "title": "Deadline",
+            "type": "string"
+          },
+          "initial_emails": {
+            "title": "Initial Emails",
+            "type": "integer"
+          },
+          "lines": {
+            "items": {
+              "$ref": "#/components/schemas/MandateLineView"
+            },
+            "title": "Lines",
+            "type": "array"
+          },
+          "max_messages_per_supplier_per_day": {
+            "title": "Max Messages Per Supplier Per Day",
+            "type": "integer"
+          },
+          "max_rounds": {
+            "title": "Max Rounds",
+            "type": "integer"
+          },
+          "rfq_id": {
+            "format": "uuid",
+            "title": "Rfq Id",
+            "type": "string"
+          },
+          "rfq_ref": {
+            "title": "Rfq Ref",
+            "type": "string"
+          },
+          "rfq_title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rfq Title"
+          },
+          "suppliers": {
+            "items": {
+              "$ref": "#/components/schemas/MandateSupplierView"
+            },
+            "title": "Suppliers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "rfq_id",
+          "rfq_ref",
+          "rfq_title",
+          "currency",
+          "deadline",
+          "max_rounds",
+          "max_messages_per_supplier_per_day",
+          "initial_emails",
+          "suppliers",
+          "lines"
+        ],
+        "title": "MandateApprovalView",
+        "type": "object"
+      },
+      "MandateLineView": {
+        "properties": {
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "max_lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Lead Time Days"
+          },
+          "max_unit_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Max Unit Price",
+            "type": "string"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "rfq_line_id": {
+            "format": "uuid",
+            "title": "Rfq Line Id",
+            "type": "string"
+          },
+          "target_unit_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Target Unit Price",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rfq_line_id",
+          "position",
+          "description",
+          "target_unit_price",
+          "max_unit_price",
+          "max_lead_time_days"
+        ],
+        "title": "MandateLineView",
+        "type": "object"
+      },
+      "MandateSupplierView": {
+        "properties": {
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          },
+          "to": {
+            "items": {
+              "type": "string"
+            },
+            "title": "To",
+            "type": "array"
+          }
+        },
+        "required": [
+          "invite_id",
+          "supplier_name",
+          "to"
+        ],
+        "title": "MandateSupplierView",
+        "type": "object"
+      },
       "MandateView": {
         "properties": {
           "approval_id": {
@@ -4364,6 +4583,27 @@
         "title": "OnboardingState",
         "type": "object"
       },
+      "OutboundDomains": {
+        "properties": {
+          "confirmed": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Confirmed",
+            "type": "array"
+          },
+          "requires_confirmation": {
+            "title": "Requires Confirmation",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "requires_confirmation",
+          "confirmed"
+        ],
+        "title": "OutboundDomains",
+        "type": "object"
+      },
       "OutcomeLine": {
         "properties": {
           "effective_unit_price_base": {
@@ -4871,6 +5111,13 @@
             "title": "Lines",
             "type": "integer"
           },
+          "recipients": {
+            "items": {
+              "$ref": "#/components/schemas/RecipientCheck"
+            },
+            "title": "Recipients",
+            "type": "array"
+          },
           "rfq_id": {
             "format": "uuid",
             "title": "Rfq Id",
@@ -5123,8 +5370,63 @@
         "title": "RateUsed",
         "type": "object"
       },
+      "RecipientCheck": {
+        "description": "One recipient, as shown to the person who approves the email.",
+        "properties": {
+          "address": {
+            "title": "Address",
+            "type": "string"
+          },
+          "confirmed": {
+            "title": "Confirmed",
+            "type": "boolean"
+          },
+          "domain": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Domain"
+          },
+          "status": {
+            "enum": [
+              "test",
+              "real_domain",
+              "no_mail",
+              "unknown",
+              "invalid"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "will_send": {
+            "title": "Will Send",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "address",
+          "domain",
+          "status",
+          "confirmed",
+          "will_send"
+        ],
+        "title": "RecipientCheck",
+        "type": "object"
+      },
       "Recommendation": {
         "properties": {
+          "advisories": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Advisories",
+            "type": "array"
+          },
           "effective_unit_price_base": {
             "anyOf": [
               {
@@ -10740,6 +11042,289 @@
         "summary": "Upload",
         "tags": [
           "onboarding"
+        ]
+      }
+    },
+    "/v1/outbound/check": {
+      "post": {
+        "description": "What DNS says about each address, and whether an email would go out.",
+        "operationId": "check_v1_outbound_check_post",
+        "parameters": [
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CheckRecipientsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/RecipientCheck"
+                  },
+                  "title": "Response Check V1 Outbound Check Post",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Check",
+        "tags": [
+          "outbound"
+        ]
+      }
+    },
+    "/v1/outbound/domains": {
+      "get": {
+        "description": "Whether the guard is on, and the domains confirmed so far.",
+        "operationId": "list_domains_v1_outbound_domains_get",
+        "parameters": [
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutboundDomains"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Domains",
+        "tags": [
+          "outbound"
+        ]
+      },
+      "post": {
+        "description": "Confirm recipient domains for the tenant (idempotent).",
+        "operationId": "confirm_v1_outbound_domains_post",
+        "parameters": [
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConfirmDomainsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OutboundDomains"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Confirm",
+        "tags": [
+          "outbound"
         ]
       }
     },

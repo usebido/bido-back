@@ -8,6 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from bido_back.negotiation.schemas import LineLimitsUpdate
+from bido_back.outbound.domains import RecipientCheck
 from bido_back.rfqs.schemas import EmailAddress
 
 MandateStatus = Literal["active", "paused", "ended"]
@@ -99,6 +100,10 @@ class ProposedMandate(BaseModel):
     lines: int
     initial_emails: int
     deadline: datetime
+    # Every address the mandate writes to, with whether its domain receives
+    # mail (a real company) and whether it is confirmed: approving needs the
+    # unconfirmed non-test domains confirmed (outbound guard).
+    recipients: list[RecipientCheck] = Field(default_factory=list[RecipientCheck])
 
 
 class MandateView(BaseModel):
