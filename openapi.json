@@ -10008,8 +10008,7 @@
               "rfq",
               "rfq_line",
               "supplier",
-              "quoted_part",
-              "file"
+              "quoted_part"
             ],
             "title": "Kind",
             "type": "string"
@@ -10061,6 +10060,14 @@
       },
       "SearchResults": {
         "properties": {
+          "files": {
+            "description": "The company files that match (name or content), first page only",
+            "items": {
+              "$ref": "#/components/schemas/FileItem"
+            },
+            "title": "Files",
+            "type": "array"
+          },
           "items": {
             "items": {
               "$ref": "#/components/schemas/SearchHit"
