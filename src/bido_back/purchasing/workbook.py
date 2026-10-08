@@ -43,8 +43,9 @@ What ERP exports (SAP and the like) need, and how it is read:
   by the base quantity of the level-0 row; assemblies are not imported (they are
   built, not bought, and their stock is not netted). The product is the level-0
   row, else the product named in the title rows ("Material: MT-120-ASM").
-* Supplier codes: a sheet listing suppliers by code only ("Fornecedor 100231")
-  takes their names from a sheet that has both (purchase orders).
+* Supplier codes: any sheet listing suppliers by code only ("Fornecedor 100231")
+  takes their names from explicit code/name pairs across the workbook, including
+  supplier masters without contact emails. Missing or conflicting joins fail.
 * Stock: only unrestricted stock counts as on hand; quality-inspection and
   blocked stock cannot go into a build and are left out (the report says so).
 * Currencies stay as written per purchase line; the analysis handles them.
@@ -77,6 +78,7 @@ from bido_back.db import tenant_session
 from bido_back.db.models import Contact, Supplier, SupplierContact, TemplateUpload
 from bido_back.logs import safe_reason
 from bido_back.purchasing.importers import (
+    MAX_ERRORS,
     MAX_ROWS,
     SPECS,
     DroppedColumn,
@@ -116,13 +118,13 @@ FIELD_FAILED_SHARE: Final = 0.5
 FEEDBACK_SAMPLES: Final = 3
 # Stable codes on the "workbook section" log line; monitoring alarms on them.
 DegradedReason = Literal["retry_mapping", "high_failure_rate", "optional_field_dropped"]
-# Write order: items and BOMs before stock and history that reference them.
+# Write order: item metadata from catalogs, BOMs and stock before purchase history.
 _ORDER: Final[tuple[ImportType, ...]] = (
     "items",
     "bom",
     "supplier_contacts",
-    "purchase_history",
     "inventory",
+    "purchase_history",
     "production_plan",
 )
 _DETAIL_TYPES: Final[tuple[ImportType, ...]] = (
@@ -179,7 +181,9 @@ def read_workbook(data: bytes, filename: str) -> list[SheetGrid]:
         raise WorkbookFileError("the file is not a readable .xlsx workbook") from exc
     sheets: list[SheetGrid] = []
     try:
-        for sheet in workbook.worksheets[:MAX_SHEETS]:
+        if len(workbook.worksheets) > MAX_SHEETS:
+            raise WorkbookFileError(f"workbooks are limited to {MAX_SHEETS} sheets")
+        for sheet in workbook.worksheets:
             rows: list[list[object]] = []
             for raw in sheet.iter_rows(values_only=True):
                 rows.append(list(raw))
@@ -910,7 +914,7 @@ async def import_workbook(
             filename=filename,
             context=context,
         )
-    _names_for_codes(parsed)
+    _names_for_codes(parsed, grids)
     parsed_sheets = {p.section.sheet for p in parsed if p.table.rows}
     unimported = [
         g.name
@@ -1259,26 +1263,100 @@ def _stock_notes(section: Section, table: ParsedTable) -> list[str]:
     ]
 
 
-def _names_for_codes(parsed: Sequence[_Parsed]) -> None:
-    """Rows naming a supplier by its ERP code get the name another sheet gives it."""
-    names: dict[str, str] = {}
-    for item in parsed:
-        for _, row in item.table.rows:
+def _supplier_text(value: object) -> str | None:
+    if isinstance(value, bool) or not isinstance(value, str | int | float | Decimal):
+        return None
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip() or None
+
+
+def _supplier_pairs(grids: Sequence[SheetGrid]) -> Iterable[tuple[str, str]]:
+    """Explicit supplier identities, even in sheets with no importable contact table."""
+    for grid in grids:
+        headers: list[tuple[int, dict[str, int]]] = []
+        for at, row in enumerate(grid.rows[:HEADER_SCAN_ROWS]):
+            index, _, _, _ = map_columns("supplier_contacts", row)
+            if "supplier" in index and "supplier_code" in index:
+                headers.append((at, index))
+        for position, (at, index) in enumerate(headers):
+            end = headers[position + 1][0] if position + 1 < len(headers) else len(grid.rows)
+            for row in grid.rows[at + 1 : end]:
+                if all(_blank(cell) for cell in row):
+                    break
+                code_at, name_at = index["supplier_code"], index["supplier"]
+                if max(code_at, name_at) >= len(row):
+                    continue
+                code, name = _supplier_text(row[code_at]), _supplier_text(row[name_at])
+                if code and name and code.casefold() != name.casefold():
+                    yield code, name
+
+
+def resolve_supplier_codes(tables: Sequence[ParsedTable], grids: Sequence[SheetGrid]) -> list[int]:
+    """Join exact supplier identifiers to unique names; never write unresolved codes.
+
+    Names compare case-insensitively, identifiers do not. In particular, leading
+    zeros remain significant. Conflicting mappings fail regardless of sheet order
+    or a buyer's confirmation to import the remaining valid rows.
+    """
+    names: dict[str, dict[str, str]] = {}
+    pairs = list(_supplier_pairs(grids))
+    for table in tables:
+        for _, row in table.rows:
             code, name = row.get("supplier_code"), row.get("supplier")
-            if isinstance(code, str) and isinstance(name, str) and code.lower() != name.lower():
-                names.setdefault(code.lower(), name)
-    if not names:
-        return
-    for item in parsed:
+            if (
+                isinstance(code, str)
+                and isinstance(name, str)
+                and code.casefold() != name.casefold()
+            ):
+                pairs.append((code, name))
+    for code, name in pairs:
+        names.setdefault(code, {}).setdefault(name.casefold(), name)
+    code_headers = {
+        norm(word)
+        for spec in SPECS["supplier_contacts"]
+        if spec.name == "supplier_code"
+        for word in spec.synonyms
+    }
+    counts: list[int] = []
+    for table in tables:
         renamed = 0
-        for _, row in item.table.rows:
+        kept: list[tuple[int, dict[str, object]]] = []
+        explicit_code = norm(table.columns.get("supplier", "")) in code_headers
+        for offset, row in table.rows:
             name = row.get("supplier")
-            if isinstance(name, str) and name.lower() in names:
-                row["supplier"] = names[name.lower()]
+            code = row.get("supplier_code")
+            reference = (
+                name
+                if isinstance(name, str) and (name in names or name.isdecimal() or explicit_code)
+                else code
+            )
+            candidates = names.get(reference, {}) if isinstance(reference, str) else {}
+            unresolved = isinstance(reference, str) and len(candidates) != 1
+            if unresolved:
+                reason = "ambiguous" if candidates else "missing"
+                if len(table.errors) < MAX_ERRORS:
+                    table.errors.append(
+                        RowError(offset, "supplier", f"{reason} supplier code-to-name mapping")
+                    )
+                table.field_failures["supplier"] = table.field_failures.get("supplier", 0) + 1
+                continue
+            if reference == name and len(candidates) == 1:
+                row["supplier"] = next(iter(candidates.values()))
+                row.setdefault("supplier_code", reference)
                 renamed += 1
+            kept.append((offset, row))
+        table.rows = kept
+        counts.append(renamed)
+    return counts
+
+
+def _names_for_codes(parsed: Sequence[_Parsed], grids: Sequence[SheetGrid]) -> None:
+    counts = resolve_supplier_codes([item.table for item in parsed], grids)
+    for item, renamed in zip(parsed, counts, strict=True):
         if renamed:
             item.notes.append(f"{renamed} rows named suppliers by code; matched to their names.")
-            item.refresh()
+        item.refresh()
 
 
 def default_sheet_mapper(config: RunnerConfig | None = None) -> SheetMapper:

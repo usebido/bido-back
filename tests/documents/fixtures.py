@@ -30,6 +30,7 @@ class PdfRect:
 class PdfPage:
     texts: Sequence[PdfText] = ()
     rects: Sequence[PdfRect] = field(default_factory=tuple[PdfRect, ...])
+    image: bool = False
 
 
 def _escape(text: str) -> str:
@@ -38,6 +39,9 @@ def _escape(text: str) -> str:
 
 def _content(page: PdfPage) -> bytes:
     ops: list[str] = []
+    if page.image:
+        # One black raster pixel scaled up: a real image with no extractable text.
+        ops.append("q 500 0 0 700 50 50 cm BI /W 1 /H 1 /BPC 8 /CS /G ID \x00 EI Q")
     for rect in page.rects:
         ops.append(f"{rect.x} {rect.y} {rect.width} {rect.height} re S")
     for item in page.texts:

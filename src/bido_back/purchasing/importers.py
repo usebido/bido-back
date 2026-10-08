@@ -10,7 +10,7 @@ The five import types and their columns (* = required):
 * `items`: part_number*, description*, mpn, manufacturer, category, unit
 * `bom`: product*, part_number*, qty_per_unit*, description, mpn, manufacturer,
   category, unit (item columns create the item when it is new)
-* `inventory`: part_number*, on_hand*, on_order, location, as_of
+* `inventory`: part_number*, on_hand*, on_order, location, as_of, description, unit
 * `purchase_history`: po_number*, supplier*, part_number*, quantity*,
   unit_price*, ordered_at*, currency, promised_at, received_at, received_qty,
   rejected_qty, quality_ok, line_no, description; read but not stored:
@@ -259,6 +259,8 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             ("location", "local", "deposito", "magazzino", "warehouse", "storage location"),
         ),
         FieldSpec("as_of", "date", False, ("as of", "data inventario", "inventory date", "date")),
+        FieldSpec("description", "text", False, _DESC),
+        FieldSpec("unit", "text", False, _UNIT),
     ),
     "purchase_history": (
         FieldSpec(
@@ -294,8 +296,8 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             ),
         ),  # fmt: skip
         FieldSpec("supplier", "text", True, _SUPPLIER_GENERIC, preferred=_SUPPLIER_NAME),
-        # The supplier's code in the buyer's ERP, next to its name: used to match the
-        # supplier master (contacts) that may list suppliers by code only.
+        # The supplier's ERP code, next to its name: joins code-only references
+        # across purchase history, contacts and supplier masters.
         FieldSpec("supplier_code", "text", False, _SUPPLIER_CODE, weak=_SUPPLIER_GENERIC),
         FieldSpec("part_number", "text", True, _PART, weak=_PART_WEAK),
         FieldSpec("quantity", "number", True, _QTY),

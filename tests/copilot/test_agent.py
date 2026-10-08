@@ -37,6 +37,7 @@ EXPECTED_TOOLS = {
     "list_open_pos": "read",
     "prepare_award": "draft",
     "import_spreadsheet": "draft",
+    "analyze_procurement_sources": "read",
     "add_supplier_contact": "draft",
     "refine_analysis": "draft",
     "propose_negotiation_mandate": "draft",

@@ -57,6 +57,7 @@ from bido_back.negotiation.agents import NegotiationWriter, default_negotiation_
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
 from bido_back.purchasing import service as purchasing_service
 from bido_back.purchasing.schemas import AnalysisRequest, CurrencyTotalView, RfqFromAnalysisRequest
+from bido_back.purchasing.sources.mapping import Mapper
 from bido_back.purchasing.workbook import SheetMapper
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
@@ -103,6 +104,7 @@ class CopilotToolDeps:
     buyer_messages: Callable[[], Awaitable[list[str]]] | None = None
     storage: BlobStorage | None = None
     sheet_mapper: SheetMapper | None = None
+    source_mapper: Mapper | None = None
     today: Callable[[], date] = lambda: datetime.now(UTC).date()
 
 
