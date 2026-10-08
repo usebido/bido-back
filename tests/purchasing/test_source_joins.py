@@ -188,13 +188,15 @@ def test_a_checked_interpretation_of_an_unknown_status_is_used() -> None:
     assert quantities(rows) == EXPECTED
 
 
-def test_available_stock_that_the_source_defines_as_gross_is_refused() -> None:
+def test_a_gross_balance_basis_does_not_disqualify_a_separate_free_stock_column() -> None:
+    # The basis describes the gross total; free stock is its own (computed) column.
     rows = motor_records()
     stock = next(r for r in rows if r.kind == "inventory")
-    extend(stock, available="25", balance_basis="Físico bruto")
-    line = assess_plan(rows, SCOPE).lines[0]
-    assert "inventory_basis_conflict" in {i.code for i in line.issues}
-    assert not line.ready
+    extend(stock, available="20", balance_basis="Livre utilização + reserva + bloqueio")
+    stock.canonical["balance_basis"] = CanonicalValue(
+        value="gross", source="Livre utilização + reserva + bloqueio", basis="value_map"
+    )
+    assert quantities(rows) == EXPECTED
 
 
 def test_unscoped_assessment_reads_bases_and_identifiers_the_same_way() -> None:

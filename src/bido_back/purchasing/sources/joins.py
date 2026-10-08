@@ -202,18 +202,6 @@ def inventory_at(
         total = source_number(record, "total", issues)
         reserved = source_number(record, "reserved", issues)
         blocked = source_number(record, "blocked", issues)
-        if free is not None and categorical(record, "balance_basis") == "gross":
-            valid = False
-            add_issue(
-                issues,
-                "inventory_basis_conflict",
-                "The quantity mapped as available stock is gross physical stock "
-                "according to the source's own balance definition.",
-                [record],
-                "available",
-                "balance_basis",
-            )
-            continue
         if free is None and total is not None and reserved is not None and blocked is not None:
             free = total - reserved - blocked
         if free is None:
