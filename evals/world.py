@@ -34,7 +34,14 @@ from bido_back.auth import Principal
 from bido_back.awards.agents import default_notice_writer
 from bido_back.awards.send import register_award_act_tools
 from bido_back.db import tenant_session
-from bido_back.db.models import Invite, Proposal, ProposalLine, RfqLine, User
+from bido_back.db.models import (
+    Invite,
+    MailboxConnection,
+    Proposal,
+    ProposalLine,
+    RfqLine,
+    User,
+)
 from bido_back.email.addresses import make_message_id
 from bido_back.email.mime import build_mime
 from bido_back.email.types import OutboundAttachment, OutboundEmail, SentEmail
@@ -214,6 +221,18 @@ class World:
             if user is not None:
                 world.outbox.addresses[user.id] = user.email
                 world.buyer_email = user.email
+                # The buyer's "connected" mailbox: the outbox stands in for its API (the
+                # token is not a real one and is never used).
+                session.add(
+                    MailboxConnection(
+                        tenant_id=principal.tenant_id,
+                        user_id=user.id,
+                        provider="google",
+                        email_address=user.email,
+                        token_ciphertext=b"eval-not-a-real-token",
+                        status="active",
+                    )
+                )
         return world
 
     # --- The clock ---------------------------------------------------------------------------
