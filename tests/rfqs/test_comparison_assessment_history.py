@@ -29,6 +29,7 @@ from bido_back.db.models import (
     ProposalLine,
     PurchaseOrder,
     RfqLine,
+    Supplier,
 )
 from bido_back.negotiation import service as negotiation
 from bido_back.purchasing.sources.contracts import (
@@ -44,7 +45,6 @@ from bido_back.purchasing.sources.snapshots import (
     draft_from_snapshot,
     save_snapshot,
 )
-from bido_back.rfqs import service
 from bido_back.rfqs import suppliers as supplier_service
 from bido_back.rfqs.errors import NotFound
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest, SupplierView
@@ -209,15 +209,25 @@ async def sourced_rfq(engine: AsyncEngine, people: People) -> Sourced:
     async with tenant_session(engine, principal.tenant_id) as session:
         line = await session.scalar(select(RfqLine.id).where(RfqLine.rfq_id == draft.rfq_id))
     assert line is not None
+    # The handoff invites the assessed suppliers itself (creating them from the evidence).
+    assert sorted(s.name for s in draft.invited) == sorted([METALNOVA.name, ACOS_SUL.name])
+    async with tenant_session(engine, principal.tenant_id) as session:
+        invites = {
+            name: (invite_id, supplier_id)
+            for invite_id, supplier_id, name in (
+                await session.execute(
+                    select(Invite.id, Invite.supplier_id, Supplier.name)
+                    .join(Supplier, Supplier.id == Invite.supplier_id)
+                    .where(Invite.rfq_id == draft.rfq_id)
+                )
+            ).all()
+        }
     created: dict[str, UUID] = {}
     for evidence, price in ((METALNOVA, "9.00"), (ACOS_SUL, "10.50")):
-        assert evidence.name is not None and evidence.email is not None
-        supplier = await create_supplier(engine, principal, evidence.name, evidence.email)
-        invite = await service.add_invite(
-            engine, principal, draft.rfq_id, supplier.id, supplier.contacts[0].id
-        )
-        await quote(engine, principal.tenant_id, invite.id, line, price)
-        created[evidence.name] = supplier.id
+        assert evidence.name is not None
+        invite_id, supplier_id = invites[evidence.name]
+        await quote(engine, principal.tenant_id, invite_id, line, price)
+        created[evidence.name] = supplier_id
     return Sourced(principal, draft.rfq_id, draft.ref, line, created)
 
 
@@ -381,7 +391,9 @@ async def test_lines_without_usable_links_keep_imported_behavior_and_tenants_sta
         return {name: cell.performance for name, cell in cells(comparison).items()}
 
     unknown = {"MetalNova": SupplierPerformance(), "Aços Sul": SupplierPerformance()}
-    assert await performance() == unknown  # drafted before links existed
+    # The handoff records links; an RFQ line drafted before links existed has none.
+    await set_links(app_engine, world, [])
+    assert await performance() == unknown
     attempts: list[JsonValue] = [
         "F001",
         [{"supplier_id": "MetalNova", "supplier_code": "F001"}],
