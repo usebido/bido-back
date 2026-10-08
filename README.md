@@ -457,3 +457,10 @@ Until the variables below exist, the job logs a notice and does nothing.
 - **Product features:** this is the scaffold that features build on.
 
 See [AGENTS.md](AGENTS.md) for the rules every change must follow.
+
+## Solana escrow
+
+The standalone devnet escrow program, LiteSVM tests, IDL and setup tooling live
+in [`solana/`](solana/README.md). Run `pnpm --dir solana install --frozen-lockfile`
+and `bash solana/scripts/check.sh` from this repository root. CI includes the
+Solana checks in the required `ci-ok` result.
