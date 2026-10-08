@@ -98,6 +98,8 @@ class RfqEmailInput(BaseModel):
     response_due: date | None = None
     lines: list[RfqEmailLine]
     template: RfqEmailTemplate | None = None
+    # The buyer's payment terms; when set, the email must state them as given.
+    payment_terms: str | None = None
 
 
 class RfqEmailOutput(BaseModel):

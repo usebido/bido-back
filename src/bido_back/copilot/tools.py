@@ -5,7 +5,10 @@ from the model's arguments, and works in that tenant's RLS-scoped session.
 
 - `read` tools answer questions: RFQs and their status, who responded, what is
   missing, proposals, the comparison, quoted price history, supplier
-  suggestions, the RFQ template.
+  suggestions, the RFQ template, and the company's imported data: its
+  suppliers with their contacts and what was bought from each
+  (`list_suppliers`) and the prices it paid (`purchase_history`). That data
+  belongs to the company, not to a conversation: these work in any chat.
 - `draft` tools change only drafts or the tenant's own settings: run a
   purchase analysis (stored, from the imported BOM, stock and purchase
   history), create an RFQ (draft, from text or from an analysis), invite
@@ -179,6 +182,8 @@ class RfqStatusOut(BaseModel):
     title: str
     status: str
     response_due: date | None
+    payment_terms: str | None
+    quote_validity_days: int | None
     lines: list[LineItem]
     invites: list[InviteItem]
     invites_by_status: dict[str, int]
@@ -296,8 +301,91 @@ class PricePointItem(BaseModel):
 
 class PriceHistoryOut(BaseModel):
     mpn: str
-    # Quoted prices: Bido does not record purchase orders yet.
+    # Quoted prices from RFQs; what was paid is purchase_history.
     points: list[PricePointItem]
+
+
+# --- list_suppliers / purchase_history (the company's imported data) -----------------------
+
+
+class ListSuppliersIn(BaseModel):
+    supplier: str | None = Field(default=None, description="Part of the supplier's name")
+    category: str | None = Field(
+        default=None, description="Only suppliers the company bought this part category from"
+    )
+    part_number: str | None = Field(
+        default=None, description="Only suppliers the company bought this part (or MPN) from"
+    )
+    limit: int = Field(default=MAX_LIST, ge=1, le=MAX_LIST)
+
+
+class SupplierContactItem(BaseModel):
+    name: str | None
+    email: str
+
+
+class PartBought(BaseModel):
+    part_number: str
+    description: str
+
+
+class SupplierEntryItem(BaseModel):
+    supplier_id: UUID
+    name: str
+    type: str
+    country: str | None
+    contacts: list[SupplierContactItem]
+    # From the imported purchase history.
+    purchase_orders: int
+    last_ordered_at: date | None
+    categories: list[str]
+    # What was bought from it (at most 20), to tell its part families apart.
+    parts: list[PartBought]
+    # From RFQs sent through Bido.
+    rfq_invites: int
+    rfq_responses: int
+
+
+class ListSuppliersOut(BaseModel):
+    total: int
+    suppliers: list[SupplierEntryItem]
+
+
+class PurchaseHistoryIn(BaseModel):
+    part_numbers: list[str] = Field(
+        default_factory=list[str],
+        max_length=MAX_LIST,
+        description="Internal part numbers or MPNs; empty = the parts bought most recently",
+    )
+    supplier: str | None = Field(default=None, description="Part of a supplier's name")
+    limit: int = Field(default=10, ge=1, le=MAX_LIST, description="Parts to return")
+
+
+class PaidLineItem(BaseModel):
+    supplier_name: str
+    po_number: str
+    ordered_at: date
+    quantity: Decimal
+    unit_price: Decimal
+    currency: str
+
+
+class PaidPartItem(BaseModel):
+    part_number: str
+    description: str
+    mpn: str | None
+    category: str | None
+    unit: str
+    last_paid: PaidLineItem
+    # Every purchase of the part, newest first (at most 10).
+    purchases: list[PaidLineItem]
+    purchase_count: int
+
+
+class PurchaseHistoryOut(BaseModel):
+    # Part numbers asked for that the purchase history does not have.
+    not_found: list[str]
+    parts: list[PaidPartItem]
 
 
 class SuggestSuppliersIn(BaseModel):
@@ -448,6 +536,16 @@ class RemoveRfqLineIn(BaseModel):
     position: int = Field(ge=1, description="The line's position, as shown")
 
 
+_TERMS_FIELDS = Literal[
+    "incoterm",
+    "delivery_location",
+    "need_by",
+    "response_due",
+    "payment_terms",
+    "quote_validity_days",
+]
+
+
 class SetRfqTermsIn(BaseModel):
     rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
     incoterm: str | None = Field(
@@ -457,6 +555,24 @@ class SetRfqTermsIn(BaseModel):
     need_by: date | None = Field(default=None, description="For every line")
     response_due: date | None = Field(default=None, description="When suppliers must answer")
     title: str | None = Field(default=None, min_length=1, max_length=500)
+    payment_terms: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description=(
+            "The buyer's payment terms for suppliers, exactly as they wrote them "
+            "(e.g. '28 DDL', '30 days net'). Stated in the RFQ email"
+        ),
+    )
+    quote_validity_days: int | None = Field(
+        default=None,
+        ge=1,
+        le=365,
+        description="How many days suppliers' quotes must stay valid, at least (1-365)",
+    )
+    clear: list[_TERMS_FIELDS] = Field(
+        default_factory=list[_TERMS_FIELDS], description="Optional terms to empty"
+    )
 
 
 class EditedRfqOut(BaseModel):
@@ -465,6 +581,9 @@ class EditedRfqOut(BaseModel):
     title: str
     status: str
     response_due: date | None
+    # What is stored now: report these, not what was asked for.
+    payment_terms: str | None
+    quote_validity_days: int | None
     lines: list[LineItem]
 
 
@@ -484,6 +603,8 @@ def _edited(detail: RfqDetail) -> EditedRfqOut:
         title=detail.title,
         status=detail.status,
         response_due=detail.response_due,
+        payment_terms=detail.payment_terms,
+        quote_validity_days=detail.quote_validity_days,
         lines=[
             LineItem(
                 position=line.position,
@@ -838,6 +959,8 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             title=rfq.title,
             status=rfq.status,
             response_due=rfq.response_due,
+            payment_terms=rfq.payment_terms,
+            quote_validity_days=rfq.quote_validity_days,
             lines=[_line_item(line) for line in lines],
             invites=invites,
             invites_by_status=queries.count_by([i.status for i in invites]),
@@ -977,6 +1100,76 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                     lead_time_days=p.lead_time_days,
                 )
                 for p in points
+            ],
+        )
+
+    async def list_suppliers(ctx: ToolContext, args: ListSuppliersIn) -> ListSuppliersOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            entries = await queries.supplier_directory(
+                session, name=args.supplier, category=args.category, part_number=args.part_number
+            )
+        return ListSuppliersOut(
+            total=len(entries),
+            suppliers=[
+                SupplierEntryItem(
+                    supplier_id=e.supplier.id,
+                    name=e.supplier.name,
+                    type=e.supplier.type,
+                    country=e.supplier.country,
+                    contacts=[SupplierContactItem(name=n, email=m) for n, m in e.contacts],
+                    purchase_orders=e.purchase_orders,
+                    last_ordered_at=e.last_ordered_at,
+                    categories=sorted(e.categories),
+                    parts=[
+                        PartBought(part_number=n, description=d)
+                        for n, d in sorted(e.parts.items())[:MAX_LIST]
+                    ],
+                    rfq_invites=e.invited,
+                    rfq_responses=e.responded,
+                )
+                for e in entries[: args.limit]
+            ],
+        )
+
+    async def purchase_history(ctx: ToolContext, args: PurchaseHistoryIn) -> PurchaseHistoryOut:
+        async with tenant_session(db, ctx.tenant_id) as session:
+            found = await queries.purchase_history(
+                session,
+                part_numbers=args.part_numbers,
+                supplier=args.supplier,
+                limit=max(args.limit, len(args.part_numbers)),
+            )
+        known = {
+            queries.normalize_mpn(code)
+            for p in found
+            for code in (p.item.part_number, p.item.mpn)
+            if code
+        }
+
+        def item(line: queries.PaidLine) -> PaidLineItem:
+            return PaidLineItem(
+                supplier_name=line.supplier_name,
+                po_number=line.po_number,
+                ordered_at=line.ordered_at,
+                quantity=line.quantity,
+                unit_price=line.unit_price,
+                currency=line.currency,
+            )
+
+        return PurchaseHistoryOut(
+            not_found=[p for p in args.part_numbers if queries.normalize_mpn(p) not in known],
+            parts=[
+                PaidPartItem(
+                    part_number=p.item.part_number,
+                    description=p.item.description,
+                    mpn=p.item.mpn,
+                    category=p.item.category,
+                    unit=p.item.unit,
+                    last_paid=item(p.lines[0]),
+                    purchases=[item(line) for line in p.lines[:10]],
+                    purchase_count=len(p.lines),
+                )
+                for p in found
             ],
         )
 
@@ -1142,13 +1335,14 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
     async def set_rfq_terms(ctx: ToolContext, args: SetRfqTermsIn) -> EditedRfqOut:
         async with tenant_session(db, ctx.tenant_id) as session:
             rfq = await _rfq(session, args.rfq)
-        changes = {
+        changes: dict[str, object] = {
             field: value
-            for field, value in args.model_dump(exclude={"rfq"}).items()
+            for field, value in args.model_dump(exclude={"rfq", "clear"}).items()
             if value is not None
         }
+        changes.update({field: None for field in args.clear})
         if not changes:
-            raise ToolError("nothing to change: pass the terms to set")
+            raise ToolError("nothing to change: pass the terms to set or to clear")
         patch = _request(UpdateRfqRequest, changes)
         try:
             return _edited(await rfq_service.update_rfq(db, _principal(ctx), rfq.id, patch))
@@ -1525,6 +1719,28 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             price_history,
         ),
         Tool(
+            "list_suppliers",
+            "The company's suppliers, stored from its imported data and RFQs: contacts "
+            "(emails), what it bought from each (part categories, part numbers, purchase "
+            "orders, last order date) and RFQ invites. Filter by name, category or part "
+            "number. Works in any conversation, with no file attached.",
+            ListSuppliersIn,
+            ListSuppliersOut,
+            "read",
+            list_suppliers,
+        ),
+        Tool(
+            "purchase_history",
+            "What the company PAID for parts, from its imported purchase orders: the last "
+            "price paid (supplier, date, currency) and earlier purchases. Give part numbers "
+            "or MPNs, or none for the parts bought most recently. Needs no BOM and no file "
+            "attached.",
+            PurchaseHistoryIn,
+            PurchaseHistoryOut,
+            "read",
+            purchase_history,
+        ),
+        Tool(
             "suggest_suppliers",
             "Suppliers to invite, ranked by how often they were invited and responded "
             "for the same part number or category.",
@@ -1617,7 +1833,11 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         Tool(
             "set_rfq_terms",
             "Set a draft RFQ's terms for every line at once: Incoterm, delivery location, "
-            "need-by date; and the RFQ's response date or title." + _DRAFT_ONLY,
+            "need-by date; and the RFQ's response date, title, payment terms (the buyer's "
+            "words, e.g. '28 DDL') and minimum quote validity in days. The RFQ email states "
+            "the payment terms and validity to suppliers. Only the fields passed change; "
+            "`clear` empties optional ones. The result is what is stored: report those "
+            "values, and never claim a term the result does not show." + _DRAFT_ONLY,
             SetRfqTermsIn,
             EditedRfqOut,
             "draft",

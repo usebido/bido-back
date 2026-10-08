@@ -205,7 +205,8 @@ def rfq_email_problems(task: RfqEmailInput, draft: RfqEmailOutput) -> list[str]:
     """What is wrong with an RFQ email draft, as codes. Empty means it may go to approval.
 
     The model writes the email; code checks the parts that must hold: the RFQ
-    reference in subject and body, every requested MPN listed, no prices.
+    reference in subject and body, every requested MPN listed, the buyer's payment
+    terms when set, no prices.
     """
     problems: list[str] = []
     if task.rfq_ref not in draft.subject:
@@ -215,6 +216,8 @@ def rfq_email_problems(task: RfqEmailInput, draft: RfqEmailOutput) -> list[str]:
     for line in task.lines:
         if line.mpn and line.mpn not in draft.body:
             problems.append(f"mpn_missing:{line.position}")
+    if task.payment_terms and task.payment_terms not in draft.body:
+        problems.append("payment_terms_missing")
     if _PRICE.search(draft.subject) or _PRICE.search(draft.body):
         problems.append("price_mentioned")
     return problems

@@ -7,7 +7,7 @@ dependency overrides.
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -29,8 +29,10 @@ from bido_back.api.suppliers import suppliers_router
 from bido_back.api.templates import templates_router
 from bido_back.auth import Principal
 from bido_back.db import create_sessionmaker
+from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
+from bido_back.rfqs.schemas import UpdateRfqRequest
 from bido_back.settings import Settings
 from tests.approvals.conftest import People
 
@@ -209,6 +211,27 @@ async def test_rfq_flow_over_http(api: Api, rfq_rows: People) -> None:
     assert (await http.get(f"/v1/rfqs/{rfq['id']}/comparison")).status_code == 404
     assert (await http.get("/v1/rfqs")).json() == []
     assert (await http.get("/v1/approvals")).json() == []
+
+
+@pytest.mark.db
+async def test_rfq_detail_and_list_show_payment_terms_and_quote_validity(
+    api: Api, app_engine: AsyncEngine
+) -> None:
+    http = api.http
+    created = (await http.post("/v1/rfqs", json={"text": "Need MLCC"})).json()
+    assert (created["payment_terms"], created["quote_validity_days"]) == (None, None)
+
+    await rfq_service.update_rfq(
+        app_engine,
+        api.principal,
+        UUID(created["id"]),
+        UpdateRfqRequest(payment_terms="28 DDL", quote_validity_days=30),
+    )
+
+    detail = (await http.get(f"/v1/rfqs/{created['id']}")).json()
+    [listed] = (await http.get("/v1/rfqs")).json()
+    for body in (detail, listed):
+        assert (body["payment_terms"], body["quote_validity_days"]) == ("28 DDL", 30)
 
 
 @pytest.mark.db
