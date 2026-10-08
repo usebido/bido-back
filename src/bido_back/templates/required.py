@@ -355,18 +355,20 @@ LINE_HEADINGS: Final[dict[str, dict[str, str]]] = {
     "en": {
         "position": "Pos.",
         "description": "Description",
+        "part_number": "Part no.",
         "mpn": "MPN",
         "manufacturer": "Manufacturer",
         "quantity": "Quantity",
         "unit": "Unit",
-        "need_by": "Need by",
+        "need_by": "Need-by date",
         "qualification": "Qualification",
         "incoterm": "Incoterm",
     },
     "pt": {
         "position": "Item",
         "description": "Descrição",
-        "mpn": "Código (MPN)",
+        "part_number": "Código",
+        "mpn": "Código do fabricante (MPN)",
         "manufacturer": "Fabricante",
         "quantity": "Quantidade",
         "unit": "Un.",
@@ -377,6 +379,7 @@ LINE_HEADINGS: Final[dict[str, dict[str, str]]] = {
     "de": {
         "position": "Pos.",
         "description": "Bezeichnung",
+        "part_number": "Artikelnr.",
         "mpn": "MPN",
         "manufacturer": "Hersteller",
         "quantity": "Menge",
@@ -388,6 +391,7 @@ LINE_HEADINGS: Final[dict[str, dict[str, str]]] = {
     "fr": {
         "position": "Pos.",
         "description": "Désignation",
+        "part_number": "Référence",
         "mpn": "Réf. fabricant",
         "manufacturer": "Fabricant",
         "quantity": "Quantité",
@@ -399,6 +403,7 @@ LINE_HEADINGS: Final[dict[str, dict[str, str]]] = {
     "es": {
         "position": "Pos.",
         "description": "Descripción",
+        "part_number": "Código",
         "mpn": "MPN",
         "manufacturer": "Fabricante",
         "quantity": "Cantidad",
@@ -410,6 +415,7 @@ LINE_HEADINGS: Final[dict[str, dict[str, str]]] = {
     "it": {
         "position": "Pos.",
         "description": "Descrizione",
+        "part_number": "Codice",
         "mpn": "Codice produttore",
         "manufacturer": "Produttore",
         "quantity": "Quantità",
@@ -422,6 +428,7 @@ LINE_HEADINGS: Final[dict[str, dict[str, str]]] = {
 
 # The render's heading key -> the required field it carries.
 _HEADING_FIELD: Final[dict[str, str]] = {
+    "part_number": "mpn",
     "mpn": "mpn",
     "manufacturer": "manufacturer",
     "quantity": "quantity_tiers",

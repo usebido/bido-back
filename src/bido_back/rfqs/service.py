@@ -70,6 +70,7 @@ from bido_back.outbound.domains import RecipientCheck, check_recipients, recipie
 from bido_back.rfqs.agents import EmailWriterAgent, IntakeAgent
 from bido_back.rfqs.currency import CurrencyChange, change_currency, resolve_currency
 from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound, ReplyByRequired
+from bido_back.rfqs.language import supplier_email_language
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.readiness import reply_by_refusal, send_blockers, utc_today
 from bido_back.rfqs.schemas import (
@@ -633,7 +634,9 @@ async def buyer_display_name(session: AsyncSession, user: User, company: str) ->
         .order_by(Contact.created_at)
         .limit(1)
     )
-    return name or f"{company} purchasing"
+    # Without a name the company signs alone: "<company> purchasing" read as a
+    # department nobody asked for.
+    return name or company
 
 
 def with_marker(subject: str, rfq_ref: str) -> str:
@@ -707,7 +710,7 @@ async def _render_for(
     localized: dict[str, TemplateContent],
 ) -> RenderedRfq:
     """The supplier's email; refuses one that fails the deterministic checks."""
-    language = supplier.language
+    language = supplier_email_language(supplier)
     display = localized.get(language)
     if display is None:
         display = await localize(ctx.template.content, language, writer, context)
@@ -857,6 +860,7 @@ async def prepare_send(
             to=[contact.email],
             subject=with_marker(rendered.subject, rfq.ref),
             body=rendered.text,
+            html_body=rendered.html,
         )
         payload = cast(dict[str, JsonValue], args.model_dump(mode="json"))
         call_id = send_proposal_ids(invite.id)[1]
