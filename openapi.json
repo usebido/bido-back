@@ -2801,6 +2801,14 @@
             "title": "Rows Total",
             "type": "integer"
           },
+          "skipped": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "default": {},
+            "title": "Skipped",
+            "type": "object"
+          },
           "type": {
             "enum": [
               "items",
@@ -6861,6 +6869,14 @@
           "sheet": {
             "title": "Sheet",
             "type": "string"
+          },
+          "skipped": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "default": {},
+            "title": "Skipped",
+            "type": "object"
           },
           "source": {
             "enum": [

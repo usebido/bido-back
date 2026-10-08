@@ -20,10 +20,12 @@ Unknown part numbers are created as items (description = the row's, or the
 part number) so a file is never rejected for that.
 """
 
+import difflib
 import logging
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, Final
@@ -116,10 +118,15 @@ class Conflict(PurchasingError):
 class _Counts:
     created: dict[str, int]
     updated: dict[str, int]
+    # Rows left out on purpose (e.g. an exact duplicate purchase line).
+    skipped: dict[str, int] = field(default_factory=dict[str, int])
 
     def add(self, kind: str, *, created: bool) -> None:
         target = self.created if created else self.updated
         target[kind] = target.get(kind, 0) + 1
+
+    def skip(self, kind: str) -> None:
+        self.skipped[kind] = self.skipped.get(kind, 0) + 1
 
 
 async def run_import(
@@ -197,6 +204,7 @@ def _report(
         errors=[ImportRowError(row=e.row, field=e.field, message=e.message) for e in table.errors],
         created=counts.created,
         updated=counts.updated,
+        skipped=counts.skipped,
     )
 
 
@@ -222,12 +230,12 @@ async def _apply(
 
 async def apply_parsed(
     session: AsyncSession, tenant_id: UUID, table: ParsedTable
-) -> tuple[dict[str, int], dict[str, int]]:
-    """Write one validated table in the caller's transaction: (created, updated) counts."""
+) -> tuple[dict[str, int], dict[str, int], dict[str, int]]:
+    """Write one validated table in the caller's transaction: (created, updated, skipped)."""
     counts = _Counts(created={}, updated={})
     if not table.missing_required and table.rows:
         await _apply(session, tenant_id, table, counts)
-    return counts.created, counts.updated
+    return counts.created, counts.updated, counts.skipped
 
 
 async def _apply_contacts(
@@ -384,6 +392,10 @@ async def _apply_purchases(
     suppliers: dict[str, Supplier] = {}
     orders: dict[tuple[UUID, str], PurchaseOrder] = {}
     next_line: dict[UUID, int] = defaultdict(int)
+    # Lines already written by this file, per order, by content. A row with no
+    # line number that repeats one of them exactly is a duplicate (spreadsheets
+    # exported twice, copy-paste): importing it would double-count the order.
+    seen: dict[UUID, set[tuple[object, ...]]] = defaultdict(set)
     for _, row in table.rows:
         name = str(row["supplier"])
         supplier = suppliers.get(name.lower())
@@ -425,8 +437,14 @@ async def _apply_purchases(
                 order.ordered_at = ordered_at
             orders[(supplier.id, number)] = order
 
-        item = await items.upsert(row, overwrite=False)
         line_no = row.get("line_no")
+        if not isinstance(line_no, int):
+            signature = _purchase_signature(row)
+            if signature in seen[order.id]:
+                counts.skip("po_lines_duplicate")
+                continue
+            seen[order.id].add(signature)
+        item = await items.upsert(row, overwrite=False)
         if not isinstance(line_no, int):
             next_line[order.id] += 1
             line_no = next_line[order.id]
@@ -458,6 +476,21 @@ async def _apply_purchases(
         line.rejected_qty = rejected
         counts.add("po_lines", created=created)
     await session.flush()
+
+
+def _purchase_signature(row: Mapping[str, Any]) -> tuple[object, ...]:
+    """What makes two purchase rows of the same order the same line."""
+    return (
+        str(row["part_number"]).strip().lower(),
+        _dec(row["quantity"]),
+        _dec(row["unit_price"]),
+        str(row.get("currency") or "").upper(),
+        row.get("promised_at"),
+        row.get("received_at"),
+        _dec(row.get("received_qty")),
+        _dec(row.get("rejected_qty")),
+        row.get("quality_ok"),
+    )
 
 
 async def _apply_plan(
@@ -518,20 +551,61 @@ async def list_products(
     ]
 
 
-async def _resolve_product(session: AsyncSession, wanted: str) -> str:
-    products = list(await session.scalars(select(BomLine.product).distinct()))
+# Words that only point at "the product" without naming it ("esse produto",
+# "this product", "il prodotto"): with one product imported, it is that one.
+_POINTER_WORDS: Final = frozenset(
+    {
+        "a", "o", "os", "as", "do", "da", "de", "the", "this", "that", "it", "my", "our",
+        "esse", "este", "essa", "esta", "isso", "isto", "meu", "minha", "nosso", "nossa",
+        "il", "lo", "la", "questo", "questa", "quel", "mio", "nostro",
+        "produto", "product", "prodotto", "item", "build", "montagem",
+    }
+)  # fmt: skip
+
+
+def match_product(products: Sequence[str], wanted: str) -> str | None:
+    """The one product `wanted` refers to, or None when it is missing or ambiguous.
+
+    Exact name (case-insensitive) first; then, with a single product, any
+    pointer phrase ("esse produto") or partial name; then a unique partial or
+    close match ("motor" -> "Motor EV-120", "motor ev120" -> "Motor EV-120").
+    """
     if not products:
-        raise NotFound("no bill of materials imported yet")
-    exact = [p for p in products if p.lower() == wanted.strip().lower()]
+        return None
+    needle = " ".join(wanted.strip().lower().split())
+    exact = [p for p in products if p.lower() == needle]
     if exact:
         return exact[0]
-    needle = wanted.strip().lower()
-    partial = [p for p in products if needle in p.lower()]
+    words = [w for w in re.split(r"[^\w-]+", needle) if w]
+    pointer_only = all(w in _POINTER_WORDS for w in words)
+    if len(products) == 1 and pointer_only:
+        return products[0]
+    if not needle or pointer_only:
+        return None
+    partial = [p for p in products if needle in p.lower() or p.lower() in needle]
     if len(partial) == 1:
         return partial[0]
-    raise NotFound(
-        f"no single product matches {wanted!r}; products: {', '.join(sorted(products)[:20])}"
-    )
+    if partial:
+        return None
+    squashed = {p: re.sub(r"[^a-z0-9]", "", p.lower()) for p in products}
+    target = re.sub(r"[^a-z0-9]", "", needle)
+    squashed_hits = [p for p, q in squashed.items() if target and (target in q or q in target)]
+    if len(squashed_hits) == 1:
+        return squashed_hits[0]
+    close = difflib.get_close_matches(needle, [p.lower() for p in products], n=2, cutoff=0.75)
+    if len(close) == 1:
+        return next(p for p in products if p.lower() == close[0])
+    return None
+
+
+async def _resolve_product(session: AsyncSession, wanted: str) -> str:
+    products = sorted(set(await session.scalars(select(BomLine.product).distinct())))
+    if not products:
+        raise NotFound("no bill of materials imported yet")
+    found = match_product(products, wanted)
+    if found is not None:
+        return found
+    raise NotFound(f"no single product matches {wanted!r}; products: {', '.join(products[:20])}")
 
 
 # --- Analyses -----------------------------------------------------------------------------

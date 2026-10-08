@@ -336,6 +336,7 @@ class SectionReport(BaseModel):
     question: str | None
     created: dict[str, int] = {}
     updated: dict[str, int] = {}
+    skipped: dict[str, int] = {}
 
 
 class WorkbookImportReport(BaseModel):
@@ -472,8 +473,9 @@ async def import_workbook(
     order = {t: i for i, t in enumerate(_ORDER)}
     async with tenant_session(db, principal.tenant_id) as session:
         for item in sorted(parsed, key=lambda p: order[p.section.import_type]):
-            created, updated = await apply_parsed(session, principal.tenant_id, item.table)
+            created, updated, skipped = await apply_parsed(session, principal.tenant_id, item.table)
             item.report.created, item.report.updated = created, updated
+            item.report.skipped = skipped
     logger.info(
         "workbook imported tenant=%s upload=%s sections=%d rows=%d",
         principal.tenant_id,
