@@ -54,10 +54,23 @@ jobs:
       RUN_TASK_NETWORK_CONFIGURATION: ${{ vars.RUN_TASK_NETWORK_CONFIGURATION }}
       INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
       RUN_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      EVENT_NAME: ${{ github.event_name }}
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Preflight
         id: preflight
         run: |
+          # CI runs for main commits are independent (ci.yml concurrency), so
+          # they can finish out of order. Deploy only main's current head: an
+          # older commit finishing later must never roll dev back.
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            head=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq .sha)
+            if [ "$head" != "$RUN_SHA" ]; then
+              echo "::notice::Deploy skipped: $RUN_SHA is no longer main's head ($head); that commit's CI deploys it."
+              echo "ready=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
           missing=()
           for name in AWS_DEPLOY_ROLE ECR_REPOSITORY RUN_TASK_NETWORK_CONFIGURATION; do
             [ -n "${!name}" ] || missing+=("$name")
