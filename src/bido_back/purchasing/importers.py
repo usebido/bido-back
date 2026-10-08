@@ -515,6 +515,17 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "email fornecedor",
                 "email fornitore",
                 "indirizzo email",
+                "email address",
+                "e mail address",
+                "email comercial",
+                "e mail comercial",
+                "email compras",
+                "endereco de email",
+                "endereco de e mail",
+                "correo",
+                "correo electronico",
+                "e mail adresse",
+                "email adresse",
             ),
         ),  # fmt: skip
         FieldSpec(

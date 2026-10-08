@@ -8371,6 +8371,14 @@
             "title": "Status",
             "type": "string"
           },
+          "suppliers_without_email": {
+            "description": "After an import: the buyer's suppliers that still have no contact email, by name (at most 50). They cannot be invited to an RFQ until one is added: tell the buyer now, not when the RFQ is created",
+            "items": {
+              "type": "string"
+            },
+            "title": "Suppliers Without Email",
+            "type": "array"
+          },
           "upload_id": {
             "format": "uuid",
             "title": "Upload Id",
