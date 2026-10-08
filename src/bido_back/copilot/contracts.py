@@ -86,6 +86,18 @@ class AnswerEvent(BaseModel):
     text: str
 
 
+class TitleEvent(BaseModel):
+    """The conversation's title changed: refined by the titler or set by a milestone.
+
+    Sent before `done`, only when the new title is ready in time; a title that
+    comes later is stored and shows up in the next conversation list.
+    """
+
+    type: Literal["title"] = "title"
+    conversation_id: UUID
+    title: str
+
+
 class DoneEvent(BaseModel):
     type: Literal["done"] = "done"
     run_id: UUID
@@ -116,7 +128,20 @@ class ConversationSummary(BaseModel):
     """One of the caller's conversations, for a history list."""
 
     conversation_id: UUID
-    title: str = Field(description="The first message, truncated")
+    title: str = Field(
+        description=(
+            "The first message, truncated, until the copilot names the conversation "
+            "or the buyer renames it"
+        )
+    )
+    title_source: Literal["fallback", "ai", "milestone", "user"] = Field(
+        default="fallback",
+        description=(
+            "Where the title came from: `fallback` (the first message), `ai` (named by "
+            "the copilot), `milestone` (an RFQ, analysis or award reference) or `user` "
+            "(renamed by the buyer; never changed automatically after that)"
+        ),
+    )
     created_at: datetime
     last_activity_at: datetime
     turns: int = Field(description="Messages sent in this conversation")
@@ -132,4 +157,15 @@ class ConversationList(BaseModel):
     )
 
 
-StreamItem = ConversationEvent | AnswerEvent | DoneEvent | dict[str, Any]
+class RenameConversationRequest(BaseModel):
+    title: str = Field(min_length=1, max_length=120)
+
+    @model_validator(mode="after")
+    def _not_blank(self) -> Self:
+        self.title = " ".join(self.title.split())
+        if not self.title:
+            raise ValueError("title must not be blank")
+        return self
+
+
+StreamItem = ConversationEvent | AnswerEvent | TitleEvent | DoneEvent | dict[str, Any]
