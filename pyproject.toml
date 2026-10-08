@@ -28,6 +28,7 @@ dependencies = [
     "httpx>=0.27",
     "holidays>=0.60",
     "dnspython>=2.6,<3",
+    "weasyprint>=66",
 ]
 
 [dependency-groups]

@@ -22,6 +22,7 @@ twice (a retry, a concurrent click) records one approval: the second proposal
 hits the sink's uniqueness rule and the first one stands.
 """
 
+import asyncio
 import importlib
 import logging
 from collections.abc import Callable, Sequence
@@ -70,6 +71,14 @@ from bido_back.onboarding.standard import TemplateContent
 from bido_back.outbound.domains import RecipientCheck, check_recipients, recipients_in_args
 from bido_back.rfqs.agents import EmailWriterAgent, IntakeAgent
 from bido_back.rfqs.currency import CurrencyChange, change_currency, resolve_currency
+from bido_back.rfqs.document import (
+    DocumentBranding,
+    RfqDocument,
+    build_document,
+    default_branding,
+    document_filename,
+    render_pdf,
+)
 from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound, ReplyByRequired
 from bido_back.rfqs.language import supplier_email_language
 from bido_back.rfqs.mailbox import MailboxSenderFactory
@@ -721,6 +730,8 @@ class _SendContext:
     template: ResolvedTemplate
     buyer_name: str
     buyer_company: str
+    # Whose name the RFQ document goes out in. Today: the company's name, no logo.
+    branding: DocumentBranding
 
 
 def _render_line(line: RfqLine) -> RenderLine:
@@ -766,6 +777,7 @@ async def _send_context(session: AsyncSession, principal: Principal, rfq: Rfq) -
         template=await resolve_for_rfq(session, rfq, lines),
         buyer_name=await buyer_display_name(session, user, tenant.name),
         buyer_company=tenant.name,
+        branding=default_branding(tenant.name),
     )
 
 
@@ -775,28 +787,28 @@ async def _render_for(
     writer: EmailWriterAgent,
     context: ToolContext,
     localized: dict[str, TemplateContent],
-) -> RenderedRfq:
-    """The supplier's email; refuses one that fails the deterministic checks."""
+) -> tuple[RenderedRfq, RenderInput]:
+    """The supplier's email (and what it was rendered from); refuses one that fails
+    the deterministic checks."""
     language = supplier_email_language(supplier)
     display = localized.get(language)
     if display is None:
         display = await localize(ctx.template.content, language, writer, context)
         localized[language] = display
-    rendered = render_rfq(
-        RenderInput(
-            rfq_ref=ctx.rfq.ref,
-            rfq_title=ctx.rfq.title,
-            response_due=ctx.rfq.response_due,
-            buyer_name=ctx.buyer_name,
-            buyer_company=ctx.buyer_company,
-            language=language,
-            template=ctx.template.content,
-            display=display,
-            lines=[_render_line(line) for line in ctx.lines],
-            payment_terms=ctx.rfq.payment_terms,
-            quote_validity_days=ctx.rfq.quote_validity_days,
-        )
+    render_input = RenderInput(
+        rfq_ref=ctx.rfq.ref,
+        rfq_title=ctx.rfq.title,
+        response_due=ctx.rfq.response_due,
+        buyer_name=ctx.buyer_name,
+        buyer_company=ctx.buyer_company,
+        language=language,
+        template=ctx.template.content,
+        display=display,
+        lines=[_render_line(line) for line in ctx.lines],
+        payment_terms=ctx.rfq.payment_terms,
+        quote_validity_days=ctx.rfq.quote_validity_days,
     )
+    rendered = render_rfq(render_input)
     problems = rfq_email_problems(
         RfqEmailInput(
             rfq_ref=ctx.rfq.ref,
@@ -814,7 +826,7 @@ async def _render_for(
     if problems:
         # The buyer's template text is the only free text: e.g. a price in it.
         raise InvalidState(f"rfq {ctx.rfq.id}: rendered email fails checks: {', '.join(problems)}")
-    return rendered
+    return rendered, render_input
 
 
 async def preview_email(
@@ -835,7 +847,7 @@ async def preview_email(
         _, supplier = row
         ctx = await _send_context(session, principal, rfq)
     context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
-    rendered = await _render_for(ctx, supplier, writer, context, {})
+    rendered, _ = await _render_for(ctx, supplier, writer, context, {})
     return RfqEmailPreview(
         invite_id=invite_id,
         subject=with_marker(rendered.subject, rfq.ref),
@@ -846,6 +858,72 @@ async def preview_email(
         template_version=ctx.template.version,
         missing_required=required_views(ctx.template.content),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class RfqDocumentFile:
+    filename: str
+    content: bytes
+
+
+async def preview_document(
+    db: Db,
+    principal: Principal,
+    rfq_id: UUID,
+    invite_id: UUID,
+    writer: EmailWriterAgent,
+    *,
+    today: date | None = None,
+) -> RfqDocumentFile:
+    """The PDF this invite's email carries. Sends nothing.
+
+    Once a send was proposed, it is the approved (or awaiting approval) document,
+    exactly what goes out; before that, the document `prepare_send` would build now.
+    """
+    async with tenant_session(db, principal.tenant_id) as session:
+        rfq = await _rfq(session, rfq_id)
+        row = (
+            await session.execute(
+                select(Invite, Supplier)
+                .join(Supplier, Supplier.id == Invite.supplier_id)
+                .where(Invite.id == invite_id, Invite.rfq_id == rfq_id)
+            )
+        ).first()
+        if row is None:
+            raise NotFound(f"invite {invite_id} not found")
+        _, supplier = row
+        proposed = await session.scalar(
+            select(Approval.args)
+            .where(
+                Approval.tool == SEND_RFQ_EMAIL,
+                Approval.tool_call_id == send_proposal_ids(invite_id)[1],
+                Approval.status.in_(("pending", "approved", "executed")),
+            )
+            .order_by(Approval.created_at.desc())
+            .limit(1)
+        )
+        document: RfqDocument | None = (
+            SendRfqEmailArgs.model_validate(proposed).document if proposed is not None else None
+        )
+        ctx = None if document is not None else await _send_context(session, principal, rfq)
+    if document is None:
+        if ctx is None:  # pragma: no cover - set whenever there is no proposed document
+            raise NotFound(f"rfq {rfq_id} not found")
+        if not ctx.lines:
+            raise InvalidState(f"rfq {rfq_id} has no lines")
+        context = ToolContext(
+            tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4()
+        )
+        _, render_input = await _render_for(ctx, supplier, writer, context, {})
+        document = build_document(
+            render_input,
+            supplier_name=supplier.name,
+            currency=rfq.base_currency,
+            issued_on=today or utc_today(),
+            branding=ctx.branding,
+        )
+    pdf = await asyncio.to_thread(render_pdf, document)
+    return RfqDocumentFile(filename=document_filename(document), content=pdf)
 
 
 async def prepare_send(
@@ -920,7 +998,7 @@ async def prepare_send(
         context = ToolContext(
             tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4()
         )
-        rendered = await _render_for(ctx, supplier, writer, context, localized)
+        rendered, render_input = await _render_for(ctx, supplier, writer, context, localized)
         args = SendRfqEmailArgs(
             invite_id=invite.id,
             sender_user_id=principal.user_id,
@@ -928,6 +1006,14 @@ async def prepare_send(
             subject=with_marker(rendered.subject, rfq.ref),
             body=rendered.text,
             html_body=rendered.html,
+            # The supplier's PDF: addressed to this supplier only, approved with the email.
+            document=build_document(
+                render_input,
+                supplier_name=supplier.name,
+                currency=rfq.base_currency,
+                issued_on=today or utc_today(),
+                branding=ctx.branding,
+            ),
         )
         payload = cast(dict[str, JsonValue], args.model_dump(mode="json"))
         call_id = send_proposal_ids(invite.id)[1]
