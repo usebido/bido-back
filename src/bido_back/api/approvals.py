@@ -45,8 +45,9 @@ class DecisionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     decision: Literal["approve", "reject"]
-    # Recipient domains of this email the person confirms (outbound guard).
-    # Only domains the approved email actually writes to are recorded.
+    # Recipients of this email the person confirms (outbound guard): domains, or
+    # exact addresses at free mailbox providers (a bare gmail.com is refused).
+    # Only what the approved email actually writes to is recorded.
     confirmed_domains: list[str] = Field(default_factory=list[str], max_length=50)
 
 

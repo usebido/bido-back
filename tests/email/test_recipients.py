@@ -85,3 +85,30 @@ def test_normalize_domain() -> None:
     assert normalize_domain(" @Acme.COM. ") == "acme.com"
     assert normalize_domain("a@b.com") is None
     assert normalize_domain("nodot") is None
+
+
+def test_consumer_providers_are_recognized() -> None:
+    from bido_back.email.recipients import confirmation_key, is_consumer_domain
+
+    for d in (
+        "gmail.com",
+        "GoogleMail.com",
+        "outlook.com",
+        "hotmail.com.br",
+        "live.co.uk",
+        "yahoo.com.br",
+        "yahoo.co.jp",
+        "gmx.de",
+        "icloud.com",
+        "proton.me",
+        "uol.com.br",
+        "bol.com.br",
+        "terra.com.br",
+        "ig.com.br",
+    ):
+        assert is_consumer_domain(d), d
+    for d in ("rame-italia.it", "usebido.com", "liveperson.com", "live.nation.com", "gmxcorp.com"):
+        assert not is_consumer_domain(d), d
+    assert confirmation_key("A.B@Gmail.com") == "a.b@gmail.com"
+    assert confirmation_key("vendas@Rame-Italia.it") == "rame-italia.it"
+    assert confirmation_key("not an address") is None
