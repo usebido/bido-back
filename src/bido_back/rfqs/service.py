@@ -179,6 +179,8 @@ def _summary_fields(rfq: Rfq) -> dict[str, object]:
         "status": cast(RfqStatus, rfq.status),
         "response_due": rfq.response_due,
         "created_at": rfq.created_at,
+        "payment_terms": rfq.payment_terms,
+        "quote_validity_days": rfq.quote_validity_days,
     }
 
 
@@ -475,8 +477,9 @@ async def remove_line(db: Db, principal: Principal, rfq_id: UUID, line_id: UUID)
 async def update_rfq(
     db: Db, principal: Principal, rfq_id: UUID, patch: UpdateRfqRequest
 ) -> RfqDetail:
-    """RFQ-wide changes to a draft: its title, response date and currency, and the
-    Incoterm, delivery location and need-by date of every line."""
+    """RFQ-wide changes to a draft: its title, response date, currency, payment terms
+    and quote validity, and the Incoterm, delivery location and need-by date of every
+    line."""
     return (await edit_rfq(db, principal, rfq_id, patch)).detail
 
 
@@ -507,7 +510,7 @@ async def edit_rfq(
             currency_change = await change_currency(
                 session, rfq, changes["currency"], today or datetime.now(UTC).date()
             )
-        for field in ("title", "response_due"):
+        for field in ("title", "response_due", "payment_terms", "quote_validity_days"):
             if field in changes:
                 setattr(rfq, field, changes[field])
         line_fields = {
@@ -715,6 +718,8 @@ async def _render_for(
             template=ctx.template.content,
             display=display,
             lines=[_render_line(line) for line in ctx.lines],
+            payment_terms=ctx.rfq.payment_terms,
+            quote_validity_days=ctx.rfq.quote_validity_days,
         )
     )
     problems = rfq_email_problems(
@@ -727,6 +732,7 @@ async def _render_for(
             supplier_language=language,
             response_due=ctx.rfq.response_due,
             lines=[_email_line(line) for line in ctx.lines],
+            payment_terms=ctx.rfq.payment_terms,
         ),
         RfqEmailOutput(subject=rendered.subject, body=rendered.text),
     )

@@ -3898,6 +3898,22 @@
         "title": "MailboxConnectionResponse",
         "type": "object"
       },
+      "MailboxProvidersResponse": {
+        "properties": {
+          "providers": {
+            "items": {
+              "$ref": "#/components/schemas/ProviderAvailability"
+            },
+            "title": "Providers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "providers"
+        ],
+        "title": "MailboxProvidersResponse",
+        "type": "object"
+      },
       "MailboxStatusResponse": {
         "properties": {
           "connections": {
@@ -5315,6 +5331,28 @@
         "title": "ProposedMandate",
         "type": "object"
       },
+      "ProviderAvailability": {
+        "properties": {
+          "available": {
+            "title": "Available",
+            "type": "boolean"
+          },
+          "provider": {
+            "enum": [
+              "google",
+              "microsoft"
+            ],
+            "title": "Provider",
+            "type": "string"
+          }
+        },
+        "required": [
+          "provider",
+          "available"
+        ],
+        "title": "ProviderAvailability",
+        "type": "object"
+      },
       "PurchaseOrderSummary": {
         "properties": {
           "created_at": {
@@ -6048,6 +6086,18 @@
             "title": "Lines",
             "type": "array"
           },
+          "payment_terms": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The buyer's payment terms for suppliers, verbatim",
+            "title": "Payment Terms"
+          },
           "questions": {
             "description": "What the buyer should clarify before sending",
             "items": {
@@ -6055,6 +6105,18 @@
             },
             "title": "Questions",
             "type": "array"
+          },
+          "quote_validity_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How many days a quote must stay valid, at least",
+            "title": "Quote Validity Days"
           },
           "ref": {
             "title": "Ref",
@@ -6131,6 +6193,30 @@
             },
             "title": "Lines",
             "type": "array"
+          },
+          "payment_terms": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The buyer's payment terms for suppliers, verbatim",
+            "title": "Payment Terms"
+          },
+          "quote_validity_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How many days a quote must stay valid, at least",
+            "title": "Quote Validity Days"
           },
           "ref": {
             "title": "Ref",
@@ -6770,6 +6856,30 @@
             "description": "The buyer who created the RFQ",
             "title": "Owner"
           },
+          "payment_terms": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The buyer's payment terms for suppliers, verbatim",
+            "title": "Payment Terms"
+          },
+          "quote_validity_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How many days a quote must stay valid, at least",
+            "title": "Quote Validity Days"
+          },
           "ref": {
             "title": "Ref",
             "type": "string"
@@ -7163,6 +7273,13 @@
               }
             ],
             "title": "Type"
+          },
+          "unknown_columns": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Unknown Columns",
+            "type": "array"
           },
           "updated": {
             "additionalProperties": {
@@ -8437,6 +8554,14 @@
             "title": "Problems",
             "type": "array"
           },
+          "products": {
+            "description": "The products the BOMs and production plans name (at most 20), as written. Analyse one of these by this exact name when the buyer says 'this product'; never a name from an example",
+            "items": {
+              "type": "string"
+            },
+            "title": "Products",
+            "type": "array"
+          },
           "questions": {
             "items": {
               "type": "string"
@@ -8466,6 +8591,14 @@
               "type": "string"
             },
             "title": "Suppliers Without Email",
+            "type": "array"
+          },
+          "unimported_sheets": {
+            "description": "Nonempty sheets with no parsed section; their data was not imported",
+            "items": {
+              "type": "string"
+            },
+            "title": "Unimported Sheets",
             "type": "array"
           },
           "upload_id": {
@@ -10250,6 +10383,73 @@
           }
         ],
         "summary": "Connect",
+        "tags": [
+          "mailbox"
+        ]
+      }
+    },
+    "/v1/mailbox/providers": {
+      "get": {
+        "description": "Which mailbox providers this server is configured for (no secrets, no details).",
+        "operationId": "mailbox_providers_v1_mailbox_providers_get",
+        "parameters": [
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MailboxProvidersResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Mailbox Providers",
         "tags": [
           "mailbox"
         ]

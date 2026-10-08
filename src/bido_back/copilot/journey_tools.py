@@ -41,6 +41,9 @@ from bido_back.negotiation.schemas import LineLimitsUpdate
 from bido_back.outbound.domains import RecipientCheck
 from bido_back.purchasing import service as purchasing_service
 from bido_back.purchasing.schemas import AnalysisRequest, CurrencyTotalView
+from bido_back.purchasing.sources.contracts import SourceAssessment
+from bido_back.purchasing.sources.mapping import default_mapper
+from bido_back.purchasing.sources.service import SourceAccessError, analyze_uploads
 from bido_back.purchasing.workbook import WorkbookFileError, WorkbookImportReport, import_workbook
 from bido_back.rfqs import suppliers as supplier_service
 from bido_back.rfqs.errors import MailboxNotConfigured, MailboxNotConnected, RfqError
@@ -76,6 +79,19 @@ class ImportSpreadsheetIn(BaseModel):
     confirmed: bool = Field(
         default=False,
         description="True only after the buyer answered the questions of a previous call",
+    )
+
+
+class AnalyzeSourcesIn(BaseModel):
+    upload_ids: list[UUID] = Field(
+        min_length=1,
+        max_length=10,
+        description="Source attachments in this conversation; include related sources together",
+    )
+    objective: str = Field(
+        min_length=1,
+        max_length=2000,
+        description="The buyer's question and explicit clarifications; do not invent assumptions",
     )
 
 
@@ -267,6 +283,28 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         if report.status == "needs_confirmation":
             asked.add(upload_id)
         return report
+
+    async def analyze_procurement_sources(
+        ctx: ToolContext, args: AnalyzeSourcesIn
+    ) -> SourceAssessment:
+        principal = _principal(ctx)
+        allowed = set(deps.attachment_ids) | set(deps.earlier_attachment_ids)
+        if not set(args.upload_ids) <= allowed:
+            raise ToolError("that id is not one of the files attached in this conversation")
+        if deps.storage is None:
+            raise ToolError("file storage is not available")
+        try:
+            return await analyze_uploads(
+                db,
+                deps.storage,
+                principal,
+                args.upload_ids,
+                args.objective,
+                ctx,
+                deps.source_mapper or default_mapper(),
+            )
+        except SourceAccessError as exc:
+            raise ToolError(str(exc)) from None
 
     async def add_supplier_contact(ctx: ToolContext, args: AddContactIn) -> AddContactOut:
         principal = _principal(ctx)
@@ -543,6 +581,18 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
 
     ref_hint = " Pass the RFQ reference (RFQ-12) or id."
     return (
+        Tool(
+            "analyze_procurement_sources",
+            "Read and cross-reference all attached procurement sources: direct material "
+            "demand, inventory, supplier identities, purchase history, supplier performance "
+            "and consolidated purchase needs. Returns source-reported quantities separately "
+            "from validated calculations, with source references and specific issues. "
+            "No BOM required for direct demand. Read-only: nothing imported or sent.",
+            AnalyzeSourcesIn,
+            SourceAssessment,
+            "read",
+            analyze_procurement_sources,
+        ),
         Tool(
             "import_spreadsheet",
             "Import a spreadsheet the buyer attached (any layout, every sheet): parts, BOM, "

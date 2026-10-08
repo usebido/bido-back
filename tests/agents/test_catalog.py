@@ -143,6 +143,8 @@ def test_models() -> None:
     assert RFQ_INTAKE.model == RFQ_EMAIL_WRITER.model == DEFAULT_MODEL == "gpt-6-luna"
     # Extraction produces the prices the buyer compares: the stronger model.
     assert QUOTE_EXTRACTION.model == EXTRACTION_MODEL == "gpt-6.1-sol"
+    # Reading the spreadsheet's columns feeds every analysis: the stronger model too.
+    assert SHEET_MAPPER.model == "gpt-6.1-sol"
 
 
 def test_model_is_configurable() -> None:

@@ -15,6 +15,10 @@ requested MPN, quantity tier and unit is always in the email. Footer fields
 are asked after the table, followed by the required sector questions the
 footer does not cover (see `bido_back.templates.required`).
 
+The RFQ's own commercial terms (payment terms, minimum quote validity) are
+stated after the questions only when the buyer set them; nothing fills them in
+otherwise.
+
 Matching headings to line data uses the template's ORIGINAL labels (the
 language the synonyms are written for); the email shows the localized ones.
 """
@@ -50,6 +54,8 @@ _PHRASES: Final[dict[str, dict[str, str]]] = {
             "If you offer an alternative part, please say so clearly and give its MPN "
             "and manufacturer."
         ),
+        "payment": "Our payment terms: {terms}",
+        "validity": "Please keep your quote valid for at least {days} days.",
         "due": "Please send your quote by {date}.",
         "closing": "Best regards,",
     },
@@ -62,6 +68,8 @@ _PHRASES: Final[dict[str, dict[str, str]]] = {
         "alternative": (
             "Se oferecer um item alternativo, indique claramente, com o código e o fabricante."
         ),
+        "payment": "Nossa condição de pagamento: {terms}",
+        "validity": "Por favor, mantenha a proposta válida por no mínimo {days} dias.",
         "due": "Por favor, envie sua proposta até {date}.",
         "closing": "Atenciosamente,",
     },
@@ -77,6 +85,8 @@ _PHRASES: Final[dict[str, dict[str, str]]] = {
             "Falls Sie einen alternativen Artikel anbieten, kennzeichnen Sie ihn bitte "
             "eindeutig und nennen Sie MPN und Hersteller."
         ),
+        "payment": "Unsere Zahlungsbedingungen: {terms}",
+        "validity": "Bitte halten Sie Ihr Angebot mindestens {days} Tage gültig.",
         "due": "Bitte senden Sie Ihr Angebot bis {date}.",
         "closing": "Mit freundlichen Grüßen",
     },
@@ -92,6 +102,8 @@ _PHRASES: Final[dict[str, dict[str, str]]] = {
             "Si vous proposez un article alternatif, merci de l'indiquer clairement avec "
             "sa référence et son fabricant."
         ),
+        "payment": "Nos conditions de paiement : {terms}",
+        "validity": "Merci de maintenir votre offre valable au moins {days} jours.",
         "due": "Merci de nous envoyer votre offre avant le {date}.",
         "closing": "Cordialement,",
     },
@@ -107,6 +119,8 @@ _PHRASES: Final[dict[str, dict[str, str]]] = {
             "Si ofrece una pieza alternativa, indíquelo claramente con su número de pieza "
             "y fabricante."
         ),
+        "payment": "Nuestras condiciones de pago: {terms}",
+        "validity": "Por favor, mantenga su cotización válida al menos {days} días.",
         "due": "Por favor, envíe su cotización antes del {date}.",
         "closing": "Saludos cordiales,",
     },
@@ -121,6 +135,8 @@ _PHRASES: Final[dict[str, dict[str, str]]] = {
         "alternative": (
             "Se offrite un articolo alternativo, indicatelo chiaramente con codice e produttore."
         ),
+        "payment": "Le nostre condizioni di pagamento: {terms}",
+        "validity": "Vi preghiamo di mantenere l'offerta valida per almeno {days} giorni.",
         "due": "Vi preghiamo di inviare l'offerta entro il {date}.",
         "closing": "Cordiali saluti,",
     },
@@ -204,6 +220,9 @@ class RenderInput:
     template: TemplateContent
     display: TemplateContent
     lines: Sequence[RenderLine]
+    # The buyer's commercial terms, stated after the questions when set; never guessed.
+    payment_terms: str | None = None
+    quote_validity_days: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,6 +397,11 @@ def render_rfq(data: RenderInput) -> RenderedRfq:
         else None
     )
     reference = words["reference"].format(ref=data.rfq_ref)
+    terms: list[str] = []
+    if data.payment_terms:
+        terms.append(words["payment"].format(terms=data.payment_terms))
+    if data.quote_validity_days:
+        terms.append(words["validity"].format(days=data.quote_validity_days))
 
     text_parts = [
         data.display.greeting,
@@ -388,6 +412,8 @@ def render_rfq(data: RenderInput) -> RenderedRfq:
         text_parts.append(f"{incoterm_label}: {incoterm}")
     text_parts.append("\n".join([words["prices"], words["asks"], *(f"- {q}" for q in questions)]))
     text_parts.append(words["alternative"])
+    if terms:
+        text_parts.append("\n".join(terms))
     if due:
         text_parts.append(due)
     text_parts.append(f"{words['closing']}\n{data.buyer_name}\n{data.buyer_company}")
@@ -408,6 +434,7 @@ def render_rfq(data: RenderInput) -> RenderedRfq:
     html_parts.append(p(words["asks"]))
     html_parts.append("<ul>" + "".join(f"<li>{html.escape(q)}</li>" for q in questions) + "</ul>")
     html_parts.append(p(words["alternative"]))
+    html_parts.extend(p(term) for term in terms)
     if due:
         html_parts.append(p(due))
     html_parts.append(
