@@ -1,0 +1,26 @@
+{
+  "name": "bido-solana",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@11.21.0",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "pnpm typecheck && pnpm test",
+    "setup:devnet": "tsx scripts/chain-setup.ts"
+  },
+  "dependencies": {
+    "@anchor-lang/core": "1.2.0",
+    "@solana/attestation": "2.1.0",
+    "@solana/kit": "^8.4.0",
+    "@solana/spl-token": "^0.4.15",
+    "@solana/web3.js": "^1.99.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "tsx": "4.23.15",
+    "typescript": "^5",
+    "vitest": "^5.0.2"
+  }
+}

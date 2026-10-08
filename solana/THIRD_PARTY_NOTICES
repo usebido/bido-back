@@ -1,0 +1,10 @@
+Third-party notices
+===================
+
+tests/fixtures/sas.so
+  Solana Attestation Service (SAS) program binary, dumped from Solana devnet for the LiteSVM tests:
+    program id  22zoJMtdu4tQc2PzL74ZUT7FrwgB1Udec8DdW4yw4BdG
+    dumped      2026-10-06, devnet slot 508216959
+    sha256      afacc7215d6ab6759bcf5edb958a1ad1d9de7559d53ac807c6aa4775a1a5a357
+  Source: https://github.com/solana-foundation/solana-attestation-service
+  License: MIT. Copyright (c) Solana Foundation.

@@ -32,3 +32,6 @@ Dockerfile
 .idea
 .vscode
 .DS_Store
+
+# The on-chain workspace is built separately from the Python service.
+solana
