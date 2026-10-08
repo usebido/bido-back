@@ -23,6 +23,8 @@ EXPECTED_TOOLS = {
     "get_rfq_template": "read",
     "update_rfq_template": "draft",
     "run_purchase_analysis": "draft",
+    "analyze_requirements": "draft",
+    "add_requirements": "draft",
     "create_rfq_from_analysis": "draft",
     "create_rfq": "draft",
     "update_rfq_line": "draft",

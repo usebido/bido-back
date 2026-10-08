@@ -30,7 +30,10 @@ from bido_back.purchasing.schemas import (
     AnalysisView,
     ImportReport,
     ImportRequest,
+    NewRequirementsRequest,
     ProductView,
+    RequirementsAnalysisRequest,
+    RequirementView,
     RfqFromAnalysis,
     RfqFromAnalysisRequest,
 )
@@ -126,6 +129,52 @@ def purchasing_router() -> APIRouter:
     ) -> AnalysisView:
         try:
             return await service.create_analysis(db, principal, request)
+        except service.PurchasingError as exc:
+            raise purchasing_http_error(exc) from None
+
+    @router.get("/v1/requirements", responses=error_responses())
+    async def requirements(  # pyright: ignore[reportUnusedFunction]
+        principal: CurrentPrincipal, db: Db, open_only: bool = True
+    ) -> list[RequirementView]:
+        return await service.list_requirements(db, principal, open_only=open_only)
+
+    @router.post(
+        "/v1/requirements",
+        status_code=status.HTTP_201_CREATED,
+        responses=error_responses(status.HTTP_422_UNPROCESSABLE_CONTENT),
+    )
+    async def add_requirements(  # pyright: ignore[reportUnusedFunction]
+        request: NewRequirementsRequest, principal: CurrentPrincipal, db: Db
+    ) -> list[RequirementView]:
+        try:
+            return await service.add_requirements(
+                db,
+                principal,
+                [
+                    service.NewRequirement(
+                        part_number=line.part_number,
+                        quantity=line.quantity,
+                        need_by=line.need_by,
+                        unit=line.unit,
+                        description=line.description,
+                        reference=line.reference,
+                    )
+                    for line in request.lines
+                ],
+            )
+        except service.PurchasingError as exc:
+            raise purchasing_http_error(exc) from None
+
+    @router.post(
+        "/v1/analyses/requirements",
+        status_code=status.HTTP_201_CREATED,
+        responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_422_UNPROCESSABLE_CONTENT),
+    )
+    async def create_requirements_analysis(  # pyright: ignore[reportUnusedFunction]
+        request: RequirementsAnalysisRequest, principal: CurrentPrincipal, db: Db
+    ) -> AnalysisView:
+        try:
+            return await service.create_requirements_analysis(db, principal, request)
         except service.PurchasingError as exc:
             raise purchasing_http_error(exc) from None
 

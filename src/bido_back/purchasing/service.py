@@ -15,6 +15,10 @@ written, and a dry run writes nothing.
 * purchase_history: suppliers matched by name (case-insensitive) or created;
   orders upserted per (supplier, PO number), lines per (order, line number).
 * production_plan: upserted per (product, need-by date).
+* requirements (workbooks and the chat): upserted per (part, need-by date,
+  reference); a requirement an RFQ already covers is left alone.
+* supplier_evaluation (workbooks): the buyer's OTIF, quality, rating, lead time
+  and material group, onto the supplier of that name.
 
 Unknown part numbers are created as items (description = the row's, or the
 part number) so a file is never rejected for that.
@@ -50,6 +54,7 @@ from bido_back.db.models import (
     PoLine,
     ProductionPlanRow,
     PurchaseOrder,
+    Requirement,
     Supplier,
     SupplierContact,
     TemplateUpload,
@@ -68,12 +73,15 @@ from bido_back.purchasing.schemas import (
     AnalysisRequest,
     AnalysisSummary,
     AnalysisView,
+    CandidateView,
     FlagView,
     ImportReport,
     ImportRequest,
     ImportRowError,
     InvitedSupplier,
     ProductView,
+    RequirementsAnalysisRequest,
+    RequirementView,
     RfqFromAnalysis,
     RfqFromAnalysisRequest,
     SkippedSupplier,
@@ -229,6 +237,10 @@ async def _apply(
             await _apply_plan(session, tenant_id, table, counts)
         case "supplier_contacts":
             await _apply_contacts(session, tenant_id, table, counts)
+        case "requirements":
+            await _apply_requirements(session, tenant_id, table, items, counts)
+        case "supplier_evaluation":
+            await _apply_evaluation(session, tenant_id, table, counts)
 
 
 async def apply_parsed(
@@ -268,6 +280,9 @@ async def _apply_contacts(
         kind = supplier_type(row.get("type"))
         if kind is not None:
             supplier.type = kind  # the buyer's supplier master says what it is
+        group = _opt(row.get("category"))
+        if group and group.strip():
+            supplier.category = group.strip()[:200]
         email = str(row["email"]).strip().lower()
         existing = await session.scalar(
             select(Contact)
@@ -388,7 +403,108 @@ async def _apply_inventory(
         stock.on_order = _dec(row.get("on_order"), Decimal(0)) or Decimal(0)
         as_of = row.get("as_of")
         stock.as_of = as_of if isinstance(as_of, date) else None
+        # A second stock sheet of the same export (a consolidated view) may not
+        # repeat the buffer or the units: keep what the first one said.
+        safety = _dec(row.get("safety_stock"))
+        if safety is not None or created:
+            stock.safety_stock = safety or Decimal(0)
+        for name in ("unit", "order_unit"):
+            value = _unit_text(row.get(name))
+            if value is not None or created:
+                setattr(stock, name, value)
         counts.add("inventory", created=created)
+    await session.flush()
+
+
+def _unit_text(value: object) -> str | None:
+    text = _opt(value)
+    return text.strip()[:20] if text and text.strip() else None
+
+
+async def _apply_requirements(
+    session: AsyncSession,
+    tenant_id: UUID,
+    table: ParsedTable,
+    items: _ItemCache,
+    counts: _Counts,
+    *,
+    source: str = "import",
+    created_by: UUID | None = None,
+) -> list[Requirement]:
+    """Upsert per (part, need-by date, reference); one an RFQ covers is left as it is."""
+    written: list[Requirement] = []
+    for _, row in table.rows:
+        item = await items.upsert(row, overwrite=False)
+        need_by = row["need_by"]
+        assert isinstance(need_by, date)
+        reference = (_opt(row.get("reference")) or "").strip()[:100]
+        found = await session.scalar(
+            select(Requirement).where(
+                Requirement.item_id == item.id,
+                Requirement.need_by == need_by,
+                Requirement.reference == reference,
+            )
+        )
+        if found is not None and found.rfq_id is not None:
+            counts.skip("requirements_already_quoted")
+            continue
+        created = found is None
+        if found is None:
+            found = Requirement(
+                tenant_id=tenant_id,
+                item_id=item.id,
+                need_by=need_by,
+                reference=reference,
+                source=source,
+                created_by=created_by,
+            )
+            session.add(found)
+        found.quantity = _dec(row["quantity"], Decimal(0)) or Decimal(0)
+        found.unit = _unit_text(row.get("unit"))
+        found.location = _opt(row.get("location"))
+        found.project = _opt(row.get("project"))
+        found.kind = _opt(row.get("kind"))
+        counts.add("requirements", created=created)
+        written.append(found)
+    await session.flush()
+    return written
+
+
+def _pct_value(value: object) -> Decimal | None:
+    """95, "95%" or 0.95 -> 95 (a percentage)."""
+    number = _dec(value)
+    if number is None:
+        return None
+    return number * 100 if number <= 1 else number
+
+
+async def _apply_evaluation(
+    session: AsyncSession, tenant_id: UUID, table: ParsedTable, counts: _Counts
+) -> None:
+    """The buyer's evaluation onto the supplier of that name (created when new)."""
+    for _, row in table.rows:
+        name = str(row["supplier"]).strip()
+        supplier = await session.scalar(
+            select(Supplier).where(func.lower(Supplier.name) == name.lower()).limit(1)
+        )
+        if supplier is None:
+            supplier = Supplier(tenant_id=tenant_id, name=name, type="distributor")
+            session.add(supplier)
+            await session.flush()
+            counts.add("suppliers", created=True)
+        group = _opt(row.get("category"))
+        if group and group.strip():
+            supplier.category = group.strip()[:200]
+        otif, quality = _pct_value(row.get("otif_pct")), _pct_value(row.get("quality_pct"))
+        if otif is not None:
+            supplier.otif_pct = otif
+        if quality is not None:
+            supplier.quality_pct = quality
+        for field_name in ("rating", "lead_time_days"):
+            value = _dec(row.get(field_name))
+            if value is not None:
+                setattr(supplier, field_name, value)
+        counts.add("supplier_evaluations", created=False)
     await session.flush()
 
 
@@ -656,6 +772,7 @@ async def create_analysis(
             purchases=purchases,
             today=today,
             params=params,
+            profiles=await _load_profiles(session),
         )
         record = Analysis(
             tenant_id=principal.tenant_id,
@@ -685,6 +802,214 @@ async def create_analysis(
         len(result.lines),
     )
     return view
+
+
+# --- Requirements ----------------------------------------------------------------------------
+
+
+REQUIREMENTS_LABEL: Final = "Necessidades"
+
+
+async def _open_requirements(
+    session: AsyncSession, request: RequirementsAnalysisRequest
+) -> list[tuple[Requirement, Item]]:
+    query = (
+        select(Requirement, Item)
+        .join(Item, Item.id == Requirement.item_id)
+        .where(Requirement.rfq_id.is_(None))
+        .order_by(Item.part_number, Requirement.need_by)
+    )
+    if request.part_numbers:
+        wanted = [p.strip().lower() for p in request.part_numbers if p.strip()]
+        query = query.where(func.lower(Item.part_number).in_(wanted))
+    if request.project:
+        query = query.where(func.lower(Requirement.project) == request.project.strip().lower())
+    if request.need_by_until is not None:
+        query = query.where(Requirement.need_by <= request.need_by_until)
+    return [(req, item) for req, item in (await session.execute(query)).all()]
+
+
+def _needs(rows: Sequence[tuple[Requirement, Item]]) -> list[calc.Need]:
+    """One need per item: requirements added up (same unit family), earliest date kept."""
+    grouped: dict[UUID, list[Requirement]] = defaultdict(list)
+    items: dict[UUID, Item] = {}
+    for req, item in rows:
+        grouped[item.id].append(req)
+        items[item.id] = item
+    needs: list[calc.Need] = []
+    for item_id, reqs in grouped.items():
+        item = items[item_id]
+        unit = next((r.unit for r in reqs if r.unit), None)
+        family = calc.unit_family(unit)
+        same = [r for r in reqs if calc.unit_family(r.unit) in (family, None)]
+        needs.append(
+            calc.Need(
+                item=_item_info(item),
+                quantity=sum((r.quantity for r in same), Decimal(0)),
+                unit=unit,
+                need_by=min(r.need_by for r in same),
+            )
+        )
+        # Requirements in another unit family stay separate lines (never added up).
+        for other in (r for r in reqs if r not in same):
+            needs.append(
+                calc.Need(
+                    item=_item_info(item),
+                    quantity=other.quantity,
+                    unit=other.unit,
+                    need_by=other.need_by,
+                )
+            )
+    return needs
+
+
+async def create_requirements_analysis(
+    db: Db,
+    principal: Principal,
+    request: RequirementsAnalysisRequest,
+    today: date | None = None,
+) -> AnalysisView:
+    """What to buy for the open requirements: net need, suppliers, prices (analysis.py)."""
+    today = today or datetime.now(UTC).date()
+    params = calc.Params(lookback_days=request.lookback_days)
+    async with tenant_session(db, principal.tenant_id) as session:
+        rows = await _open_requirements(session, request)
+        if not rows:
+            raise NotFound("no open requirements; import an MRP / needs sheet or list them")
+        needs = _needs(rows)
+        item_ids = [n.item.id for n in needs]
+        projects = sorted({req.project for req, _ in rows if req.project})
+        label = REQUIREMENTS_LABEL + (f": {projects[0]}" if len(projects) == 1 else "")
+        result = calc.analyze_requirements(
+            label=label,
+            needs=needs,
+            stock=await _load_stock(session, item_ids),
+            purchases=await _load_purchases(session, item_ids),
+            today=today,
+            params=params,
+            profiles=await _load_profiles(session),
+        )
+        record = Analysis(
+            tenant_id=principal.tenant_id,
+            product=label,
+            quantity=result.quantity,
+            need_by=result.need_by,
+            source="requirements",
+            params={
+                "safety_stock_pct": "0",
+                "lookback_days": params.lookback_days,
+                "max_over_pct": str(params.max_over_pct),
+                "today": today.isoformat(),
+                "requirement_ids": [str(req.id) for req, _ in rows],
+            },
+            summary=_summary_json(result.summary),
+            created_by=principal.user_id,
+        )
+        session.add(record)
+        await session.flush()
+        for line in result.lines:
+            session.add(_line_row(principal.tenant_id, record.id, line))
+        await session.flush()
+        await session.refresh(record)
+        view = await _view(session, record)
+    logger.info(
+        "requirements analysis tenant=%s analysis=%s requirements=%d items=%d",
+        principal.tenant_id,
+        record.id,
+        len(rows),
+        len(result.lines),
+    )
+    return view
+
+
+async def list_requirements(
+    db: Db, principal: Principal, *, open_only: bool = True, limit: int = 200
+) -> list[RequirementView]:
+    async with tenant_session(db, principal.tenant_id) as session:
+        query = (
+            select(Requirement, Item)
+            .join(Item, Item.id == Requirement.item_id)
+            .order_by(Requirement.need_by, Item.part_number)
+            .limit(limit)
+        )
+        if open_only:
+            query = query.where(Requirement.rfq_id.is_(None))
+        rows = (await session.execute(query)).all()
+    return [_requirement_view(req, item) for req, item in rows]
+
+
+def _requirement_view(req: Requirement, item: Item) -> RequirementView:
+    return RequirementView(
+        id=req.id,
+        part_number=item.part_number,
+        description=item.description,
+        quantity=_qty(req.quantity),
+        unit=req.unit,
+        need_by=req.need_by,
+        reference=req.reference,
+        location=req.location,
+        project=req.project,
+        source="chat" if req.source == "chat" else "import",
+        rfq_id=req.rfq_id,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class NewRequirement:
+    part_number: str
+    quantity: Decimal
+    need_by: date
+    unit: str | None = None
+    description: str | None = None
+    reference: str = ""
+
+
+async def add_requirements(
+    db: Db, principal: Principal, lines: Sequence[NewRequirement]
+) -> list[RequirementView]:
+    """Requirements the buyer stated in the chat (source 'chat'), upserted like imported ones.
+
+    An unknown part number becomes a new item (description given, or the number).
+    """
+    if not lines:
+        raise InvalidRequest("give at least one requirement")
+    if any(line.quantity <= 0 for line in lines):
+        raise InvalidRequest("quantities must be positive")
+    table = ParsedTable("requirements", {}, [], [])
+    for n, line in enumerate(lines, start=1):
+        row: dict[str, object] = {
+            "part_number": line.part_number.strip(),
+            "quantity": line.quantity,
+            "need_by": line.need_by,
+            "reference": line.reference,
+        }
+        if line.unit:
+            row["unit"] = line.unit
+        if line.description:
+            row["description"] = line.description
+        table.rows.append((n, row))
+    counts = _Counts(created={}, updated={})
+    async with tenant_session(db, principal.tenant_id) as session:
+        items = _ItemCache(session, principal.tenant_id, counts)
+        written = await _apply_requirements(
+            session,
+            principal.tenant_id,
+            table,
+            items,
+            counts,
+            source="chat",
+            created_by=principal.user_id,
+        )
+        views = [
+            _requirement_view(req, await session.get_one(Item, req.item_id)) for req in written
+        ]
+    logger.info(
+        "requirements from chat tenant=%s written=%d skipped=%d",
+        principal.tenant_id,
+        len(written),
+        sum(counts.skipped.values()),
+    )
+    return views
 
 
 async def get_analysis(db: Db, principal: Principal, analysis_id: UUID) -> AnalysisView:
@@ -790,14 +1115,43 @@ async def _load_stock(session: AsyncSession, item_ids: Sequence[UUID]) -> dict[U
         return {}
     rows = await session.execute(
         select(
-            InventoryRow.item_id, func.sum(InventoryRow.on_hand), func.sum(InventoryRow.on_order)
+            InventoryRow.item_id,
+            func.sum(InventoryRow.on_hand),
+            func.sum(InventoryRow.on_order),
+            func.sum(InventoryRow.safety_stock),
+            func.max(InventoryRow.unit),
+            func.max(InventoryRow.order_unit),
         )
         .where(InventoryRow.item_id.in_(item_ids))
         .group_by(InventoryRow.item_id)
     )
     return {
-        item_id: calc.Stock(on_hand=Decimal(on_hand), on_order=Decimal(on_order))
-        for item_id, on_hand, on_order in rows
+        item_id: calc.Stock(
+            on_hand=Decimal(on_hand),
+            on_order=Decimal(on_order),
+            safety_stock=Decimal(safety or 0),
+            unit=unit,
+            order_unit=order_unit,
+        )
+        for item_id, on_hand, on_order, safety, unit, order_unit in rows
+    }
+
+
+async def _load_profiles(session: AsyncSession) -> dict[UUID, calc.SupplierProfile]:
+    """Every supplier's material group and the buyer's evaluation (the supplier master)."""
+    rows = await session.scalars(select(Supplier))
+    return {
+        s.id: calc.SupplierProfile(
+            supplier_id=s.id,
+            name=s.name,
+            type=s.type,
+            category=s.category,
+            otif_pct=s.otif_pct,
+            quality_pct=s.quality_pct,
+            rating=s.rating,
+            lead_time_days=s.lead_time_days,
+        )
+        for s in rows
     }
 
 
@@ -873,8 +1227,26 @@ def _line_row(tenant_id: UUID, analysis_id: UUID, line: calc.LineResult) -> Anal
             "on_time_rate": _num(s.on_time_rate),
             "quality_rate": _num(s.quality_rate),
             "suggested": s.suggested,
+            "category": s.category,
+            "otif_pct": _num(s.otif_pct),
+            "evaluation_quality_pct": _num(s.evaluation_quality_pct),
+            "rating": _num(s.rating),
+            "lead_time_days": _num(s.lead_time_days),
         }
         for s in line.suppliers
+    ]
+    candidates: list[JsonValue] = [
+        {
+            "supplier_id": str(c.supplier_id),
+            "name": c.name,
+            "type": c.type,
+            "category": c.category,
+            "otif_pct": _num(c.otif_pct),
+            "quality_pct": _num(c.quality_pct),
+            "rating": _num(c.rating),
+            "lead_time_days": _num(c.lead_time_days),
+        }
+        for c in line.candidates
     ]
     flags: list[JsonValue] = [
         {"code": f.code, "supplier": f.supplier, "value": _num(f.value)} for f in line.flags
@@ -899,6 +1271,8 @@ def _line_row(tenant_id: UUID, analysis_id: UUID, line: calc.LineResult) -> Anal
         max_price=line.max_price,
         suppliers=suppliers,
         flags=flags,
+        safety_stock=line.safety_stock,
+        candidates=candidates,
     )
 
 
@@ -958,11 +1332,14 @@ async def _view(session: AsyncSession, record: Analysis) -> AnalysisView:
                 suppliers=[SupplierStatView.model_validate(s) for s in line.suppliers],
                 flags=[FlagView.model_validate(f) for f in line.flags],
                 rfq_line_id=line.rfq_line_id,
+                safety_stock=_qty(line.safety_stock),
+                candidates=[CandidateView.model_validate(c) for c in line.candidates],
             )
             for line, item in rows
         ],
         rfq_id=record.rfq_id,
         created_at=record.created_at,
+        source="requirements" if record.source == "requirements" else "bom",
     )
 
 
@@ -983,7 +1360,28 @@ async def create_rfq_from_analysis(
     db: Db, principal: Principal, analysis_id: UUID, request: RfqFromAnalysisRequest
 ) -> RfqFromAnalysis:
     """A DRAFT RFQ with the analysis's lines to buy, its suggested suppliers invited
-    as DRAFT invites. Nothing is sent; preparing the send asks for approval."""
+    as DRAFT invites. Nothing is sent; preparing the send asks for approval.
+
+    A requirements analysis gives one RFQ per material group
+    (`create_rfqs_from_analysis`); this returns the first of them.
+    """
+    created = await create_rfqs_from_analysis(db, principal, analysis_id, request)
+    first = created[0]
+    first.other_rfq_ids = [c.rfq.id for c in created[1:]]
+    return first
+
+
+async def create_rfqs_from_analysis(
+    db: Db, principal: Principal, analysis_id: UUID, request: RfqFromAnalysisRequest
+) -> list[RfqFromAnalysis]:
+    """DRAFT RFQs for an analysis's lines to buy, each with its suppliers invited (DRAFT).
+
+    A product's analysis gives one RFQ. A requirements analysis gives one RFQ per
+    material group (steel sheets to the steel mills, bolts to the fastener
+    suppliers), and marks the requirements it covers so they are not quoted twice.
+    Per line, the best suggested suppliers by history are invited, topped up with
+    the best-evaluated suppliers of the item's group that never sold it.
+    """
     async with tenant_session(db, principal.tenant_id) as session:
         record = await session.get(Analysis, analysis_id, with_for_update=True)
         if record is None:
@@ -1001,83 +1399,126 @@ async def create_rfq_from_analysis(
             ).all()
         )
         if not rows:
-            raise InvalidRequest("nothing to buy: stock and open orders cover the build")
-
-        title = request.title or f"{record.product}: {record.quantity.normalize():f} un"
-        currency = _rfq_currency([line.currency for line, _ in rows])
+            raise InvalidRequest("nothing to buy: stock and open orders cover the need")
         rates = await load_rates(session, datetime.now(UTC).date())
-        rfq, rfq_lines = await rfq_service.create_draft_rfq(
-            session,
-            principal,
-            title=title,
-            lines=[
-                rfq_service.NewRfqLine(
-                    description=item.description,
-                    quantity=line.to_buy,
-                    unit=line.unit,
-                    part_number=item.part_number,
-                    mpn=item.mpn,
-                    manufacturer=item.manufacturer,
-                    category=rfq_category(item.category),
-                    need_by=line.need_by,
+        batches: list[tuple[str, list[tuple[AnalysisLine, Item]]]]
+        if record.source == "requirements":
+            profiles = await _load_profiles(session)
+            groups: dict[str, list[tuple[AnalysisLine, Item]]] = defaultdict(list)
+            for line, item in rows:
+                # Every purchase counts: the specialist that sold it three times
+                # outweighs a distributor that sold it once.
+                sold_by = [
+                    UUID(str(s["supplier_id"]))
+                    for s in line.suppliers
+                    for _ in range(max(int(s.get("orders") or 1), 1))
+                ]
+                group = calc.item_group(_item_info(item), sold_by, profiles)
+                groups[group or ""].append((line, item))
+            batches = [
+                (
+                    request.title or f"{record.product} · {group or 'Outros'}",
+                    groups[group],
                 )
-                for line, item in rows
-            ],
-            source_text=f"Purchase analysis {analysis_id}",
-            response_due=request.response_due,
-            base_currency=currency,
-        )
-        wanted: dict[UUID, str] = {}
-        without_limits: list[int] = []
-        for (line, _), rfq_line in zip(rows, rfq_lines, strict=True):
-            line.rfq_line_id = rfq_line.id
-            # The analysis prices become the negotiation's default limits (the buyer
-            # can still change them), in the RFQ's currency: the strategy compares
-            # offers in base currency. A line bought in another currency has its
-            # limits converted at the latest reference rate; without a rate it has none.
-            factor = _fx_factor(line.currency, currency, rates)
-            if factor is not None and line.target_price is not None and line.max_price is not None:
-                rfq_line.target_unit_price = (line.target_price * factor).quantize(
-                    calc.PRICE_PLACES
-                )
-                rfq_line.max_unit_price = (line.max_price * factor).quantize(calc.PRICE_PLACES)
-            else:
-                without_limits.append(rfq_line.position)
-            suggested = [s for s in line.suppliers if s.get("suggested")]
-            for supplier in suggested[: request.max_suppliers_per_line]:
-                wanted.setdefault(UUID(str(supplier["supplier_id"])), str(supplier["name"]))
-        record.rfq_id = rfq.id
+                for group in sorted(groups, key=lambda g: (g == "", g.lower()))
+            ]
+        else:
+            title = request.title or f"{record.product}: {record.quantity.normalize():f} un"
+            batches = [(title, [(line, item) for line, item in rows])]
 
-        invited: list[InvitedSupplier] = []
-        skipped: list[SkippedSupplier] = []
-        for supplier_id, name in wanted.items():
-            contact_id = await session.scalar(
-                select(Contact.id)
-                .join(SupplierContact, SupplierContact.contact_id == Contact.id)
-                .where(
-                    SupplierContact.supplier_id == supplier_id,
-                    Contact.email.is_not(None),
-                    Contact.pseudonymized_at.is_(None),
-                )
-                .order_by(Contact.created_at)
-                .limit(1)
+        created: list[RfqFromAnalysis] = []
+        for title, batch in batches:
+            created.append(
+                await _draft_rfq(session, principal, analysis_id, title, batch, request, rates)
             )
-            if contact_id is None:
-                skipped.append(
-                    SkippedSupplier(supplier_id=supplier_id, name=name, reason="no contact email")
-                )
-                continue
-            await rfq_service.add_draft_invite(session, principal, rfq, supplier_id, contact_id)
-            invited.append(InvitedSupplier(supplier_id=supplier_id, name=name))
+        record.rfq_id = created[0].rfq.id
+        if record.source == "requirements":
+            await _mark_requirements(session, record, created)
         await session.flush()
-        detail = await rfq_service.rfq_detail(session, rfq)
     logger.info(
-        "rfq from analysis tenant=%s analysis=%s rfq=%s invites=%d",
+        "rfq from analysis tenant=%s analysis=%s rfqs=%d invites=%d",
         principal.tenant_id,
         analysis_id,
-        rfq.id,
-        len(invited),
+        len(created),
+        sum(len(c.invited) for c in created),
     )
+    return created
+
+
+async def _draft_rfq(
+    session: AsyncSession,
+    principal: Principal,
+    analysis_id: UUID,
+    title: str,
+    rows: Sequence[tuple[AnalysisLine, Item]],
+    request: RfqFromAnalysisRequest,
+    rates: Mapping[str, Rate],
+) -> RfqFromAnalysis:
+    currency = _rfq_currency([line.currency for line, _ in rows])
+    rfq, rfq_lines = await rfq_service.create_draft_rfq(
+        session,
+        principal,
+        title=title,
+        lines=[
+            rfq_service.NewRfqLine(
+                description=item.description,
+                quantity=line.to_buy,
+                unit=line.unit,
+                part_number=item.part_number,
+                mpn=item.mpn,
+                manufacturer=item.manufacturer,
+                category=rfq_category(item.category),
+                need_by=line.need_by,
+            )
+            for line, item in rows
+        ],
+        source_text=f"Purchase analysis {analysis_id}",
+        response_due=request.response_due,
+        base_currency=currency,
+    )
+    wanted: dict[UUID, str] = {}
+    without_limits: list[int] = []
+    for (line, _), rfq_line in zip(rows, rfq_lines, strict=True):
+        line.rfq_line_id = rfq_line.id
+        # The analysis prices become the negotiation's default limits (the buyer
+        # can still change them), in the RFQ's currency: the strategy compares
+        # offers in base currency. A line bought in another currency has its
+        # limits converted at the latest reference rate; without a rate it has none.
+        factor = _fx_factor(line.currency, currency, rates)
+        if factor is not None and line.target_price is not None and line.max_price is not None:
+            rfq_line.target_unit_price = (line.target_price * factor).quantize(calc.PRICE_PLACES)
+            rfq_line.max_unit_price = (line.max_price * factor).quantize(calc.PRICE_PLACES)
+        else:
+            without_limits.append(rfq_line.position)
+        chosen = [s for s in line.suppliers if s.get("suggested")][: request.max_suppliers_per_line]
+        room = request.max_suppliers_per_line - len(chosen)
+        chosen += list(line.candidates[: max(room, 0)])
+        for supplier in chosen:
+            wanted.setdefault(UUID(str(supplier["supplier_id"])), str(supplier["name"]))
+
+    invited: list[InvitedSupplier] = []
+    skipped: list[SkippedSupplier] = []
+    for supplier_id, name in wanted.items():
+        contact_id = await session.scalar(
+            select(Contact.id)
+            .join(SupplierContact, SupplierContact.contact_id == Contact.id)
+            .where(
+                SupplierContact.supplier_id == supplier_id,
+                Contact.email.is_not(None),
+                Contact.pseudonymized_at.is_(None),
+            )
+            .order_by(Contact.created_at)
+            .limit(1)
+        )
+        if contact_id is None:
+            skipped.append(
+                SkippedSupplier(supplier_id=supplier_id, name=name, reason="no contact email")
+            )
+            continue
+        await rfq_service.add_draft_invite(session, principal, rfq, supplier_id, contact_id)
+        invited.append(InvitedSupplier(supplier_id=supplier_id, name=name))
+    await session.flush()
+    detail = await rfq_service.rfq_detail(session, rfq)
     return RfqFromAnalysis(
         analysis_id=analysis_id,
         rfq=detail,
@@ -1085,6 +1526,29 @@ async def create_rfq_from_analysis(
         skipped=skipped,
         lines_without_limits=without_limits,
     )
+
+
+async def _mark_requirements(
+    session: AsyncSession, record: Analysis, created: Sequence[RfqFromAnalysis]
+) -> None:
+    """The analysed requirements of each part now in an RFQ point at that RFQ."""
+    ids = [UUID(str(i)) for i in record.params.get("requirement_ids", [])]
+    if not ids:
+        return
+    rfq_by_part: dict[str, UUID] = {}
+    for result in created:
+        for line in result.rfq.lines:
+            if line.part_number:
+                rfq_by_part[line.part_number.lower()] = result.rfq.id
+    rows = await session.execute(
+        select(Requirement, Item)
+        .join(Item, Item.id == Requirement.item_id)
+        .where(Requirement.id.in_(ids), Requirement.rfq_id.is_(None))
+    )
+    for req, item in rows.all():
+        rfq_id = rfq_by_part.get(item.part_number.lower())
+        if rfq_id is not None:
+            req.rfq_id = rfq_id
 
 
 def _rfq_currency(currencies: Sequence[str | None]) -> str:

@@ -41,9 +41,15 @@ from evals.harness import (
 )
 from evals.layouts import Fixture, fixtures
 from evals.mock import mock_extractor
+from evals.needs import (
+    NEEDS_CASES,
+    scenario_needs_copilot,
+    scenario_needs_import,
+    scenario_needs_typed,
+)
 from evals.quotes import cases
 
-SCENARIOS: Final = ("import", "analysis", "copilot", "extraction")
+SCENARIOS: Final = ("import", "analysis", "copilot", "extraction", "needs")
 # The copilot conversation is the expensive one: a representative subset.
 COPILOT_FIXTURES: Final = (
     "motor_tidy_en",
@@ -78,6 +84,11 @@ async def run_suite(
                 results.append(await _one(env, "analysis", fixture, run))
             if "copilot" in scenarios and (only or fixture.name in COPILOT_FIXTURES):
                 results.append(await _one(env, "copilot", fixture, run))
+        if "needs" in scenarios:
+            for name in NEEDS_CASES:
+                if only and name not in only:
+                    continue
+                results.append(await _needs(env, name, run))
         if "extraction" in scenarios:
             for case in quote_cases:
                 result = RunResult("extraction", case.name, run)
@@ -91,6 +102,20 @@ async def run_suite(
                     )
                 )
     return results
+
+
+async def _needs(env: Env, name: str, run: int) -> RunResult:
+    result = RunResult("needs", name, run)
+    scenario = {
+        "needs_import": scenario_needs_import,
+        "needs_copilot": scenario_needs_copilot,
+        "needs_typed": scenario_needs_typed,
+    }[name]
+
+    async def go() -> None:
+        await scenario(env, result)
+
+    return await run_timed(go, result)
 
 
 async def _one(env: Env, scenario: str, fixture: Fixture, run: int) -> RunResult:

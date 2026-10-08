@@ -22,6 +22,7 @@ from bido_back.db.models import (
     PoLine,
     ProductionPlanRow,
     PurchaseOrder,
+    Requirement,
     TemplateUpload,
 )
 from tests.approvals.conftest import People, people
@@ -33,6 +34,7 @@ __all__ = ["app_engine", "migrator_engine", "people", "rfq_rows", "two_tenants"]
 CLEANUP = (
     AnalysisLine,
     Analysis,
+    Requirement,
     PoLine,
     PurchaseOrder,
     InventoryRow,

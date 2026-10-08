@@ -49,7 +49,33 @@ when every line to buy is in one currency.
 Flags per line: `no_history`, `single_source`, `price_up` (trend above
 `price_up_pct`), `supplier_late` (on-time below `late_threshold`),
 `quality_issue` (quality below `quality_threshold`), `broker_source`,
-`mixed_currency`, `covered_by_stock` (nothing to buy).
+`mixed_currency`, `covered_by_stock` (nothing to buy), `unit_assumed`,
+`unit_mismatch` and `no_supplier` (below).
+
+Requirements (`analyze_requirements`): the buyer brings the demand itself, part
+by part (an MRP's purchase requisitions or net requirements, or a typed list).
+Per part, every open requirement is added up and the earliest need-by date kept:
+
+* `to_buy = max(0, required + safety_stock - available - on_order)`, rounded up
+  as above. `available` is the stock's free (unrestricted) quantity, never the
+  total with blocked stock; `on_order` as above (open POs due by the earliest
+  need-by date when the stock gives none). Without stock data the requirement is
+  bought as given.
+* Units are never mixed silently. The requirement's unit is compared with the
+  unit the stock is counted in (same family: UN = EA = PC, KG = KGS...). When
+  they differ but the stock says the part is bought and priced in the
+  requirement's unit (`order_unit`, e.g. stock in UN priced per KG), the stock
+  is read in that unit and the line is flagged `unit_assumed`. Otherwise the
+  stock is not used, the requirement is bought as given, and the line is
+  flagged `unit_mismatch`: the buyer must confirm the conversion.
+
+Suppliers by group: an item's material group is its own category, else the
+group most of the suppliers that sold it belong to (the buyer's supplier master,
+`suppliers.category`). Suppliers of that group that never sold the item are its
+`candidates`, ranked by the buyer's evaluation (rating, then OTIF, quality and
+lead time). The buyer's evaluation also fills in on-time and quality when the
+purchase history cannot measure them. A line with neither history nor a
+candidate is flagged `no_supplier` (requirements only).
 """
 
 from collections import defaultdict
@@ -82,7 +108,35 @@ FlagCode = Literal[
     "mixed_currency",
     "covered_by_stock",
     "on_order_from_pos",
+    "unit_assumed",
+    "unit_mismatch",
+    "no_supplier",
 ]
+
+# Units that mean the same thing ("UN" in one export, "EA" in the next).
+_UNIT_FAMILIES: Final[Mapping[str, str]] = {
+    **dict.fromkeys(
+        ("un", "und", "unid", "unidade", "unidades", "unit", "units", "ea", "each", "pc",
+         "pcs", "pç", "pc.", "peca", "pecas", "peça", "peças", "piece", "pieces", "pz",
+         "pezzi", "pezzo", "st", "stk", "stück", "stuck", "nos", "no"),
+        "each",
+    ),
+    **dict.fromkeys(("kg", "kgs", "kilo", "kilos", "quilo", "quilos", "kilogram"), "kg"),
+    **dict.fromkeys(("g", "gr", "grama", "gramas", "gram", "grams"), "g"),
+    **dict.fromkeys(("t", "ton", "tons", "tonelada", "toneladas", "tonne"), "t"),
+    **dict.fromkeys(("m", "mt", "mts", "metro", "metros", "meter", "meters", "metre"), "m"),
+    **dict.fromkeys(("m2", "m²", "metro quadrado", "sqm"), "m2"),
+    **dict.fromkeys(("m3", "m³", "metro cubico"), "m3"),
+    **dict.fromkeys(("l", "lt", "lts", "litro", "litros", "liter", "litre"), "l"),
+}  # fmt: skip
+
+
+def unit_family(unit: str | None) -> str | None:
+    """A unit's family ("UN" and "EA" are both "each"); None when not given."""
+    if unit is None or not unit.strip():
+        return None
+    text = unit.strip().lower()
+    return _UNIT_FAMILIES.get(text, text)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,6 +172,48 @@ class BomEntry:
 class Stock:
     on_hand: Decimal = Decimal(0)
     on_order: Decimal = Decimal(0)
+    safety_stock: Decimal = Decimal(0)
+    # The unit the stock is counted in and the unit it is bought / priced in.
+    unit: str | None = None
+    order_unit: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SupplierProfile:
+    """What the buyer's supplier master says: material group and evaluation."""
+
+    supplier_id: UUID
+    name: str
+    type: str
+    category: str | None = None
+    otif_pct: Decimal | None = None
+    quality_pct: Decimal | None = None
+    rating: Decimal | None = None
+    lead_time_days: Decimal | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class Candidate:
+    """A supplier of the item's material group that never sold it."""
+
+    supplier_id: UUID
+    name: str
+    type: str
+    category: str
+    otif_pct: Decimal | None
+    quality_pct: Decimal | None
+    rating: Decimal | None
+    lead_time_days: Decimal | None
+
+
+@dataclass(frozen=True, slots=True)
+class Need:
+    """An open requirement of one item (several added up): how much, in what unit, by when."""
+
+    item: ItemInfo
+    quantity: Decimal
+    unit: str | None
+    need_by: date | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +246,12 @@ class SupplierStats:
     on_time_rate: Decimal | None
     quality_rate: Decimal | None
     suggested: bool = False
+    # From the buyer's supplier master (SupplierProfile), when it has them.
+    category: str | None = None
+    otif_pct: Decimal | None = None
+    evaluation_quality_pct: Decimal | None = None
+    rating: Decimal | None = None
+    lead_time_days: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +279,9 @@ class LineResult:
     max_price: Decimal | None
     suppliers: tuple[SupplierStats, ...] = ()
     flags: tuple[Flag, ...] = ()
+    safety_stock: Decimal = Decimal(0)
+    group: str | None = None
+    candidates: tuple[Candidate, ...] = ()
 
     @property
     def suggested(self) -> tuple[SupplierStats, ...]:
@@ -296,12 +401,105 @@ def _supplier_stats(rows: Sequence[Purchase]) -> SupplierStats:
     )
 
 
+def _share(pct: Decimal | None) -> Decimal | None:
+    return None if pct is None else (pct / 100).quantize(RATE_PLACES)
+
+
 def _rank_key(stats: SupplierStats) -> tuple[bool, Decimal, Decimal, Decimal]:
+    # Measured history first; the buyer's own evaluation where history says nothing.
+    quality = stats.quality_rate
+    if quality is None:
+        quality = _share(stats.evaluation_quality_pct)
+    on_time = stats.on_time_rate
+    if on_time is None:
+        on_time = _share(stats.otif_pct)
     return (
         stats.type in BROKER_TYPES,
-        -(stats.quality_rate if stats.quality_rate is not None else Decimal(1)),
-        -(stats.on_time_rate if stats.on_time_rate is not None else Decimal(1)),
+        -(quality if quality is not None else Decimal(1)),
+        -(on_time if on_time is not None else Decimal(1)),
         stats.avg_price,
+    )
+
+
+def _with_profile(stats: SupplierStats, profile: SupplierProfile | None) -> SupplierStats:
+    if profile is None:
+        return stats
+    return replace(
+        stats,
+        category=profile.category,
+        otif_pct=profile.otif_pct,
+        evaluation_quality_pct=profile.quality_pct,
+        rating=profile.rating,
+        lead_time_days=profile.lead_time_days,
+    )
+
+
+def _group_key(text: str | None) -> str | None:
+    return " ".join(text.lower().split()) if text and text.strip() else None
+
+
+def item_group(
+    item: ItemInfo,
+    sold_by: Iterable[UUID],
+    profiles: Mapping[UUID, SupplierProfile],
+) -> str | None:
+    """The item's material group: its category, else the group most of its purchases
+    came from (`sold_by` lists the seller of every purchase, repeats included)."""
+    if item.category and item.category.strip():
+        return item.category.strip()
+    counts: dict[str, int] = defaultdict(int)
+    names: dict[str, str] = {}
+    for supplier_id in sold_by:
+        profile = profiles.get(supplier_id)
+        key = _group_key(profile.category if profile else None)
+        if key is None or profile is None or profile.category is None:
+            continue
+        counts[key] += 1
+        names.setdefault(key, profile.category.strip())
+    if not counts:
+        return None
+    best = max(counts.values())
+    return names[min(k for k, n in counts.items() if n == best)]
+
+
+def group_candidates(
+    group: str | None,
+    exclude: Iterable[UUID],
+    profiles: Mapping[UUID, SupplierProfile],
+) -> tuple[Candidate, ...]:
+    """Suppliers of `group` not in `exclude`, best evaluated first."""
+    key = _group_key(group)
+    if key is None:
+        return ()
+    skip = set(exclude)
+    found = [
+        p
+        for p in profiles.values()
+        if p.supplier_id not in skip and _group_key(p.category) == key and p.category
+    ]
+
+    def rank(p: SupplierProfile) -> tuple[bool, Decimal, Decimal, Decimal, Decimal, str]:
+        return (
+            p.type in BROKER_TYPES,
+            -(p.rating if p.rating is not None else Decimal(0)),
+            -(p.otif_pct if p.otif_pct is not None else Decimal(0)),
+            -(p.quality_pct if p.quality_pct is not None else Decimal(0)),
+            p.lead_time_days if p.lead_time_days is not None else Decimal(10**6),
+            p.name.lower(),
+        )
+
+    return tuple(
+        Candidate(
+            supplier_id=p.supplier_id,
+            name=p.name,
+            type=p.type,
+            category=p.category or "",
+            otif_pct=p.otif_pct,
+            quality_pct=p.quality_pct,
+            rating=p.rating,
+            lead_time_days=p.lead_time_days,
+        )
+        for p in sorted(found, key=rank)
     )
 
 
@@ -335,8 +533,10 @@ def analyze(
     purchases: Sequence[Purchase],
     today: date,
     params: Params | None = None,
+    profiles: Mapping[UUID, SupplierProfile] | None = None,
 ) -> AnalysisResult:
     params = params or Params()
+    profiles = profiles or {}
     window_start = today - timedelta(days=params.lookback_days)
     by_item: dict[UUID, list[Purchase]] = defaultdict(list)
     for purchase in purchases:
@@ -355,7 +555,16 @@ def analyze(
         gross = required * (1 + params.safety_stock_pct / 100)
         to_buy = round_up_quantity(gross - held.on_hand - held.on_order, item.unit)
         line = _line(
-            position, item, required, held, to_buy, need_by, by_item[item.id], today, params
+            position,
+            item,
+            required,
+            held,
+            to_buy,
+            need_by,
+            by_item[item.id],
+            today,
+            params,
+            profiles,
         )
         if from_pos:
             line = replace(line, flags=(*line.flags, Flag("on_order_from_pos", value=from_pos)))
@@ -369,6 +578,86 @@ def analyze(
         summary=_summary(lines),
         params=params,
     )
+
+
+def analyze_requirements(
+    *,
+    label: str,
+    needs: Sequence[Need],
+    stock: Mapping[UUID, Stock],
+    purchases: Sequence[Purchase],
+    today: date,
+    params: Params | None = None,
+    profiles: Mapping[UUID, SupplierProfile] | None = None,
+) -> AnalysisResult:
+    """Net need per open requirement (see the top): what to buy, from whom, at what price."""
+    params = params or Params()
+    profiles = profiles or {}
+    window_start = today - timedelta(days=params.lookback_days)
+    by_item: dict[UUID, list[Purchase]] = defaultdict(list)
+    for purchase in purchases:
+        if purchase.ordered_at >= window_start and purchase.quantity > 0:
+            by_item[purchase.item_id].append(purchase)
+
+    lines: list[LineResult] = []
+    for position, need in enumerate(needs, start=1):
+        unit = need.unit or need.item.unit
+        item = replace(need.item, unit=unit)
+        held = stock.get(item.id)
+        flags: list[Flag] = []
+        from_pos = Decimal(0)
+        if held is not None:
+            usable, unit_flag = _stock_unit_check(need.unit, held)
+            if unit_flag is not None:
+                flags.append(unit_flag)
+            if not usable:
+                held = None
+        if held is None:
+            held = Stock()
+        elif held.on_order == 0:
+            from_pos = open_on_order(purchases, item.id, need.need_by, today, params)
+            held = replace(held, on_order=from_pos)
+        to_buy = round_up_quantity(
+            need.quantity + held.safety_stock - held.on_hand - held.on_order, unit
+        )
+        line = _line(
+            position,
+            item,
+            need.quantity,
+            held,
+            to_buy,
+            need.need_by,
+            by_item[item.id],
+            today,
+            params,
+            profiles,
+        )
+        extra = list(flags)
+        if from_pos:
+            extra.append(Flag("on_order_from_pos", value=from_pos))
+        if not line.suppliers and not line.candidates:
+            extra.append(Flag("no_supplier"))
+        lines.append(replace(line, flags=(*line.flags, *extra), safety_stock=held.safety_stock))
+
+    return AnalysisResult(
+        product=label,
+        quantity=Decimal(len(lines)),
+        need_by=min((n.need_by for n in needs if n.need_by is not None), default=None),
+        lines=tuple(lines),
+        summary=_summary(lines),
+        params=params,
+    )
+
+
+def _stock_unit_check(wanted: str | None, held: Stock) -> tuple[bool, Flag | None]:
+    """Can this stock be netted against a requirement in `wanted`? (usable, flag)."""
+    need = unit_family(wanted)
+    counted = unit_family(held.unit)
+    if need is None or counted is None or need == counted:
+        return True, None
+    if unit_family(held.order_unit) == need:
+        return True, Flag("unit_assumed", supplier=f"{held.unit}->{wanted}")
+    return False, Flag("unit_mismatch", supplier=f"{held.unit}->{wanted}")
 
 
 def open_on_order(
@@ -400,10 +689,14 @@ def _line(
     history: list[Purchase],
     today: date,
     params: Params,
+    profiles: Mapping[UUID, SupplierProfile] | None = None,
 ) -> LineResult:
+    profiles = profiles or {}
     flags: list[Flag] = []
     if to_buy == 0:
         flags.append(Flag("covered_by_stock"))
+    group = item_group(item, [p.supplier_id for p in history], profiles)
+    candidates = group_candidates(group, {p.supplier_id for p in history}, profiles)
     if not history:
         flags.append(Flag("no_history"))
         return LineResult(
@@ -422,6 +715,9 @@ def _line(
             target_price=None,
             max_price=None,
             flags=tuple(flags),
+            safety_stock=held.safety_stock,
+            group=group,
+            candidates=candidates,
         )
 
     currency = _main_currency(history)
@@ -432,7 +728,12 @@ def _line(
     per_supplier: dict[UUID, list[Purchase]] = defaultdict(list)
     for row in rows:
         per_supplier[row.supplier_id].append(row)
-    suppliers = _ranked([_supplier_stats(group) for group in per_supplier.values()])
+    suppliers = _ranked(
+        [
+            _with_profile(_supplier_stats(rows_of), profiles.get(supplier_id))
+            for supplier_id, rows_of in per_supplier.items()
+        ]
+    )
 
     last = _price(_latest(rows).unit_price)
     avg_raw = _weighted_avg(rows)
@@ -471,6 +772,9 @@ def _line(
         max_price=maximum,
         suppliers=suppliers,
         flags=tuple(flags),
+        safety_stock=held.safety_stock,
+        group=group,
+        candidates=candidates,
     )
 
 

@@ -191,6 +191,34 @@ code validates every value. When unsure it answers `needs_confirmation` with
 questions and writes nothing until confirmed. Supplier emails next to supplier
 names become supplier contacts.
 
+Besides BOMs, stock, history, plans and contacts, a workbook may bring:
+
+- **Requirements** (an MRP's purchase requisitions or net requirements, or a
+  plain needs list: part, quantity, need-by date, optionally unit, plant,
+  reference, project). The buyer can also type them in the chat
+  (`add_requirements`) or `POST /v1/requirements`. They are reported in the
+  import's `extra_sections`.
+- **Stock buffers and units:** safety stock ("Estoque de segurança"), the unit
+  the stock is counted in and the unit it is bought and priced in ("Unidade de
+  preço").
+- **The supplier master's material groups** ("Grupo de mercadoria") and the
+  buyer's **supplier evaluation** (OTIF, quality, rating, lead time).
+
+## Needs first
+
+Buyers usually bring the need itself. `POST /v1/analyses/requirements` (the
+copilot's `analyze_requirements`) analyses the open requirements, no BOM
+needed: per part, `to_buy = required + safety stock - free stock - on order`
+(never below 0; open POs count when the stock gives no on-order quantity).
+Units are never mixed silently: a need in KG is netted against stock counted
+in UN only when the stock is priced per KG (`unit_assumed`); otherwise the
+line is flagged `unit_mismatch` and the stock is left out. Suppliers come
+from the purchase history and from the part's material group (`candidates`),
+ranked with the buyer's evaluation. `POST /v1/analyses/{id}/rfq` then drafts
+one RFQ per material group and marks the requirements it covers, so they are
+not quoted twice. A BOM times a production plan (`POST /v1/analyses`) stays
+the other way to get to the need.
+
 ## Observability
 
 - **Logs:** one JSON object per line on stdout (CloudWatch reads the fields;
@@ -254,8 +282,10 @@ Scenarios: `import` (sections, valid rows, contacts, PO lines), `analysis`
 (quantities, target prices and suggested suppliers vs the golden numbers in
 `evals/golden.py`), `copilot` (a real conversation: attach, "faz uma
 análise", "pode criar a RFQ"; checked by tool calls, the answer and the RFQ
-it leaves) and `extraction` (prices, quantities, lead times, grounding,
-extra offers).
+it leaves), `extraction` (prices, quantities, lead times, grounding,
+extra offers) and `needs` (`evals/needs.py`: an ERP export whose MRP sheet
+says what to buy and whose consolidated view holds the answer, material by
+material; RFQs per material group; a need typed in the chat).
 
 ```bash
 uv run python -m evals.run --mock      # scripted model: checks the harness (free)

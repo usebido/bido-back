@@ -56,7 +56,13 @@ from bido_back.negotiation import service as negotiation_service
 from bido_back.negotiation.agents import NegotiationWriter, default_negotiation_writer
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
 from bido_back.purchasing import service as purchasing_service
-from bido_back.purchasing.schemas import AnalysisRequest, CurrencyTotalView, RfqFromAnalysisRequest
+from bido_back.purchasing.schemas import (
+    AnalysisRequest,
+    AnalysisView,
+    CurrencyTotalView,
+    RequirementsAnalysisRequest,
+    RfqFromAnalysisRequest,
+)
 from bido_back.purchasing.workbook import SheetMapper
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
@@ -792,6 +798,22 @@ class AnalysisSupplierItem(BaseModel):
     on_time_rate: Decimal | None
     quality_rate: Decimal | None
     suggested: bool
+    # The buyer's supplier master: material group and evaluation, when imported.
+    category: str | None = None
+    rating: Decimal | None = None
+    otif_pct: Decimal | None = None
+    lead_time_days: Decimal | None = None
+
+
+class AnalysisCandidateItem(BaseModel):
+    """A supplier of the part's material group that never sold it (can still be asked)."""
+
+    name: str
+    category: str
+    rating: Decimal | None = None
+    otif_pct: Decimal | None = None
+    quality_pct: Decimal | None = None
+    lead_time_days: Decimal | None = None
 
 
 class AnalysisFlagItem(BaseModel):
@@ -818,10 +840,15 @@ class AnalysisLineItem(BaseModel):
     max_price: Decimal | None
     suppliers: list[AnalysisSupplierItem]
     flags: list[AnalysisFlagItem]
+    # Requirements: to_buy = required + safety_stock - on_hand - on_order (never below 0).
+    safety_stock: Decimal = Decimal(0)
+    candidates: list[AnalysisCandidateItem] = []
 
 
 class PurchaseAnalysisOut(BaseModel):
     analysis_id: UUID
+    # 'bom' (a product's BOM x units) or 'requirements' (the buyer's open needs).
+    source: str = "bom"
     product: str
     quantity: Decimal
     need_by: date | None
@@ -836,8 +863,61 @@ class PurchaseAnalysisOut(BaseModel):
     lines: list[AnalysisLineItem]
 
 
+class AnalyzeRequirementsIn(BaseModel):
+    part_numbers: list[str] = Field(
+        default_factory=list[str],
+        max_length=200,
+        description="Only these part numbers; empty = every open requirement",
+    )
+    project: str | None = Field(
+        default=None, max_length=200, description="Only this project / WBS element, if given"
+    )
+
+
+class RequirementLineIn(BaseModel):
+    part_number: str = Field(min_length=1, max_length=100, description="The part number")
+    quantity: float = Field(gt=0, le=1e12, description="How much is needed, in `unit`")
+    unit: str | None = Field(default=None, max_length=20, description="e.g. KG, M, UN, EA")
+    need_by: date = Field(description="The date the part is needed (ISO)")
+    description: str | None = Field(
+        default=None, max_length=300, description="What the part is, if the buyer said"
+    )
+
+
+class AddRequirementsIn(BaseModel):
+    lines: list[RequirementLineIn] = Field(min_length=1, max_length=100)
+
+
+class RequirementItem(BaseModel):
+    part_number: str
+    description: str
+    quantity: Decimal
+    unit: str | None
+    need_by: date
+    reference: str
+    project: str | None
+
+
+class AddRequirementsOut(BaseModel):
+    requirements: list[RequirementItem]
+    note: str
+
+
 class RfqFromAnalysisIn(BaseModel):
-    analysis_id: UUID = Field(description="The analysis_id returned by run_purchase_analysis")
+    analysis_id: UUID = Field(
+        description="The analysis_id returned by run_purchase_analysis or analyze_requirements"
+    )
+
+
+class RfqDraftSummary(BaseModel):
+    id: UUID
+    ref: str
+    title: str
+    currency: str
+    lines: int
+    invited_suppliers: list[str]
+    skipped_suppliers: list[str]
+    lines_without_limits: list[int]
 
 
 class RfqFromAnalysisOut(BaseModel):
@@ -853,6 +933,79 @@ class RfqFromAnalysisOut(BaseModel):
     # Positions without a target/maximum price (no history, or another currency
     # with no exchange rate): the buyer must give them before negotiating.
     lines_without_limits: list[int]
+    # A requirements analysis gives one RFQ per material group: every RFQ created,
+    # this one (the first) included.
+    rfqs: list[RfqDraftSummary] = []
+
+
+def _analysis_out(view: AnalysisView) -> PurchaseAnalysisOut:
+    return PurchaseAnalysisOut(
+        analysis_id=view.id,
+        source=view.source,
+        product=view.product,
+        quantity=view.quantity,
+        need_by=view.need_by,
+        items=view.summary.items,
+        items_to_buy=view.summary.items_to_buy,
+        currency=view.summary.currency,
+        total_at_target=view.summary.total_at_target,
+        total_at_last_price=view.summary.total_at_last_price,
+        totals=view.summary.totals,
+        lines=[
+            AnalysisLineItem(
+                part_number=line.part_number,
+                description=line.description,
+                mpn=line.mpn,
+                unit=line.unit,
+                required=line.required,
+                on_hand=line.on_hand,
+                on_order=line.on_order,
+                to_buy=line.to_buy,
+                need_by=line.need_by,
+                currency=line.currency,
+                last_price=line.last_price,
+                avg_price=line.avg_price,
+                trend_pct=line.trend_pct,
+                target_price=line.target_price,
+                max_price=line.max_price,
+                suppliers=[
+                    AnalysisSupplierItem(
+                        supplier_id=s.supplier_id,
+                        name=s.name,
+                        type=s.type,
+                        last_price=s.last_price,
+                        last_ordered_at=s.last_ordered_at,
+                        avg_price=s.avg_price,
+                        on_time_rate=s.on_time_rate,
+                        quality_rate=s.quality_rate,
+                        suggested=s.suggested,
+                        category=s.category,
+                        rating=s.rating,
+                        otif_pct=s.otif_pct,
+                        lead_time_days=s.lead_time_days,
+                    )
+                    for s in line.suppliers[:MAX_ANALYSIS_SUPPLIERS]
+                ],
+                flags=[
+                    AnalysisFlagItem(code=f.code, supplier=f.supplier, value=f.value)
+                    for f in line.flags
+                ],
+                safety_stock=line.safety_stock,
+                candidates=[
+                    AnalysisCandidateItem(
+                        name=c.name,
+                        category=c.category,
+                        rating=c.rating,
+                        otif_pct=c.otif_pct,
+                        quality_pct=c.quality_pct,
+                        lead_time_days=c.lead_time_days,
+                    )
+                    for c in line.candidates[:MAX_ANALYSIS_SUPPLIERS]
+                ],
+            )
+            for line in view.lines
+        ],
+    )
 
 
 def _line_item(line: RfqLine) -> LineItem:
@@ -1416,55 +1569,56 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             )
         except purchasing_service.PurchasingError as exc:
             raise ToolError(str(exc)) from None
-        return PurchaseAnalysisOut(
-            analysis_id=view.id,
-            product=view.product,
-            quantity=view.quantity,
-            need_by=view.need_by,
-            items=view.summary.items,
-            items_to_buy=view.summary.items_to_buy,
-            currency=view.summary.currency,
-            total_at_target=view.summary.total_at_target,
-            total_at_last_price=view.summary.total_at_last_price,
-            totals=view.summary.totals,
-            lines=[
-                AnalysisLineItem(
-                    part_number=line.part_number,
-                    description=line.description,
-                    mpn=line.mpn,
-                    unit=line.unit,
-                    required=line.required,
-                    on_hand=line.on_hand,
-                    on_order=line.on_order,
-                    to_buy=line.to_buy,
-                    need_by=line.need_by,
-                    currency=line.currency,
-                    last_price=line.last_price,
-                    avg_price=line.avg_price,
-                    trend_pct=line.trend_pct,
-                    target_price=line.target_price,
-                    max_price=line.max_price,
-                    suppliers=[
-                        AnalysisSupplierItem(
-                            supplier_id=s.supplier_id,
-                            name=s.name,
-                            type=s.type,
-                            last_price=s.last_price,
-                            last_ordered_at=s.last_ordered_at,
-                            avg_price=s.avg_price,
-                            on_time_rate=s.on_time_rate,
-                            quality_rate=s.quality_rate,
-                            suggested=s.suggested,
-                        )
-                        for s in line.suppliers[:MAX_ANALYSIS_SUPPLIERS]
-                    ],
-                    flags=[
-                        AnalysisFlagItem(code=f.code, supplier=f.supplier, value=f.value)
-                        for f in line.flags
-                    ],
+        return _analysis_out(view)
+
+    async def analyze_requirements(
+        ctx: ToolContext, args: AnalyzeRequirementsIn
+    ) -> PurchaseAnalysisOut:
+        principal = _principal(ctx)
+        try:
+            view = await purchasing_service.create_requirements_analysis(
+                db,
+                principal,
+                RequirementsAnalysisRequest(part_numbers=args.part_numbers, project=args.project),
+                today=deps.today(),
+            )
+        except purchasing_service.PurchasingError as exc:
+            raise ToolError(str(exc)) from None
+        return _analysis_out(view)
+
+    async def add_requirements(ctx: ToolContext, args: AddRequirementsIn) -> AddRequirementsOut:
+        principal = _principal(ctx)
+        try:
+            views = await purchasing_service.add_requirements(
+                db,
+                principal,
+                [
+                    purchasing_service.NewRequirement(
+                        part_number=line.part_number,
+                        quantity=Decimal(str(line.quantity)),
+                        need_by=line.need_by,
+                        unit=line.unit,
+                        description=line.description,
+                    )
+                    for line in args.lines
+                ],
+            )
+        except purchasing_service.PurchasingError as exc:
+            raise ToolError(str(exc)) from None
+        return AddRequirementsOut(
+            requirements=[
+                RequirementItem(
+                    part_number=v.part_number,
+                    description=v.description,
+                    quantity=v.quantity,
+                    unit=v.unit,
+                    need_by=v.need_by,
+                    reference=v.reference,
+                    project=v.project,
                 )
-                for line in view.lines
+                for v in views
             ],
+            note="Saved as open requirements. Call analyze_requirements for the net need.",
         )
 
     async def create_rfq_from_analysis(
@@ -1473,7 +1627,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         principal = _principal(ctx)
         analysis_id = args.analysis_id
         try:
-            created = await purchasing_service.create_rfq_from_analysis(
+            created = await purchasing_service.create_rfqs_from_analysis(
                 db, principal, analysis_id, RfqFromAnalysisRequest()
             )
         except purchasing_service.NotFound:
@@ -1483,14 +1637,15 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             if latest is None or latest == analysis_id:
                 raise ToolError(f"analysis {analysis_id} not found") from None
             try:
-                created = await purchasing_service.create_rfq_from_analysis(
+                created = await purchasing_service.create_rfqs_from_analysis(
                     db, principal, latest, RfqFromAnalysisRequest()
                 )
             except purchasing_service.PurchasingError as exc:
                 raise ToolError(str(exc)) from None
         except purchasing_service.PurchasingError as exc:
             raise ToolError(str(exc)) from None
-        rfq = created.rfq
+        first = created[0]
+        rfq = first.rfq
         return RfqFromAnalysisOut(
             id=rfq.id,
             ref=rfq.ref,
@@ -1511,9 +1666,22 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 )
                 for line in rfq.lines
             ],
-            invited_suppliers=[s.name for s in created.invited],
-            skipped_suppliers=[f"{s.name} ({s.reason})" for s in created.skipped],
-            lines_without_limits=created.lines_without_limits,
+            invited_suppliers=[s.name for s in first.invited],
+            skipped_suppliers=[f"{s.name} ({s.reason})" for s in first.skipped],
+            lines_without_limits=first.lines_without_limits,
+            rfqs=[
+                RfqDraftSummary(
+                    id=c.rfq.id,
+                    ref=c.rfq.ref,
+                    title=c.rfq.title,
+                    currency=c.rfq.base_currency,
+                    lines=len(c.rfq.lines),
+                    invited_suppliers=[s.name for s in c.invited],
+                    skipped_suppliers=[f"{s.name} ({s.reason})" for s in c.skipped],
+                    lines_without_limits=c.lines_without_limits,
+                )
+                for c in created
+            ],
         )
 
     async def get_negotiation_status(ctx: ToolContext, args: RfqRef) -> NegotiationStatusOut:
@@ -1779,10 +1947,35 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             artifact_kind="purchase_analysis",
         ),
         Tool(
+            "analyze_requirements",
+            "Analyse what to buy for the company's OPEN REQUIREMENTS (an imported MRP / "
+            "needs sheet, or needs saved with add_requirements): per part, to_buy = required "
+            "+ safety stock - free stock - on order (never below 0), with the suppliers who "
+            "sold it (purchase prices, evaluation), other suppliers of its material group, "
+            "and a target and maximum price. Needs no BOM. Saves the analysis (no email, no "
+            "RFQ).",
+            AnalyzeRequirementsIn,
+            PurchaseAnalysisOut,
+            "draft",
+            analyze_requirements,
+            artifact_kind="purchase_analysis",
+        ),
+        Tool(
+            "add_requirements",
+            "Save needs the buyer stated in the chat (part number, quantity, unit, need-by "
+            "date) as open requirements. Only what the buyer said: never invent a quantity "
+            "or a date.",
+            AddRequirementsIn,
+            AddRequirementsOut,
+            "draft",
+            add_requirements,
+        ),
+        Tool(
             "create_rfq_from_analysis",
-            "Create a DRAFT RFQ from a purchase analysis: the parts to buy with their "
-            "quantities and need-by dates, and the suggested suppliers as DRAFT invites. "
-            "Nothing is sent.",
+            "Create DRAFT RFQs from a purchase analysis: the parts to buy with their "
+            "quantities and need-by dates, and the suggested suppliers as DRAFT invites. A "
+            "requirements analysis gives one RFQ per material group (see `rfqs`). Nothing "
+            "is sent.",
             RfqFromAnalysisIn,
             RfqFromAnalysisOut,
             "draft",

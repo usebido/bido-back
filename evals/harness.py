@@ -191,7 +191,8 @@ async def scenario_import(env: Env, fixture: Fixture, result: RunResult) -> Prin
             env.engine, env.storage, principal, upload_id, mapper=mapper, confirmed=True
         )
     result.check("imported", report.status == "imported", f"status={report.status}")
-    found = {(s.sheet, s.type) for s in report.sections}
+    every = [*report.sections, *report.extra_sections]
+    found = {(s.sheet, str(s.type)) for s in every}
     expected = set(fixture.sections)
     result.check(
         "sections",
@@ -199,7 +200,7 @@ async def scenario_import(env: Env, fixture: Fixture, result: RunResult) -> Prin
         f"missing={sorted(expected - found)} extra={sorted(found - expected)}",
     )
     ok_rows: dict[str, int] = {}
-    for section in report.sections:
+    for section in every:
         ok_rows[section.type] = ok_rows.get(section.type, 0) + section.rows_ok
     wrong = {
         t: (ok_rows.get(t, 0), want)
@@ -412,6 +413,11 @@ async def _turn(
 
 def _called(turns: Sequence[Turn], tool: str) -> bool:
     return any(name == tool and ok for t in turns for name, ok in t.tools)
+
+
+# The same, for scenarios in other modules (evals.needs).
+copilot_turn = _turn
+called = _called
 
 
 async def _rfq_state(env: Env, principal: Principal) -> tuple[int, set[str]] | None:

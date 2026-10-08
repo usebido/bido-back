@@ -42,9 +42,10 @@ from typing import Final, Literal, Protocol, cast
 
 from bido_back.quotes.parsing import DecimalSeparator, number_tokens, parse_decimal
 
-# What POST /v1/data/imports accepts (unchanged contract); workbooks add contacts.
+# What POST /v1/data/imports accepts (unchanged contract); workbooks add contacts,
+# purchase requirements (an MRP's needs) and supplier evaluations.
 TableImportType = Literal["items", "bom", "inventory", "purchase_history", "production_plan"]
-ImportType = TableImportType | Literal["supplier_contacts"]
+ImportType = TableImportType | Literal["supplier_contacts", "requirements", "supplier_evaluation"]
 FieldKind = Literal["text", "number", "date", "bool", "int"]
 
 MAX_ROWS: Final = 20_000
@@ -122,6 +123,40 @@ _SUPPLIER_CODE = (
     "cod fornitore", "lifnr",
 )  # fmt: skip
 _SUPPLIER_GENERIC = ("supplier", "fornecedor", "fornitore", "vendor")
+_SAFETY = (
+    "safety stock", "safety stock qty", "estoque de seguranca", "estoque seguranca",
+    "est seguranca", "estoque minimo de seguranca", "scorta di sicurezza", "scorta sicurezza",
+    "sicherheitsbestand", "buffer stock", "stock de seguridad",
+)  # fmt: skip
+_ORDER_UNIT = (
+    "order unit", "purchase unit", "purchasing unit", "unidade de preco", "unidade do preco",
+    "unidade de compra", "unidade do pedido", "un preco", "unita di prezzo",
+    "unita di acquisto", "unita d acquisto", "bestellmengeneinheit", "price uom",
+)  # fmt: skip
+# A supplier's commodity / material group: who to ask for what.
+_GROUP = (
+    "grupo de mercadoria", "grupo de mercadorias", "grupo mercadoria", "grupo de material",
+    "grupo de materiais", "material group", "commodity", "commodity group", "product group",
+    "grupo de produto", "grupo de produtos", "categoria de produto", "categoria de material",
+    "linha de produto", "segmento", "gruppo merceologico", "merceologia", "warengruppe",
+)  # fmt: skip
+_REQ_QTY = (
+    "quantidade necessaria", "qtd necessaria", "quantidade requerida", "qtd requerida",
+    "necessidade", "necessidade liquida", "quantidade da necessidade", "qtd necessidade",
+    "quantidade solicitada", "qtd solicitada", "required qty", "required quantity",
+    "qty required", "quantity required", "requirement qty", "requirement quantity",
+    "net requirement", "net requirements", "demand", "demand qty", "demand quantity",
+    "need qty", "qty needed", "quantity needed", "requested qty", "requested quantity",
+    "fabbisogno", "quantita fabbisogno", "quantita richiesta", "qta richiesta",
+    "qta fabbisogno", "bedarfsmenge",
+)  # fmt: skip
+_REQ_DATE = (
+    "data necessidade", "data de necessidade", "data da necessidade", "data necessaria",
+    "data requerida", "data de entrega necessaria", "data de entrega requerida",
+    "need by", "needed by", "need date", "required by", "required date",
+    "requirement date", "date required", "data fabbisogno", "data richiesta",
+    "data esigenza", "data necessita", "bedarfstermin", "fecha necesidad",
+)  # fmt: skip
 
 SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
     "items": (
@@ -259,6 +294,13 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             ("location", "local", "deposito", "magazzino", "warehouse", "storage location"),
         ),
         FieldSpec("as_of", "date", False, ("as of", "data inventario", "inventory date", "date")),
+        # Stock kept as a buffer: a requirement's net need covers it (analysis.py).
+        FieldSpec("safety_stock", "number", False, _SAFETY),
+        # The unit the stock is counted in, and the unit it is bought and priced in
+        # ("Unidade de medida" UN next to "Unidade de preço" KG): a requirement in
+        # the second unit can still be netted against this stock (analysis.py).
+        FieldSpec("unit", "text", False, _UNIT),
+        FieldSpec("order_unit", "text", False, _ORDER_UNIT),
     ),
     "purchase_history": (
         FieldSpec(
@@ -623,6 +665,7 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
         FieldSpec("phone", "text", False, ("phone", "telefone", "telefono", "tel", "celular")),
         FieldSpec("country", "text", False, ("country", "pais", "paese", "nazione")),
         FieldSpec("language", "text", False, ("language", "idioma", "lingua", "lang")),
+        FieldSpec("category", "text", False, _GROUP),
         # Manufacturer, authorized distributor, reseller...: brokers rank last.
         FieldSpec(
             "type",
@@ -644,7 +687,162 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             weak=("tipo", "categoria"),
         ),  # fmt: skip
     ),
+    # Purchase requirements: what the buyer must buy, by part and date (an MRP's
+    # purchase requisitions or net requirements, or a plain "what we need" list).
+    "requirements": (
+        FieldSpec("part_number", "text", True, _PART, weak=_PART_WEAK),
+        FieldSpec("quantity", "number", True, (*_REQ_QTY, *_QTY)),
+        FieldSpec("need_by", "date", True, _REQ_DATE),
+        FieldSpec("unit", "text", False, _UNIT),
+        FieldSpec("description", "text", False, _DESC),
+        FieldSpec(
+            "location",
+            "text",
+            False,
+            ("centro", "plant", "planta", "fabrica", "stabilimento", "location", "local"),
+        ),
+        FieldSpec(
+            "reference",
+            "text",
+            False,
+            (
+                "requisicao",
+                "requisicao de compra",
+                "numero requisicao",
+                "n requisicao",
+                "numero da requisicao",
+                "rc",
+                "requisition",
+                "purchase requisition",
+                "requisition number",
+                "requisition no",
+                "pr",
+                "pr number",
+                "pr no",
+                "req",
+                "req no",
+                "mrp element",
+                "elemento mrp",
+                "richiesta di acquisto",
+                "rda",
+                "numero rda",
+                "banf",
+            ),
+        ),  # fmt: skip
+        FieldSpec(
+            "project",
+            "text",
+            False,
+            (
+                "elemento pep",
+                "elemento pep projeto",
+                "pep",
+                "wbs",
+                "wbs element",
+                "projeto",
+                "project",
+                "progetto",
+                "commessa",
+                "ordem de producao",
+                "production order",
+                "ordine di produzione",
+            ),
+        ),  # fmt: skip
+        FieldSpec(
+            "kind",
+            "text",
+            False,
+            (
+                "tipo de necessidade",
+                "tipo necessidade",
+                "requirement type",
+                "demand type",
+                "tipo fabbisogno",
+                "tipo de demanda",
+            ),
+        ),  # fmt: skip
+    ),
+    # How the buyer rates its suppliers (OTIF, quality, rating, lead time), by name.
+    "supplier_evaluation": (
+        FieldSpec(
+            "supplier",
+            "text",
+            True,
+            (*_SUPPLIER_GENERIC, "company", "empresa", "azienda"),
+            preferred=_SUPPLIER_NAME,
+        ),
+        FieldSpec("supplier_code", "text", False, _SUPPLIER_CODE, weak=_SUPPLIER_GENERIC),
+        FieldSpec(
+            "otif_pct",
+            "number",
+            False,
+            (
+                "otif",
+                "otif pct",
+                "otif percent",
+                "on time in full",
+                "pontualidade",
+                "entrega no prazo",
+                "on time delivery",
+                "otd",
+                "puntualita",
+            ),
+        ),  # fmt: skip
+        FieldSpec(
+            "quality_pct",
+            "number",
+            False,
+            (
+                "qualidade",
+                "quality",
+                "quality pct",
+                "indice de qualidade",
+                "qualita",
+                "aprovacao de qualidade",
+                "quality rate",
+            ),
+        ),  # fmt: skip
+        FieldSpec(
+            "rating",
+            "number",
+            False,
+            (
+                "avaliacao",
+                "avaliacao media",
+                "nota",
+                "nota media",
+                "rating",
+                "score",
+                "supplier rating",
+                "supplier score",
+                "valutazione",
+                "punteggio",
+            ),
+        ),  # fmt: skip
+        FieldSpec(
+            "lead_time_days",
+            "number",
+            False,
+            (
+                "lead time",
+                "lead time medio",
+                "lead time medio dias",
+                "lead time dias",
+                "lead time days",
+                "prazo medio",
+                "prazo de entrega medio",
+                "prazo entrega",
+                "tempo di consegna",
+                "lead time giorni",
+                "average lead time",
+            ),
+        ),  # fmt: skip
+        FieldSpec("category", "text", False, _GROUP),
+    ),
 }
+
+# A supplier evaluation must carry at least one of these (a bare supplier list is not one).
+EVALUATION_FIELDS: Final = frozenset({"otif_pct", "quality_pct", "rating", "lead_time_days"})
 
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _TRAILING_MINUS = re.compile(r"^(.*\d)\s*-$")
@@ -1127,6 +1325,7 @@ def _check_row(import_type: ImportType, row: int, values: Mapping[str, object]) 
         case "inventory":
             positive("on_hand", allow_zero=True)
             positive("on_order", allow_zero=True)
+            positive("safety_stock", allow_zero=True)
         case "purchase_history":
             positive("quantity")
             positive("unit_price", allow_zero=True)
@@ -1138,6 +1337,11 @@ def _check_row(import_type: ImportType, row: int, values: Mapping[str, object]) 
                 errors.append(RowError(row, "currency", "use a 3-letter code such as EUR"))
         case "production_plan":
             positive("quantity")
+        case "requirements":
+            positive("quantity")
+        case "supplier_evaluation":
+            for name in EVALUATION_FIELDS:
+                positive(name, allow_zero=True)
         case "supplier_contacts":
             email = values.get("email")
             if isinstance(email, str) and not _EMAIL.fullmatch(email):

@@ -85,6 +85,25 @@ class SupplierStatView(BaseModel):
     on_time_rate: Decimal | None
     quality_rate: Decimal | None
     suggested: bool
+    # The buyer's supplier master: material group and evaluation (percentages).
+    category: str | None = None
+    otif_pct: Decimal | None = None
+    evaluation_quality_pct: Decimal | None = None
+    rating: Decimal | None = None
+    lead_time_days: Decimal | None = None
+
+
+class CandidateView(BaseModel):
+    """A supplier of the item's material group that never sold it."""
+
+    supplier_id: UUID
+    name: str
+    type: str
+    category: str
+    otif_pct: Decimal | None = None
+    quality_pct: Decimal | None = None
+    rating: Decimal | None = None
+    lead_time_days: Decimal | None = None
 
 
 class FlagView(BaseModel):
@@ -117,6 +136,9 @@ class AnalysisLineView(BaseModel):
     suppliers: list[SupplierStatView]
     flags: list[FlagView]
     rfq_line_id: UUID | None
+    # The buffer counted in `to_buy` (requirements: required + safety - on hand - on order).
+    safety_stock: Decimal = Decimal(0)
+    candidates: list[CandidateView] = []
 
 
 class CurrencyTotalView(BaseModel):
@@ -149,6 +171,44 @@ class AnalysisView(BaseModel):
     lines: list[AnalysisLineView]
     rfq_id: UUID | None
     created_at: datetime
+    # 'bom' (a product's BOM times a quantity) or 'requirements' (open needs).
+    source: Literal["bom", "requirements"] = "bom"
+
+
+class RequirementsAnalysisRequest(_Strict):
+    """Analyse the open requirements (not yet in an RFQ), optionally narrowed down."""
+
+    part_numbers: list[str] = Field(default_factory=list[str], max_length=500)
+    project: str | None = Field(default=None, max_length=200)
+    need_by_until: date | None = None
+    lookback_days: int = Field(default=365, ge=30, le=1095)
+
+
+class NewRequirementLine(_Strict):
+    part_number: str = Field(min_length=1, max_length=100)
+    quantity: Decimal = Field(gt=0)
+    need_by: date
+    unit: str | None = Field(default=None, max_length=20)
+    description: str | None = Field(default=None, max_length=300)
+    reference: str = Field(default="", max_length=100)
+
+
+class NewRequirementsRequest(_Strict):
+    lines: list[NewRequirementLine] = Field(min_length=1, max_length=200)
+
+
+class RequirementView(BaseModel):
+    id: UUID
+    part_number: str
+    description: str
+    quantity: Decimal
+    unit: str | None
+    need_by: date
+    reference: str
+    location: str | None
+    project: str | None
+    source: Literal["import", "chat"]
+    rfq_id: UUID | None
 
 
 class RfqFromAnalysisRequest(_Strict):
@@ -177,3 +237,5 @@ class RfqFromAnalysis(BaseModel):
     # Line positions left without a target/maximum price: bought in another
     # currency than the RFQ's, with no exchange rate to convert the limits.
     lines_without_limits: list[int] = []
+    # A requirements analysis gives one RFQ per material group: the others' ids.
+    other_rfq_ids: list[UUID] = []

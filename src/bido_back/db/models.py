@@ -216,6 +216,12 @@ class Supplier(Base):
     country: Mapped[str | None] = mapped_column(Text)
     language: Mapped[str] = mapped_column(Text, server_default=text("'en'"))
     email_domain: Mapped[str | None] = mapped_column(Text)
+    # The buyer's material group for it and the buyer's own evaluation (migration 0027).
+    category: Mapped[str | None] = mapped_column(Text)
+    otif_pct: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    quality_pct: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    rating: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
+    lead_time_days: Mapped[Decimal | None] = mapped_column(Numeric(18, 6))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -850,6 +856,10 @@ class InventoryRow(Base):
     on_hand: Mapped[Decimal] = mapped_column(AMOUNT, server_default=text("0"))
     on_order: Mapped[Decimal] = mapped_column(AMOUNT, server_default=text("0"))
     as_of: Mapped[date | None] = mapped_column(Date)
+    # Migration 0027: the buffer to keep, the unit counted in, the unit bought in.
+    safety_stock: Mapped[Decimal] = mapped_column(AMOUNT, server_default=text("0"))
+    unit: Mapped[str | None] = mapped_column(Text)
+    order_unit: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -922,8 +932,45 @@ class ProductionPlanRow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
+class Requirement(Base):
+    """A part the buyer must buy, how much and by when (an MRP need or a typed one).
+
+    `rfq_id` is set once an RFQ covers it: an open requirement has none.
+    """
+
+    __tablename__ = "requirements"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "item_id", "need_by", "reference", name="requirements_item_date_ref_key"
+        ),
+        CheckConstraint("quantity > 0", name="requirements_quantity_check"),
+        CheckConstraint("source IN ('import', 'chat')", name="requirements_source_check"),
+        Index(
+            "requirements_open_idx",
+            "tenant_id",
+            "need_by",
+            postgresql_where=text("rfq_id IS NULL"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    item_id: Mapped[UUID] = mapped_column(ForeignKey("items.id", ondelete="CASCADE"))
+    quantity: Mapped[Decimal] = mapped_column(AMOUNT)
+    unit: Mapped[str | None] = mapped_column(Text)
+    need_by: Mapped[date] = mapped_column(Date)
+    reference: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    location: Mapped[str | None] = mapped_column(Text)
+    project: Mapped[str | None] = mapped_column(Text)
+    kind: Mapped[str | None] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text, server_default=text("'import'"))
+    rfq_id: Mapped[UUID | None] = mapped_column(ForeignKey("rfqs.id", ondelete="SET NULL"))
+    created_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
 class Analysis(Base):
-    """One run of the purchase analysis for a product and quantity."""
+    """One run of the purchase analysis: a product's build, or the open requirements."""
 
     __tablename__ = "analyses"
     __table_args__ = (CheckConstraint("quantity > 0", name="analyses_quantity_check"),)
@@ -937,6 +984,8 @@ class Analysis(Base):
     summary: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     created_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     rfq_id: Mapped[UUID | None] = mapped_column(ForeignKey("rfqs.id", ondelete="SET NULL"))
+    # 'bom' (a product's BOM times a quantity) or 'requirements' (migration 0027).
+    source: Mapped[str] = mapped_column(Text, server_default=text("'bom'"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
@@ -981,6 +1030,10 @@ class AnalysisLine(Base):
     rfq_line_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("rfq_lines.id", ondelete="SET NULL")
     )
+    # Migration 0027: the buffer counted in `to_buy`, and suppliers of the item's
+    # material group that never sold it (they can still be asked).
+    safety_stock: Mapped[Decimal] = mapped_column(AMOUNT, server_default=text("0"))
+    candidates: Mapped[list[Any]] = mapped_column(JSONB, server_default=text("'[]'::jsonb"))
 
 
 # --- Award and issued purchase orders (migration 0015) -------------------------------

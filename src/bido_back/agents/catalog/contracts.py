@@ -360,6 +360,8 @@ SheetImportType = Literal[
     "purchase_history",
     "production_plan",
     "supplier_contacts",
+    "requirements",
+    "supplier_evaluation",
     "ignore",
 ]
 

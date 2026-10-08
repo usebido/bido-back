@@ -178,8 +178,8 @@ AWARD_NOTICE_WRITER: Final = award_notice_writer()
 def sheet_mapper(model: str = MAPPER_MODEL) -> AgentDefinition[SheetMappingOutput]:
     return AgentDefinition(
         name="sheet_mapper",
-        prompt_file="sheet_mapper.v2.md",
-        prompt_version=2,
+        prompt_file="sheet_mapper.v3.md",
+        prompt_version=3,
         model=model,
         output_model=SheetMappingOutput,
         max_turns=_MAX_TURNS,

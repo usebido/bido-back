@@ -57,7 +57,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Final, Literal, Protocol, cast
+from typing import Final, Literal, Protocol, TypeGuard, cast
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
@@ -77,6 +77,7 @@ from bido_back.db import tenant_session
 from bido_back.db.models import Contact, Supplier, SupplierContact, TemplateUpload
 from bido_back.logs import safe_reason
 from bido_back.purchasing.importers import (
+    EVALUATION_FIELDS,
     MAX_ROWS,
     SPECS,
     DroppedColumn,
@@ -84,6 +85,7 @@ from bido_back.purchasing.importers import (
     ImportType,
     ParsedTable,
     RowError,
+    TableImportType,
     decimal_evidence,
     map_columns,
     norm,
@@ -121,15 +123,18 @@ _ORDER: Final[tuple[ImportType, ...]] = (
     "items",
     "bom",
     "supplier_contacts",
+    "supplier_evaluation",
     "purchase_history",
     "inventory",
     "production_plan",
+    "requirements",
 )
 _DETAIL_TYPES: Final[tuple[ImportType, ...]] = (
     "bom",
     "purchase_history",
     "inventory",
     "production_plan",
+    "requirements",
 )
 
 
@@ -349,6 +354,8 @@ def _rule_candidates(grid: SheetGrid) -> list[Section]:
                     missing = []
             if missing:
                 continue
+            if import_type == "supplier_evaluation" and not EVALUATION_FIELDS & set(index):
+                continue  # a supplier list without any rating is not an evaluation
             score = len(index)
             if import_type not in best or score > best[import_type][1]:
                 best[import_type] = (at, score, index)
@@ -370,7 +377,10 @@ def _rule_candidates(grid: SheetGrid) -> list[Section]:
         sections = [s for s in sections if s.import_type != "items"]
     if any(s.import_type in ("bom", "purchase_history") for s in sections):
         # A BOM's or a purchase line's quantity and date also read as a production
-        # plan; the BOM or the purchase history wins.
+        # plan or a requirement; the BOM or the purchase history wins.
+        sections = [s for s in sections if s.import_type not in ("production_plan", "requirements")]
+    if any(s.import_type == "requirements" for s in sections):
+        # An MRP list of parts to buy, by date, is not a plan of products to build.
         sections = [s for s in sections if s.import_type != "production_plan"]
     return sections
 
@@ -408,6 +418,17 @@ _FIELD_HINTS: Final[Mapping[str, str]] = {
     "cancelled_qty": "quantity cancelled on the line",
     "received_qty": "quantity received (gross, before rejections)",
     "on_order": "quantity ordered and not yet received",
+    "safety_stock": "the stock kept as a buffer (estoque de segurança), not stock on hand",
+    "order_unit": (
+        "the unit the part is bought and priced in (e.g. 'Unidade de preço' KG next to a "
+        "base unit UN): a unit of measure, never a number"
+    ),
+    "need_by": "the date the part is needed (data de necessidade), not an order date",
+    "category": "the supplier's material / commodity group (grupo de mercadoria)",
+    "otif_pct": "on-time-in-full percentage",
+    "quality_pct": "quality percentage",
+    "rating": "the supplier's average score",
+    "lead_time_days": "average lead time in days",
 }
 
 
@@ -572,9 +593,14 @@ MAX_SUPPLIERS_WITHOUT_EMAIL: Final = 50
 MAX_PRODUCTS: Final = 20
 
 
-class SectionReport(BaseModel):
+# The section types this report published first; later ones go to `extra_sections`, so a
+# client written against the earlier contract never meets a type it does not know.
+PublishedType = TableImportType | Literal["supplier_contacts"]
+ExtraType = Literal["requirements", "supplier_evaluation"]
+
+
+class _SectionFields(BaseModel):
     sheet: str
-    type: ImportType
     source: Literal["rules", "model"]
     header_row: int  # 1-based, as in the spreadsheet
     columns: dict[str, str]
@@ -595,11 +621,33 @@ class SectionReport(BaseModel):
     notes: list[str] = []
 
 
+class SectionReport(_SectionFields):
+    type: PublishedType
+
+
+class ExtraSectionReport(_SectionFields):
+    """A section of a type added after `sections` was published (same fields)."""
+
+    type: ExtraType
+
+
+def _is_extra(import_type: ImportType) -> TypeGuard[ExtraType]:
+    return import_type in ("requirements", "supplier_evaluation")
+
+
 class WorkbookImportReport(BaseModel):
     upload_id: UUID
     filename: str
     status: Literal["imported", "needs_confirmation", "nothing_found"]
     sections: list[SectionReport]
+    extra_sections: list[ExtraSectionReport] = Field(
+        default_factory=list[ExtraSectionReport],
+        description=(
+            "Sections of the types added later, with the same fields as `sections`: "
+            "purchase requirements (an MRP's needs: what to buy, how much, by when) and the "
+            "buyer's supplier evaluation"
+        ),
+    )
     # What to ask the buyer before importing; empty when imported.
     questions: list[str]
     problems: list[str]
@@ -632,7 +680,7 @@ class _Parsed:
     notes: list[str] = field(default_factory=list[str])
     # The sheet went back to the mapper once (`_retry_mapping`).
     retried: bool = False
-    report: SectionReport = field(init=False)
+    report: SectionReport | ExtraSectionReport = field(init=False)
 
     def __post_init__(self) -> None:
         self.refresh()
@@ -640,9 +688,9 @@ class _Parsed:
     def refresh(self) -> None:
         t = self.table
         failed = t.total_rows - len(t.rows)
-        self.report = SectionReport(
+        import_type = self.section.import_type
+        fields = dict(
             sheet=self.section.sheet,
-            type=self.section.import_type,
             source=self.section.source,
             header_row=self.section.header_row + 1,
             columns=t.columns,
@@ -660,6 +708,10 @@ class _Parsed:
             question=self.section.question,
             notes=list(self.notes),
         )
+        if _is_extra(import_type):
+            self.report = ExtraSectionReport.model_validate({**fields, "type": import_type})
+        else:
+            self.report = SectionReport.model_validate({**fields, "type": import_type})
 
     def failing(self) -> bool:
         """Too many failing rows, or one field failing on most of them."""
@@ -942,7 +994,8 @@ async def import_workbook(
             upload_id=upload_id,
             filename=filename,
             status="needs_confirmation",
-            sections=[p.report for p in parsed],
+            sections=_published(parsed),
+            extra_sections=_extra(parsed),
             questions=questions,
             problems=problems,
             products=_products(parsed),
@@ -960,13 +1013,22 @@ async def import_workbook(
         upload_id=upload_id,
         filename=filename,
         status="imported",
-        sections=[p.report for p in parsed],
+        sections=_published(parsed),
+        extra_sections=_extra(parsed),
         questions=[],
         problems=problems,
         unimported_sheets=unimported,
         suppliers_without_email=without_email,
         products=_products(parsed),
     )
+
+
+def _published(parsed: Sequence["_Parsed"]) -> list[SectionReport]:
+    return [p.report for p in parsed if isinstance(p.report, SectionReport)]
+
+
+def _extra(parsed: Sequence["_Parsed"]) -> list[ExtraSectionReport]:
+    return [p.report for p in parsed if isinstance(p.report, ExtraSectionReport)]
 
 
 async def suppliers_without_email(session: AsyncSession) -> list[str]:
