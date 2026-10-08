@@ -40,6 +40,7 @@ CATALOG: dict[str, list[str]] = {
         "currency",
         "as_of",
         "receipt_date",
+        "balance_basis",
     ],
     "material_requirement": [
         "part_number",
@@ -51,6 +52,8 @@ CATALOG: dict[str, list[str]] = {
         "reference",
         "project",
         "demand_basis",
+        "area",
+        "product_code",
     ],
     "supplier": ["supplier_code", "name", "email", "country"],
     "purchase": [
@@ -63,6 +66,10 @@ CATALOG: dict[str, list[str]] = {
         "ordered_at",
         "unit",
         "po_number",
+        "po_line",
+        "location",
+        "promised_at",
+        "status",
     ],
     "supplier_performance": [
         "supplier_code",
@@ -88,6 +95,51 @@ CATALOG: dict[str, list[str]] = {
         "reported_estimated_cost",
         "currency",
     ],
+    "item": ["part_number", "description", "unit", "area"],
+    "bom": [
+        "product_code",
+        "part_number",
+        "quantity_per",
+        "unit",
+        "product_unit",
+        "base_quantity",
+        "location",
+        "revision",
+        "valid_from",
+        "valid_to",
+    ],
+    "production_plan": [
+        "reference",
+        "product_code",
+        "quantity",
+        "unit",
+        "location",
+        "area",
+        "need_by",
+        "status",
+    ],
+    "receipt": [
+        "po_number",
+        "po_line",
+        "location",
+        "received_at",
+        "quantity",
+        "rejected",
+        "unit",
+        "receipt_id",
+        "movement",
+    ],
+    "delivery_schedule": [
+        "po_number",
+        "po_line",
+        "location",
+        "part_number",
+        "quantity",
+        "unit",
+        "expected_at",
+        "status",
+    ],
+    "supplier_item": ["part_number", "supplier_code", "status", "valid_from"],
 }
 Mapper = Callable[[MappingTask, ToolContext], Awaitable[MappingProposal]]
 PAGE_ROWS = 60
@@ -98,14 +150,30 @@ MAX_TABLES = 100
 MANIFEST_CHARS = 20_000
 
 
+def _anchors(table: EvidenceTable) -> list[int]:
+    """Include late headers and separate blocks instead of only the report's title rows."""
+    boundaries = [
+        i for i, row in enumerate(table.rows) if any(row) and (i == 0 or not any(table.rows[i - 1]))
+    ]
+    indices = sorted(
+        {
+            i
+            for boundary in boundaries
+            for i in (boundary, boundary + 1)
+            if i < len(table.rows) and any(table.rows[i])
+        }
+    )
+    return indices[:16]
+
+
 def default_mapper(config: RunnerConfig | None = None) -> Mapper:
     async def call(task: MappingTask, context: ToolContext) -> MappingProposal:
         from bido_back.agents.runner import Completed, run_to_completion
 
         agent = AgentDefinition(
             name="source_mapper",
-            prompt_file="source_mapper.v1.md",
-            prompt_version=1,
+            prompt_file="source_mapper.v2.md",
+            prompt_version=2,
             model=MAPPER_MODEL,
             output_model=MappingProposal,
             max_turns=1,
@@ -305,7 +373,8 @@ async def map_sources(
                 for t in tables
             ],
         )
-    sample_chars = max(1, MANIFEST_CHARS // max(len(tables), 1) // 160)
+    sample_cells = sum(sum(bool(v) for v in t.rows[i][:40]) for t in tables for i in _anchors(t))
+    sample_chars = max(1, MANIFEST_CHARS // max(sample_cells, 1))
     manifest = [
         TableManifest(
             source_id=t.source_id,
@@ -313,8 +382,10 @@ async def map_sources(
             rows=len(t.rows),
             columns=max((len(r) for r in t.rows), default=0),
             sample=[
-                [v[: min(120, sample_chars)] if v else v for v in row[:40]] for row in t.rows[:4]
+                [v[: min(120, sample_chars)] if v else v for v in t.rows[i][:40]]
+                for i in _anchors(t)
             ],
+            sample_rows=[i + 1 for i in _anchors(t)],
         )
         for t in tables
     ]

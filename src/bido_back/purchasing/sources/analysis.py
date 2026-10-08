@@ -9,41 +9,36 @@ demand balance. Every issue retains the original evidence coordinates.
 import re
 from collections import Counter, defaultdict
 from collections.abc import Sequence
-from datetime import date
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal
 
-from bido_back.purchasing.importers import norm, parse_date
+from bido_back.purchasing.importers import norm
 from bido_back.purchasing.sources.contracts import (
     Assessment,
     AssessmentLine,
     Issue,
     Record,
-    SourceRef,
     SupplierEvidence,
 )
-from bido_back.quotes.parsing import parse_decimal
+from bido_back.purchasing.sources.evidence import (
+    add_issue as _issue,
+)
+from bido_back.purchasing.sources.evidence import (
+    normalize_unit as _unit,
+)
+from bido_back.purchasing.sources.evidence import (
+    source_date as _day,
+)
+from bido_back.purchasing.sources.evidence import (
+    source_number as _number,
+)
+from bido_back.purchasing.sources.evidence import (
+    source_refs as _refs,
+)
+from bido_back.purchasing.sources.evidence import (
+    source_text as _text,
+)
 
 _ZERO = Decimal(0)
-_COUNT_UNITS = frozenset(
-    {
-        "un",
-        "und",
-        "unid",
-        "unidade",
-        "unidades",
-        "ea",
-        "each",
-        "pc",
-        "pcs",
-        "pce",
-        "piece",
-        "pieces",
-        "peca",
-        "pecas",
-        "unit",
-        "units",
-    }
-)
 _GROSS = frozenset(
     {
         "gross",
@@ -71,86 +66,6 @@ _NET = frozenset(
 _PLANNING_KINDS = frozenset({"inventory", "material_requirement", "purchase_summary"})
 
 
-def _text(record: Record | None, field: str) -> str | None:
-    if record is None:
-        return None
-    return record.values.get(field, "").strip() or None
-
-
-def _refs(records: Sequence[Record], *fields: str) -> list[SourceRef]:
-    result: list[SourceRef] = []
-    for record in records:
-        for field, ref in record.evidence.items():
-            if (not fields or field in fields) and ref not in result:
-                result.append(ref)
-    return result
-
-
-def _issue(
-    issues: list[Issue],
-    code: str,
-    message: str,
-    records: Sequence[Record],
-    *fields: str,
-    warning: bool = False,
-) -> None:
-    issues.append(
-        Issue(
-            code=code,
-            severity="warning" if warning else "blocker",
-            message=message,
-            evidence=_refs(records, *fields),
-        )
-    )
-
-
-def _number(
-    record: Record | None,
-    field: str,
-    issues: list[Issue],
-    *,
-    negative: bool = False,
-    warning: bool = False,
-) -> Decimal | None:
-    raw = _text(record, field)
-    if raw is None or record is None:
-        return None
-    # Readers stringify real Excel numbers, including scientific notation.
-    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?[eE][-+]?\d+", raw):
-        try:
-            value = Decimal(raw)
-        except InvalidOperation:
-            value = None
-    else:
-        value = parse_decimal(raw)
-    if (
-        value is None
-        or not value.is_finite()
-        or abs(value) >= Decimal(10) ** 12
-        or (value < 0 and not negative)
-    ):
-        _issue(
-            issues,
-            "invalid_number",
-            f"The source {field} is not an unambiguous valid number.",
-            [record],
-            field,
-            warning=warning,
-        )
-        return None
-    return value
-
-
-def _day(record: Record | None, field: str, issues: list[Issue]) -> date | None:
-    raw = _text(record, field)
-    if raw is None or record is None:
-        return None
-    value = parse_date(raw)
-    if value is None:
-        _issue(issues, "invalid_date", f"The source {field} is not a valid date.", [record], field)
-    return value
-
-
 def _currency(record: Record | None, issues: list[Issue]) -> str | None:
     value = _text(record, "currency")
     if value is None or record is None:
@@ -165,13 +80,6 @@ def _currency(record: Record | None, issues: list[Issue]) -> str | None:
         )
         return None
     return value.upper()
-
-
-def _unit(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = norm(value)
-    return "count" if normalized in _COUNT_UNITS else normalized
 
 
 def _one(records: Sequence[Record], kind: str, issues: list[Issue]) -> Record | None:
@@ -557,12 +465,14 @@ def _supplier_matches(
     return matches if len(codes - {None}) <= 1 else []
 
 
-def _supplier(
+def supplier_evidence(
     purchases: Sequence[Record],
     masters: Sequence[Record],
     performance: Sequence[Record],
     all_purchases: Sequence[Record],
     issues: list[Issue],
+    *,
+    include_history_evidence: bool = True,
 ) -> SupplierEvidence:
     first = purchases[0]
     code = _text(first, "supplier_code")
@@ -655,7 +565,13 @@ def _supplier(
         last_price=_number(latest, "unit_price", issues, warning=True),
         currency=_currency(latest, issues),
         ordered_at=_day(latest, "ordered_at", issues),
-        evidence=_refs([*purchases, *matching, *metrics]),
+        evidence=_refs(
+            [
+                *(purchases if include_history_evidence else [latest or first]),
+                *matching,
+                *metrics,
+            ]
+        ),
     )
     for field in ("otif_pct", "quality_pct", "lead_time_days"):
         values = {_number(record, field, issues, warning=True) for record in metrics} - {None}
@@ -725,7 +641,7 @@ def assess(records: Sequence[Record]) -> Assessment:
                 continue
             by_supplier[code, None if code else _name(name)].append(record)
         line.suppliers = [
-            _supplier(rows, masters, performance, all_purchases, line.issues)
+            supplier_evidence(rows, masters, performance, all_purchases, line.issues)
             for rows in by_supplier.values()
         ]
         line.ready = line.calculated_to_buy is not None and not any(

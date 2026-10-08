@@ -91,10 +91,72 @@ ignoring them.
 
 ## Business semantics and limits
 
-Canonical evidence kinds are inventory, material requirement, supplier,
-purchase, supplier performance and purchase summary. They complement the
-existing persisted items/BOM/history/plan model; they do not pretend a material
-requirement is a production plan or supplier OTIF is a purchase receipt date.
+Canonical evidence kinds include inventory, material requirement, supplier,
+purchase, supplier performance, purchase summary, item master, BOM, production
+plan, receipt, pending delivery schedule and supplier-item qualification. Direct
+demand stays distinct from finished-product production, and receipts stay distinct
+from delivery promises.
+
+### Production plans and scattered ERP exports
+
+`source_mapper.v2.md` represents the relationships needed for a product-build
+analysis, returning only cell locators. It does not generate join code, quantities,
+normalized statuses or SQL. Manifest samples now include late headers and separate
+table blocks with original row numbers rather than only introductory rows.
+
+Both source tools and `POST /v1/procurement-assessments` accept optional `scope`:
+
+```json
+{
+  "product_code": "MTR-100",
+  "location": "Plant A",
+  "as_of": "2026-10-08",
+  "horizon_end": "2026-10-22",
+  "safety_stock": 0,
+  "production_lead_days": 0
+}
+```
+
+`area` can select production using the plan or product master instead of a single
+product. Product codes and plant keys match exactly; objective text alone is not
+a filter. Located `planning_candidates` and `snapshot_dates` let the copilot resolve
+identifiers and repeat an initially unscoped call. Saving preserves the same scope;
+scope and contract version are part of the immutable snapshot cache identity.
+
+The deterministic planner:
+
+- Selects production by product/area, plant and inclusive horizon, joins effective
+  BOM rows and multiplies exact decimal quantities. Conflicting revisions block
+  validation. `demand_contributions` retains both source rows for each calculation.
+- Selects stock snapshots by material/plant/warehouse/date. Historical positions
+  are not added to current balances. Conflicting duplicate positions and overlapping
+  plant/warehouse totals block validation. A snapshot older than `as_of` requires
+  reconciliation of intervening movements. Explicit available stock is used directly;
+  otherwise gross minus reserved minus blocked is computed only when all quantities
+  are present. Safety stock needs a source value or an explicit buyer policy.
+- Joins orders, receipts and pending confirmations by order/item/plant. Repeated
+  confirmations are not extra purchases. Receipts reduce the outstanding balance
+  without being added again to stock. Absence of a receipt is not proof of zero
+  receipts: an explicit pending balance must reconcile with the order and observed
+  receipts. Orphaned and conflicting confirmations block validation.
+- Nets demand and eligible deliveries in date order. A receipt before a later need
+  cannot erase an earlier shortage. Late, overdue and undated deliveries are disclosed
+  and excluded. `inbound` and `netting` expose eligible quantities, additional purchases
+  and projected balances by need date.
+- Resolves item names, supplier contacts and qualifications. Completed-purchase prices
+  require reconciled receipts with evidence. Open orders and archived quotation emails
+  cannot become the last received price.
+
+`copilot.v20.md` uses these typed boundaries and explains assumptions rather than asking
+buyers to prejoin the workbook. This path performs no import or outbound action.
+Manufacturing lead time defaults to zero and is disclosed: component deadlines then
+equal the production need date. Coverage is conditional on pending deliveries arriving.
+
+This is single-level component planning. Nested assemblies, overlapping direct and
+exploded demand, unrecognized receipt movements, split deliveries without unique
+schedule identities, incompatible units and ambiguous keys stay blocked. The legacy
+unscoped path supports explicit net requirements; scoped mixed production planning
+currently accepts gross direct requirements and refuses overlapping BOM demand.
 
 For explicit gross demand, with compatible units and confirmed timely receipts:
 
@@ -133,7 +195,7 @@ sends messages, approves anything or creates an order. The existing preliminary
 workflow remains available when the buyer explicitly wants an unresolved draft.
 
 Further work should add OCR/vision with the same provenance contract, explicit
-UOM conversion evidence, time-phased multi-demand netting for arbitrary source records, connector adapters,
+UOM conversion evidence, multilevel make/buy planning, connector adapters,
 native numeric type preservation, and durable checkpointed mapping for large sources. These are not implemented
 by claiming all formats are understood. Live-model semantic accuracy requires
 evaluations before rollout; deterministic fixture tests alone cannot establish it.
@@ -161,6 +223,9 @@ evaluations before rollout; deterministic fixture tests alone cannot establish i
 - [SAP: Net Requirements Calculation](https://help.sap.com/saphelp_SCM700_ehp01/helpdata/en/a4/2ec95360267614e10000000a174cb4/content.htm?no_cache=true):
   requirements and supply have dates and coverage relationships; procurement
   analysis is not necessarily a new BOM explosion.
+- [Program of Thoughts (TMLR 2023)](https://arxiv.org/abs/2211.12588):
+  separate language interpretation from numerical execution. Bido applies that
+  separation with fixed typed operations, without executing model-generated code.
 - [Microsoft: Safety stock](https://learn.microsoft.com/en-us/dynamics365/supply-chain/master-planning/safety-stock-replenishment):
   safety-stock replenishment is an explicit planning policy, not an arbitrary
   percentage applied to every source quantity.
@@ -181,3 +246,12 @@ tables, inconsistent codes, locale-dependent decimals, gross versus net demand,
 units/conversions, duplicated consolidated views, scanned/partial sources and
 embedded instructions. Track false-ready rate and evidence fidelity in addition
 to extraction recall and end-to-end task completion.
+
+`uv run python -m evals.source_planning --mock` checks the new source-planning
+harness with synthetic complete, permuted, conflicting-stock and missing-BOM
+cases. It grades exact quantities, received-order prices, table coverage and
+false-ready outcomes. `--live --repeats 3` runs the same cases through the actual
+source mapper with `OPENAI_API_KEY`; it sends only synthetic records and needs
+neither a database nor a mailbox. Passing the mock mode does not establish model
+extraction accuracy. The local reproduction of the supplied industrial workbook
+also uses explicit locator mappings and is kept outside the repository.

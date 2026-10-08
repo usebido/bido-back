@@ -887,6 +887,13 @@
             ],
             "title": "Demand"
           },
+          "demand_contributions": {
+            "items": {
+              "$ref": "#/components/schemas/DemandContribution"
+            },
+            "title": "Demand Contributions",
+            "type": "array"
+          },
           "demand_unit": {
             "anyOf": [
               {
@@ -914,6 +921,13 @@
               "$ref": "#/components/schemas/SourceRef"
             },
             "title": "Evidence",
+            "type": "array"
+          },
+          "inbound": {
+            "items": {
+              "$ref": "#/components/schemas/InboundEvidence"
+            },
+            "title": "Inbound",
             "type": "array"
           },
           "inventory_unit": {
@@ -956,6 +970,13 @@
               }
             ],
             "title": "Need By"
+          },
+          "netting": {
+            "items": {
+              "$ref": "#/components/schemas/NettingStep"
+            },
+            "title": "Netting",
+            "type": "array"
           },
           "on_order": {
             "anyOf": [
@@ -1058,6 +1079,16 @@
             "minLength": 1,
             "title": "Objective",
             "type": "string"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanningScope-Input"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "upload_ids": {
             "items": {
@@ -3536,6 +3567,50 @@
         "title": "DemandAllocationView",
         "type": "object"
       },
+      "DemandContribution": {
+        "properties": {
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "need_by": {
+            "format": "date",
+            "title": "Need By",
+            "type": "string"
+          },
+          "product_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Code"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "reference": {
+            "title": "Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "quantity",
+          "need_by",
+          "evidence"
+        ],
+        "title": "DemandContribution",
+        "type": "object"
+      },
       "DirectUploadRequest": {
         "additionalProperties": false,
         "properties": {
@@ -4392,6 +4467,55 @@
           "message"
         ],
         "title": "ImportRowError",
+        "type": "object"
+      },
+      "InboundEvidence": {
+        "properties": {
+          "eligible": {
+            "default": false,
+            "title": "Eligible",
+            "type": "boolean"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "expected_at": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected At"
+          },
+          "po_line": {
+            "title": "Po Line",
+            "type": "string"
+          },
+          "po_number": {
+            "title": "Po Number",
+            "type": "string"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "po_number",
+          "po_line",
+          "quantity",
+          "evidence"
+        ],
+        "title": "InboundEvidence",
         "type": "object"
       },
       "InviteFollowups": {
@@ -6094,6 +6218,44 @@
         "title": "NegotiationSettingsUpdate",
         "type": "object"
       },
+      "NettingStep": {
+        "properties": {
+          "demand": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Demand",
+            "type": "string"
+          },
+          "incoming": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Incoming",
+            "type": "string"
+          },
+          "need_by": {
+            "format": "date",
+            "title": "Need By",
+            "type": "string"
+          },
+          "projected_balance": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Projected Balance",
+            "type": "string"
+          },
+          "purchase_quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Purchase Quantity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "need_by",
+          "demand",
+          "incoming",
+          "purchase_quantity",
+          "projected_balance"
+        ],
+        "title": "NettingStep",
+        "type": "object"
+      },
       "NoticeProposed": {
         "properties": {
           "approval_id": {
@@ -6482,6 +6644,218 @@
           "justification"
         ],
         "title": "OutcomeLine",
+        "type": "object"
+      },
+      "PlanningCandidate": {
+        "properties": {
+          "area": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Area"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
+          },
+          "need_dates": {
+            "items": {
+              "format": "date",
+              "type": "string"
+            },
+            "title": "Need Dates",
+            "type": "array"
+          },
+          "product_code": {
+            "title": "Product Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "product_code"
+        ],
+        "title": "PlanningCandidate",
+        "type": "object"
+      },
+      "PlanningScope-Input": {
+        "description": "Buyer-supplied planning boundaries, kept separate from extracted evidence.",
+        "properties": {
+          "area": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Area"
+          },
+          "as_of": {
+            "format": "date",
+            "title": "As Of",
+            "type": "string"
+          },
+          "horizon_end": {
+            "format": "date",
+            "title": "Horizon End",
+            "type": "string"
+          },
+          "location": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Location",
+            "type": "string"
+          },
+          "product_code": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Code"
+          },
+          "production_lead_days": {
+            "default": 0,
+            "maximum": 365.0,
+            "minimum": 0.0,
+            "title": "Production Lead Days",
+            "type": "integer"
+          },
+          "safety_stock": {
+            "anyOf": [
+              {
+                "exclusiveMaximum": 1000000000000.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Safety Stock"
+          }
+        },
+        "required": [
+          "location",
+          "as_of",
+          "horizon_end"
+        ],
+        "title": "PlanningScope",
+        "type": "object"
+      },
+      "PlanningScope-Output": {
+        "description": "Buyer-supplied planning boundaries, kept separate from extracted evidence.",
+        "properties": {
+          "area": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Area"
+          },
+          "as_of": {
+            "format": "date",
+            "title": "As Of",
+            "type": "string"
+          },
+          "horizon_end": {
+            "format": "date",
+            "title": "Horizon End",
+            "type": "string"
+          },
+          "location": {
+            "maxLength": 200,
+            "minLength": 1,
+            "title": "Location",
+            "type": "string"
+          },
+          "product_code": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Code"
+          },
+          "production_lead_days": {
+            "default": 0,
+            "maximum": 365.0,
+            "minimum": 0.0,
+            "title": "Production Lead Days",
+            "type": "integer"
+          },
+          "safety_stock": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Safety Stock"
+          }
+        },
+        "required": [
+          "location",
+          "as_of",
+          "horizon_end"
+        ],
+        "title": "PlanningScope",
         "type": "object"
       },
       "PrepareSendResponse": {
@@ -9123,9 +9497,21 @@
       },
       "SheetPreview": {
         "properties": {
+          "has_more": {
+            "default": false,
+            "description": "Rows follow this page",
+            "title": "Has More",
+            "type": "boolean"
+          },
           "name": {
             "title": "Name",
             "type": "string"
+          },
+          "offset": {
+            "default": 0,
+            "description": "Index of the first row of this page",
+            "title": "Offset",
+            "type": "integer"
           },
           "rows": {
             "items": {
@@ -9143,13 +9529,19 @@
             "type": "integer"
           },
           "total_rows": {
-            "description": "Rows with at least one value, in the whole sheet",
+            "description": "Rows in the whole sheet: every row an .xlsx has (an empty one shows as an empty row), or a csv's lines that have a value",
             "title": "Total Rows",
             "type": "integer"
           },
           "truncated": {
-            "description": "Rows, columns or cells were cut for the preview",
+            "description": "Rows outside this page, columns past the cap, or cut cells",
             "title": "Truncated",
+            "type": "boolean"
+          },
+          "truncated_columns": {
+            "default": false,
+            "description": "The sheet is wider than the columns returned",
+            "title": "Truncated Columns",
             "type": "boolean"
           }
         },
@@ -9227,6 +9619,13 @@
             "title": "Persisted",
             "type": "boolean"
           },
+          "planning_candidates": {
+            "items": {
+              "$ref": "#/components/schemas/PlanningCandidate"
+            },
+            "title": "Planning Candidates",
+            "type": "array"
+          },
           "record_counts": {
             "additionalProperties": {
               "type": "integer"
@@ -9245,6 +9644,24 @@
               }
             ],
             "title": "Rfq Id"
+          },
+          "scope": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PlanningScope-Output"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "snapshot_dates": {
+            "items": {
+              "format": "date",
+              "type": "string"
+            },
+            "title": "Snapshot Dates",
+            "type": "array"
           },
           "status": {
             "default": "needs_review",
@@ -9646,6 +10063,15 @@
             ],
             "title": "Last Price"
           },
+          "last_price_basis": {
+            "default": "purchase_order",
+            "enum": [
+              "purchase_order",
+              "received_order"
+            ],
+            "title": "Last Price Basis",
+            "type": "string"
+          },
           "lead_time_days": {
             "anyOf": [
               {
@@ -9692,6 +10118,17 @@
               }
             ],
             "title": "Otif Pct"
+          },
+          "qualification_status": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Qualification Status"
           },
           "quality_pct": {
             "anyOf": [
@@ -10790,7 +11227,7 @@
         "type": "object"
       },
       "UploadPreview": {
-        "description": "What to show for an uploaded file.\n\n* `table`: spreadsheets (xlsx, csv) as `sheets`, values only (formulas are\n  never evaluated: a formula shows its last saved result, or nothing).\n* `inline`: PDF and images, as a short-lived `url` served inline with the\n  file's exact type, for an iframe or an img.\n* `none`: no preview (`reason`); the file can still be downloaded.",
+        "description": "What to show for an uploaded file.\n\n* `table`: spreadsheets (xlsx, csv) as `sheets`, values only (formulas are\n  never evaluated: a formula shows its last saved result, or nothing). One\n  page of rows each: the first rows of every sheet, or, with `sheet`, the\n  `limit` rows of that sheet from `offset`.\n* `inline`: PDF and images, as a short-lived `url` served inline with the\n  file's exact type, for an iframe or an img.\n* `none`: no preview (`reason`); the file can still be downloaded.",
         "properties": {
           "content_type": {
             "title": "Content Type",
@@ -10841,6 +11278,14 @@
               }
             ],
             "title": "Reason"
+          },
+          "sheet_names": {
+            "description": "Every sheet of a table, in order; `sheets` may hold only the requested one",
+            "items": {
+              "type": "string"
+            },
+            "title": "Sheet Names",
+            "type": "array"
           },
           "sheets": {
             "items": {
@@ -20893,6 +21338,53 @@
               "format": "uuid",
               "title": "Upload Id",
               "type": "string"
+            }
+          },
+          {
+            "description": "Page this sheet only",
+            "in": "query",
+            "name": "sheet",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Page this sheet only",
+              "title": "Sheet"
+            }
+          },
+          {
+            "description": "First row of the page",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "First row of the page",
+              "maximum": 1000000,
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Rows in the page",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 200,
+              "description": "Rows in the page",
+              "maximum": 1000,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
             }
           },
           {

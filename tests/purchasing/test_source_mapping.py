@@ -173,6 +173,36 @@ async def test_header_variants_use_the_injected_semantic_mapping(supplier_header
     assert coverage[0].mapped_rows == 1
 
 
+async def test_manifest_preserves_late_headers_and_separate_blocks_with_coordinates() -> None:
+    table = EvidenceTable(
+        source_id="erp",
+        name="Opaque report",
+        rows=[
+            ["ERP export"],
+            ["Date", "2026-10-08"],
+            [],
+            [],
+            [],
+            ["Finished product", "Component", "Consumption per 1"],
+            ["MTR-100", "000101", "2"],
+            [],
+            ["Product", "Unit", "Area"],
+            ["MTR-100", "pcs", "Motors"],
+        ],
+    )
+
+    async def mapper(task: MappingTask, _: ToolContext) -> MappingProposal:
+        manifest = task.manifest[0]
+        anchored = dict(zip(manifest.sample_rows, manifest.sample, strict=True))
+        assert anchored[6] == ["Finished product", "Component", "Consumption per 1"]
+        assert anchored[9] == ["Product", "Unit", "Area"]
+        return MappingProposal()
+
+    _, issues, coverage = await map_sources([table], "Analyze motor", context(), mapper)
+    assert coverage[0].inspected
+    assert not any(issue.code == "mapping_failed" for issue in issues)
+
+
 async def test_mapping_parallelism_is_bounded_and_context_stays_tenant_scoped() -> None:
     tables = [EvidenceTable(source_id=str(i), name="S", rows=[["Part"]]) for i in range(7)]
     original = context()
