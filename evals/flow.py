@@ -247,7 +247,7 @@ async def scenario_intake(world: World, case: IntakeCase, result: RunResult) -> 
     if world.model is not None:
         world.model.intake[case.text.strip()] = _intake_script(case)
     created = await rfq_service.create_rfq_from_text(
-        world.engine, world.principal, case.text, world.intake
+        world.engine, world.principal, case.text, world.intake, currency="EUR"
     )
     async with tenant_session(world.engine, world.tenant_id) as session:
         rows = list(

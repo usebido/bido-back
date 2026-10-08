@@ -221,7 +221,7 @@ async def test_rfq_preserves_planning_calculation_evidence(
         app_engine,
         who,
         analysis.id,
-        RfqFromAnalysisRequest(),
+        RfqFromAnalysisRequest(currency="EUR"),
     )
     async with tenant_session(app_engine, who.tenant_id) as session:
         line = await session.scalar(select(RfqLine).where(RfqLine.rfq_id == rfq.rfq.id))

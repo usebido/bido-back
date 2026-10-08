@@ -2,6 +2,7 @@
 
 from bido_back.fx.ecb import (
     ECB_DAILY_URL,
+    REFERENCE_CURRENCIES,
     DailyRates,
     FxError,
     FxRefreshHandler,
@@ -13,6 +14,7 @@ from bido_back.fx.ecb import (
 
 __all__ = [
     "ECB_DAILY_URL",
+    "REFERENCE_CURRENCIES",
     "DailyRates",
     "FxError",
     "FxRefreshHandler",

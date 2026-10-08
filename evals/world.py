@@ -335,6 +335,7 @@ class World:
                 session,
                 self.principal,
                 title=title,
+                base_currency="EUR",
                 lines=[
                     NewRfqLine(
                         description=item.description,

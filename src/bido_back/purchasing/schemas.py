@@ -8,7 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from bido_back.purchasing.importers import TableImportType
-from bido_back.rfqs.schemas import RfqDetail
+from bido_back.rfqs.schemas import CurrencyCode, CurrencySource, RfqDetail
 
 
 class _Strict(BaseModel):
@@ -204,6 +204,14 @@ class RfqFromAnalysisRequest(_Strict):
     response_due: date | None = None
     # Suggested suppliers invited per line (the best-ranked ones).
     max_suppliers_per_line: int = Field(default=3, ge=1, le=3)
+    currency: CurrencyCode | None = Field(
+        default=None,
+        description=(
+            "The RFQ's currency, when the buyer said it. Without it: the analysis's currency "
+            "when its lines to buy were all bought in one, else the purchase history's; when "
+            "neither tells, the request is refused (422) and the buyer has to say"
+        ),
+    )
 
 
 class InvitedSupplier(BaseModel):
@@ -220,6 +228,9 @@ class SkippedSupplier(BaseModel):
 class RfqFromAnalysis(BaseModel):
     analysis_id: UUID
     rfq: RfqDetail
+    currency_source: CurrencySource | None = Field(
+        default=None, description="Where the RFQ's base_currency came from"
+    )
     invited: list[InvitedSupplier]
     skipped: list[SkippedSupplier]
     # Line positions left without a target/maximum price: bought in another

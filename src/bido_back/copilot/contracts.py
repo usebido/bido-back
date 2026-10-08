@@ -101,6 +101,8 @@ class ConversationTurn(BaseModel):
     message: str | None
     # The names of the files attached to this turn.
     attachments: list[str] = Field(default_factory=list[str])
+    # Their upload ids, in the same order (for `/v1/uploads/{id}/preview` and `/download`).
+    attachment_ids: list[UUID] = Field(default_factory=list[UUID])
     answer: str | None
     status: str
 

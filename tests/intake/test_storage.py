@@ -90,6 +90,9 @@ class FakeS3:
     def head_object(self, **kwargs: object) -> dict[str, object]:
         raise NoSuchKeyError
 
+    def generate_presigned_url(self, *args: object, **kwargs: object) -> str:
+        raise AssertionError("not used here")
+
     def generate_presigned_post(self, **kwargs: object) -> dict[str, object]:
         raise NotImplementedError
 

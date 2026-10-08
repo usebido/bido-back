@@ -104,8 +104,13 @@ async def test_assessment_http_roundtrip_and_owner_authorization(
             },
         )
         assert forged.status_code == 422
+        unsupported = await http.post(
+            f"{path}/rfq", json={"title": "Components", "base_currency": "XYZ"}
+        )
+        assert unsupported.status_code == 422
+        assert (await http.get(path)).json()["rfq_id"] is None
         rfq_request = {"title": "Components", "base_currency": "EUR"}
-        draft = await http.post(f"{path}/rfq", json=rfq_request)
+        draft = await http.post(f"{path}/rfq", json={**rfq_request, "base_currency": " eur "})
         assert draft.status_code == 200, draft.text
         again = await http.post(f"{path}/rfq", json=rfq_request)
         assert again.json()["rfq_id"] == draft.json()["rfq_id"]

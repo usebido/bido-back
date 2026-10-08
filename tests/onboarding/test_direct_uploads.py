@@ -123,6 +123,9 @@ class FakeS3:
             raise NotFoundError
         return self.heads[key]
 
+    def generate_presigned_url(self, *args: object, **kwargs: object) -> str:
+        raise AssertionError("not used here")
+
     def generate_presigned_post(self, **kwargs: object) -> dict[str, object]:
         self.presigned = kwargs
         fields = kwargs["Fields"]

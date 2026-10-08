@@ -126,7 +126,9 @@ def _text_of(value: str | None) -> Callable[[], Awaitable[str]] | None:
 
 
 async def make_rfq(engine: AsyncEngine, principal: Principal) -> RfqCreated:
-    return await service.create_rfq_from_text(engine, principal, "Need MLCC", FakeIntake())
+    return await service.create_rfq_from_text(
+        engine, principal, "Need MLCC", FakeIntake(), currency="EUR"
+    )
 
 
 async def invite(

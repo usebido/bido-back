@@ -950,7 +950,10 @@
         "additionalProperties": false,
         "properties": {
           "base_currency": {
-            "pattern": "^[A-Z]{3}$",
+            "description": "ISO 4217 code: EUR or a currency with an ECB reference rate (BRL, USD...)",
+            "examples": [
+              "BRL"
+            ],
             "title": "Base Currency",
             "type": "string"
           },
@@ -2751,6 +2754,14 @@
             ],
             "title": "Answer"
           },
+          "attachment_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Attachment Ids",
+            "type": "array"
+          },
           "attachments": {
             "items": {
               "type": "string"
@@ -2910,6 +2921,22 @@
       "CreateRfqRequest": {
         "additionalProperties": false,
         "properties": {
+          "currency": {
+            "anyOf": [
+              {
+                "description": "ISO 4217 code: EUR or a currency with an ECB reference rate (BRL, USD...)",
+                "examples": [
+                  "BRL"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The RFQ's currency, when the buyer said it. Without it the currency comes from the purchase history; when that does not tell, the request is refused (400) and the buyer has to say which currency",
+            "title": "Currency"
+          },
           "text": {
             "description": "The buyer's request",
             "maxLength": 50000,
@@ -3642,6 +3669,36 @@
           "created_at"
         ],
         "title": "FieldCorrectionView",
+        "type": "object"
+      },
+      "FileLinkView": {
+        "description": "A short-lived link the browser opens itself; it always downloads the file.",
+        "properties": {
+          "content_type": {
+            "title": "Content Type",
+            "type": "string"
+          },
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "url": {
+            "title": "Url",
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "expires_at",
+          "filename",
+          "content_type"
+        ],
+        "title": "FileLinkView",
         "type": "object"
       },
       "FlagView": {
@@ -7562,6 +7619,23 @@
             "title": "Created At",
             "type": "string"
           },
+          "currency_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "stated",
+                  "analysis",
+                  "purchase_history"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where base_currency came from",
+            "title": "Currency Source"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -7945,6 +8019,23 @@
             "title": "Analysis Id",
             "type": "string"
           },
+          "currency_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "stated",
+                  "analysis",
+                  "purchase_history"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Where the RFQ's base_currency came from",
+            "title": "Currency Source"
+          },
           "invited": {
             "items": {
               "$ref": "#/components/schemas/InvitedSupplier"
@@ -7983,6 +8074,22 @@
       "RfqFromAnalysisRequest": {
         "additionalProperties": false,
         "properties": {
+          "currency": {
+            "anyOf": [
+              {
+                "description": "ISO 4217 code: EUR or a currency with an ECB reference rate (BRL, USD...)",
+                "examples": [
+                  "BRL"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The RFQ's currency, when the buyer said it. Without it: the analysis's currency when its lines to buy were all bought in one, else the purchase history's; when neither tells, the request is refused (422) and the buyer has to say",
+            "title": "Currency"
+          },
           "max_suppliers_per_line": {
             "default": 3,
             "maximum": 3.0,
@@ -8774,6 +8881,48 @@
           "question"
         ],
         "title": "SectionReport",
+        "type": "object"
+      },
+      "SheetPreview": {
+        "properties": {
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "rows": {
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "total_columns": {
+            "description": "The widest row, in the whole sheet",
+            "title": "Total Columns",
+            "type": "integer"
+          },
+          "total_rows": {
+            "description": "Rows with at least one value, in the whole sheet",
+            "title": "Total Rows",
+            "type": "integer"
+          },
+          "truncated": {
+            "description": "Rows, columns or cells were cut for the preview",
+            "title": "Truncated",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "name",
+          "rows",
+          "total_rows",
+          "total_columns",
+          "truncated"
+        ],
+        "title": "SheetPreview",
         "type": "object"
       },
       "SkippedSupplier": {
@@ -10292,6 +10441,92 @@
           "requirements"
         ],
         "title": "UpdateRequirementsRequest",
+        "type": "object"
+      },
+      "UploadPreview": {
+        "description": "What to show for an uploaded file.\n\n* `table`: spreadsheets (xlsx, csv) as `sheets`, values only (formulas are\n  never evaluated: a formula shows its last saved result, or nothing).\n* `inline`: PDF and images, as a short-lived `url` served inline with the\n  file's exact type, for an iframe or an img.\n* `none`: no preview (`reason`); the file can still be downloaded.",
+        "properties": {
+          "content_type": {
+            "title": "Content Type",
+            "type": "string"
+          },
+          "expires_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "table",
+              "inline",
+              "none"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "enum": [
+                  "unsupported",
+                  "too_large",
+                  "unreadable"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
+          },
+          "sheets": {
+            "items": {
+              "$ref": "#/components/schemas/SheetPreview"
+            },
+            "title": "Sheets",
+            "type": "array"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Url"
+          }
+        },
+        "required": [
+          "id",
+          "filename",
+          "size_bytes",
+          "content_type",
+          "kind"
+        ],
+        "title": "UploadPreview",
         "type": "object"
       },
       "UploadView": {
@@ -19570,6 +19805,220 @@
         "summary": "Add Contact",
         "tags": [
           "suppliers"
+        ]
+      }
+    },
+    "/v1/uploads/{upload_id}/download": {
+      "get": {
+        "description": "A short-lived link that downloads the file under its original name.",
+        "operationId": "download_upload_v1_uploads__upload_id__download_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "upload_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Upload Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileLinkView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Download Upload",
+        "tags": [
+          "uploads"
+        ]
+      }
+    },
+    "/v1/uploads/{upload_id}/preview": {
+      "get": {
+        "description": "What to show for the file: a table, an inline link, or nothing (download only).",
+        "operationId": "preview_upload_v1_uploads__upload_id__preview_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "upload_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Upload Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UploadPreview"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Preview Upload",
+        "tags": [
+          "uploads"
         ]
       }
     }

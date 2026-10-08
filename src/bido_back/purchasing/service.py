@@ -37,7 +37,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.agents.catalog.contracts import LineCategory
 from bido_back.auth import Principal
-from bido_back.comparison.compute import Rate
 from bido_back.comparison.loader import load_rates
 from bido_back.db import tenant_session
 from bido_back.db.models import (
@@ -82,6 +81,8 @@ from bido_back.purchasing.schemas import (
 )
 from bido_back.quotes.parsing import DecimalSeparator
 from bido_back.rfqs import service as rfq_service
+from bido_back.rfqs.currency import fx_factor, resolve_currency
+from bido_back.rfqs.errors import RfqError
 from bido_back.storage import BlobStorage
 
 logger = logging.getLogger(__name__)
@@ -1136,7 +1137,13 @@ async def create_rfq_from_analysis(
                 )
 
         title = request.title or f"{record.product}: {record.quantity.normalize():f} un"
-        currency = _rfq_currency([line.currency for line, _ in rows])
+        try:
+            resolved = await resolve_currency(
+                session, stated=request.currency, analysis=[line.currency for line, _ in rows]
+            )
+        except RfqError as exc:
+            raise InvalidRequest(str(exc)) from None
+        currency = resolved.code
         rates = await load_rates(session, datetime.now(UTC).date())
         rfq, rfq_lines = await rfq_service.create_draft_rfq(
             session,
@@ -1179,7 +1186,7 @@ async def create_rfq_from_analysis(
             # can still change them), in the RFQ's currency: the strategy compares
             # offers in base currency. A line bought in another currency has its
             # limits converted at the latest reference rate; without a rate it has none.
-            factor = _fx_factor(line.currency, currency, rates)
+            factor = fx_factor(line.currency, currency, rates)
             if factor is not None and line.target_price is not None and line.max_price is not None:
                 rfq_line.target_unit_price = (line.target_price * factor).quantize(
                     calc.PRICE_PLACES
@@ -1216,39 +1223,18 @@ async def create_rfq_from_analysis(
         await session.flush()
         detail = await rfq_service.rfq_detail(session, rfq)
     logger.info(
-        "rfq from analysis tenant=%s analysis=%s rfq=%s invites=%d",
+        "rfq from analysis tenant=%s analysis=%s rfq=%s invites=%d currency_source=%s",
         principal.tenant_id,
         analysis_id,
         rfq.id,
         len(invited),
+        resolved.source,
     )
     return RfqFromAnalysis(
         analysis_id=analysis_id,
         rfq=detail,
+        currency_source=resolved.source,
         invited=invited,
         skipped=skipped,
         lines_without_limits=without_limits,
     )
-
-
-def _rfq_currency(currencies: Sequence[str | None]) -> str:
-    """The currency most lines to buy were bought in (the RFQ's base currency)."""
-    counts: dict[str, int] = defaultdict(int)
-    for currency in currencies:
-        if currency is not None:
-            counts[currency] += 1
-    if not counts:
-        return rfq_service.BASE_CURRENCY
-    return min(counts, key=lambda c: (-counts[c], c != rfq_service.BASE_CURRENCY, c))
-
-
-def _fx_factor(source: str | None, target: str, rates: Mapping[str, Rate]) -> Decimal | None:
-    """Units of `target` per unit of `source` (ECB reference rates, per EUR)."""
-    if source is None:
-        return None
-    if source == target:
-        return Decimal(1)
-    per_eur = {code: rate.per_eur for code, rate in rates.items()} | {"EUR": Decimal(1)}
-    if source not in per_eur or target not in per_eur or per_eur[source] <= 0:
-        return None
-    return per_eur[target] / per_eur[source]

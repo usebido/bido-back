@@ -106,7 +106,7 @@ class World:
     async def setup(self, *, silent: bool = False) -> "World":
         principal = buyer(self.people)
         rfq = await rfq_service.create_rfq_from_text(
-            self.engine, principal, "Need MLCC and connectors", FakeIntake()
+            self.engine, principal, "Need MLCC and connectors", FakeIntake(), currency="EUR"
         )
         self.rfq_id = rfq.id
         names = [("rhein", "de", "DE"), ("lyon", "fr", "FR")]
@@ -761,7 +761,7 @@ async def test_historical_target_uses_latest_comparable_quantity_and_price_basis
     await world.offer("rhein", ("0.001", "1.00"))
     latest = await world.offer("rhein", ("0.50", "1.00"))
     current = await rfq_service.create_rfq_from_text(
-        world.engine, buyer(world.people), "New capacitor need", FakeIntake()
+        world.engine, buyer(world.people), "New capacitor need", FakeIntake(), currency="EUR"
     )
     mpn = current.lines[0].mpn
     assert mpn is not None
