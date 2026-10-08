@@ -179,6 +179,7 @@ def _headings(language: str) -> dict[str, str]:
 class RenderLine:
     position: int
     description: str
+    part_number: str | None
     mpn: str | None
     manufacturer: str | None
     quantities: Sequence[Decimal]
@@ -244,6 +245,13 @@ def format_date(value: date, language: str) -> str:
             return value.isoformat()
 
 
+def _part(line: RenderLine) -> str:
+    """The part-number cell: the buyer's own code first; a different MPN after it, in brackets."""
+    if line.part_number and line.mpn and line.mpn != line.part_number:
+        return f"{line.part_number} ({line.mpn})"
+    return line.part_number or line.mpn or ""
+
+
 def _incoterm(line: RenderLine) -> str:
     return " ".join(p for p in (line.incoterm, line.delivery_location) if p)
 
@@ -255,7 +263,7 @@ def _cell(key: str | None, line: RenderLine, language: str) -> str:
         case "description":
             return line.description
         case "mpn":
-            return line.mpn or ""
+            return _part(line)
         case "manufacturer":
             return line.manufacturer or ""
         case "quantity":
@@ -293,7 +301,7 @@ def table(data: RenderInput) -> tuple[list[str], list[list[str]], str | None]:
         uniform_incoterm = None
     wanted = [
         ("description", True),
-        ("mpn", any(line.mpn for line in lines)),
+        ("mpn", any(line.part_number or line.mpn for line in lines)),
         ("manufacturer", any(line.manufacturer for line in lines)),
         ("quantity", True),
         ("unit", True),

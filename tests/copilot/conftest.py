@@ -83,6 +83,7 @@ def make_tools(
     earlier_attachment_ids: tuple[UUID, ...] = (),
     earlier_attachments_text: str | None = None,
     storage: BlobStorage | None = None,
+    buyer_messages: tuple[str, ...] | None = None,
 ) -> Tools:
     mailboxes = FakeMailboxes()
     agents = fake_agents()
@@ -96,11 +97,22 @@ def make_tools(
             attachment_ids=attachment_ids,
             earlier_attachment_ids=earlier_attachment_ids,
             earlier_attachments_text=_text_of(earlier_attachments_text),
+            buyer_messages=_messages_of(buyer_messages),
             storage=storage,
             today=lambda: date(2026, 10, 7),
         )
     )
     return Tools({tool.name: tool for tool in tools}, mailboxes, agents.intake)
+
+
+def _messages_of(value: tuple[str, ...] | None) -> Callable[[], Awaitable[list[str]]] | None:
+    if value is None:
+        return None
+
+    async def read() -> list[str]:
+        return list(value)
+
+    return read
 
 
 def _text_of(value: str | None) -> Callable[[], Awaitable[str]] | None:

@@ -47,6 +47,8 @@ class RfqLineView(BaseModel):
     id: UUID
     position: int
     description: str
+    # The buyer's own code for the part (the main reference); `mpn` is the manufacturer's.
+    part_number: str | None
     mpn: str | None
     manufacturer: str | None
     category: LineCategory
@@ -130,6 +132,7 @@ class UpdateLineRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     description: ShortText | None = None
+    part_number: str | None = None
     mpn: str | None = None
     manufacturer: str | None = None
     category: LineCategory | None = None
