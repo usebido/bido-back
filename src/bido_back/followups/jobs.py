@@ -6,6 +6,9 @@ answered invite", found through the SECURITY DEFINER `followup_tenants()`
 (migration 0008; tenant ids only). Each tenant is swept in its own
 `tenant_session`. A real tenant id sweeps just that tenant. Running it twice
 at once is safe: proposals are keyed by (invite, kind, sequence).
+
+The every-tenant run also re-enqueues approved actions whose execution job was
+lost between the approval's commit and its enqueue (`approvals.reconcile`).
 """
 
 import logging
@@ -18,6 +21,7 @@ from uuid import UUID
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from bido_back.approvals.reconcile import requeue_stalled_approvals
 from bido_back.db import create_sessionmaker
 from bido_back.followups.agents import FollowupWriter
 from bido_back.followups.service import sweep_tenant
@@ -71,3 +75,9 @@ class FollowupSweepHandler:
                 logger.exception("followups.sweep failed tenant=%s", tenant_id)
                 if single:
                     raise
+        if not single and self.jobs is not None:
+            # Approved actions whose execution job was lost (`approvals.reconcile`).
+            try:
+                await requeue_stalled_approvals(self.db, self.jobs)
+            except Exception:
+                logger.exception("followups.sweep: re-enqueueing stalled approvals failed")

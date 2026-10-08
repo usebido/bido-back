@@ -237,6 +237,8 @@ class _AwardRfq:
 class _Claim:
     message_id: str
     thread_message_id: str
+    # The Message-ID was claimed by an earlier attempt, which may have sent it.
+    possibly_sent: bool = False
 
 
 class _SendPurchaseOrder:
@@ -271,6 +273,7 @@ class _SendPurchaseOrder:
                     body=args.body,
                     message_id=claim.message_id,
                     thread_message_id=claim.thread_message_id,
+                    possibly_sent=claim.possibly_sent,
                     attachments=(
                         OutboundAttachment(
                             filename=f"{po.ref}.xlsx",
@@ -328,11 +331,14 @@ class _SendPurchaseOrder:
                 await session.flush()
                 logger.warning("purchase order %s changed since approval; not sent", po.id)
                 return ThreadEmailResult(outcome="skipped")
+            reused = po.message_id_header is not None
             if po.message_id_header is None:
                 po.message_id_header = make_message_id(self._deps.email_domain)
                 await session.flush()
             return _Claim(
-                message_id=po.message_id_header, thread_message_id=invite.thread_message_id
+                message_id=po.message_id_header,
+                thread_message_id=invite.thread_message_id,
+                possibly_sent=reused,
             )
 
 
@@ -368,6 +374,7 @@ class _SendAwardNotice:
                     body=args.body,
                     message_id=claim.message_id,
                     thread_message_id=claim.thread_message_id,
+                    possibly_sent=claim.possibly_sent,
                 ),
             )
             row.status = "sent"
@@ -408,11 +415,14 @@ class _SendAwardNotice:
                 row.status = "canceled"
                 await session.flush()
                 return ThreadEmailResult(outcome="skipped")
+            reused = row.message_id_header is not None
             if row.message_id_header is None:
                 row.message_id_header = make_message_id(self._deps.email_domain)
                 await session.flush()
             return _Claim(
-                message_id=row.message_id_header, thread_message_id=invite.thread_message_id
+                message_id=row.message_id_header,
+                thread_message_id=invite.thread_message_id,
+                possibly_sent=reused,
             )
 
 
