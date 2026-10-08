@@ -495,5 +495,53 @@ async def test_a_turn_is_logged_with_ids_and_counts_but_no_content(
     assert (run["agent"], run["outcome"], run["tool_calls"]) == ("copilot", "completed", 1)
     (finished,) = by_msg["copilot turn finished"]
     assert (finished["outcome"], finished["tool_errors"]) == ("ok", 1)
+    # Three scripted requests of 10 input and 5 output tokens each, priced.
+    assert (finished["model_calls"], finished["input_tokens"], finished["output_tokens"]) == (
+        3,
+        30,
+        15,
+    )
+    assert finished["cost_usd"] > 0
+    assert (run["input_tokens"], run["cost_usd"]) == (30, finished["cost_usd"])
     assert finished["tools"] == ["invite_suppliers"]
     assert finished["conversation_id"] == parse_sse(response.text)[0]["conversation_id"]
+
+
+@pytest.mark.db
+@pytest.mark.parametrize("capture", [False, True])
+async def test_a_turn_is_traced_with_content_only_when_capture_is_on(
+    api: Api, copilot_rows: People, script: Script, capture: bool
+) -> None:
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    from bido_back.agents import tracing
+
+    secret = "customer-content-5d1e"  # noqa: S105 - a marker, not a credential
+    exporter = InMemorySpanExporter()
+    tracing.configure(exporter, capture_content=capture, environment="dev", batch=False)
+    try:
+        script(
+            reply(tool_use("fc_1", "invite_suppliers", rfq=secret, supplier_ids=[str(uuid4())])),
+            reply(text(f"I could not find {secret}.")),
+        )
+        response = await api.http.post(
+            "/v1/copilot/messages", json={"message": f"invite {secret} to it"}
+        )
+    finally:
+        tracing.reset()
+
+    events = parse_sse(response.text)
+    assert events[-1]["ok"] is True
+    spans = exporter.get_finished_spans()
+    attributes = "\n".join(
+        str(value) for span in spans for value in (span.attributes or {}).values()
+    )
+    assert (secret in attributes) is capture
+    (root,) = [s for s in spans if s.name == "agent copilot"]
+    attrs = dict(root.attributes or {})
+    assert root.parent is None
+    assert attrs["langfuse.session.id"] == events[0]["conversation_id"]
+    assert attrs["langfuse.user.id"] == str(copilot_rows.owner)
+    assert attrs["langfuse.trace.metadata.tenant_id"] == str(copilot_rows.tenant)
+    assert [s.name for s in spans if s.name.startswith("tool ")] == ["tool invite_suppliers"]
+    assert len([s for s in spans if s.name.startswith("model ")]) == 2

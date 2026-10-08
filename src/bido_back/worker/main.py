@@ -35,6 +35,7 @@ from uuid import UUID
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from bido_back.agents.tracing import init_llm_tracing, shutdown_llm_tracing
 from bido_back.approvals.executor import APPROVAL_EXECUTE_JOB, ActToolRegistry, ApprovalExecutor
 from bido_back.db import create_engine
 from bido_back.logs import bind, configure_logging
@@ -447,6 +448,7 @@ async def main() -> None:
     settings = get_settings()
     configure_logging(settings, service="worker")
     init_observability(settings, service="worker")
+    init_llm_tracing(settings, service="worker")
     if not settings.sqs_queue_url:
         raise SystemExit("SQS_QUEUE_URL is not set")
 
@@ -482,3 +484,4 @@ async def main() -> None:
         )
     finally:
         await engine.dispose()
+        shutdown_llm_tracing()

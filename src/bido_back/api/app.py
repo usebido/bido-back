@@ -14,6 +14,7 @@ from typing import Literal
 from fastapi import FastAPI
 from pydantic import BaseModel
 
+from bido_back.agents.tracing import init_llm_tracing, shutdown_llm_tracing
 from bido_back.api.approvals import approvals_router
 from bido_back.api.awards import awards_router
 from bido_back.api.compliance import compliance_router
@@ -55,6 +56,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     configure_logging(resolved, service="api")
     # Off unless OTEL_EXPORTER_OTLP_ENDPOINT / SENTRY_DSN are set; once per process.
     init_observability(resolved, service="api")
+    # LLM traces to Langfuse: off unless LANGFUSE_* are set; once per process.
+    init_llm_tracing(resolved, service="api")
 
     # Database and queue clients, created lazily on first use (see api/deps.py).
     resources = ApiResources(resolved)
@@ -63,6 +66,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(_: FastAPI) -> AsyncGenerator[None]:
         yield
         await resources.aclose()
+        shutdown_llm_tracing()
 
     app = FastAPI(title=API_TITLE, version=API_VERSION, lifespan=lifespan)
     app.state.resources = resources

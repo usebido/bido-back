@@ -36,6 +36,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
 from bido_back.agents.events import Event, RunCompleted, RunFailed, ToolCalled, ToolResult
+from bido_back.agents.usage import UsageMeter
 from bido_back.approvals import PostgresApprovalSink
 from bido_back.auth import Principal
 from bido_back.copilot.agent import copilot_agent
@@ -233,6 +234,8 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
         session=session_key(principal, prepared.conversation_id),
         approvals=PostgresApprovalSink(deps.db),
         config=deps.runner_config,
+        usage=turn.usage,
+        trace_session=str(prepared.conversation_id),
     )
     try:
         async for event in events:
@@ -299,6 +302,8 @@ class _TurnLog:
         self._outcome = "aborted"
         self._code: str | None = None
         self.tool_errors = 0
+        # The turn's model usage and estimated cost, nested runs included.
+        self.usage = UsageMeter()
         self._fields: dict[str, object] = {
             # Also bound to the request's other lines; repeated here so the turn
             # lines name it wherever they are written (evals, scripts).
@@ -327,6 +332,7 @@ class _TurnLog:
             "tool_errors": self.tool_errors,
             "tools": tools,
             "actions": actions,
+            **self.usage.log_fields(),
         }
         if self._code is not None:
             fields["code"] = self._code
