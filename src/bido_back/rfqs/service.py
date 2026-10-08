@@ -69,6 +69,7 @@ from bido_back.rfqs.agents import EmailWriterAgent, IntakeAgent
 from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.schemas import (
+    AddLineRequest,
     ApprovalQueueItem,
     ApprovalStatus,
     EmailKind,
@@ -86,6 +87,7 @@ from bido_back.rfqs.schemas import (
     RfqLineView,
     RfqStatus,
     UpdateLineRequest,
+    UpdateRfqRequest,
 )
 from bido_back.rfqs.send import (
     SEND_RFQ_EMAIL,
@@ -368,16 +370,7 @@ async def update_line(
             raise InvalidState(f"{required} cannot be cleared")
 
     async with tenant_session(db, principal.tenant_id) as session:
-        rfq = await _rfq(session, rfq_id, lock=True)
-        if rfq.status != "draft":
-            raise InvalidState(f"rfq {rfq_id} is {rfq.status}; lines are frozen")
-        prepared = await session.scalar(
-            select(func.count())
-            .select_from(Invite)
-            .where(Invite.rfq_id == rfq_id, Invite.status.not_in(_EDITABLE_INVITES))
-        )
-        if prepared:
-            raise InvalidState(f"rfq {rfq_id} has prepared or sent invites; lines are frozen")
+        await _editable_rfq(session, rfq_id)
         line = await session.scalar(
             select(RfqLine).where(RfqLine.id == line_id, RfqLine.rfq_id == rfq_id)
         )
@@ -390,6 +383,124 @@ async def update_line(
                 setattr(line, field, value)
         await session.flush()
         return _line_view(line)
+
+
+async def add_line(
+    db: Db, principal: Principal, rfq_id: UUID, request: AddLineRequest
+) -> RfqDetail:
+    """Append a line to a draft RFQ that no email has been prepared from."""
+    async with tenant_session(db, principal.tenant_id) as session:
+        rfq = await _editable_rfq(session, rfq_id)
+        last = await session.scalar(
+            select(func.max(RfqLine.position)).where(RfqLine.rfq_id == rfq_id)
+        )
+        session.add(
+            RfqLine(
+                tenant_id=principal.tenant_id,
+                rfq_id=rfq_id,
+                position=(last or 0) + 1,
+                description=request.description,
+                mpn=request.mpn,
+                manufacturer=request.manufacturer,
+                category=request.category,
+                quantities=[quantity_json(q) for q in request.quantities],
+                unit=request.unit,
+                need_by=request.need_by,
+                incoterm=request.incoterm,
+                delivery_location=request.delivery_location,
+                qualification=request.qualification,
+            )
+        )
+        await session.flush()
+        return await _detail(session, rfq)
+
+
+async def remove_line(db: Db, principal: Principal, rfq_id: UUID, line_id: UUID) -> RfqDetail:
+    """Remove a line from a draft RFQ and close the gap in the positions.
+
+    The last line cannot go: an RFQ asks for at least one thing.
+    """
+    async with tenant_session(db, principal.tenant_id) as session:
+        rfq = await _editable_rfq(session, rfq_id)
+        lines = await _lines(session, rfq_id)
+        line = next((each for each in lines if each.id == line_id), None)
+        if line is None:
+            raise NotFound(f"line {line_id} not found")
+        if len(lines) == 1:
+            raise InvalidState(f"rfq {rfq_id} has only this line; an RFQ needs at least one")
+        await session.delete(line)
+        await session.flush()
+        # One at a time, lowest first: (rfq_id, position) is unique at every step.
+        for later in (each for each in lines if each.position > line.position):
+            later.position -= 1
+            await session.flush()
+        return await _detail(session, rfq)
+
+
+async def update_rfq(
+    db: Db, principal: Principal, rfq_id: UUID, patch: UpdateRfqRequest
+) -> RfqDetail:
+    """RFQ-wide changes to a draft: its title and response date, and the Incoterm,
+    delivery location and need-by date of every line."""
+    changes = patch.model_dump(exclude_unset=True)
+    if "title" in changes and changes["title"] is None:
+        raise InvalidState("title cannot be cleared")
+    async with tenant_session(db, principal.tenant_id) as session:
+        rfq = await _editable_rfq(session, rfq_id)
+        for field in ("title", "response_due"):
+            if field in changes:
+                setattr(rfq, field, changes[field])
+        line_fields = {
+            field: changes[field]
+            for field in ("incoterm", "delivery_location", "need_by")
+            if field in changes
+        }
+        if line_fields:
+            for line in await _lines(session, rfq_id):
+                for field, value in line_fields.items():
+                    setattr(line, field, value)
+        await session.flush()
+        await session.refresh(rfq)
+        return await _detail(session, rfq)
+
+
+async def _editable_rfq(session: AsyncSession, rfq_id: UUID) -> Rfq:
+    """The RFQ, locked, if its content can still change: a draft that no email has been
+    prepared from. What a supplier may already have seen never changes."""
+    rfq = await _rfq(session, rfq_id, lock=True)
+    if rfq.status != "draft":
+        raise InvalidState(f"rfq {rfq_id} is {rfq.status}; lines are frozen")
+    prepared = await session.scalar(
+        select(func.count())
+        .select_from(Invite)
+        .where(Invite.rfq_id == rfq_id, Invite.status.not_in(_EDITABLE_INVITES))
+    )
+    if prepared:
+        raise InvalidState(f"rfq {rfq_id} has prepared or sent invites; lines are frozen")
+    return rfq
+
+
+# A draft created before someone else's sign-off (engineering validating the BOM): the
+# buyer can move on, and the mark in the title keeps the Copilot from preparing to send it.
+PRELIMINARY_MARK: Final = "PRELIMINARY"
+
+
+def preliminary_title(title: str, pending: str) -> str:
+    return f"{PRELIMINARY_MARK} (pending {pending.strip()}): {title}"
+
+
+def is_preliminary(title: str) -> bool:
+    return title.startswith(PRELIMINARY_MARK)
+
+
+def preliminary_hold(rfq: Rfq) -> str | None:
+    """Why a PRELIMINARY RFQ cannot be prepared for sending yet; None when it can."""
+    if not is_preliminary(rfq.title):
+        return None
+    return (
+        f"{rfq.ref} is preliminary ({rfq.title.split(':', 1)[0]}). Ask the buyer to confirm "
+        "the validation is done, then remove the mark with set_rfq_terms(title=...)"
+    )
 
 
 # --- Invites ------------------------------------------------------------------------

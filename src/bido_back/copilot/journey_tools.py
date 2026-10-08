@@ -45,6 +45,7 @@ from bido_back.purchasing.workbook import WorkbookFileError, WorkbookImportRepor
 from bido_back.rfqs import suppliers as supplier_service
 from bido_back.rfqs.errors import MailboxNotConfigured, MailboxNotConnected, RfqError
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest, EmailAddress
+from bido_back.rfqs.service import preliminary_hold
 
 if TYPE_CHECKING:
     from bido_back.copilot.tools import CopilotToolDeps
@@ -353,6 +354,8 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             rfq = await queries.find_rfq(session, args.rfq)
             if rfq is None:
                 raise ToolError(f"no RFQ {args.rfq!r}; use list_rfqs to find it")
+            if (hold := preliminary_hold(rfq)) is not None:
+                raise ToolError(hold)
             rfq_id, ref = rfq.id, rfq.ref
             line_ids = {line.position: line.id for line in await queries.lines(session, rfq_id)}
         if args.deadline < deps.today():

@@ -141,6 +141,36 @@ class UpdateLineRequest(BaseModel):
     qualification: str | None = None
 
 
+class AddLineRequest(BaseModel):
+    """A new line at the end of a draft RFQ."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    description: ShortText
+    mpn: str | None = None
+    manufacturer: str | None = None
+    category: LineCategory = "catalog"
+    quantities: list[PositiveQuantity] = Field(min_length=1, max_length=20)
+    unit: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)] = "pcs"
+    need_by: date | None = None
+    incoterm: str | None = None
+    delivery_location: str | None = None
+    qualification: str | None = None
+
+
+class UpdateRfqRequest(BaseModel):
+    """RFQ-wide changes to a draft. `incoterm`, `delivery_location` and `need_by` are set
+    on every line; only the fields present change, and `null` clears an optional one."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    title: ShortText | None = None
+    response_due: date | None = None
+    incoterm: str | None = None
+    delivery_location: str | None = None
+    need_by: date | None = None
+
+
 # --- Suppliers and contacts ---------------------------------------------------------
 
 
