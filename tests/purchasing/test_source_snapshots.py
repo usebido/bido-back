@@ -15,7 +15,7 @@ from bido_back.db import tenant_session
 from bido_back.db.models import Approval, Invite, Message, ProcurementAssessment, Rfq, RfqLine
 from bido_back.onboarding import service as onboarding
 from bido_back.purchasing.service import Conflict, InvalidRequest, NotFound
-from bido_back.purchasing.sources.contracts import SourceAssessment
+from bido_back.purchasing.sources.contracts import MappingProposal, MappingTask, SourceAssessment
 from bido_back.purchasing.sources.service import analyze_uploads
 from bido_back.purchasing.sources.snapshots import (
     AssessmentRfqRequest,
@@ -289,3 +289,71 @@ async def test_snapshot_search_escapes_wildcards_and_excludes_other_buyers(
         assert await list_snapshots(app_engine, foreign) == []
     with pytest.raises(InvalidRequest, match="limit"):
         await list_snapshots(app_engine, who, limit=51)
+
+
+class TwoRowMapper(SourceMapper):
+    """SourceMapper, reading two data rows per table instead of one."""
+
+    async def __call__(self, task: MappingTask, context: ToolContext) -> MappingProposal:
+        proposal = await super().__call__(task, context)
+        return proposal.model_copy(
+            update={"sections": [s.model_copy(update={"last_row": 3}) for s in proposal.sections]}
+        )
+
+
+async def test_a_preliminary_draft_keeps_the_assessed_units_and_skips_unready_lines(
+    app_engine: AsyncEngine,
+    purchasing_rows: People,
+) -> None:
+    who = buyer(purchasing_rows)
+    storage = TrackingStorage()
+    upload = await onboarding.store_upload(
+        app_engine,
+        storage,
+        who,
+        filename="procurement.xlsx",
+        content_type=XLSX,
+        data=workbook(
+            {
+                "Stock": [
+                    ["Material", "Description", "Unit", "Available", "On order", "Safety stock"],
+                    ["FI-CU-180", "Copper wire", "kg", "0", "0", "0"],
+                    ["IM-N48H-40", "Magnet", None, "0", "0", "0"],
+                ],
+                "Requirements": [
+                    ["Material", "Unit", "Quantity", "Need by", "Demand basis"],
+                    ["FI-CU-180", "kg", "150", "2026-11-01", "Gross"],
+                    ["IM-N48H-40", None, "400", "2026-11-01", "Gross"],
+                ],
+            }
+        ),
+    )
+    source = await _assess(app_engine, who, storage, TwoRowMapper(), upload.id)
+    assert source.assessment_id is not None and source.status == "needs_review"
+
+    # Open issues still block a normal draft...
+    with pytest.raises(InvalidRequest):
+        await draft_from_snapshot(app_engine, who, source.assessment_id, _draft_request())
+    # ...and a preliminary one carries them, with the units the assessment found.
+    result = await draft_from_snapshot(
+        app_engine,
+        who,
+        source.assessment_id,
+        AssessmentRfqRequest(
+            title="Motor component enquiry",
+            base_currency="EUR",
+            pending_validation="engineering validation of the BOM",
+        ),
+    )
+
+    assert result.preliminary and result.skipped == ["IM-N48H-40"]
+    assert result.title == (
+        "PRELIMINARY (pending engineering validation of the BOM): Motor component enquiry"
+    )
+    async with tenant_session(app_engine, who.tenant_id) as session:
+        lines = list(await session.scalars(select(RfqLine).where(RfqLine.rfq_id == result.rfq_id)))
+        for model in (Approval, Message, Invite):
+            assert await session.scalar(select(func.count()).select_from(model)) == 0
+    assert [(line.part_number, line.unit, line.quantities) for line in lines] == [
+        ("FI-CU-180", "kg", ["150"])
+    ]

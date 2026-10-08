@@ -1137,6 +1137,8 @@ async def create_rfq_from_analysis(
                 )
 
         title = request.title or f"{record.product}: {record.quantity.normalize():f} un"
+        if request.pending_validation is not None:
+            title = rfq_service.preliminary_title(title, request.pending_validation)
         try:
             resolved = await resolve_currency(
                 session, stated=request.currency, analysis=[line.currency for line, _ in rows]
