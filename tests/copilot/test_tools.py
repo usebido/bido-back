@@ -5,12 +5,20 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import select
+from pydantic import ValidationError
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.tools import ToolError
 from bido_back.db import tenant_session
-from bido_back.db.models import Approval, Invite, RfqLine, RfqTemplate, RfqTemplateVersion
+from bido_back.db.models import (
+    Approval,
+    Invite,
+    Rfq,
+    RfqLine,
+    RfqTemplate,
+    RfqTemplateVersion,
+)
 from bido_back.rfqs.send import SEND_RFQ_EMAIL
 from tests.approvals.conftest import People
 
@@ -136,7 +144,7 @@ async def test_prepare_send_records_approvals_and_sends_nothing(
     tools = make_tools(app_engine, attachments_text="[bom.xlsx] 4000 MLCC")
     ctx = context_of(principal)
 
-    created = await tools.call(ctx, "create_rfq", text="MLCC and connectors")
+    created = await tools.call(ctx, "create_rfq", currency="EUR", text="MLCC and connectors")
     invited = await tools.call(
         ctx, "invite_suppliers", rfq=created.ref, supplier_ids=[str(rhein.id)]
     )
@@ -161,8 +169,8 @@ async def test_create_rfq_reads_the_attachments_and_no_tool_acts(
     tools = make_tools(app_engine, attachments_text="[bom.xlsx] 4000 MLCC")
     ctx = context_of(buyer_of(copilot_rows))
 
-    await tools.call(ctx, "create_rfq", text="Quote this BOM")
-    await tools.call(ctx, "create_rfq", text="Only this", include_attachments=False)
+    await tools.call(ctx, "create_rfq", currency="EUR", text="Quote this BOM")
+    await tools.call(ctx, "create_rfq", currency="EUR", text="Only this", include_attachments=False)
 
     texts = [call[0].text for call in tools.intake.calls]
     assert texts == ["Quote this BOM\n\n[bom.xlsx] 4000 MLCC", "Only this"]
@@ -184,8 +192,8 @@ async def test_create_rfq_reads_earlier_files_only_when_this_message_has_none(
         earlier_attachments_text="[bom.xlsx] old",
     )
 
-    await later.call(ctx, "create_rfq", text="Quote the BOM I sent")
-    await fresh.call(ctx, "create_rfq", text="Quote this one")
+    await later.call(ctx, "create_rfq", currency="EUR", text="Quote the BOM I sent")
+    await fresh.call(ctx, "create_rfq", currency="EUR", text="Quote this one")
 
     assert [call[0].text for call in later.intake.calls] == [
         "Quote the BOM I sent\n\n[bom.xlsx] old"
@@ -200,7 +208,7 @@ async def test_create_rfq_hands_the_buyers_own_words_to_intake(
     tools = make_tools(app_engine, buyer_messages=said)
     ctx = context_of(buyer_of(copilot_rows))
 
-    created = await tools.call(ctx, "create_rfq", text="4000 capacitors")
+    created = await tools.call(ctx, "create_rfq", currency="EUR", text="4000 capacitors")
 
     [(task, _)] = tools.intake.calls
     assert task.text == "4000 capacitors" and task.buyer_messages == list(said)
@@ -261,7 +269,7 @@ async def test_editing_a_draft_rfq_by_position(
     principal = buyer_of(copilot_rows)
     tools = make_tools(app_engine)
     ctx = context_of(principal)
-    created = await tools.call(ctx, "create_rfq", text="MLCC and connectors")
+    created = await tools.call(ctx, "create_rfq", currency="EUR", text="MLCC and connectors")
     ref = created.ref
 
     edited = await tools.call(
@@ -335,7 +343,7 @@ async def test_lines_are_frozen_once_emails_are_prepared(
     rhein = await supplier(app_engine, principal, "Rhein")
     tools = make_tools(app_engine)
     ctx = context_of(principal)
-    created = await tools.call(ctx, "create_rfq", text="MLCC and connectors")
+    created = await tools.call(ctx, "create_rfq", currency="EUR", text="MLCC and connectors")
     await tools.call(ctx, "invite_suppliers", rfq=created.ref, supplier_ids=[str(rhein.id)])
     await tools.call(ctx, "prepare_send", rfq=created.ref)
 
@@ -343,6 +351,85 @@ async def test_lines_are_frozen_once_emails_are_prepared(
         await tools.call(ctx, "update_rfq_line", rfq=created.ref, position=1, quantities=[1])
     with pytest.raises(ToolError, match="frozen"):
         await tools.call(ctx, "set_rfq_terms", rfq=created.ref, incoterm="EXW")
+
+
+async def test_without_a_reply_by_date_the_model_is_told_to_ask_for_one(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    rhein = await supplier(app_engine, principal, "Rhein")
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+    for name in ("prepare_send", "propose_negotiation_mandate"):
+        assert "reply-by date" in tools.tools[name].description
+        assert "set_rfq_terms" in tools.tools[name].description
+
+    created = await tools.call(ctx, "create_rfq", text="MLCC and connectors", currency="EUR")
+    await tools.call(ctx, "invite_suppliers", rfq=created.ref, supplier_ids=[str(rhein.id)])
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        await session.execute(update(Rfq).where(Rfq.id == created.id).values(response_due=None))
+
+    ask = rf"{created.ref} has no reply-by date.*set_rfq_terms\(response_due="
+    with pytest.raises(ToolError, match=ask):
+        await tools.call(ctx, "prepare_send", rfq=created.ref)
+    with pytest.raises(ToolError, match=ask):
+        await tools.call(
+            ctx,
+            "propose_negotiation_mandate",
+            rfq=created.ref,
+            deadline=datetime.now(UTC).date() + timedelta(days=30),
+            limits=[
+                {"position": p, "target_unit_price": "1.00", "max_unit_price": "1.50"}
+                for p in (1, 2)
+            ],
+        )
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        assert list(await session.scalars(select(Approval))) == []
+
+    # The buyer gave the date: the model sets it and prepares the send.
+    due = datetime.now(UTC).date() + timedelta(days=14)
+    await tools.call(ctx, "set_rfq_terms", rfq=created.ref, response_due=due)
+    prepared = await tools.call(ctx, "prepare_send", rfq=created.ref)
+    assert len(prepared.approvals) == 1
+
+
+async def test_set_rfq_terms_stores_and_clears_payment_terms_and_quote_validity(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+    created = await tools.call(ctx, "create_rfq", text="MLCC and connectors", currency="EUR")
+    ref = created.ref
+
+    termed = await tools.call(
+        ctx, "set_rfq_terms", rfq=ref, payment_terms="28 DDL", quote_validity_days=30
+    )
+    status = await tools.call(ctx, "get_rfq_status", rfq=ref)
+    # Another term leaves them as they are.
+    renamed = await tools.call(ctx, "set_rfq_terms", rfq=ref, title="Capacitors")
+    cleared = await tools.call(
+        ctx, "set_rfq_terms", rfq=ref, clear=["payment_terms", "quote_validity_days"]
+    )
+
+    # The result is what is stored, so the copilot reports exactly that.
+    assert (termed.payment_terms, termed.quote_validity_days) == ("28 DDL", 30)
+    assert (status.payment_terms, status.quote_validity_days) == ("28 DDL", 30)
+    assert (renamed.payment_terms, renamed.quote_validity_days) == ("28 DDL", 30)
+    assert (cleared.payment_terms, cleared.quote_validity_days) == (None, None)
+    assert cleared.title == "Capacitors"
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        stored = await session.get(Rfq, created.id)
+    assert stored is not None
+    assert (stored.payment_terms, stored.quote_validity_days) == (None, None)
+
+    for days in (0, -1, 366):
+        with pytest.raises(ValidationError):
+            await tools.call(ctx, "set_rfq_terms", rfq=ref, quote_validity_days=days)
+    with pytest.raises(ValidationError):
+        await tools.call(ctx, "set_rfq_terms", rfq=ref, clear=["title"])
+    with pytest.raises(ToolError, match="nothing to change"):
+        await tools.call(ctx, "set_rfq_terms", rfq=ref)
 
 
 async def test_a_preliminary_rfq_is_not_prepared_for_sending(
@@ -357,6 +444,7 @@ async def test_a_preliminary_rfq_is_not_prepared_for_sending(
         ctx,
         "create_rfq",
         text="MLCC and connectors",
+        currency="EUR",
         pending_validation="engineering validation of the BOM",
     )
     await tools.call(ctx, "invite_suppliers", rfq=created.ref, supplier_ids=[str(rhein.id)])
@@ -376,3 +464,38 @@ async def test_a_preliminary_rfq_is_not_prepared_for_sending(
     await tools.call(ctx, "set_rfq_terms", rfq=created.ref, title="Capacitors and connectors")
     prepared = await tools.call(ctx, "prepare_send", rfq=created.ref)
     assert len(prepared.approvals) == 1
+
+
+async def test_create_rfq_never_guesses_the_currency(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    tools = make_tools(app_engine)
+    ctx = context_of(buyer_of(copilot_rows))
+
+    # No purchase history and the buyer named no currency: the model is told to ask.
+    with pytest.raises(ToolError, match=r"ask the buyer which currency this RFQ is in"):
+        await tools.call(ctx, "create_rfq", text="400 rolamentos 6205")
+    with pytest.raises(ToolError, match="ISO 4217"):
+        await tools.call(ctx, "create_rfq", text="400 rolamentos 6205", currency="reais")
+    assert tools.intake.calls == []
+
+    created = await tools.call(ctx, "create_rfq", text="400 rolamentos 6205", currency="brl")
+    assert (created.currency, created.currency_source) == ("BRL", "stated")
+
+    changed = await tools.call(ctx, "set_rfq_terms", rfq=created.ref, currency="USD")
+    assert changed.currency == "USD"
+    assert changed.note is None  # no negotiation limits to convert
+    with pytest.raises(ToolError, match="ISO 4217"):
+        await tools.call(ctx, "set_rfq_terms", rfq=created.ref, currency="dollars")
+
+
+async def test_creation_tools_take_a_currency_and_report_its_source(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    tools = make_tools(app_engine)
+
+    for name in ("create_rfq", "create_rfq_from_analysis", "set_rfq_terms"):
+        assert "currency" in tools.tools[name].input_model.model_json_schema()["properties"]
+    for name in ("create_rfq", "create_rfq_from_analysis"):
+        assert "currency_source" in tools.tools[name].output_model.model_json_schema()["properties"]
+        assert "currency_source" in tools.tools[name].description

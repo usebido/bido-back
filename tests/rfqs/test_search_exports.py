@@ -10,6 +10,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.api.deps import ApiResources, get_db, get_principal
@@ -17,7 +18,8 @@ from bido_back.api.exports import exports_router
 from bido_back.api.proposals import proposals_router
 from bido_back.api.search import search_router
 from bido_back.auth import Principal
-from bido_back.db import create_sessionmaker
+from bido_back.db import create_sessionmaker, tenant_session
+from bido_back.db.models import Rfq
 from bido_back.search.service import search
 from bido_back.settings import Settings
 from tests.approvals.conftest import People
@@ -137,6 +139,12 @@ async def test_correct_then_export_over_http(
     assert first["Corrected fields"] == "unit_price"
     assert first["Line total (base)"] == "1600.00"
 
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        await session.execute(
+            update(Rfq)
+            .where(Rfq.id == quoted.rfq.id)
+            .values(payment_terms="28 DDL", quote_validity_days=30)
+        )
     listing = await http.get("/v1/rfqs.csv")
     [row] = [
         r
@@ -147,6 +155,7 @@ async def test_correct_then_export_over_http(
     assert row["Suppliers"].startswith("Rhein")
     # Line 2 of the RFQ is not quoted, so no supplier is complete: no landed cost.
     assert row["Landed cost"] == ""
+    assert (row["Payment terms"], row["Quote validity (days)"]) == ("28 DDL", "30")
 
     xlsx = await http.get(f"/v1/rfqs/{quoted.rfq.id}/comparison.xlsx")
     assert xlsx.status_code == 200 and xlsx.content[:2] == b"PK"

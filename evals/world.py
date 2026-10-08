@@ -24,7 +24,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bido_back.agents.context import ToolContext
@@ -37,6 +37,7 @@ from bido_back.db import tenant_session
 from bido_back.db.models import (
     Invite,
     MailboxConnection,
+    Message,
     Proposal,
     ProposalLine,
     RfqLine,
@@ -334,6 +335,9 @@ class World:
                 session,
                 self.principal,
                 title=title,
+                # Suppliers answer within two weeks of the eval clock's today.
+                response_due=self.today + timedelta(days=14),
+                base_currency="EUR",
                 lines=[
                     NewRfqLine(
                         description=item.description,
@@ -399,9 +403,19 @@ class World:
         message = build_mime(email, now=self.now)
         if auto_reply:
             message["Auto-Submitted"] = "auto-replied"
-        return await self.inbound.ingest_for_invite(
+        result = await self.inbound.ingest_for_invite(
             message.as_bytes(), tenant_id=self.tenant_id, invite_id=self.invites[persona.key]
         )
+        if result.message_id is not None:
+            # Receipt time shares the simulated business clock. Keeping the DB
+            # wall clock here would make every advanced scenario look forged.
+            async with tenant_session(self.engine, self.tenant_id) as session:
+                await session.execute(
+                    update(Message)
+                    .where(Message.id == result.message_id)
+                    .values(created_at=self.now)
+                )
+        return result
 
     async def quote(
         self,

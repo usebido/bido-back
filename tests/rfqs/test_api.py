@@ -7,12 +7,13 @@ dependency overrides.
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.api.approvals import approvals_router
@@ -28,9 +29,12 @@ from bido_back.api.rfqs import rfqs_router
 from bido_back.api.suppliers import suppliers_router
 from bido_back.api.templates import templates_router
 from bido_back.auth import Principal
-from bido_back.db import create_sessionmaker
+from bido_back.db import create_sessionmaker, tenant_session
+from bido_back.db.models import Rfq
+from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
+from bido_back.rfqs.schemas import UpdateRfqRequest
 from bido_back.settings import Settings
 from tests.approvals.conftest import People
 
@@ -60,7 +64,7 @@ async def test_routes_require_authentication() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
         responses = [
             await http.get("/v1/rfqs"),
-            await http.post("/v1/rfqs", json={"text": "x"}),
+            await http.post("/v1/rfqs", json={"text": "x", "currency": "EUR"}),
             await http.get("/v1/suppliers"),
             await http.get("/v1/approvals"),
             await http.get(f"/v1/rfqs/{uuid4()}/comparison"),
@@ -113,7 +117,9 @@ async def api(app_engine: AsyncEngine, rfq_rows: People) -> AsyncIterator[Api]:
 async def test_rfq_flow_over_http(api: Api, rfq_rows: People) -> None:
     http = api.http
 
-    created = await http.post("/v1/rfqs", json={"text": "Need MLCC and connectors"})
+    created = await http.post(
+        "/v1/rfqs", json={"text": "Need MLCC and connectors", "currency": "EUR"}
+    )
     assert created.status_code == 201, created.text
     rfq = created.json()
     assert rfq["ref"] == "RFQ-1" and rfq["status"] == "draft"
@@ -212,11 +218,85 @@ async def test_rfq_flow_over_http(api: Api, rfq_rows: People) -> None:
 
 
 @pytest.mark.db
+async def test_rfq_detail_and_list_show_payment_terms_and_quote_validity(
+    api: Api, app_engine: AsyncEngine
+) -> None:
+    http = api.http
+    created = (await http.post("/v1/rfqs", json={"text": "Need MLCC", "currency": "EUR"})).json()
+    assert (created["payment_terms"], created["quote_validity_days"]) == (None, None)
+
+    await rfq_service.update_rfq(
+        app_engine,
+        api.principal,
+        UUID(created["id"]),
+        UpdateRfqRequest(payment_terms="28 DDL", quote_validity_days=30),
+    )
+
+    detail = (await http.get(f"/v1/rfqs/{created['id']}")).json()
+    [listed] = (await http.get("/v1/rfqs")).json()
+    for body in (detail, listed):
+        assert (body["payment_terms"], body["quote_validity_days"]) == ("28 DDL", 30)
+
+
+@pytest.mark.db
 async def test_send_without_a_connected_mailbox_is_409(api: Api, rfq_rows: People) -> None:
-    rfq = (await api.http.post("/v1/rfqs", json={"text": "Need parts"})).json()
+    rfq = (await api.http.post("/v1/rfqs", json={"text": "Need parts", "currency": "EUR"})).json()
     api.mailboxes.disconnected.add(rfq_rows.owner)
 
     response = await api.http.post(f"/v1/rfqs/{rfq['id']}/send")
 
     assert response.status_code == 409
     assert "mailbox" in response.json()["detail"]
+
+
+@pytest.mark.db
+async def test_send_without_a_reply_by_date_is_409_and_the_rfq_says_so(
+    api: Api, app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    http = api.http
+    rfq = (await http.post("/v1/rfqs", json={"text": "Need parts", "currency": "EUR"})).json()
+    assert rfq["send_blockers"] == []
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        await session.execute(update(Rfq).where(Rfq.id == rfq["id"]).values(response_due=None))
+    detail = (await http.get(f"/v1/rfqs/{rfq['id']}")).json()
+    assert detail["send_blockers"] == ["reply_by_missing"]
+    listed = (await http.get("/v1/rfqs")).json()
+    assert [r["send_blockers"] for r in listed] == [["reply_by_missing"]]
+    supplier = (
+        await http.post(
+            "/v1/suppliers",
+            json={"name": "Rhein", "contacts": [{"email": "jonas@rhein.example.test"}]},
+        )
+    ).json()
+    invite = await http.post(
+        f"/v1/rfqs/{rfq['id']}/invites",
+        json={"supplier_id": supplier["id"], "contact_id": supplier["contacts"][0]["id"]},
+    )
+    assert invite.status_code == 201, invite.text
+
+    response = await http.post(f"/v1/rfqs/{rfq['id']}/send")
+
+    assert response.status_code == 409
+    assert response.json()["detail"].startswith(f"{rfq['ref']} has no reply-by date")
+    assert (await http.get("/v1/approvals")).json() == []
+    assert api.mailboxes.calls == []
+
+
+async def test_create_needs_a_currency_it_can_tell(api: Api, rfq_rows: People) -> None:
+    http = api.http
+
+    # No purchase history and no currency in the request: refused, nothing created.
+    unknown = await http.post("/v1/rfqs", json={"text": "Need parts"})
+    assert unknown.status_code == 400, unknown.text
+    assert "ask the buyer which currency this RFQ is in" in unknown.json()["detail"]
+    assert (await http.get("/v1/rfqs")).json() == []
+
+    invalid = await http.post("/v1/rfqs", json={"text": "Need parts", "currency": "XYZ"})
+    assert invalid.status_code == 422
+
+    created = await http.post("/v1/rfqs", json={"text": "Need parts", "currency": "brl"})
+    assert created.status_code == 201, created.text
+    assert (created.json()["base_currency"], created.json()["currency_source"]) == (
+        "BRL",
+        "stated",
+    )

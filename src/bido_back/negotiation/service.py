@@ -32,7 +32,7 @@ import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Final, cast
 from uuid import UUID, uuid4
 
@@ -52,12 +52,14 @@ from bido_back.approvals.sink import PostgresApprovalSink
 from bido_back.auth import Principal
 from bido_back.comparison.compute import Comparison
 from bido_back.comparison.loader import load_comparison
-from bido_back.comparison.rules import blockers
+from bido_back.comparison.policy import ComparisonPolicy
+from bido_back.comparison.rules import policy_blockers
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
     AuditEvent,
     Contact,
+    FieldCorrection,
     Invite,
     Message,
     NegotiationMandate,
@@ -95,6 +97,7 @@ from bido_back.negotiation.send import (
 from bido_back.negotiation.strategy import (
     LineLimits,
     LineOffer,
+    PreviousRound,
     SupplierDecision,
     best_competing_prices,
     decide_supplier,
@@ -182,7 +185,17 @@ def _offers(comparison: Comparison) -> dict[UUID, dict[UUID, LineOffer]]:
                 rfq_line_id=cell.rfq_line_id,
                 unit_price=cell.effective_unit_price_base,
                 lead_time_days=cell.lead_time_days,
-                blockers=tuple(b for b in blockers(cell, column) if b != "no_quote_for_line"),
+                blockers=tuple(
+                    b
+                    for b in policy_blockers(cell, column, comparison.policy)
+                    if b
+                    not in (
+                        "no_quote_for_line",
+                        "above_buyer_maximum",
+                        "buyer_lead_time_unconfirmed",
+                        "above_buyer_lead_time_limit",
+                    )
+                ),
             )
         offers[column.invite_id] = mine
     return offers
@@ -196,6 +209,50 @@ def _rounds(messages: Sequence[NegotiationMessage]) -> tuple[int, bool, bool]:
     return len(counted), bafo, pending
 
 
+def _decimal_value(value: JsonValue) -> Decimal | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        number = Decimal(value)
+    except InvalidOperation:
+        return None
+    return number if number.is_finite() else None
+
+
+def _previous_rounds(messages: Sequence[NegotiationMessage]) -> list[PreviousRound]:
+    previous: list[PreviousRound] = []
+    for message in sorted(messages, key=lambda message: message.round):
+        if message.status != "sent":
+            continue
+        terms = cast(dict[str, JsonValue], message.terms)
+        entries = terms.get("lines")
+        if not isinstance(entries, list):
+            continue
+        offers: dict[UUID, LineOffer] = {}
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            line_id = entry.get("rfq_line_id")
+            if not isinstance(line_id, str):
+                continue
+            try:
+                line_uuid = UUID(line_id)
+            except ValueError:
+                continue
+            lead = entry.get("offered_lead_days")
+            offers[line_uuid] = LineOffer(
+                rfq_line_id=line_uuid,
+                unit_price=_decimal_value(entry.get("offered")),
+                lead_time_days=lead
+                if isinstance(lead, int) and not isinstance(lead, bool)
+                else None,
+                blockers=("previous_offer_blocked",) if entry.get("decision") == "blocked" else (),
+            )
+        if offers:
+            previous.append(PreviousRound(offers=offers))
+    return previous
+
+
 def _decide(
     lines: Sequence[_Line],
     offers: dict[UUID, LineOffer],
@@ -203,6 +260,7 @@ def _decide(
     messages: Sequence[NegotiationMessage],
     rfq: Rfq,
     now: datetime,
+    holds: Sequence[str] = (),
 ) -> SupplierDecision:
     rounds_used, bafo, _ = _rounds(messages)
     return decide_supplier(
@@ -214,6 +272,8 @@ def _decide(
         max_rounds=rfq.negotiation_max_rounds,
         deadline=rfq.negotiation_deadline,
         now=now,
+        previous_rounds=_previous_rounds(messages),
+        holds=holds,
     )
 
 
@@ -226,6 +286,7 @@ def _settings(rfq: Rfq, lines: Sequence[_Line]) -> NegotiationSettings:
         max_rounds=rfq.negotiation_max_rounds,
         early_close=rfq.negotiation_early_close,
         base_currency=rfq.base_currency,
+        comparison_policy=ComparisonPolicy.model_validate(rfq.comparison_policy or {}),
         lines=[
             LineLimitsView(
                 rfq_line_id=line.row.id,
@@ -295,7 +356,15 @@ async def _view(
             mine = [m for m in messages if m.invite_id == invite.id]
             column = columns.get(invite.id)
             decision = (
-                _decide(lines, offers.get(invite.id, {}), best.get(invite.id, {}), mine, rfq, now)
+                _decide(
+                    lines,
+                    offers.get(invite.id, {}),
+                    best.get(invite.id, {}),
+                    mine,
+                    rfq,
+                    now,
+                    column.negotiation_holds,
+                )
                 if column is not None
                 else None
             )
@@ -309,6 +378,8 @@ async def _view(
                     latest_proposal_id=column.proposal_id if column else None,
                     latest_proposal_version=column.proposal_version if column else None,
                     lines=_line_views(decision) if decision else [],
+                    strategy_reasons=list(decision.reasons) if decision else [],
+                    stalled_rounds=decision.stalled_rounds if decision else 0,
                     messages=[
                         NegotiationMessageView(
                             id=m.id,
@@ -381,6 +452,8 @@ async def apply_settings(
         line.target_unit_price = limits.target_unit_price
         line.max_unit_price = limits.max_unit_price
         line.max_lead_time_days = limits.max_lead_time_days
+    if changes.comparison_policy is not None:
+        await _save_comparison_policy(session, rfq, actor_user_id, changes.comparison_policy)
     rfq.negotiation_deadline = changes.deadline
     rfq.negotiation_max_rounds = changes.max_rounds
     rfq.negotiation_early_close = changes.early_close
@@ -405,6 +478,57 @@ async def apply_settings(
         )
     )
     await session.flush()
+
+
+async def _save_comparison_policy(
+    session: AsyncSession, rfq: Rfq, actor_user_id: UUID | None, policy: ComparisonPolicy
+) -> None:
+    if ComparisonPolicy.model_validate(rfq.comparison_policy or {}) == policy:
+        return
+    rfq.comparison_policy = policy.model_dump(mode="json")
+    pending = list(
+        await session.scalars(
+            select(NegotiationMessage)
+            .join(Invite, Invite.id == NegotiationMessage.invite_id)
+            .where(Invite.rfq_id == rfq.id, NegotiationMessage.status == "proposed")
+            .with_for_update(of=NegotiationMessage)
+        )
+    )
+    if pending:
+        await _cancel(session, pending, "comparison_policy_changed")
+    await session.execute(
+        update(Invite)
+        .where(Invite.rfq_id == rfq.id, Invite.negotiation_status.not_in(_FINAL_INVITE))
+        .values(negotiation_evaluated_proposal_id=None)
+    )
+    if rfq.negotiation_status == "ready_to_close":
+        rfq.negotiation_status = "open"
+        rfq.negotiation_ready_at = None
+    session.add(
+        AuditEvent(
+            tenant_id=rfq.tenant_id,
+            actor_user_id=actor_user_id,
+            action="rfq.comparison_policy_updated",
+            payload={"rfq_id": str(rfq.id), "canceled_messages": len(pending)},
+        )
+    )
+
+
+async def set_comparison_policy(
+    db: Db, principal: Principal, rfq_id: UUID, policy: ComparisonPolicy
+) -> ComparisonPolicy:
+    """Change review priorities without opening negotiation or changing its mandate.
+
+    The frozen outcome of a closed negotiation retains the old policy and
+    evidence. The live comparison applies the new policy for a fresh review.
+    """
+    async with tenant_session(db, principal.tenant_id) as session:
+        rfq = await session.scalar(select(Rfq).where(Rfq.id == rfq_id).with_for_update())
+        if rfq is None:
+            raise NotFound(f"rfq {rfq_id} not found")
+        await _save_comparison_policy(session, rfq, principal.user_id, policy)
+        await session.flush()
+    return policy
 
 
 async def update_negotiation(
@@ -469,6 +593,19 @@ def _outcome(comparison: Comparison, targets: dict[UUID, Decimal | None]) -> lis
                 if price is not None and target is not None
                 else None,
                 justification=rec.justification,
+                readiness=rec.readiness,
+                policy=comparison.policy,
+                policy_reasons=rec.policy_reasons,
+                source_evidence=rec.source_evidence,
+                offer=rec.offer,
+                evidence_gaps=rec.evidence_gaps,
+                alternatives=rec.alternatives,
+                excluded=rec.excluded,
+                performance=rec.performance,
+                proposal_id=rec.proposal_id,
+                proposal_line_id=rec.proposal_line_id,
+                evidence_message_ids=rec.evidence_message_ids,
+                landed_total_base=rec.landed_total_base,
             )
         )
     return result
@@ -676,6 +813,7 @@ def _terms(decision: SupplierDecision, currency: str) -> dict[str, JsonValue]:
             "offered": str(d.offered_price) if d.offered_price is not None else None,
             "ask": str(d.ask_price) if d.ask_price is not None else None,
             "ask_lead_days": d.ask_lead_days,
+            "offered_lead_days": d.lead_time_days,
         }
         lines.append(line)
     return {"currency": currency, "lines": lines}
@@ -707,6 +845,7 @@ async def _due(
     decision: SupplierDecision,
     proposal_id: UUID,
     next_round: int,
+    correction_revision: int,
 ) -> _Due | None:
     if invite.thread_message_id is None:
         return None
@@ -756,7 +895,18 @@ async def _due(
             mention_competition=decision.mention_competition,
             lines=asks,
         ),
-        terms=_terms(decision, rfq.base_currency),
+        terms={
+            **_terms(decision, rfq.base_currency),
+            "correction_revision": correction_revision,
+            "comparison_policy_hash": args_hash(
+                cast(
+                    dict[str, JsonValue],
+                    ComparisonPolicy.model_validate(rfq.comparison_policy or {}).model_dump(
+                        mode="json"
+                    ),
+                )
+            ),
+        },
     )
 
 
@@ -799,6 +949,10 @@ async def evaluate_rfq(
         rfq = await session.scalar(select(Rfq).where(Rfq.id == rfq_id).with_for_update())
         if rfq is None or rfq.negotiation_status not in _ACTIVE:
             return EvaluationResult()
+        if ComparisonPolicy.model_validate(rfq.comparison_policy or {}) != comparison.policy:
+            # A concurrent policy edit invalidated the comparison before this lock.
+            # Leave the offer unevaluated; the next sweep will load the new policy.
+            return EvaluationResult(skipped=1)
         lines = await _lines(session, rfq, history)
         rows = (
             await session.execute(
@@ -831,7 +985,13 @@ async def evaluate_rfq(
             mine = [m for m in messages if m.invite_id == invite.id]
             _, _, pending = _rounds(mine)
             decision = _decide(
-                lines, offers.get(invite.id, {}), best.get(invite.id, {}), mine, rfq, at
+                lines,
+                offers.get(invite.id, {}),
+                best.get(invite.id, {}),
+                mine,
+                rfq,
+                at,
+                column.negotiation_holds,
             )
             decisions.append(decision)
             if pending or invite.negotiation_status in _FINAL_INVITE:
@@ -848,6 +1008,7 @@ async def evaluate_rfq(
                     decision,
                     column.proposal_id,
                     max((m.round for m in mine), default=0) + 1,
+                    column.correction_revision,
                 )
                 if built is not None:
                     due.append(built)
@@ -952,6 +1113,53 @@ async def _propose(
             )
         )
         if approval_id is None:
+            return None
+        rfq = await session.scalar(select(Rfq).where(Rfq.id == item.rfq_id).with_for_update())
+        current_hash = (
+            args_hash(
+                cast(
+                    dict[str, JsonValue],
+                    ComparisonPolicy.model_validate(rfq.comparison_policy or {}).model_dump(
+                        mode="json"
+                    ),
+                )
+            )
+            if rfq
+            else None
+        )
+        source = await session.scalar(
+            select(Proposal).where(Proposal.id == item.proposal_id).with_for_update()
+        )
+        latest_version = await session.scalar(
+            select(func.max(Proposal.version)).where(
+                Proposal.invite_id == item.invite_id,
+            )
+        )
+        revision = await session.scalar(
+            select(func.count(FieldCorrection.id)).where(
+                FieldCorrection.proposal_id == item.proposal_id,
+            )
+        )
+        if (
+            rfq is None
+            or rfq.status != "open"
+            or rfq.negotiation_status not in _ACTIVE
+            or source is None
+            or source.version != latest_version
+            or current_hash != item.terms.get("comparison_policy_hash")
+            or revision != item.terms.get("correction_revision")
+        ):
+            expired = await session.scalar(
+                update(Approval)
+                .where(
+                    Approval.id == approval_id,
+                    Approval.status == "pending",
+                )
+                .values(status="expired")
+                .returning(Approval)
+            )
+            if expired is not None:
+                session.add(approval_audit(expired, "approval.expired", None))
             return None
         await session.execute(
             insert(NegotiationMessage)

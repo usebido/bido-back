@@ -28,6 +28,7 @@ from bido_back.api.me import me_router
 from bido_back.api.negotiation import negotiation_router
 from bido_back.api.onboarding import onboarding_router
 from bido_back.api.outbound import outbound_router
+from bido_back.api.procurement_assessments import procurement_assessments_router
 from bido_back.api.proposals import proposals_router
 from bido_back.api.purchasing import purchasing_router
 from bido_back.api.request_context import add_request_context
@@ -35,6 +36,7 @@ from bido_back.api.rfqs import rfqs_router
 from bido_back.api.search import search_router
 from bido_back.api.suppliers import suppliers_router
 from bido_back.api.templates import templates_router
+from bido_back.api.uploads import uploads_router
 from bido_back.logs import configure_logging
 from bido_back.observability import init_observability, instrument_fastapi
 from bido_back.settings import Settings, get_settings
@@ -92,8 +94,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(search_router())
     app.include_router(exports_router())
     app.include_router(purchasing_router())
+    app.include_router(procurement_assessments_router())
     app.include_router(awards_router())
     app.include_router(outbound_router())
+    app.include_router(uploads_router())
     if resolved.environment == "local":
         # Never mounted elsewhere (and every route refuses outside local too).
         from bido_back.api.dev import dev_router

@@ -181,15 +181,20 @@ sends only to reserved test domains (`example.com`, `.test`, `.example`,
 
 The flag is set by seeds or the migration role, never by a request.
 
-## Spreadsheets
+## Procurement sources
 
-Buyers send what they have. `POST /v1/data/workbook-imports` (and the
-copilot's `import_spreadsheet`) reads every sheet of an `.xlsx` or a `.csv`:
-rules find the header row and columns (Portuguese, English, Italian), the
-`sheet_mapper` agent proposes a mapping for sheets the rules cannot read, and
-code validates every value. When unsure it answers `needs_confirmation` with
-questions and writes nothing until confirmed. Supplier emails next to supplier
-names become supplier contacts.
+The copilot's `analyze_procurement_sources` reads related attachments together,
+identifies direct material demand, inventory, purchase history, suppliers and
+supplier evaluations, and returns evidence-backed purchase needs without
+requiring a BOM. Source reading, semantic mapping and deterministic validation
+are separate stages. Reported purchase quantities remain visible when conflicting
+units or missing assumptions prevent a validated calculation.
+
+XLSX/CSV tables and extracted PDF/DOCX/text use the same neutral evidence contract.
+Unreadable, scanned or truncated sources are disclosed. Assessments are read-only;
+the existing spreadsheet importer still persists its supported company-data kinds.
+See [the architecture review and research](docs/source-understanding.md) for the
+workflow, boundaries, procurement rules and remaining work.
 
 ## Observability
 

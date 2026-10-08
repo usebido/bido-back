@@ -59,6 +59,10 @@ class LineCorrectionRequest(_Correction):
     qualification: ShortText | None = Field(
         default=None, description="Qualification the supplier states, e.g. AEC-Q200"
     )
+    price_basis_quantity: Quantity | None = None
+    freight_cost: Money | None = None
+    tax_rate_percent: Annotated[Decimal, Field(ge=0, le=100, decimal_places=6)] | None = None
+    conditional_terms: ShortText | None = None
 
 
 class HeaderCorrectionRequest(_Correction):
@@ -90,6 +94,10 @@ class ProposalLineView(BaseModel):
     needs_review: bool
     review_fields: list[str] = Field(description="Fields still flagged for review")
     corrected_fields: list[str] = Field(description="Fields a person corrected or confirmed")
+    price_basis_quantity: Decimal | None = None
+    freight_cost: Decimal | None = None
+    tax_rate_percent: Decimal | None = None
+    conditional_terms: str | None = None
 
 
 class ProposalView(BaseModel):

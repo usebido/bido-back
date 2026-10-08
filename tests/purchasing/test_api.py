@@ -103,6 +103,19 @@ async def test_import_analyse_and_draft_over_http(http: httpx.AsyncClient) -> No
     assert done.json()["created"] == {"items": 3, "bom_lines": 3}
     assert done.json()["columns"]["qty_per_unit"] == "Quantità per unità"
 
+    # Explicit zero inventory establishes a balance; absent stock is unknown.
+    stock_upload = await http.post(
+        "/v1/onboarding/uploads",
+        params={"filename": "stock.xlsx"},
+        content=xlsx([["Part number", "On hand"], ["BRG-6205", 0], ["CU-WIRE", 0], ["HSG-AL", 0]]),
+        headers={"content-type": XLSX},
+    )
+    stock_import = await http.post(
+        "/v1/data/imports",
+        json={"type": "inventory", "upload_id": stock_upload.json()["id"]},
+    )
+    assert stock_import.status_code == 200
+
     no_plan = await http.post("/v1/analyses", json={"product": "motor"})
     assert no_plan.status_code == 422
     unknown = await http.post("/v1/analyses", json={"product": "turbine", "quantity": 5})
@@ -119,9 +132,20 @@ async def test_import_analyse_and_draft_over_http(http: httpx.AsyncClient) -> No
     fetched = await http.get(f"/v1/analyses/{analysis['id']}")
     assert fetched.json() == analysis
 
-    rfq = await http.post(f"/v1/analyses/{analysis['id']}/rfq")
+    # No purchase history and no currency said: no silent default, the buyer is asked.
+    unknown_currency = await http.post(f"/v1/analyses/{analysis['id']}/rfq")
+    assert unknown_currency.status_code == 422
+    assert "ask the buyer which currency" in unknown_currency.json()["detail"]
+    not_a_currency = await http.post(f"/v1/analyses/{analysis['id']}/rfq", json={"currency": "XYZ"})
+    assert not_a_currency.status_code == 422
+
+    rfq = await http.post(f"/v1/analyses/{analysis['id']}/rfq", json={"currency": "brl"})
     assert rfq.status_code == 201, rfq.text
     assert len(rfq.json()["rfq"]["lines"]) == 3
+    assert (rfq.json()["rfq"]["base_currency"], rfq.json()["currency_source"]) == (
+        "BRL",
+        "stated",
+    )
     again = await http.post(f"/v1/analyses/{analysis['id']}/rfq", json={})
     assert again.status_code == 409
 

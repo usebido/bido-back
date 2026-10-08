@@ -65,7 +65,9 @@ async def test_set_up_read_and_close(
     http: httpx.AsyncClient, app_engine: AsyncEngine, rfq_rows: People
 ) -> None:
     principal = Principal(tenant_id=rfq_rows.tenant, user_id=rfq_rows.owner, role="owner")
-    rfq = await rfq_service.create_rfq_from_text(app_engine, principal, "MLCC", FakeIntake())
+    rfq = await rfq_service.create_rfq_from_text(
+        app_engine, principal, "MLCC", FakeIntake(), currency="EUR"
+    )
     url = f"/v1/rfqs/{rfq.id}/negotiation"
 
     initial = await http.get(url)
@@ -96,3 +98,34 @@ async def test_set_up_read_and_close(
     assert closed.json()["status"] == "closed" and closed.json()["outcome"] is not None
     assert (await http.put(url, json={})).status_code == 409
     assert (await http.get(f"/v1/rfqs/{uuid4()}/negotiation")).status_code == 404
+
+
+@pytest.mark.db
+async def test_policy_endpoint_does_not_start_negotiation(
+    http: httpx.AsyncClient, app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    principal = Principal(tenant_id=rfq_rows.tenant, user_id=rfq_rows.owner, role="owner")
+    rfq = await rfq_service.create_rfq_from_text(
+        app_engine, principal, "MLCC", FakeIntake(), currency="EUR"
+    )
+    response = await http.put(
+        f"/v1/rfqs/{rfq.id}/comparison/policy",
+        json={
+            "preference": "reliability_first",
+            "minimum_on_time_rate": "0.95",
+        },
+    )
+    assert response.status_code == 200
+    assert response.json()["minimum_on_time_rate"] == "0.95"
+    view = await http.get(f"/v1/rfqs/{rfq.id}/negotiation")
+    assert view.json()["status"] == "not_started"
+    assert view.json()["settings"]["comparison_policy"]["preference"] == "reliability_first"
+    assert (
+        await http.put(
+            f"/v1/rfqs/{rfq.id}/comparison/policy",
+            json={
+                "minimum_on_time_rate": "1.1",
+            },
+        )
+    ).status_code == 422
+    assert (await http.put(f"/v1/rfqs/{uuid4()}/comparison/policy", json={})).status_code == 404

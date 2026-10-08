@@ -3,7 +3,7 @@
 Fake writers and mailbox; real strategy, approvals, guard, executor and mandate checks.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID
 
@@ -24,9 +24,11 @@ from bido_back.approvals import (
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
+    Invite,
     MailboxConnection,
     MandateSend,
     NegotiationMandate,
+    Rfq,
     RfqLine,
 )
 from bido_back.mandates import service as mandates
@@ -41,7 +43,7 @@ from bido_back.negotiation.schemas import LineLimitsUpdate, NegotiationSettingsU
 from bido_back.negotiation.send import SEND_NEGOTIATION_EMAIL
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs import suppliers
-from bido_back.rfqs.errors import InvalidState
+from bido_back.rfqs.errors import InvalidState, ReplyByRequired
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
 from bido_back.rfqs.send import SEND_RFQ_EMAIL
 from tests.approvals.conftest import People
@@ -82,7 +84,7 @@ class MandateWorld(World):
         if connected:
             await self.connect()
         rfq = await rfq_service.create_rfq_from_text(
-            self.engine, principal, "Need MLCC and connectors", FakeIntake()
+            self.engine, principal, "Need MLCC and connectors", FakeIntake(), currency="EUR"
         )
         self.rfq_id = rfq.id
         for name, language, country in (("rhein", "de", "DE"), ("lyon", "fr", "FR")):
@@ -325,6 +327,35 @@ async def test_a_mandate_needs_a_target_and_a_maximum_on_every_line(
     with pytest.raises(InvalidState, match="line"):
         await world.propose()
     assert world.mailboxes.sender.sent == []
+
+
+@pytest.mark.parametrize("due", [None, datetime.now(UTC).date() - timedelta(days=2)])
+async def test_a_mandate_needs_a_reply_by_date_for_its_initial_emails(
+    world: MandateWorld, due: date | None
+) -> None:
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        await session.execute(update(Rfq).where(Rfq.id == world.rfq_id).values(response_due=due))
+
+    with pytest.raises(ReplyByRequired, match="reply-by date"):
+        await world.propose()
+
+    # No mandate, no initial email approvals, invites untouched, nothing sent.
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        approvals = list(await session.scalars(select(Approval)))
+        statuses = set(
+            await session.scalars(select(Invite.status).where(Invite.rfq_id == world.rfq_id))
+        )
+    assert approvals == [] and statuses == {"draft"}
+    assert world.mailboxes.sender.sent == []
+
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        await session.execute(
+            update(Rfq)
+            .where(Rfq.id == world.rfq_id)
+            .values(response_due=datetime.now(UTC).date() + timedelta(days=14))
+        )
+    approval_id = await world.propose()
+    assert (await world.approval(approval_id)).tool == APPROVE_NEGOTIATION_MANDATE
 
 
 async def test_a_rejected_mandate_releases_its_emails(world: MandateWorld) -> None:

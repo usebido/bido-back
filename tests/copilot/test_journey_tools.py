@@ -141,7 +141,34 @@ async def test_the_outcome_names_lines_no_supplier_covers(
     covered = {line.position: line.covered for line in out.lines}
     assert covered.get(1) is True
     if len(rfq.lines) > 1:
-        assert out.uncovered_lines >= 1 and "network" in out.note
+        assert out.uncovered_lines >= 1
+        assert out.readiness == "needs_review"
+        assert any(line.readiness == "no_feasible_offer" for line in out.lines)
+    assert out.lines[0].evidence_gaps
+    assert out.lines[0].performance.observations == 0
+    assert out.lines[0].justification
+
+
+async def test_the_buyer_can_change_comparison_policy_without_starting_negotiation(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    rfq = await make_rfq(app_engine, principal)
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+    policy = await tools.call(
+        ctx,
+        "set_comparison_policy",
+        rfq=rfq.ref,
+        policy={"preference": "reliability_first", "allow_unknown_history": False},
+    )
+    comparison = await tools.call(ctx, "get_comparison", rfq=rfq.ref)
+    outcome = await tools.call(ctx, "get_negotiation_outcome", rfq=rfq.ref)
+    assert comparison.policy == policy
+    assert outcome.policy == policy
+    assert comparison.readiness == "no_feasible_offer"
+    assert outcome.negotiation_status == "not_started"
+    assert not tools.mailboxes.sender.sent
 
 
 async def test_the_mandate_takes_limits_the_buyer_gives_for_lines_without_them(

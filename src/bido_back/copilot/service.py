@@ -479,6 +479,7 @@ async def conversation(
     for stored in runs:
         message: str | None = None
         attachments: list[str] = []
+        attachment_ids: list[UUID] = []
         if stored.input:
             try:
                 parsed = CopilotInput.model_validate_json(stored.input)
@@ -486,6 +487,7 @@ async def conversation(
                 parsed = None
             if parsed is not None:
                 attachments = parsed.attachments
+                attachment_ids = parsed.attachment_ids
                 # Show what the buyer wrote, not the instruction sent for files alone.
                 message = "" if _files_only(parsed) else parsed.message
         turns.append(
@@ -494,6 +496,7 @@ async def conversation(
                 created_at=datetime.fromtimestamp(stored.created_at, UTC),
                 message=message,
                 attachments=attachments,
+                attachment_ids=attachment_ids,
                 answer=_answer(stored.output),
                 status=stored.status,
             )

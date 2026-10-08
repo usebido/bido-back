@@ -22,23 +22,26 @@ no-op.
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Annotated, Final, Literal
+from typing import Annotated, Final, Literal, cast
 from uuid import UUID, uuid5
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, StringConstraints
 from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bido_back.agents.context import ToolContext
+from bido_back.agents.events import args_hash
 from bido_back.agents.tools import Tool
 from bido_back.approvals.executor import ActToolRegistry
 from bido_back.approvals.guard import RejectHook
+from bido_back.comparison.policy import ComparisonPolicy
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
     AuditEvent,
     Contact,
+    FieldCorrection,
     Invite,
     Message,
     NegotiationMessage,
@@ -108,6 +111,25 @@ async def stale_reason(
     rfq = await session.get(Rfq, invite.rfq_id)
     if rfq is None or rfq.negotiation_status == "closed" or rfq.status != "open":
         return "negotiation_closed"
+    stored_hash = row.terms.get("comparison_policy_hash")
+    if stored_hash is not None:
+        current_hash = args_hash(
+            cast(
+                dict[str, JsonValue],
+                ComparisonPolicy.model_validate(rfq.comparison_policy or {}).model_dump(
+                    mode="json"
+                ),
+            )
+        )
+        if stored_hash != current_hash:
+            return "comparison_policy_changed"
+    revision = await session.scalar(
+        select(func.count(FieldCorrection.id)).where(
+            FieldCorrection.proposal_id == row.proposal_id,
+        )
+    )
+    if revision != row.terms.get("correction_revision", 0):
+        return "offer_corrected"
     if invite.thread_message_id is None:
         return "no_thread"
     latest = await session.scalar(
@@ -130,6 +152,11 @@ class _SendNegotiationEmail:
         if isinstance(claim, SendNegotiationEmailResult):
             return claim
         message_id = await self._send_and_record(ctx, args, claim)
+        if message_id is None:
+            return SendNegotiationEmailResult(
+                negotiation_message_id=args.negotiation_message_id,
+                outcome="skipped",
+            )
         logger.info(
             "sent negotiation email tenant=%s invite=%s row=%s action=%s round=%s run=%s",
             ctx.tenant_id,
@@ -208,7 +235,7 @@ class _SendNegotiationEmail:
 
     async def _send_and_record(
         self, ctx: ToolContext, args: SendNegotiationEmailArgs, claim: _Claim
-    ) -> str:
+    ) -> str | None:
         now = datetime.now(UTC)
         async with tenant_session(self._deps.db, ctx.tenant_id) as session:
             row = await session.scalar(
@@ -220,6 +247,15 @@ class _SendNegotiationEmail:
                 raise NotFound(f"negotiation email {args.negotiation_message_id} not found")
             if row.status == "sent":
                 return row.message_id_header or claim.message_id
+            invite = await session.get(Invite, args.invite_id)
+            reason = "not_proposed" if row.status != "proposed" else None
+            reason = reason or (await stale_reason(session, row, invite) if invite else "no_invite")
+            if reason is not None:
+                if row.status == "proposed":
+                    row.status = "canceled"
+                    row.canceled_reason = reason
+                await session.flush()
+                return None
             buyer = await session.get(User, args.sender_user_id)
             tenant = await session.get(Tenant, ctx.tenant_id)
             if buyer is None or tenant is None:

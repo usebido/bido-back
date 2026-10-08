@@ -61,8 +61,7 @@ class PurchaseRow:
     promised_at: date
     received_at: date | None
     rejected_qty: Decimal
-    # Delivered quantity when the spreadsheet has one (partial deliveries);
-    # None means the whole quantity once received.
+    # Delivered quantity when the spreadsheet has one; None means unknown.
     received_qty: Decimal | None = None
 
 
@@ -84,6 +83,8 @@ class Dataset:
     plan: tuple[PlanRow, ...]
     # Extra products sharing the catalog (BOM part number -> qty per unit).
     other_boms: dict[str, dict[str, Decimal]] = field(default_factory=dict[str, dict[str, Decimal]])
+    stock_as_of: date | None = None
+    stock_due: date | None = None
 
     def part(self, number: str) -> Part:
         return next(p for p in self.parts if p.number == number)

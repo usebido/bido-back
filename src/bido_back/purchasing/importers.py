@@ -10,16 +10,26 @@ The five import types and their columns (* = required):
 * `items`: part_number*, description*, mpn, manufacturer, category, unit
 * `bom`: product*, part_number*, qty_per_unit*, description, mpn, manufacturer,
   category, unit (item columns create the item when it is new)
-* `inventory`: part_number*, on_hand*, on_order, location, as_of
+* `inventory`: part_number*, on_hand*, on_order, location, as_of, description, unit,
+  reserved_qty, blocked_qty, on_order_due. Gross, available and unrestricted
+  balance headers preserve their meaning when subtracting unavailable stock.
 * `purchase_history`: po_number*, supplier*, part_number*, quantity*,
   unit_price*, ordered_at*, currency, promised_at, received_at, received_qty,
-  rejected_qty, quality_ok, line_no, description
+  rejected_qty, quality_ok, line_no, description; read but not stored:
+  price_quantity_basis (SAP "Por": the price is per that many units), status and
+  cancelled_qty (cancelled lines are not purchases)
 * `production_plan`: product*, quantity*, need_by*
 * `supplier_contacts`: supplier*, email*, contact_name, phone, country, language
 
 Workbooks with several sheets, headers below row 1 or mixed content go
 through `bido_back.purchasing.workbook`, which finds the header row and the
 columns of each section and then validates rows here (`parse_mapped`).
+
+A mapping is checked against the data before any row is: a number, date or
+yes/no field whose column mostly holds something else ("EA", "M" mapped as a
+number) was mapped to the wrong column. An optional field there is dropped,
+so one wrong optional column never fails every row; a required one is kept
+and its rows fail, which makes the import ask (`ParsedTable.dropped`).
 """
 
 import csv
@@ -73,7 +83,8 @@ _PART = (
     "part number", "part no", "pn", "codigo", "codigo item", "codigo interno", "item code",
     "sku", "codice", "codice articolo", "articolo", "internal pn", "material",
     "material number", "numero material", "codigo material", "cod material",
-    "codice materiale", "componente", "component", "codice componente",
+    "codice materiale", "componente", "component", "codice componente", "material id",
+    "material code", "material no", "item id", "item number", "part id", "part code",
 )  # fmt: skip
 _PART_WEAK = ("item", "cod", "code", "ref", "referencia", "riferimento")
 _DESC = (
@@ -98,7 +109,8 @@ _PRODUCT = ("product", "produto", "prodotto", "model", "modelo", "modello", "ass
 _QTY = (
     "quantity", "quantidade", "qtd", "qty", "quantita", "qta", "qt", "qtd do pedido",
     "quantidade do pedido", "qtd pedido", "order qty", "order quantity", "ordered qty",
-    "qty ordered", "quantita ordinata", "qta ordinata",
+    "qty ordered", "quantita ordinata", "qta ordinata", "quantidade pedida", "qtd pedida",
+    "po qty", "po quantity",
 )  # fmt: skip
 _SUPPLIER_NAME = (
     "supplier name", "nome do fornecedor", "nome fornecedor", "fornecedor nome", "vendor name",
@@ -232,6 +244,14 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "in ordine",
                 "open orders",
                 "open po",
+                "quantidade em pedido",
+                "qtd em pedido",
+                "quantity on order",
+                "qty on order",
+                "on order qty",
+                "open po qty",
+                "open order qty",
+                "qta in ordine",
             ),
         ),  # fmt: skip
         FieldSpec(
@@ -241,6 +261,43 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             ("location", "local", "deposito", "magazzino", "warehouse", "storage location"),
         ),
         FieldSpec("as_of", "date", False, ("as of", "data inventario", "inventory date", "date")),
+        FieldSpec(
+            "reserved_qty",
+            "number",
+            False,
+            (
+                "reserved qty",
+                "reserved quantity",
+                "reserved",
+                "reservado",
+                "estoque reservado",
+            ),
+        ),
+        FieldSpec(
+            "blocked_qty",
+            "number",
+            False,
+            (
+                "blocked qty",
+                "blocked quantity",
+                "blocked",
+                "blocked stock",
+                "estoque bloqueado",
+            ),
+        ),
+        FieldSpec(
+            "on_order_due",
+            "date",
+            False,
+            (
+                "on order due",
+                "inbound due",
+                "expected receipt",
+                "data chegada pedido",
+            ),
+        ),
+        FieldSpec("description", "text", False, _DESC),
+        FieldSpec("unit", "text", False, _UNIT),
     ),
     "purchase_history": (
         FieldSpec(
@@ -276,8 +333,8 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             ),
         ),  # fmt: skip
         FieldSpec("supplier", "text", True, _SUPPLIER_GENERIC, preferred=_SUPPLIER_NAME),
-        # The supplier's code in the buyer's ERP, next to its name: used to match the
-        # supplier master (contacts) that may list suppliers by code only.
+        # The supplier's ERP code, next to its name: joins code-only references
+        # across purchase history, contacts and supplier masters.
         FieldSpec("supplier_code", "text", False, _SUPPLIER_CODE, weak=_SUPPLIER_GENERIC),
         FieldSpec("part_number", "text", True, _PART, weak=_PART_WEAK),
         FieldSpec("quantity", "number", True, _QTY),
@@ -285,7 +342,16 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             "unit_price",
             "number",
             True,
-            (
+            # The price in the line's own currency, over a converted one next to it.
+            preferred=(
+                "unit price local",
+                "unit price lc",
+                "local unit price",
+                "net price local",
+                "preco unitario local",
+                "prezzo unitario locale",
+            ),
+            synonyms=(
                 "unit price",
                 "preco unitario",
                 "prezzo unitario",
@@ -301,9 +367,10 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "costo unitario",
             ),
         ),  # fmt: skip
-        # SAP prices are per a price unit ("Por" 100): the unit price is price / unit.
+        # SAP prices are per a quantity ("Por" 100): the unit price is price / basis.
+        # Not the unit of measure ("EA", "KG"): the type check drops such a column.
         FieldSpec(
-            "price_unit",
+            "price_quantity_basis",
             "number",
             False,
             ("por", "price unit", "per", "unidade de preco", "unita di prezzo", "price per"),
@@ -342,12 +409,16 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "data consegna prevista",
                 "due date",
                 "confirmed date",
+                "confirmed delivery date",
+                "promised delivery date",
                 "data remessa",
                 "data de remessa",
                 "data entrega prevista",
                 "data de entrega prevista",
                 "scheduled delivery",
             ),
+            # What the buyer asked for, when no confirmed date is given.
+            weak=("requested delivery date", "data solicitada", "data de entrega solicitada"),
         ),  # fmt: skip
         FieldSpec(
             "received_at",
@@ -370,13 +441,19 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "gr date",
                 "goods receipt date",
                 "data entrata merci",
+                "receipt date",
+                "last receipt date",
+                "last gr date",
+                "data ultimo recebimento",
             ),
         ),  # fmt: skip
         FieldSpec(
             "received_qty",
             "number",
             False,
-            (
+            # Gross receipts: rejected quantities are a separate column.
+            preferred=("received qty gross", "gross received qty", "qty received gross"),
+            synonyms=(
                 "received qty",
                 "qty received",
                 "quantidade recebida",
@@ -392,6 +469,8 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
                 "delivered quantity",
                 "qta consegnata",
                 "quantita consegnata",
+                "net received qty",
+                "received qty net",
             ),
         ),  # fmt: skip
         FieldSpec(
@@ -431,6 +510,40 @@ SPECS: Final[Mapping[ImportType, tuple[FieldSpec, ...]]] = {
             weak=("item", "pos", "posicao", "position"),
         ),
         FieldSpec("description", "text", False, _DESC),
+        # A cancelled line is not a purchase (`parse_mapped` skips it).
+        FieldSpec(
+            "status",
+            "text",
+            False,
+            (
+                "status",
+                "po status",
+                "line status",
+                "order status",
+                "status pedido",
+                "status do pedido",
+                "situacao",
+                "situacao pedido",
+                "stato",
+                "stato ordine",
+                "stato riga",
+            ),
+        ),  # fmt: skip
+        FieldSpec(
+            "cancelled_qty",
+            "number",
+            False,
+            (
+                "cancelled qty",
+                "canceled qty",
+                "cancelled quantity",
+                "qty cancelled",
+                "qtd cancelada",
+                "quantidade cancelada",
+                "qta annullata",
+                "quantita annullata",
+            ),
+        ),  # fmt: skip
     ),
     "production_plan": (
         FieldSpec(
@@ -602,6 +715,14 @@ class RowError:
     message: str
 
 
+@dataclass(frozen=True, slots=True)
+class DroppedColumn:
+    """A mapped column whose values do not fit its field (see `fit_columns`)."""
+
+    field: str
+    header: str
+
+
 @dataclass(slots=True)
 class ParsedTable:
     import_type: ImportType
@@ -616,6 +737,12 @@ class ParsedTable:
     total_rows: int = 0
     # Totals and subtotals; for a multi-level BOM also the assemblies, exploded.
     skipped_rows: int = 0
+    # Cancelled purchase lines (counted in skipped_rows too).
+    cancelled_rows: int = 0
+    # Optional columns left out because their values do not fit the field.
+    dropped: list[DroppedColumn] = field(default_factory=list[DroppedColumn])
+    # Rows failing per field, over every row (`errors` keeps only the first ones).
+    field_failures: dict[str, int] = field(default_factory=dict[str, int])
 
 
 # --- Reading the file ---------------------------------------------------------------------
@@ -851,10 +978,13 @@ def parse_mapped(
     rows: Iterable[tuple[int, Sequence[object]]],
     *,
     decimal: DecimalSeparator | None = None,
+    check_types: bool = True,
 ) -> ParsedTable:
     """Validate data rows given an explicit field -> column index (any header row).
 
     `rows` are (1-based spreadsheet row number, cells). Unknown fields are refused.
+    Optional columns whose values do not fit their field are dropped first
+    (`fit_columns`, reported in `ParsedTable.dropped`) unless `check_types` is off.
     """
     specs = {s.name: s for s in SPECS[import_type]}
     unknown_fields = set(index) - set(specs)
@@ -879,6 +1009,14 @@ def parse_mapped(
         for name, i in index.items()
         if specs[name].kind in ("number", "int")
     }
+    if check_types:
+        fitted, table.dropped = fit_columns(import_type, header, index, data, decimals)
+        if table.dropped:
+            index = fitted
+            table.columns = {
+                name: (str(header[i]) if i < width and header[i] is not None else f"column {i + 1}")
+                for name, i in index.items()
+            }
     for offset, raw in data:
         if _is_total_row(raw):
             table.skipped_rows += 1
@@ -902,15 +1040,139 @@ def parse_mapped(
             values[name] = parsed
         row_errors.extend(_check_row(import_type, offset, values))
         if row_errors:
+            for name in {e.field or "" for e in row_errors}:
+                table.field_failures[name] = table.field_failures.get(name, 0) + 1
             if len(table.errors) < MAX_ERRORS:
                 table.errors.extend(row_errors[: MAX_ERRORS - len(table.errors)])
             continue
-        per = values.pop("price_unit", None)
-        price = values.get("unit_price")
-        if isinstance(per, Decimal) and isinstance(price, Decimal) and per != 1:
-            values["unit_price"] = price / per
+        if import_type == "purchase_history" and not _purchase_line(values):
+            table.cancelled_rows += 1
+            table.skipped_rows += 1
+            table.total_rows -= 1
+            continue
+        if import_type == "inventory":
+            _inventory_line(values, table.columns.get("on_hand", ""))
         table.rows.append((offset, values))
     return table
+
+
+# Explicit availability excludes reservations; unrestricted stock only establishes
+# that blocked stock is separate. Normalize each restriction exactly once.
+_AVAILABLE_STOCK_HEADERS: Final = frozenset(
+    {
+        "disponibile",
+        "estoque livre",
+        "estoque disponivel",
+        "free stock",
+        "available",
+        "available stock",
+        "qty available",
+        "quantidade disponivel",
+        "disponivel",
+        "libero",
+        "uso libero",
+        "stock libero",
+        "giacenza disponibile",
+    }
+)
+_UNRESTRICTED_STOCK_HEADERS: Final = frozenset(
+    {
+        "utilizacao livre",
+        "livre utilizacao",
+        "unrestricted",
+        "unrestricted use",
+        "unrestricted stock",
+    }
+)
+
+
+def _inventory_line(values: dict[str, object], on_hand_header: str) -> None:
+    header = _norm(on_hand_header)
+    if header not in _AVAILABLE_STOCK_HEADERS | _UNRESTRICTED_STOCK_HEADERS:
+        return
+    on_hand = values.get("on_hand")
+    if isinstance(on_hand, Decimal):
+        restrictions = [values.get("blocked_qty")]
+        if header in _AVAILABLE_STOCK_HEADERS:
+            restrictions.append(values.get("reserved_qty"))
+        values["on_hand"] = on_hand + sum(
+            (value for value in restrictions if isinstance(value, Decimal)), Decimal(0)
+        )
+
+
+# What a PO status says when the line was cancelled.
+_CANCELLED: Final = frozenset(
+    {
+        "cancelled", "canceled", "cancel", "cancelado", "cancelada", "cancelados", "annullato",
+        "annullata", "annullato ordine", "deleted", "excluido", "excluida", "eliminato",
+        "void", "voided", "storniert", "rejected order",
+    }
+)  # fmt: skip
+
+
+def _purchase_line(values: dict[str, object]) -> bool:
+    """Normalize one purchase line in place; False when it is not a purchase.
+
+    A cancelled line (status, or cancelled quantity covering the order) is not
+    one; a partly cancelled line counts what was not cancelled. A price per a
+    quantity basis ("EUR 50 per 100") becomes a price per unit.
+    """
+    status = values.pop("status", None)
+    cancelled = values.pop("cancelled_qty", None)
+    basis = values.pop("price_quantity_basis", None)
+    if isinstance(status, str) and _norm(status) in _CANCELLED:
+        return False
+    quantity = values.get("quantity")
+    if isinstance(cancelled, Decimal) and cancelled > 0 and isinstance(quantity, Decimal):
+        if cancelled >= quantity:
+            return False
+        values["quantity"] = quantity - cancelled
+    price = values.get("unit_price")
+    if isinstance(basis, Decimal) and isinstance(price, Decimal) and basis != 1:
+        values["unit_price"] = price / basis
+    return True
+
+
+# Most of a column must read as its field's type, else it was mapped wrongly.
+FIT_SHARE: Final = Decimal("0.5")
+
+
+def fit_columns(
+    import_type: ImportType,
+    header: Sequence[object],
+    index: Mapping[str, int],
+    rows: Sequence[tuple[int, Sequence[object]]],
+    decimals: Mapping[str, DecimalSeparator | None],
+) -> tuple[dict[str, int], list[DroppedColumn]]:
+    """The mapping without optional columns whose values do not fit their field.
+
+    A number, date or yes/no field is checked on every non-blank cell of its
+    column (totals rows included: they are few). Fewer than half readable means
+    the column holds something else ("EA", "M" mapped as a number). An optional
+    field is then dropped, so it cannot fail every row. Required fields stay:
+    their rows fail and the import asks.
+    """
+    specs = {s.name: s for s in SPECS[import_type]}
+    fitted = dict(index)
+    dropped: list[DroppedColumn] = []
+    for name, position in index.items():
+        spec = specs[name]
+        if spec.kind == "text" or spec.required:
+            continue
+        cells = [
+            raw[position] for _, raw in rows if position < len(raw) and not _blank(raw[position])
+        ]
+        if not cells:
+            continue
+        readable = sum(1 for c in cells if _parse(spec.kind, c, decimals.get(name)) is not None)
+        if Decimal(readable) >= FIT_SHARE * len(cells):
+            continue
+        del fitted[name]
+        title = header[position] if position < len(header) else None
+        dropped.append(
+            DroppedColumn(name, str(title) if title is not None else f"column {position + 1}")
+        )
+    return fitted, dropped
 
 
 def _is_total_row(raw: Sequence[object]) -> bool:
@@ -950,10 +1212,12 @@ def _check_row(import_type: ImportType, row: int, values: Mapping[str, object]) 
         case "inventory":
             positive("on_hand", allow_zero=True)
             positive("on_order", allow_zero=True)
+            positive("reserved_qty", allow_zero=True)
+            positive("blocked_qty", allow_zero=True)
         case "purchase_history":
             positive("quantity")
             positive("unit_price", allow_zero=True)
-            positive("price_unit")
+            positive("price_quantity_basis")
             positive("received_qty", allow_zero=True)
             positive("rejected_qty", allow_zero=True)
             currency = values.get("currency")

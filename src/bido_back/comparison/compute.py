@@ -38,8 +38,9 @@ from decimal import Decimal
 from typing import Final, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, JsonValue
 
+from bido_back.comparison.policy import ComparisonPolicy, SupplierPerformance
 from bido_back.compliance.schemas import SupplierComplianceSummary
 
 EUR: Final = "EUR"
@@ -104,6 +105,10 @@ class RequestedLine:
     need_by: date | None = None
     # Required qualification as the buyer wrote it, e.g. "AEC-Q200".
     qualification: str | None = None
+    part_number: str | None = None
+    max_unit_price: Decimal | None = None
+    max_lead_time_days: int | None = None
+    source_evidence: Mapping[str, JsonValue] = field(default_factory=dict[str, JsonValue])
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +130,11 @@ class QuotedLine:
     review_issues: tuple[str, ...] | None = None
     # Qualification the supplier states for this offer (grounded text), if any.
     qualification: str | None = None
+    price_basis_quantity: Decimal | None = None
+    freight_cost: Decimal | None = None
+    tax_rate_percent: Decimal | None = None
+    conditional_terms: str | None = None
+    source_message_ids: tuple[UUID, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -143,6 +153,11 @@ class SupplierQuote:
     supplier_type: str | None = None
     # As extracted from the proposal header (free text, e.g. "30 days net").
     payment_terms: str | None = None
+    performance: Mapping[UUID, SupplierPerformance] = field(
+        default_factory=dict[UUID, SupplierPerformance]
+    )
+    negotiation_holds: tuple[str, ...] = ()
+    correction_revision: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +193,7 @@ class ComparisonLine(BaseModel):
     incoterm: str | None
     need_by: date | None = None
     qualification: str | None = None
+    source_evidence: dict[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
 
 
 class Cell(BaseModel):
@@ -204,6 +220,17 @@ class Cell(BaseModel):
     corrected_fields: list[str] = Field(default_factory=list[str])
     qualification: str | None = None
     rules: list[RuleFlag] = Field(default_factory=list[RuleFlag])
+    price_basis_quantity: Decimal | None = None
+    freight_cost: Decimal | None = None
+    tax_rate_percent: Decimal | None = None
+    conditional_terms: str | None = None
+    # Known subtotal is not a landed cost; missing components stay explicit.
+    known_total_base: Decimal | None = None
+    landed_total_base: Decimal | None = None
+    cost_gaps: list[str] = Field(default_factory=list[str])
+    buyer_limit_issues: list[str] = Field(default_factory=list[str])
+    evidence_message_ids: list[UUID] = Field(default_factory=list[UUID])
+    performance: SupplierPerformance = Field(default_factory=SupplierPerformance)
 
 
 class TierTotal(BaseModel):
@@ -233,6 +260,8 @@ class SupplierColumn(BaseModel):
     rules: list[RuleFlag] = Field(default_factory=list[RuleFlag])
     # The latest proposal's payment terms, as extracted (free text).
     payment_terms: str | None = None
+    negotiation_holds: list[str] = Field(default_factory=list[str])
+    correction_revision: int = 0
 
 
 class AwaitingSupplier(BaseModel):
@@ -272,6 +301,35 @@ class RunnerUp(BaseModel):
     price_delta_pct: Decimal
 
 
+class DecisionOffer(BaseModel):
+    supplier_id: UUID
+    proposal_id: UUID
+    proposal_version: int
+    proposal_line_id: UUID | None = None
+    offered_mpn: str | None = None
+    unit: str | None = None
+    quoted_currency: str | None = None
+    quoted_unit_price: Decimal | None = None
+    price_basis_quantity: Decimal | None = None
+    valid_until: date | None = None
+    payment_terms: str | None = None
+    incoterm: str | None = None
+    known_total_base: Decimal | None = None
+    landed_total_base: Decimal | None = None
+    evidence_message_ids: list[UUID] = Field(default_factory=list[UUID])
+
+
+class OfferAlternative(BaseModel):
+    invite_id: UUID
+    supplier_name: str
+    effective_unit_price_base: Decimal
+    landed_total_base: Decimal | None = None
+    lead_time_days: int | None = None
+    performance: SupplierPerformance = Field(default_factory=SupplierPerformance)
+    tradeoffs: list[str] = Field(default_factory=list[str])
+    offer: DecisionOffer | None = None
+
+
 class Recommendation(BaseModel):
     rfq_line_id: UUID
     tier: int
@@ -292,6 +350,19 @@ class Recommendation(BaseModel):
     # offered the line (brokers never win against them). A free list rather
     # than new `reasons` values, so existing clients keep validating.
     advisories: list[str] = Field(default_factory=list[str])
+    policy_reasons: list[str] = Field(default_factory=list[str])
+    source_evidence: dict[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
+    offer: DecisionOffer | None = None
+    evidence_gaps: list[str] = Field(default_factory=list[str])
+    alternatives: list[OfferAlternative] = Field(default_factory=list[OfferAlternative])
+    performance: SupplierPerformance = Field(default_factory=SupplierPerformance)
+    proposal_id: UUID | None = None
+    proposal_line_id: UUID | None = None
+    evidence_message_ids: list[UUID] = Field(default_factory=list[UUID])
+    landed_total_base: Decimal | None = None
+    readiness: Literal["ready_for_buyer_review", "needs_review", "no_feasible_offer"] = (
+        "needs_review"
+    )
 
 
 class Comparison(BaseModel):
@@ -307,6 +378,12 @@ class Comparison(BaseModel):
         default_factory=list[SupplierComplianceSummary]
     )
     recommendations: list[Recommendation] = Field(default_factory=list[Recommendation])
+    policy: ComparisonPolicy = Field(default_factory=ComparisonPolicy)
+    readiness: Literal["ready_for_buyer_review", "needs_review", "no_feasible_offer"] = (
+        "needs_review"
+    )
+    covered_line_tiers: int = 0
+    requested_line_tiers: int = 0
 
 
 # --- Pure helpers ----------------------------------------------------------------------
@@ -401,6 +478,10 @@ _LINE_FIELDS: Final = (
     "tooling_cost",
     "moq",
     "lead_time_days",
+    "price_basis_quantity",
+    "freight_cost",
+    "tax_rate_percent",
+    "conditional_terms",
 )
 _PROPOSAL_FIELDS: Final = ("currency", "valid_until", "incoterm")
 # Fields that do not count against an offer when the RFQ line requests no part number.
@@ -513,6 +594,10 @@ def compute_cell(
             flags.append("incoterm_differs")
 
     currency = _norm_code(quote.currency)
+    denominator = chosen.price_basis_quantity or Decimal(1)
+    basis_valid = chosen.price_basis_quantity is None or chosen.price_basis_quantity > 0
+    if not basis_valid:
+        flags.append("needs_review")
     unit_price_base: Decimal | None = None
     tooling_base: Decimal | None = Decimal(0) if chosen.tooling_cost is None else None
     has_amount = chosen.unit_price is not None or chosen.tooling_cost is not None
@@ -521,7 +606,11 @@ def compute_cell(
             flags.append("missing_currency")
     else:
         if chosen.unit_price is not None:
-            unit_price_base = to_base(chosen.unit_price, currency, base_currency, rates)
+            unit_price_base = (
+                to_base(chosen.unit_price / denominator, currency, base_currency, rates)
+                if basis_valid
+                else None
+            )
         if chosen.tooling_cost is not None:
             tooling_base = to_base(chosen.tooling_cost, currency, base_currency, rates)
         if has_amount and (
@@ -543,6 +632,45 @@ def compute_cell(
         if unit_price_base is not None and tooling_base is not None and applies and unit_ok
         else None
     )
+
+    cost_gaps: list[str] = []
+    if chosen.tooling_cost is None:
+        cost_gaps.append("tooling_cost_unknown")
+    if chosen.freight_cost is None:
+        cost_gaps.append("freight_cost_unknown")
+    if chosen.tax_rate_percent is None:
+        cost_gaps.append("tax_treatment_unknown")
+    if chosen.conditional_terms:
+        cost_gaps.append("conditional_terms_require_review")
+    freight_base = (
+        to_base(chosen.freight_cost, currency, base_currency, rates)
+        if currency is not None and chosen.freight_cost is not None
+        else None
+    )
+    known_total = total
+    if known_total is not None and freight_base is not None:
+        known_total += freight_base
+    # Tax rate alone does not establish the taxable base (freight/tooling can
+    # differ by jurisdiction). A positive rate requires an evidenced tax amount.
+    if chosen.tax_rate_percent is not None and chosen.tax_rate_percent != 0:
+        cost_gaps.append("taxable_basis_unknown")
+    if chosen.freight_cost is not None and freight_base is None:
+        cost_gaps.append("freight_fx_missing")
+    if low:
+        cost_gaps.append("cost_evidence_needs_review")
+    landed_total = known_total if not cost_gaps and unit_ok and applies else None
+    buyer_limit_issues: list[str] = []
+    if (
+        line.max_unit_price is not None
+        and effective is not None
+        and effective > line.max_unit_price
+    ):
+        buyer_limit_issues.append("above_buyer_maximum")
+    if line.max_lead_time_days is not None:
+        if chosen.lead_time_days is None:
+            buyer_limit_issues.append("buyer_lead_time_unconfirmed")
+        elif chosen.lead_time_days > line.max_lead_time_days:
+            buyer_limit_issues.append("above_buyer_lead_time_limit")
 
     return Cell(
         rfq_line_id=line.id,
@@ -566,6 +694,16 @@ def compute_cell(
         proposal_line_id=chosen.id,
         corrected_fields=_corrected(chosen.fields, _CORRECTABLE_LINE_FIELDS),
         qualification=chosen.qualification,
+        price_basis_quantity=chosen.price_basis_quantity,
+        freight_cost=chosen.freight_cost,
+        tax_rate_percent=chosen.tax_rate_percent,
+        conditional_terms=chosen.conditional_terms,
+        known_total_base=_q(known_total, _MONEY_PLACES),
+        landed_total_base=_q(landed_total, _MONEY_PLACES),
+        cost_gaps=cost_gaps,
+        buyer_limit_issues=buyer_limit_issues,
+        evidence_message_ids=list(chosen.source_message_ids),
+        performance=quote.performance.get(line.id, SupplierPerformance()),
     )
 
 
@@ -628,6 +766,8 @@ def compute_supplier(
         totals=totals,
         supplier_type=quote.supplier_type,
         payment_terms=quote.payment_terms,
+        negotiation_holds=list(quote.negotiation_holds),
+        correction_revision=quote.correction_revision,
     )
 
 
@@ -664,6 +804,7 @@ def compute_comparison(
                 incoterm=line.incoterm,
                 need_by=line.need_by,
                 qualification=line.qualification,
+                source_evidence=dict(line.source_evidence),
             )
             for line in ordered
         ],

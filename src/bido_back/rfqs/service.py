@@ -4,8 +4,10 @@ Every function takes the caller's `Principal` and works in one
 `tenant_session` for that tenant (forced RLS). Agent runs (seconds) happen
 OUTSIDE any transaction; their results are written afterwards.
 
-Preparing a send never sends. It first checks that the caller (the buyer)
-has a connected mailbox, since that is where the emails will go out from
+Preparing a send never sends. It first checks that the RFQ has a reply-by
+date of today or later when there is an invite to prepare
+(`bido_back.rfqs.readiness`, `ReplyByRequired` otherwise), then that the
+caller (the buyer) has a connected mailbox, since that is where the emails will go out from
 (`MailboxNotConnected` otherwise). It pins the RFQ to the template version
 its emails use (`bido_back.templates.service.resolve_for_rfq`, recorded at
 the first send). Then, for each invite still in `draft`, it renders the email
@@ -24,7 +26,7 @@ import importlib
 import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Final, cast
 from uuid import UUID, uuid4
@@ -66,8 +68,10 @@ from bido_back.negotiation.send import SEND_NEGOTIATION_EMAIL, SendNegotiationEm
 from bido_back.onboarding.standard import TemplateContent
 from bido_back.outbound.domains import RecipientCheck, check_recipients, recipients_in_args
 from bido_back.rfqs.agents import EmailWriterAgent, IntakeAgent
-from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound
+from bido_back.rfqs.currency import CurrencyChange, change_currency, resolve_currency
+from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound, ReplyByRequired
 from bido_back.rfqs.mailbox import MailboxSenderFactory
+from bido_back.rfqs.readiness import reply_by_refusal, send_blockers, utc_today
 from bido_back.rfqs.schemas import (
     AddLineRequest,
     ApprovalQueueItem,
@@ -109,7 +113,6 @@ logger = logging.getLogger(__name__)
 
 Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
-BASE_CURRENCY: Final = "EUR"
 REPLY_TOKENS_MODULE: Final = "bido_back.email.addresses"
 _REF_PATTERN: Final = r"^RFQ-([0-9]+)$"
 _EDITABLE_INVITES: Final = frozenset({"draft"})
@@ -156,6 +159,7 @@ def _line_view(line: RfqLine) -> RfqLineView:
         incoterm=line.incoterm,
         delivery_location=line.delivery_location,
         qualification=line.qualification,
+        source_evidence=line.source_evidence,
     )
 
 
@@ -179,6 +183,9 @@ def _summary_fields(rfq: Rfq) -> dict[str, object]:
         "status": cast(RfqStatus, rfq.status),
         "response_due": rfq.response_due,
         "created_at": rfq.created_at,
+        "send_blockers": send_blockers(rfq.status, rfq.response_due, utc_today()),
+        "payment_terms": rfq.payment_terms,
+        "quote_validity_days": rfq.quote_validity_days,
     }
 
 
@@ -238,16 +245,22 @@ async def create_rfq_from_text(
     intake: IntakeAgent,
     *,
     buyer_messages: Sequence[str] = (),
+    currency: str | None = None,
 ) -> RfqCreated:
     """Structure the buyer's text with the intake agent and store it as a draft RFQ.
 
     From the Copilot, `source_text` is its summary of what to quote and
     `buyer_messages` the buyer's own words, which win on codes and terms.
+    `currency` is the one the buyer stated; without it the purchase history
+    decides, and when it cannot, `CurrencyRequired` is raised before the intake
+    agent runs (`bido_back.rfqs.currency`).
     """
+    async with tenant_session(db, principal.tenant_id) as session:
+        resolved = await resolve_currency(session, stated=currency)
     context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
     draft = await intake(
         RfqIntakeInput(
-            text=source_text, base_currency=BASE_CURRENCY, buyer_messages=list(buyer_messages)
+            text=source_text, base_currency=resolved.code, buyer_messages=list(buyer_messages)
         ),
         context,
     )
@@ -258,7 +271,7 @@ async def create_rfq_from_text(
             ref=await _next_ref(session, principal.tenant_id),
             title=draft.title,
             status="draft",
-            base_currency=BASE_CURRENCY,
+            base_currency=resolved.code,
             response_due=draft.response_due,
             source_text=source_text,
             created_by=principal.user_id,
@@ -287,8 +300,16 @@ async def create_rfq_from_text(
         await session.flush()
         await session.refresh(rfq)
         detail = await _detail(session, rfq)
-    logger.info("rfq created tenant=%s rfq=%s run=%s", principal.tenant_id, rfq.id, context.run_id)
-    return RfqCreated.model_validate({**detail.model_dump(), "questions": draft.questions})
+    logger.info(
+        "rfq created tenant=%s rfq=%s run=%s currency_source=%s",
+        principal.tenant_id,
+        rfq.id,
+        context.run_id,
+        resolved.source,
+    )
+    return RfqCreated.model_validate(
+        {**detail.model_dump(), "questions": draft.questions, "currency_source": resolved.source}
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,9 +335,11 @@ async def create_draft_rfq(
     lines: Sequence[NewRfqLine],
     source_text: str | None = None,
     response_due: date | None = None,
-    base_currency: str = BASE_CURRENCY,
+    base_currency: str,
 ) -> tuple[Rfq, list[RfqLine]]:
-    """Store a draft RFQ with the given lines, in the caller's tenant session."""
+    """Store a draft RFQ with the given lines, in the caller's tenant session.
+
+    `base_currency` comes from `bido_back.rfqs.currency.resolve_currency`."""
     rfq = Rfq(
         tenant_id=principal.tenant_id,
         ref=await _next_ref(session, principal.tenant_id),
@@ -459,14 +482,40 @@ async def remove_line(db: Db, principal: Principal, rfq_id: UUID, line_id: UUID)
 async def update_rfq(
     db: Db, principal: Principal, rfq_id: UUID, patch: UpdateRfqRequest
 ) -> RfqDetail:
-    """RFQ-wide changes to a draft: its title and response date, and the Incoterm,
-    delivery location and need-by date of every line."""
+    """RFQ-wide changes to a draft: its title, response date, currency, payment terms
+    and quote validity, and the Incoterm, delivery location and need-by date of every
+    line."""
+    return (await edit_rfq(db, principal, rfq_id, patch)).detail
+
+
+@dataclass(frozen=True, slots=True)
+class EditedRfq:
+    detail: RfqDetail
+    # Set when the patch changed the currency (and converted any negotiation limits).
+    currency_change: CurrencyChange | None = None
+
+
+async def edit_rfq(
+    db: Db,
+    principal: Principal,
+    rfq_id: UUID,
+    patch: UpdateRfqRequest,
+    *,
+    today: date | None = None,
+) -> EditedRfq:
+    """`update_rfq`, also telling what a currency change converted."""
     changes = patch.model_dump(exclude_unset=True)
-    if "title" in changes and changes["title"] is None:
-        raise InvalidState("title cannot be cleared")
+    for required in ("title", "currency"):
+        if required in changes and changes[required] is None:
+            raise InvalidState(f"{required} cannot be cleared")
     async with tenant_session(db, principal.tenant_id) as session:
         rfq = await _editable_rfq(session, rfq_id)
-        for field in ("title", "response_due"):
+        currency_change = None
+        if "currency" in changes:
+            currency_change = await change_currency(
+                session, rfq, changes["currency"], today or datetime.now(UTC).date()
+            )
+        for field in ("title", "response_due", "payment_terms", "quote_validity_days"):
             if field in changes:
                 setattr(rfq, field, changes[field])
         line_fields = {
@@ -480,7 +529,7 @@ async def update_rfq(
                     setattr(line, field, value)
         await session.flush()
         await session.refresh(rfq)
-        return await _detail(session, rfq)
+        return EditedRfq(await _detail(session, rfq), currency_change)
 
 
 async def _editable_rfq(session: AsyncSession, rfq_id: UUID) -> Rfq:
@@ -674,6 +723,8 @@ async def _render_for(
             template=ctx.template.content,
             display=display,
             lines=[_render_line(line) for line in ctx.lines],
+            payment_terms=ctx.rfq.payment_terms,
+            quote_validity_days=ctx.rfq.quote_validity_days,
         )
     )
     problems = rfq_email_problems(
@@ -686,6 +737,7 @@ async def _render_for(
             supplier_language=language,
             response_due=ctx.rfq.response_due,
             lines=[_email_line(line) for line in ctx.lines],
+            payment_terms=ctx.rfq.payment_terms,
         ),
         RfqEmailOutput(subject=rendered.subject, body=rendered.text),
     )
@@ -734,9 +786,14 @@ async def prepare_send(
     mailboxes: MailboxSenderFactory,
     *,
     require_mailbox: bool = True,
+    today: date | None = None,
 ) -> PrepareSendResponse:
     """Render one email per draft invite and record each as a pending approval.
 
+    With an invite to prepare, the RFQ needs a reply-by date of `today` (UTC by
+    default) or later; otherwise this fails with `ReplyByRequired` before
+    anything is rendered or proposed. This is the one place RFQ emails are
+    proposed, so the API, the copilot and negotiation mandates all get the rule.
     The emails will go out from the caller's connected mailbox; without one
     this fails with `MailboxNotConnected` before anything is rendered, unless
     `require_mailbox` is False (a negotiation mandate, whose sends wait for the
@@ -746,9 +803,6 @@ async def prepare_send(
         rfq = await _rfq(session, rfq_id, lock=True)
         if rfq.status not in ("draft", "open"):
             raise InvalidState(f"rfq {rfq_id} is {rfq.status}")
-        # Fail early: nobody should approve an email that cannot be sent.
-        if require_mailbox:
-            await mailboxes(session, principal.tenant_id, principal.user_id)
         rows = await session.execute(
             select(Invite, Supplier, Contact)
             .join(Supplier, Supplier.id == Invite.supplier_id)
@@ -757,6 +811,17 @@ async def prepare_send(
             .order_by(Invite.created_at, Invite.id)
         )
         drafts = list(rows)
+        # Without a date to answer by, suppliers have no deadline and follow-ups
+        # and the negotiation nothing to anchor on. Checked first: the buyer can
+        # fix it at once. Nothing to prepare (e.g. a mandate on an RFQ already
+        # sent) means no email, so no date is needed.
+        if drafts and (
+            refusal := reply_by_refusal(rfq.ref, rfq.status, rfq.response_due, today or utc_today())
+        ):
+            raise ReplyByRequired(refusal, draft=rfq.status == "draft")
+        # Fail early: nobody should approve an email that cannot be sent.
+        if require_mailbox:
+            await mailboxes(session, principal.tenant_id, principal.user_id)
         # Earlier rejected (or expired, e.g. with a rejected mandate) proposals per
         # invite: the next proposal is a new attempt.
         call_ids = [send_proposal_ids(invite.id)[1] for invite, _, _ in drafts]

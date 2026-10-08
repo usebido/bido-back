@@ -64,7 +64,9 @@ async def test_get_and_patch_followup_settings(
     http: httpx.AsyncClient, app_engine: AsyncEngine, rfq_rows: People
 ) -> None:
     principal = Principal(tenant_id=rfq_rows.tenant, user_id=rfq_rows.owner, role="owner")
-    rfq = await rfq_service.create_rfq_from_text(app_engine, principal, "Need caps", FakeIntake())
+    rfq = await rfq_service.create_rfq_from_text(
+        app_engine, principal, "Need caps", FakeIntake(), currency="EUR"
+    )
 
     got = await http.get(f"/v1/rfqs/{rfq.id}/followups")
     assert got.status_code == 200
@@ -73,7 +75,7 @@ async def test_get_and_patch_followup_settings(
         "first_after_business_days": 2,
         "every_business_days": 2,
         "max_chases": 3,
-        "response_due": "2026-11-01",
+        "response_due": "2099-11-01",
     }
 
     patched = await http.patch(

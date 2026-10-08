@@ -15,6 +15,8 @@
   callback URL cannot have the attacker's mailbox (or theirs) attached to the
   wrong account, because the caller must be the user who started the flow.
 * `GET /v1/mailbox`: the calling user's connections (never tokens).
+* `GET /v1/mailbox/providers`: which providers this server can connect, so the
+  frontend can say so instead of offering a connection that can only fail.
 * `DELETE /v1/mailbox/{provider}`: erase the tokens and mark the connection
   revoked, then revoke at the provider (best effort).
 
@@ -66,6 +68,7 @@ from bido_back.worker.jobs import JobQueue
 logger = logging.getLogger(__name__)
 
 _NO_STORE = {"Cache-Control": "no-store"}
+_PROVIDERS: tuple[Provider, ...] = ("google", "microsoft")
 
 
 class ConnectResponse(BaseModel):
@@ -91,6 +94,26 @@ class MailboxConnectionResponse(BaseModel):
 
 class MailboxStatusResponse(BaseModel):
     connections: list[MailboxConnectionResponse]
+
+
+class ProviderAvailability(BaseModel):
+    provider: Provider
+    available: bool
+
+
+class MailboxProvidersResponse(BaseModel):
+    providers: list[ProviderAvailability]
+
+
+def provider_available(settings: Settings, provider: Provider) -> bool:
+    """Whether connect and complete can succeed: OAuth client, state sealing, token cipher."""
+    try:
+        oauth_client(settings, provider)
+        StateSealer.from_settings(settings)
+        build_token_cipher(settings)
+    except MailboxNotConfigured:
+        return False
+    return True
 
 
 def _response(view: ConnectionView) -> MailboxConnectionResponse:
@@ -249,6 +272,20 @@ def mailbox_router() -> APIRouter:
         )
         await _release_waiting_mandate_sends(db, sealed.tenant_id, jobs)
         return _response(view)
+
+    @router.get("/providers", responses=_errors(status.HTTP_401_UNAUTHORIZED))
+    async def mailbox_providers(  # pyright: ignore[reportUnusedFunction]
+        principal: Annotated[Principal, Depends(get_principal)],
+        settings: Annotated[Settings, Depends(get_mailbox_settings)],
+    ) -> MailboxProvidersResponse:
+        """Which mailbox providers this server is configured for (no secrets, no details)."""
+        del principal  # Signed-in only, like the rest of /v1/mailbox.
+        return MailboxProvidersResponse(
+            providers=[
+                ProviderAvailability(provider=p, available=provider_available(settings, p))
+                for p in _PROVIDERS
+            ]
+        )
 
     @router.get("", responses=_errors(status.HTTP_401_UNAUTHORIZED))
     async def mailbox_status(  # pyright: ignore[reportUnusedFunction]

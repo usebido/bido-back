@@ -89,7 +89,7 @@ BOM = [
     BomEntry(HOUSING, Decimal(1)),
 ]
 STOCK = {
-    BEARING.id: Stock(on_hand=Decimal(50), on_order=Decimal(30)),
+    BEARING.id: Stock(on_hand=Decimal(50), on_order=Decimal(30), on_order_due=date(2026, 11, 1)),
     COPPER.id: Stock(on_hand=Decimal("30.5")),
     HOUSING.id: Stock(on_hand=Decimal(150)),
 }
@@ -247,3 +247,52 @@ def test_totals_are_per_currency_and_never_added_up() -> None:
         ("EUR", 1, Decimal("600.00")),
     ]
     assert currency_totals([(None, Decimal(5), None, None)]) == ()
+
+
+def test_open_purchase_orders_due_in_time_count_as_on_order() -> None:
+    it = item("D-OPEN")
+    history = [
+        buy(it, DIST, date(2026, 5, 1), "100", "2.00", promised=date(2026, 5, 20),
+            received=date(2026, 5, 22)),
+        # Open and due before the need date: on order.
+        buy(it, DIST, date(2026, 9, 20), "300", "2.10", promised=date(2026, 10, 30)),
+        # Open, promised a little late (still coming): on order.
+        buy(it, DIST, date(2026, 8, 20), "50", "2.10", promised=date(2026, 9, 25)),
+        # Due after the need date, stale, or with no promised date: not counted.
+        buy(it, DIST, date(2026, 9, 25), "400", "2.10", promised=date(2026, 12, 1)),
+        buy(it, DIST, date(2026, 3, 1), "70", "2.10", promised=date(2026, 4, 1)),
+        buy(it, DIST, date(2026, 9, 28), "80", "2.10"),
+    ]  # fmt: skip
+    [line] = analyze(
+        product="P",
+        quantity=Decimal(500),
+        need_by=date(2026, 11, 15),
+        bom=[BomEntry(it, Decimal(1))],
+        stock={it.id: Stock(on_hand=Decimal(20))},
+        purchases=history,
+        today=TODAY,
+    ).lines
+    assert (line.on_order, line.to_buy) == (Decimal(350), Decimal(130))
+    assert ("on_order_from_pos", None) in codes(line)
+    assert next(f.value for f in line.flags if f.code == "on_order_from_pos") == Decimal(350)
+
+
+def test_the_stock_on_order_wins_over_open_purchase_orders() -> None:
+    it = item("D-STOCK")
+    history = [buy(it, DIST, date(2026, 9, 20), "300", "2.10", promised=date(2026, 10, 30))]
+    [line] = analyze(
+        product="P",
+        quantity=Decimal(500),
+        need_by=date(2026, 11, 15),
+        bom=[BomEntry(it, Decimal(1))],
+        stock={
+            it.id: Stock(
+                on_hand=Decimal(20), on_order=Decimal(300), on_order_due=date(2026, 10, 30)
+            )
+        },
+        purchases=history,
+        today=TODAY,
+    ).lines
+    # The stock export already counts its open orders: not added twice.
+    assert (line.on_order, line.to_buy) == (Decimal(300), Decimal(180))
+    assert "on_order_from_pos" not in [c for c, _ in codes(line)]

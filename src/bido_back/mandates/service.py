@@ -135,7 +135,10 @@ async def propose_mandate(
     """Render the initial emails and record the single mandate approval.
 
     `writer` and `mailboxes` are what `prepare_send` takes (the RFQ email
-    writer and the mailbox sender factory). Nothing is sent here.
+    writer and the mailbox sender factory). The initial emails are prepared
+    through it, so its rules hold here too: with an invite still to prepare,
+    the RFQ needs a reply-by date of today or later (`ReplyByRequired`, and no
+    approval is recorded). Nothing is sent here.
     """
     overrides = {limits.rfq_line_id: limits for limits in request.lines}
     async with tenant_session(db, principal.tenant_id) as session:

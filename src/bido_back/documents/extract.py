@@ -221,6 +221,7 @@ def _pdf(name: str, data: bytes, limits: Limits) -> DocumentText:
     lines: list[str] = []
     budget = _Budget(limits.max_chars)
     pages_with_text = 0
+    unread_visual_pages = False
     with pdfplumber.open(io.BytesIO(data)) as pdf:
         total = len(pdf.pages)
         for number, page in enumerate(pdf.pages[: limits.max_pdf_pages], start=1):
@@ -231,7 +232,8 @@ def _pdf(name: str, data: bytes, limits: Limits) -> DocumentText:
             text = (rest.extract_text() or "").strip()
             rendered = [_table_rows(table.extract()) for table in tables]
             if not text and not any(rendered):
-                if page.chars or page.images:
+                if page.chars or page.images or page.rects or page.curves or page.lines:
+                    unread_visual_pages = True
                     lines.append(f"[{name} p.{number}] no text layer: needs vision, not read")
                 else:
                     lines.append(f"[{name} p.{number}] empty page")
@@ -252,7 +254,8 @@ def _pdf(name: str, data: bytes, limits: Limits) -> DocumentText:
             text=f"[{name}] scanned PDF without a text layer: needs vision, not read",
             needs_vision=True,
         )
-    truncated = budget.truncated or total > limits.max_pdf_pages
+    # Mixed PDFs retain their readable pages, but cannot claim complete coverage.
+    truncated = budget.truncated or total > limits.max_pdf_pages or unread_visual_pages
     if total > limits.max_pdf_pages:
         lines.append(f"[{name}] truncated: pages {limits.max_pdf_pages + 1}-{total} not read")
     elif budget.truncated:
