@@ -1,7 +1,8 @@
 """`/v1/copilot`: the procurement copilot.
 
-* `POST /v1/copilot/messages`: send a message (and optionally files uploaded
-  through `POST /v1/onboarding/uploads`); the response is a Server-Sent Events
+* `POST /v1/copilot/messages`: send a message, files uploaded through
+  `POST /v1/onboarding/uploads`, or both (files alone mean "import and analyse
+  them"; neither is a 422); the response is a Server-Sent Events
   stream (`text/event-stream`). Every event is `event: <type>` plus one JSON
   `data:` line with a `type` field:
 
