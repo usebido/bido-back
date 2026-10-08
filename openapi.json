@@ -3031,6 +3031,42 @@
         "title": "ConversationView",
         "type": "object"
       },
+      "CopilotLimits": {
+        "description": "What one Copilot message may carry, so the front never drifts from the server.",
+        "properties": {
+          "accepted_extensions": {
+            "description": "File extensions accepted, lowercase",
+            "items": {
+              "type": "string"
+            },
+            "title": "Accepted Extensions",
+            "type": "array"
+          },
+          "max_attachments": {
+            "description": "Files per message",
+            "title": "Max Attachments",
+            "type": "integer"
+          },
+          "max_message_chars": {
+            "description": "Characters in the message text",
+            "title": "Max Message Chars",
+            "type": "integer"
+          },
+          "max_upload_bytes": {
+            "description": "Size of one uploaded file, in bytes",
+            "title": "Max Upload Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "max_attachments",
+          "max_message_chars",
+          "max_upload_bytes",
+          "accepted_extensions"
+        ],
+        "title": "CopilotLimits",
+        "type": "object"
+      },
       "CopilotMessageRequest": {
         "properties": {
           "attachment_ids": {
@@ -3038,7 +3074,7 @@
               "format": "uuid",
               "type": "string"
             },
-            "maxItems": 5,
+            "maxItems": 25,
             "title": "Attachment Ids",
             "type": "array"
           },
@@ -12606,6 +12642,63 @@
           }
         ],
         "summary": "Rename Conversation",
+        "tags": [
+          "copilot"
+        ]
+      }
+    },
+    "/v1/copilot/limits": {
+      "get": {
+        "description": "What one message may carry: files, text and upload size. The front reads it.",
+        "operationId": "limits_v1_copilot_limits_get",
+        "parameters": [
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CopilotLimits"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Limits",
         "tags": [
           "copilot"
         ]
