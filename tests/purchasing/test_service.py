@@ -122,6 +122,24 @@ async def test_imports_write_the_data(app_engine: AsyncEngine, purchasing_rows: 
     assert again.created == {} and again.updated == {"po_lines": 3}
 
 
+async def test_exact_duplicate_purchase_rows_are_skipped(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = buyer(purchasing_rows)
+    storage = FakeStorage()
+    duplicated = [*HISTORY, HISTORY[2], HISTORY[2]]
+    # Same order, same part, a different quantity: a second line, not a duplicate.
+    different = [*HISTORY[2][:3], 50, *HISTORY[2][4:]]
+
+    report = await load(app_engine, storage, who, "purchase_history", [*duplicated, different])
+
+    assert report.created["po_lines"] == 4
+    assert report.skipped == {"po_lines_duplicate": 2}
+    async with tenant_session(app_engine, who.tenant_id) as session:
+        quantities = sorted(line.quantity for line in await session.scalars(select(PoLine)))
+    assert quantities == [Decimal(10), Decimal(50), Decimal(100), Decimal(200)]
+
+
 async def test_dry_run_writes_nothing(app_engine: AsyncEngine, purchasing_rows: People) -> None:
     who = buyer(purchasing_rows)
     storage = FakeStorage()

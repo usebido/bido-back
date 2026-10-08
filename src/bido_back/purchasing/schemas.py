@@ -49,6 +49,8 @@ class ImportReport(BaseModel):
     errors: list[ImportRowError]
     created: dict[str, int]
     updated: dict[str, int]
+    # Rows left out on purpose, e.g. {"po_lines_duplicate": 2}.
+    skipped: dict[str, int] = {}
 
 
 class ProductView(BaseModel):
