@@ -45,28 +45,53 @@ _GROSS = frozenset(
 )
 
 
+def code_key(value: str) -> str:
+    """How identifiers compare: case and spacing aside, other punctuation is significant."""
+    return "".join(value.casefold().split())
+
+
+def same_code(left: str | None, right: str | None) -> bool:
+    return left is not None and right is not None and code_key(left) == code_key(right)
+
+
+def same_place(left: str | None, right: str | None) -> bool:
+    """Plants and areas compare without case, accents, spacing or punctuation."""
+    return left is not None and right is not None and bool(norm(left)) and norm(left) == norm(right)
+
+
 def planning_context(records: Sequence[Record]) -> tuple[list[PlanningCandidate], list[date]]:
-    """Expose located product/plant/date choices so the copilot can complete a scoped call."""
-    grouped: dict[tuple[str, str | None], list[Record]] = defaultdict(list)
+    """Expose located product/plant/date choices so the copilot can complete a scoped call.
+
+    Spellings of one code or plant that differ only in case or spacing are one candidate.
+    """
+    grouped: dict[tuple[str, str], list[Record]] = defaultdict(list)
     dates: set[date] = set()
     for row in records:
         if row.kind == "production_plan" and (product := source_text(row, "product_code")):
-            grouped[product, source_text(row, "location")].append(row)
+            grouped[code_key(product), norm(source_text(row, "location") or "")].append(row)
         elif row.kind == "inventory" and (day := source_date(row, "as_of", [])) is not None:
             dates.add(day)
     candidates: list[PlanningCandidate] = []
-    for (product, location), plans in grouped.items():
+    for plans in grouped.values():
+        product = source_text(plans[0], "product_code") or ""
+        location = source_text(plans[0], "location")
         masters = [
-            r for r in records if r.kind == "item" and source_text(r, "part_number") == product
+            r
+            for r in records
+            if r.kind == "item" and same_code(source_text(r, "part_number"), product)
         ]
         descriptions = {source_text(r, "description") for r in masters} - {None}
-        areas = {source_text(r, "area") for r in [*plans, *masters]} - {None}
+        areas = {
+            norm(area): area
+            for r in [*plans, *masters]
+            if (area := source_text(r, "area")) is not None
+        }
         candidates.append(
             PlanningCandidate(
                 product_code=product,
                 location=location,
                 description=next(iter(descriptions)) if len(descriptions) == 1 else None,
-                area=next(iter(areas)) if len(areas) == 1 else None,
+                area=next(iter(areas.values())) if len(areas) == 1 else None,
                 need_dates=sorted(
                     {d for r in plans if (d := source_date(r, "need_by", [])) is not None}
                 ),
@@ -90,12 +115,12 @@ def _matches_scope(
     record: Record, records: Sequence[Record], scope: PlanningScope, issues: list[Issue]
 ) -> bool:
     product = source_text(record, "product_code")
-    if scope.product_code is not None and product != scope.product_code:
+    if scope.product_code is not None and not same_code(product, scope.product_code):
         return False
     if scope.area is not None:
         master = _master(records, product or "", issues)
         area = source_text(record, "area") or source_text(master, "area")
-        if area is None and product == scope.product_code:
+        if area is None and same_code(product, scope.product_code):
             add_issue(
                 issues,
                 "unresolved_product_area",
@@ -104,7 +129,8 @@ def _matches_scope(
             )
         if area is None or norm(area) != norm(scope.area):
             return False
-    if source_text(record, "location") is None:
+    location = source_text(record, "location")
+    if location is None:
         add_issue(
             issues,
             "missing_production_location",
@@ -112,9 +138,7 @@ def _matches_scope(
             [record],
         )
         return False
-    if source_text(record, "location") != scope.location:
-        return False
-    return True
+    return same_place(location, scope.location)
 
 
 def _bom_at(

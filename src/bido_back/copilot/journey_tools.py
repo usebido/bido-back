@@ -49,7 +49,7 @@ from bido_back.negotiation.schemas import LineLimitsUpdate
 from bido_back.outbound.domains import RecipientCheck
 from bido_back.purchasing import service as purchasing_service
 from bido_back.purchasing.schemas import AnalysisRequest, CurrencyTotalView
-from bido_back.purchasing.sources.contracts import PlanningScope, SourceAssessment
+from bido_back.purchasing.sources.contracts import ScopeRequest, SourceAssessment
 from bido_back.purchasing.sources.mapping import default_mapper
 from bido_back.purchasing.sources.service import SourceAccessError, analyze_uploads
 from bido_back.purchasing.sources.snapshots import (
@@ -126,8 +126,15 @@ class ImportSpreadsheetIn(BaseModel):
     )
 
 
-class PlanningScopeInput(PlanningScope):
-    safety_stock: ModelDecimal | None = Field(default=None, ge=0, lt=10**12)
+class ScopeRequestInput(ScopeRequest):
+    # A plain number: the decimal string pattern has a lookahead strict schemas reject.
+    safety_stock: ModelDecimal | None = Field(
+        default=None,
+        ge=0,
+        lt=10**12,
+        description="The buyer's explicit safety-stock policy ('sem estoque de segurança "
+        "adicional' = 0); empty = the sources' own policy",
+    )
 
 
 class AnalyzeSourcesIn(BaseModel):
@@ -141,10 +148,14 @@ class AnalyzeSourcesIn(BaseModel):
         max_length=2000,
         description="The buyer's question and explicit clarifications; do not invent assumptions",
     )
-    scope: PlanningScopeInput | None = Field(
+    scope: ScopeRequestInput | None = Field(
         default=None,
-        description="For BOM/production planning: the buyer's product code or area, plant, "
-        "snapshot date, horizon and explicit safety stock. Never invent missing boundaries.",
+        description="Always fill it with the planning boundaries the buyer stated, in their "
+        "words: product (or product_code), area only for a whole area, location, as_of or "
+        "horizon_end as dates, horizon_days for 'the next N days', safety_stock, "
+        "production_lead_days. Leave unknown fields empty: code resolves them against the "
+        "evidence (the reference date from the latest stock snapshot) and asks the rest. When "
+        "saving, pass the same scope as the analysis plus the buyer's answers.",
     )
 
 
@@ -894,7 +905,10 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             "save_procurement_assessment",
             "Analyze the conversation's procurement sources and save an immutable evidence "
             "snapshot. Returns assessment_id for later retrieval and draft RFQ creation. "
-            "Use when the buyer asks to save the analysis or proceed to an RFQ. Nothing is sent.",
+            "Use when the buyer asks to save the analysis or proceed to an RFQ. Pass the same "
+            "upload_ids, objective and scope as the analyze_procurement_sources call the buyer "
+            "saw (their words plus any answers, not the resolved values), so the saved snapshot "
+            "resolves the same scope. Nothing is sent.",
             AnalyzeSourcesIn,
             SourceAssessment,
             "draft",
@@ -932,12 +946,19 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         ),
         Tool(
             "analyze_procurement_sources",
-            "Read and cross-reference all attached procurement sources: direct material "
-            "demand, inventory, supplier identities, purchase history, supplier performance "
-            "and consolidated purchase needs. With scope, derives production/BOM demand and "
-            "reconciles stock snapshots, receipts and pending orders. Returns source-reported "
-            "quantities separately from validated calculations, with evidence and specific issues. "
-            "No BOM required for direct demand. Read-only: nothing imported or sent.",
+            "Read every row of the attached procurement sources and cross-reference them: "
+            "production orders and BOMs, stock snapshots, open orders, receipts, purchase "
+            "history, suppliers and direct material demand. Always pass `scope` with the "
+            "buyer's planning boundaries as they said them (product words or code, plant, "
+            "horizon as dates or days, safety stock) and leave unknowns empty: in this same "
+            "call code finds the exact product code and plant, takes the reference date from "
+            "the latest stock snapshot when none was given, and derives production/BOM demand "
+            "netted against stock and timely deliveries. `scope` in the result is the resolved "
+            "scope; `scope_resolution` lists the assumptions to disclose and the questions "
+            "(with options) to ask when a boundary cannot be settled without guessing. Returns "
+            "source-reported quantities separately from validated calculations, with evidence "
+            "and specific issues. No BOM required for direct demand. Read-only: nothing "
+            "imported or sent.",
             AnalyzeSourcesIn,
             SourceAssessment,
             "read",

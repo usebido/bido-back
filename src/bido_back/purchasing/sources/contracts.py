@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 RecordKind = Literal[
     "inventory",
@@ -63,6 +63,119 @@ class PlanningScope(BaseModel):
         if self.horizon_end < self.as_of:
             raise ValueError("The planning horizon must end on or after the snapshot date")
         return self
+
+
+class ScopeRequest(BaseModel):
+    """The buyer's planning boundaries as they stated them; every field is optional.
+
+    Code resolves the request against the mapped evidence into a `PlanningScope`
+    (`bido_back.purchasing.sources.scope`), or asks a question. A complete request
+    (product code or area, location, as_of and horizon_end) is a planning scope.
+    """
+
+    product_code: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description="The product's exact code, only when the buyer gave it (e.g. MTR-100)",
+    )
+    product: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description="The product as the buyer named it, in their words (e.g. 'Motor MTR-100'); "
+        "its exact code is found in the sources",
+    )
+    area: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description="Only when the buyer asks for a whole area or department, not one product",
+    )
+    location: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description="The plant or site as the buyer wrote it (e.g. 'Planta A')",
+    )
+    as_of: date | None = Field(
+        default=None,
+        description="The reference (export/snapshot) date, only when the buyer gave one; "
+        "empty = the latest stock snapshot of the plant",
+    )
+    horizon_end: date | None = Field(
+        default=None, description="The last need date to include (inclusive), when given as a date"
+    )
+    horizon_days: int | None = Field(
+        default=None,
+        ge=0,
+        le=365,
+        description="A horizon given in days after the reference date ('next 14 days' = 14)",
+    )
+    safety_stock: Decimal | None = Field(
+        default=None,
+        ge=0,
+        lt=10**12,
+        description="The buyer's explicit safety-stock policy ('no additional safety stock' "
+        "= 0); empty = the sources' own policy",
+    )
+    production_lead_days: int = Field(
+        default=0,
+        ge=0,
+        le=365,
+        description="Days before the production date that components are needed, when given",
+    )
+
+    @field_validator("product_code", "product", "area", "location", mode="before")
+    @classmethod
+    def blank_is_unknown(cls, value: object) -> object:
+        return None if isinstance(value, str) and not value.strip() else value
+
+    @model_validator(mode="after")
+    def valid_request(self) -> "ScopeRequest":
+        if (
+            self.as_of is not None
+            and self.horizon_end is not None
+            and self.horizon_end < self.as_of
+        ):
+            raise ValueError("The planning horizon must end on or after the snapshot date")
+        return self
+
+
+ScopeField = Literal["product_code", "area", "location", "as_of", "horizon_end"]
+
+
+class ScopeOption(BaseModel):
+    # What to put in the scope field when the buyer picks this option.
+    value: str
+    label: str
+    evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
+
+
+class ScopeAssumption(BaseModel):
+    """A boundary code settled from the evidence; the copilot discloses it."""
+
+    code: str
+    field: ScopeField
+    # The value code settled on; None when a boundary was left out of the scope.
+    value: str | None = None
+    message: str
+    evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
+
+
+class ScopeQuestion(BaseModel):
+    """A boundary the evidence cannot settle without guessing: ask the buyer."""
+
+    code: str
+    field: ScopeField
+    message: str
+    options: list[ScopeOption] = Field(default_factory=list[ScopeOption])
+
+
+class ScopeResolution(BaseModel):
+    request: ScopeRequest
+    assumptions: list[ScopeAssumption] = Field(default_factory=list[ScopeAssumption])
+    questions: list[ScopeQuestion] = Field(default_factory=list[ScopeQuestion])
 
 
 class DemandContribution(BaseModel):
@@ -228,7 +341,10 @@ class PlanningCandidate(BaseModel):
 
 
 class SourceAssessment(Assessment):
+    # The resolved planning scope the quantities were calculated with.
     scope: PlanningScope | None = None
+    # How the buyer's request became that scope: assumptions and open questions.
+    scope_resolution: ScopeResolution | None = None
     planning_candidates: list[PlanningCandidate] = Field(default_factory=list[PlanningCandidate])
     snapshot_dates: list[date] = Field(default_factory=list[date])
     coverage: list[Coverage] = Field(default_factory=list[Coverage])

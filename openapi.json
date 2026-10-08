@@ -1100,12 +1100,16 @@
           "scope": {
             "anyOf": [
               {
+                "$ref": "#/components/schemas/ScopeRequest-Input"
+              },
+              {
                 "$ref": "#/components/schemas/PlanningScope-Input"
               },
               {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Scope"
           },
           "upload_ids": {
             "items": {
@@ -9425,6 +9429,397 @@
         "title": "ScanView",
         "type": "object"
       },
+      "ScopeAssumption": {
+        "description": "A boundary code settled from the evidence; the copilot discloses it.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "field": {
+            "enum": [
+              "product_code",
+              "area",
+              "location",
+              "as_of",
+              "horizon_end"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "code",
+          "field",
+          "message"
+        ],
+        "title": "ScopeAssumption",
+        "type": "object"
+      },
+      "ScopeOption": {
+        "properties": {
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label"
+        ],
+        "title": "ScopeOption",
+        "type": "object"
+      },
+      "ScopeQuestion": {
+        "description": "A boundary the evidence cannot settle without guessing: ask the buyer.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "field": {
+            "enum": [
+              "product_code",
+              "area",
+              "location",
+              "as_of",
+              "horizon_end"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/ScopeOption"
+            },
+            "title": "Options",
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "field",
+          "message"
+        ],
+        "title": "ScopeQuestion",
+        "type": "object"
+      },
+      "ScopeRequest-Input": {
+        "description": "The buyer's planning boundaries as they stated them; every field is optional.\n\nCode resolves the request against the mapped evidence into a `PlanningScope`\n(`bido_back.purchasing.sources.scope`), or asks a question. A complete request\n(product code or area, location, as_of and horizon_end) is a planning scope.",
+        "properties": {
+          "area": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only when the buyer asks for a whole area or department, not one product",
+            "title": "Area"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The reference (export/snapshot) date, only when the buyer gave one; empty = the latest stock snapshot of the plant",
+            "title": "As Of"
+          },
+          "horizon_days": {
+            "anyOf": [
+              {
+                "maximum": 365.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A horizon given in days after the reference date ('next 14 days' = 14)",
+            "title": "Horizon Days"
+          },
+          "horizon_end": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The last need date to include (inclusive), when given as a date",
+            "title": "Horizon End"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The plant or site as the buyer wrote it (e.g. 'Planta A')",
+            "title": "Location"
+          },
+          "product": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The product as the buyer named it, in their words (e.g. 'Motor MTR-100'); its exact code is found in the sources",
+            "title": "Product"
+          },
+          "product_code": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The product's exact code, only when the buyer gave it (e.g. MTR-100)",
+            "title": "Product Code"
+          },
+          "production_lead_days": {
+            "default": 0,
+            "description": "Days before the production date that components are needed, when given",
+            "maximum": 365.0,
+            "minimum": 0.0,
+            "title": "Production Lead Days",
+            "type": "integer"
+          },
+          "safety_stock": {
+            "anyOf": [
+              {
+                "exclusiveMaximum": 1000000000000.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The buyer's explicit safety-stock policy ('no additional safety stock' = 0); empty = the sources' own policy",
+            "title": "Safety Stock"
+          }
+        },
+        "title": "ScopeRequest",
+        "type": "object"
+      },
+      "ScopeRequest-Output": {
+        "description": "The buyer's planning boundaries as they stated them; every field is optional.\n\nCode resolves the request against the mapped evidence into a `PlanningScope`\n(`bido_back.purchasing.sources.scope`), or asks a question. A complete request\n(product code or area, location, as_of and horizon_end) is a planning scope.",
+        "properties": {
+          "area": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only when the buyer asks for a whole area or department, not one product",
+            "title": "Area"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The reference (export/snapshot) date, only when the buyer gave one; empty = the latest stock snapshot of the plant",
+            "title": "As Of"
+          },
+          "horizon_days": {
+            "anyOf": [
+              {
+                "maximum": 365.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A horizon given in days after the reference date ('next 14 days' = 14)",
+            "title": "Horizon Days"
+          },
+          "horizon_end": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The last need date to include (inclusive), when given as a date",
+            "title": "Horizon End"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The plant or site as the buyer wrote it (e.g. 'Planta A')",
+            "title": "Location"
+          },
+          "product": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The product as the buyer named it, in their words (e.g. 'Motor MTR-100'); its exact code is found in the sources",
+            "title": "Product"
+          },
+          "product_code": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The product's exact code, only when the buyer gave it (e.g. MTR-100)",
+            "title": "Product Code"
+          },
+          "production_lead_days": {
+            "default": 0,
+            "description": "Days before the production date that components are needed, when given",
+            "maximum": 365.0,
+            "minimum": 0.0,
+            "title": "Production Lead Days",
+            "type": "integer"
+          },
+          "safety_stock": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The buyer's explicit safety-stock policy ('no additional safety stock' = 0); empty = the sources' own policy",
+            "title": "Safety Stock"
+          }
+        },
+        "title": "ScopeRequest",
+        "type": "object"
+      },
+      "ScopeResolution": {
+        "properties": {
+          "assumptions": {
+            "items": {
+              "$ref": "#/components/schemas/ScopeAssumption"
+            },
+            "title": "Assumptions",
+            "type": "array"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/ScopeQuestion"
+            },
+            "title": "Questions",
+            "type": "array"
+          },
+          "request": {
+            "$ref": "#/components/schemas/ScopeRequest-Output"
+          }
+        },
+        "required": [
+          "request"
+        ],
+        "title": "ScopeResolution",
+        "type": "object"
+      },
       "SearchHit": {
         "properties": {
           "created_at": {
@@ -9840,6 +10235,16 @@
             "anyOf": [
               {
                 "$ref": "#/components/schemas/PlanningScope-Output"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "scope_resolution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScopeResolution"
               },
               {
                 "type": "null"
@@ -15484,6 +15889,7 @@
         ]
       },
       "post": {
+        "description": "Assess the uploads and save the evidence snapshot.\n\n`scope` carries the buyer's planning boundaries as stated, all optional (a product\nname or code, plant, reference date, horizon end or days, safety stock). They are\nresolved against the mapped evidence: `scope` in the response is the resolved scope\nand `scope_resolution` the assumptions made and the questions still open.",
         "operationId": "create_assessment_v1_procurement_assessments_post",
         "parameters": [
           {
