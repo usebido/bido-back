@@ -44,3 +44,6 @@ htmlcov/
 
 # Local blob storage (STORAGE_LOCAL_DIR default)
 .data/
+
+# Eval reports (uv run python -m evals.run)
+evals/reports/
