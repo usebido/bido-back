@@ -134,7 +134,7 @@ def test_source_tool_is_read_only_and_has_provider_compatible_inputs() -> None:
     assert tool.kind == "read"
     properties = tool.input_schema()["properties"]
     assert isinstance(properties, dict)
-    assert set(properties) == {"upload_ids", "objective"}
+    assert set(properties) == {"upload_ids", "objective", "scope"}
     assert tool.parse_input({"upload_ids": [str(uuid4())], "objective": "What should I buy?"})
     invalid_inputs: tuple[dict[str, object], ...] = (
         {"upload_ids": [], "objective": "What should I buy?"},

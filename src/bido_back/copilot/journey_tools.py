@@ -43,7 +43,7 @@ from bido_back.negotiation.schemas import LineLimitsUpdate
 from bido_back.outbound.domains import RecipientCheck
 from bido_back.purchasing import service as purchasing_service
 from bido_back.purchasing.schemas import AnalysisRequest, CurrencyTotalView
-from bido_back.purchasing.sources.contracts import SourceAssessment
+from bido_back.purchasing.sources.contracts import PlanningScope, SourceAssessment
 from bido_back.purchasing.sources.mapping import default_mapper
 from bido_back.purchasing.sources.service import SourceAccessError, analyze_uploads
 from bido_back.purchasing.sources.snapshots import (
@@ -121,6 +121,10 @@ class ImportSpreadsheetIn(BaseModel):
     )
 
 
+class PlanningScopeInput(PlanningScope):
+    safety_stock: ModelDecimal | None = Field(default=None, ge=0, lt=10**12)
+
+
 class AnalyzeSourcesIn(BaseModel):
     upload_ids: list[UUID] = Field(
         min_length=1,
@@ -131,6 +135,11 @@ class AnalyzeSourcesIn(BaseModel):
         min_length=1,
         max_length=2000,
         description="The buyer's question and explicit clarifications; do not invent assumptions",
+    )
+    scope: PlanningScopeInput | None = Field(
+        default=None,
+        description="For BOM/production planning: the buyer's product code or area, plant, "
+        "snapshot date, horizon and explicit safety stock. Never invent missing boundaries.",
     )
 
 
@@ -379,6 +388,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
                 ctx,
                 deps.source_mapper or default_mapper(),
                 persist=persist,
+                scope=args.scope,
             )
         except SourceAccessError as exc:
             raise ToolError(str(exc)) from None
@@ -805,8 +815,9 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             "analyze_procurement_sources",
             "Read and cross-reference all attached procurement sources: direct material "
             "demand, inventory, supplier identities, purchase history, supplier performance "
-            "and consolidated purchase needs. Returns source-reported quantities separately "
-            "from validated calculations, with source references and specific issues. "
+            "and consolidated purchase needs. With scope, derives production/BOM demand and "
+            "reconciles stock snapshots, receipts and pending orders. Returns source-reported "
+            "quantities separately from validated calculations, with evidence and specific issues. "
             "No BOM required for direct demand. Read-only: nothing imported or sent.",
             AnalyzeSourcesIn,
             SourceAssessment,

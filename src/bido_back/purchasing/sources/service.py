@@ -14,8 +14,15 @@ from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import TemplateUpload
 from bido_back.purchasing.sources.analysis import assess
-from bido_back.purchasing.sources.contracts import Coverage, EvidenceTable, Issue, SourceAssessment
+from bido_back.purchasing.sources.contracts import (
+    Coverage,
+    EvidenceTable,
+    Issue,
+    PlanningScope,
+    SourceAssessment,
+)
 from bido_back.purchasing.sources.mapping import Mapper, map_sources
+from bido_back.purchasing.sources.planning import assess_plan, planning_context
 from bido_back.purchasing.sources.readers import SourceDocument, read_source
 from bido_back.purchasing.sources.snapshots import find_snapshot, save_snapshot
 from bido_back.storage import BlobStorage
@@ -32,6 +39,8 @@ async def analyze_documents(
     objective: str,
     context: ToolContext,
     mapper: Mapper,
+    *,
+    scope: PlanningScope | None = None,
 ) -> SourceAssessment:
     tables: list[EvidenceTable] = []
     issues: list[Issue] = []
@@ -51,7 +60,17 @@ async def analyze_documents(
                 )
             )
     records, problems, coverage = await map_sources(tables, objective, context, mapper)
-    result = assess(records)
+    candidates, snapshot_dates = planning_context(records)
+    result = assess(records) if scope is None else assess_plan(records, scope)
+    if scope is None and any(record.kind == "production_plan" for record in records):
+        result.issues.append(
+            Issue(
+                code="missing_planning_scope",
+                severity="blocker",
+                message="Production and BOM evidence need a product/area, location, snapshot "
+                "date and horizon in scope. Re-run with the buyer's planning boundaries.",
+            )
+        )
     result.issues.extend([*issues, *problems])
     if not result.lines:
         result.issues.append(
@@ -71,6 +90,9 @@ async def analyze_documents(
             line.ready = False
     return SourceAssessment(
         **result.model_dump(),
+        scope=scope,
+        planning_candidates=candidates,
+        snapshot_dates=snapshot_dates,
         coverage=all_coverage,
         status=(
             "assessed"
@@ -93,6 +115,7 @@ async def analyze_uploads(
     mapper: Mapper,
     *,
     persist: bool = False,
+    scope: PlanningScope | None = None,
 ) -> SourceAssessment:
     documents: list[SourceDocument] = []
     # Check ALL IDs before fetching any content. The tenant helper and user ownership
@@ -122,8 +145,9 @@ async def analyze_uploads(
     source_key = hashlib.sha256(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "objective": objective,
+                "scope": scope.model_dump(mode="json") if scope is not None else None,
                 "sources": sorted(
                     (doc.source_id, hashlib.sha256(doc.data).hexdigest()) for doc in documents
                 ),
@@ -135,7 +159,7 @@ async def analyze_uploads(
         existing = await find_snapshot(db, principal, source_key)
         if existing is not None:
             return existing
-    assessment = await analyze_documents(documents, objective, context, mapper)
+    assessment = await analyze_documents(documents, objective, context, mapper, scope=scope)
     if not persist:
         return assessment
     return await save_snapshot(
