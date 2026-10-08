@@ -479,6 +479,22 @@ async def scenario_copilot(env: Env, fixture: Fixture, result: RunResult) -> Non
         if golden is not None:
             conversation, turn = await _turn(env, principal, conversation, "Pode criar a RFQ.", [])
             turns.append(turn)
+            proposed: object = turn.outputs.get("create_rfq_from_analysis")
+            awaiting = (
+                isinstance(proposed, dict)
+                and cast(dict[str, object], proposed).get("awaiting_confirmation") is True
+            )
+            # The RFQ is only proposed in that reply; the buyer's next message confirms it.
+            result.check(
+                "asked_before_creating_rfq",
+                awaiting,
+                "the RFQ was not proposed for the buyer to confirm first",
+            )
+            if awaiting:
+                conversation, turn = await _turn(
+                    env, principal, conversation, "Sim, pode criar.", []
+                )
+                turns.append(turn)
             await _check_context(env, principal, conversation, fixture, result, turns)
         result.notes["answers"] = [t.answer[:600] for t in turns]
         result.notes["tools"] = [t.tools for t in turns]
@@ -629,6 +645,8 @@ async def _mock_conversation(
     from bido_back.copilot.tools import CopilotToolDeps, copilot_tools
     from bido_back.rfqs.agents import default_rfq_agents
 
+    conversation = uuid4()
+
     def tools_for(*, attached: bool) -> dict[str, AnyTool]:
         # One message attaches the file; the buyer's answer comes in the next one.
         return {
@@ -643,15 +661,17 @@ async def _mock_conversation(
                     storage=env.storage,
                     sheet_mapper=scripted_mapper(fixture),
                     today=lambda: env.today,
+                    conversation_id=conversation,
                 )
             )
         }
 
-    ctx = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
     calls: list[tuple[str, bool]] = []
 
     async def call(tools: dict[str, AnyTool], name: str, **args: object) -> Any:
         tool = tools[name]
+        # Each call stands for a message of its own (its own run), as in a conversation.
+        ctx = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
         try:
             out = await tool.invoke(ctx, tool.parse_input(args))
         except Exception:  # a ToolError: the model would see it and answer
@@ -672,7 +692,13 @@ async def _mock_conversation(
         quantity=int(fixture.quantity) if fixture.quantity is not None else None,
     )
     if analysis is not None:
-        await call(tools, "create_rfq_from_analysis", analysis_id=str(analysis.analysis_id))
+        rfq = {"analysis_id": str(analysis.analysis_id)}
+        proposed = await call(tools, "create_rfq_from_analysis", **rfq)
+        if proposed is not None and proposed.awaiting_confirmation:
+            # The buyer confirms the proposal in their next message.
+            await call(
+                tools, "create_rfq_from_analysis", **rfq, proposal_id=str(proposed.proposal_id)
+            )
     turns.append(Turn("", calls, {}))
 
 

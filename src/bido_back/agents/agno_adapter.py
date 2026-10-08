@@ -675,7 +675,9 @@ class _Translator:
         events: list[Event] = [
             self._emit(ToolResult, call_id=call_id, tool=tool.name, ok=True, output=outcome.output)
         ]
-        if tool.artifact_kind is not None:
+        if tool.artifact_kind is not None and (
+            tool.artifact_if is None or tool.artifact_if(outcome.output or {})
+        ):
             events.append(self._emit(Artifact, kind=tool.artifact_kind, data=outcome.output))
         return events
 

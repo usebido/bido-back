@@ -1,5 +1,6 @@
 """The copilot's tools against Postgres: tenant isolation, history queries, draft actions."""
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -13,6 +14,7 @@ from bido_back.agents.tools import ToolError
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
+    CopilotProposal,
     Invite,
     Rfq,
     RfqLine,
@@ -144,8 +146,8 @@ async def test_prepare_send_records_approvals_and_sends_nothing(
     tools = make_tools(app_engine, attachments_text="[bom.xlsx] 4000 MLCC")
     ctx = context_of(principal)
 
-    created = await tools.call(ctx, "create_rfq", currency="EUR", text="MLCC and connectors")
-    invited = await tools.call(
+    created = await tools.confirmed(ctx, "create_rfq", currency="EUR", text="MLCC and connectors")
+    invited = await tools.confirmed(
         ctx, "invite_suppliers", rfq=created.ref, supplier_ids=[str(rhein.id)]
     )
     prepared = await tools.call(ctx, "prepare_send", rfq=created.ref)
@@ -169,8 +171,10 @@ async def test_create_rfq_reads_the_attachments_and_no_tool_acts(
     tools = make_tools(app_engine, attachments_text="[bom.xlsx] 4000 MLCC")
     ctx = context_of(buyer_of(copilot_rows))
 
-    await tools.call(ctx, "create_rfq", currency="EUR", text="Quote this BOM")
-    await tools.call(ctx, "create_rfq", currency="EUR", text="Only this", include_attachments=False)
+    await tools.confirmed(ctx, "create_rfq", currency="EUR", text="Quote this BOM")
+    await tools.confirmed(
+        ctx, "create_rfq", currency="EUR", text="Only this", include_attachments=False
+    )
 
     texts = [call[0].text for call in tools.intake.calls]
     assert texts == ["Quote this BOM\n\n[bom.xlsx] 4000 MLCC", "Only this"]
@@ -192,8 +196,8 @@ async def test_create_rfq_reads_earlier_files_only_when_this_message_has_none(
         earlier_attachments_text="[bom.xlsx] old",
     )
 
-    await later.call(ctx, "create_rfq", currency="EUR", text="Quote the BOM I sent")
-    await fresh.call(ctx, "create_rfq", currency="EUR", text="Quote this one")
+    await later.confirmed(ctx, "create_rfq", currency="EUR", text="Quote the BOM I sent")
+    await fresh.confirmed(ctx, "create_rfq", currency="EUR", text="Quote this one")
 
     assert [call[0].text for call in later.intake.calls] == [
         "Quote the BOM I sent\n\n[bom.xlsx] old"
@@ -208,7 +212,7 @@ async def test_create_rfq_hands_the_buyers_own_words_to_intake(
     tools = make_tools(app_engine, buyer_messages=said)
     ctx = context_of(buyer_of(copilot_rows))
 
-    created = await tools.call(ctx, "create_rfq", currency="EUR", text="4000 capacitors")
+    created = await tools.confirmed(ctx, "create_rfq", currency="EUR", text="4000 capacitors")
 
     [(task, _)] = tools.intake.calls
     assert task.text == "4000 capacitors" and task.buyer_messages == list(said)
@@ -269,7 +273,7 @@ async def test_editing_a_draft_rfq_by_position(
     principal = buyer_of(copilot_rows)
     tools = make_tools(app_engine)
     ctx = context_of(principal)
-    created = await tools.call(ctx, "create_rfq", currency="EUR", text="MLCC and connectors")
+    created = await tools.confirmed(ctx, "create_rfq", currency="EUR", text="MLCC and connectors")
     ref = created.ref
 
     edited = await tools.call(
@@ -343,8 +347,8 @@ async def test_lines_are_frozen_once_emails_are_prepared(
     rhein = await supplier(app_engine, principal, "Rhein")
     tools = make_tools(app_engine)
     ctx = context_of(principal)
-    created = await tools.call(ctx, "create_rfq", currency="EUR", text="MLCC and connectors")
-    await tools.call(ctx, "invite_suppliers", rfq=created.ref, supplier_ids=[str(rhein.id)])
+    created = await tools.confirmed(ctx, "create_rfq", currency="EUR", text="MLCC and connectors")
+    await tools.confirmed(ctx, "invite_suppliers", rfq=created.ref, supplier_ids=[str(rhein.id)])
     await tools.call(ctx, "prepare_send", rfq=created.ref)
 
     with pytest.raises(ToolError, match="frozen"):
@@ -364,8 +368,8 @@ async def test_without_a_reply_by_date_the_model_is_told_to_ask_for_one(
         assert "reply-by date" in tools.tools[name].description
         assert "set_rfq_terms" in tools.tools[name].description
 
-    created = await tools.call(ctx, "create_rfq", text="MLCC and connectors", currency="EUR")
-    await tools.call(ctx, "invite_suppliers", rfq=created.ref, supplier_ids=[str(rhein.id)])
+    created = await tools.confirmed(ctx, "create_rfq", text="MLCC and connectors", currency="EUR")
+    await tools.confirmed(ctx, "invite_suppliers", rfq=created.ref, supplier_ids=[str(rhein.id)])
     async with tenant_session(app_engine, principal.tenant_id) as session:
         await session.execute(update(Rfq).where(Rfq.id == created.id).values(response_due=None))
 
@@ -399,7 +403,7 @@ async def test_set_rfq_terms_stores_and_clears_payment_terms_and_quote_validity(
     principal = buyer_of(copilot_rows)
     tools = make_tools(app_engine)
     ctx = context_of(principal)
-    created = await tools.call(ctx, "create_rfq", text="MLCC and connectors", currency="EUR")
+    created = await tools.confirmed(ctx, "create_rfq", text="MLCC and connectors", currency="EUR")
     ref = created.ref
 
     termed = await tools.call(
@@ -440,14 +444,14 @@ async def test_a_preliminary_rfq_is_not_prepared_for_sending(
     tools = make_tools(app_engine)
     ctx = context_of(principal)
 
-    created = await tools.call(
+    created = await tools.confirmed(
         ctx,
         "create_rfq",
         text="MLCC and connectors",
         currency="EUR",
         pending_validation="engineering validation of the BOM",
     )
-    await tools.call(ctx, "invite_suppliers", rfq=created.ref, supplier_ids=[str(rhein.id)])
+    await tools.confirmed(ctx, "invite_suppliers", rfq=created.ref, supplier_ids=[str(rhein.id)])
 
     assert created.title.startswith("PRELIMINARY (pending engineering validation of the BOM): ")
     with pytest.raises(ToolError, match="is preliminary"):
@@ -474,12 +478,12 @@ async def test_create_rfq_never_guesses_the_currency(
 
     # No purchase history and the buyer named no currency: the model is told to ask.
     with pytest.raises(ToolError, match=r"ask the buyer which currency this RFQ is in"):
-        await tools.call(ctx, "create_rfq", text="400 rolamentos 6205")
+        await tools.confirmed(ctx, "create_rfq", text="400 rolamentos 6205")
     with pytest.raises(ToolError, match="ISO 4217"):
-        await tools.call(ctx, "create_rfq", text="400 rolamentos 6205", currency="reais")
+        await tools.confirmed(ctx, "create_rfq", text="400 rolamentos 6205", currency="reais")
     assert tools.intake.calls == []
 
-    created = await tools.call(ctx, "create_rfq", text="400 rolamentos 6205", currency="brl")
+    created = await tools.confirmed(ctx, "create_rfq", text="400 rolamentos 6205", currency="brl")
     assert (created.currency, created.currency_source) == ("BRL", "stated")
 
     changed = await tools.call(ctx, "set_rfq_terms", rfq=created.ref, currency="USD")
@@ -499,3 +503,84 @@ async def test_creation_tools_take_a_currency_and_report_its_source(
     for name in ("create_rfq", "create_rfq_from_analysis"):
         assert "currency_source" in tools.tools[name].output_model.model_json_schema()["properties"]
         assert "currency_source" in tools.tools[name].description
+
+
+async def test_nothing_is_created_until_the_buyer_confirms_in_a_later_message(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+
+    proposed = await tools.call(ctx, "create_rfq", text="MLCC and connectors", currency="EUR")
+
+    assert proposed.awaiting_confirmation and proposed.id is None
+    assert proposed.preview is not None
+    assert [(line.description, line.unit) for line in proposed.preview.lines] == [
+        ("MLCC 100nF 50V X7R 0603", "pcs"),
+        ("Board-to-board connector 40 pin", "pcs"),
+    ]
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        assert list(await session.scalars(select(Rfq))) == []
+    proposal_id = str(proposed.proposal_id)
+
+    # The same run cannot confirm its own proposal: the buyer has not answered.
+    with pytest.raises(ToolError, match="has not confirmed yet"):
+        await tools.call(ctx, "create_rfq", text="MLCC and connectors", proposal_id=proposal_id)
+
+    # The buyer's next message: the STORED draft is created, whatever the model passes now,
+    # and the intake agent is not asked again.
+    later = replace(ctx, run_id=uuid4())
+    created = await tools.call(later, "create_rfq", text="something else", proposal_id=proposal_id)
+    assert not created.awaiting_confirmation and created.ref == "RFQ-1"
+    assert [line.description for line in created.lines] == [
+        "MLCC 100nF 50V X7R 0603",
+        "Board-to-board connector 40 pin",
+    ]
+    assert [call[0].text for call in tools.intake.calls] == ["MLCC and connectors"]
+
+    with pytest.raises(ToolError, match="already confirmed"):
+        await tools.call(
+            replace(ctx, run_id=uuid4()), "create_rfq", text="x", proposal_id=proposal_id
+        )
+
+
+async def test_a_proposal_is_only_confirmed_by_its_owner_in_its_conversation(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+    rhein = await supplier(app_engine, principal, "Rhein")
+    rfq = await make_rfq(app_engine, principal)
+
+    proposed = await tools.call(ctx, "invite_suppliers", rfq=rfq.ref, supplier_ids=[str(rhein.id)])
+    assert proposed.preview is not None and [
+        (s.name, s.email) for s in proposed.preview.suppliers
+    ] == [("Rhein", "sales@rhein.example.test")]
+    pid = str(proposed.proposal_id)
+    args = {"rfq": rfq.ref, "supplier_ids": [str(rhein.id)], "proposal_id": pid}
+    later = replace(ctx, run_id=uuid4())
+
+    # Another conversation of the same buyer, another tenant's buyer, another action.
+    with pytest.raises(ToolError, match="no invite_suppliers proposal"):
+        await make_tools(app_engine).call(later, "invite_suppliers", **args)
+    with pytest.raises(ToolError):
+        other = context_of(other_buyer_of(copilot_rows))
+        await make_tools(app_engine, conversation_id=tools.conversation_id).call(
+            other, "invite_suppliers", **args
+        )
+    with pytest.raises(ToolError, match="no create_rfq proposal"):
+        await tools.call(later, "create_rfq", text="x", proposal_id=pid)
+
+    # Older than a day: proposed again, not confirmed.
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        await session.execute(
+            update(CopilotProposal)
+            .where(CopilotProposal.id == proposed.proposal_id)
+            .values(created_at=datetime.now(UTC) - timedelta(hours=25))
+        )
+    with pytest.raises(ToolError, match="expired"):
+        await tools.call(later, "invite_suppliers", **args)
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        assert list(await session.scalars(select(Invite).where(Invite.rfq_id == rfq.id))) == []
