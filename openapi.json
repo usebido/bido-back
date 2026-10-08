@@ -2424,6 +2424,18 @@
           "detail": {
             "title": "Detail",
             "type": "string"
+          },
+          "request_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Names this request in the api's logs; quote it when reporting the error.",
+            "title": "Request Id"
           }
         },
         "required": [

@@ -135,3 +135,45 @@ async def test_run_forever_stops_on_request() -> None:
 
     assert queue.deleted == ["m1"]
     assert len(seen) == 1
+
+
+async def test_each_job_is_logged_with_its_type_tenant_outcome_and_attempt() -> None:
+    import logging
+
+    from bido_back.logs import JsonFormatter
+
+    class Lines(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.setFormatter(JsonFormatter(service="worker", release=None))
+            self.lines: list[dict[str, object]] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.lines.append(json.loads(self.format(record)))
+
+    ok, failing = envelope(), envelope("explode")
+    queue = FakeQueue(
+        [
+            QueueMessage("m1", "rh-1", json.dumps(ok), receive_count=1),
+            QueueMessage("m2", "rh-2", json.dumps(failing), receive_count=3),
+        ]
+    )
+    handler = Lines()
+    logger = logging.getLogger("bido_back.worker")
+    logger.addHandler(handler)
+    previous = logger.level
+    logger.setLevel(logging.INFO)
+    try:
+        await Worker(queue, registry([])).run_once()
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+    jobs = [line for line in handler.lines if line["msg"] == "job"]
+    assert [(j["job"], j["outcome"], j["attempt"]) for j in jobs] == [
+        ("ping", "handled", 1),
+        ("explode", "failed", 3),
+    ]
+    assert [j["tenant_id"] for j in jobs] == [ok["tenant_id"], failing["tenant_id"]]
+    failure = next(line for line in handler.lines if str(line["msg"]).startswith("handler failed"))
+    assert failure["job"] == "explode" and failure["exc_type"] == "RuntimeError"

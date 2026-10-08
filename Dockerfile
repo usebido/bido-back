@@ -63,6 +63,11 @@ ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
     AGNO_TELEMETRY=false
 
+# The commit this image was built from (deploy-dev passes it); it tags logs and
+# Sentry events with the release. Last, so a new commit reuses every layer above.
+ARG GIT_SHA=""
+ENV GIT_SHA=${GIT_SHA}
+
 USER 10001:10001
 
 EXPOSE 8080

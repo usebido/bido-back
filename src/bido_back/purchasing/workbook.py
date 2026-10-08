@@ -64,6 +64,7 @@ from bido_back.agents.context import ToolContext
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import TemplateUpload
+from bido_back.logs import safe_reason
 from bido_back.purchasing.importers import (
     MAX_ROWS,
     SPECS,
@@ -676,6 +677,7 @@ async def import_workbook(
         parsed.append(_Parsed(section, table, [*notes, *_stock_notes(section, table)]))
     _names_for_codes(parsed)
     if not parsed:
+        _log_import("nothing_found", upload_id, parsed, problems, sheets=len(grids))
         return WorkbookImportReport(
             upload_id=upload_id,
             filename=filename,
@@ -686,11 +688,13 @@ async def import_workbook(
         )
     questions = [q for p in parsed for q in p.doubts()]
     if questions and not confirmed:
-        logger.info(
-            "workbook import needs confirmation tenant=%s upload=%s sections=%d",
-            principal.tenant_id,
+        _log_import(
+            "needs_confirmation",
             upload_id,
-            len(parsed),
+            parsed,
+            problems,
+            sheets=len(grids),
+            questions=len(questions),
         )
         return WorkbookImportReport(
             upload_id=upload_id,
@@ -706,13 +710,7 @@ async def import_workbook(
             created, updated, skipped = await apply_parsed(session, principal.tenant_id, item.table)
             item.report.created, item.report.updated = created, updated
             item.report.skipped = skipped
-    logger.info(
-        "workbook imported tenant=%s upload=%s sections=%d rows=%d",
-        principal.tenant_id,
-        upload_id,
-        len(parsed),
-        sum(p.report.rows_ok for p in parsed),
-    )
+    _log_import("imported", upload_id, parsed, problems, sheets=len(grids), confirmed=confirmed)
     return WorkbookImportReport(
         upload_id=upload_id,
         filename=filename,
@@ -721,6 +719,70 @@ async def import_workbook(
         questions=[],
         problems=problems,
     )
+
+
+_NUMBER: Final = re.compile(r"\d[\d.,]*")
+
+
+def _log_import(
+    status: str,
+    upload_id: UUID,
+    parsed: Sequence[_Parsed],
+    problems: Sequence[str],
+    *,
+    sheets: int,
+    questions: int = 0,
+    confirmed: bool = False,
+) -> None:
+    """A line for the import and one per section: types, counts and error reasons.
+
+    Sheet names, headers and cell values are the buyer's content, so sections
+    are numbered, and row errors are reduced to the field and the masked
+    message ("quantity: not a valid number: '…'"), counted.
+    """
+    logger.info(
+        "workbook import",
+        extra={
+            "upload_id": str(upload_id),
+            "status": status,
+            "confirmed": confirmed,
+            "sheets": sheets,
+            "sections": len(parsed),
+            "questions": questions,
+            "problems": len(problems),
+            "rows_ok": sum(p.report.rows_ok for p in parsed),
+            "rows_failed": sum(p.report.rows_failed for p in parsed),
+        },
+    )
+    for index, item in enumerate(parsed):
+        report = item.report
+        reasons: dict[str, int] = {}
+        for error in item.table.errors:
+            text = f"{error.field + ': ' if error.field else ''}{error.message}"
+            # An unquoted cell value is a number; mask those too.
+            key = _NUMBER.sub("<n>", safe_reason(text, 120))
+            reasons[key] = reasons.get(key, 0) + 1
+        top = sorted(reasons.items(), key=lambda kv: -kv[1])[:5]
+        logger.log(
+            logging.WARNING if report.rows_failed or report.missing_required else logging.INFO,
+            "workbook section",
+            extra={
+                "upload_id": str(upload_id),
+                "section": index,
+                "type": report.type,
+                "source": report.source,
+                "header_row": report.header_row,
+                "confidence": report.confidence,
+                "rows_total": report.rows_total,
+                "rows_ok": report.rows_ok,
+                "rows_failed": report.rows_failed,
+                "rows_skipped": report.rows_skipped,
+                "missing_required": report.missing_required,
+                "columns_mapped": len(report.columns),
+                "has_question": report.question is not None,
+                "error_reasons": [f"{count}x {reason}" for reason, count in top],
+            },
+        )
 
 
 def _number_cells(section: Section, grid: SheetGrid) -> list[object]:

@@ -25,6 +25,7 @@ import asyncio
 import json
 import logging
 import signal
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
@@ -36,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.approvals.executor import APPROVAL_EXECUTE_JOB, ActToolRegistry, ApprovalExecutor
 from bido_back.db import create_engine
+from bido_back.logs import bind, configure_logging
 from bido_back.observability import init_observability
 from bido_back.settings import Settings, get_settings
 from bido_back.worker.envelope import Envelope
@@ -206,6 +208,8 @@ class QueueMessage:
     message_id: str
     receipt_handle: str
     body: str
+    # SQS's ApproximateReceiveCount: 1 on the first delivery. None when unknown.
+    receive_count: int | None = None
 
 
 class QueueClient(Protocol):
@@ -251,11 +255,15 @@ class SqsQueueClient:
             QueueUrl=self._queue_url,
             MaxNumberOfMessages=max_messages,
             WaitTimeSeconds=wait_seconds,
+            MessageSystemAttributeNames=["ApproximateReceiveCount"],
         )
-        raw = cast(list[dict[str, str]], response.get("Messages", []))
+        raw = cast(list[dict[str, object]], response.get("Messages", []))
         return [
             QueueMessage(
-                message_id=m["MessageId"], receipt_handle=m["ReceiptHandle"], body=m["Body"]
+                message_id=str(m["MessageId"]),
+                receipt_handle=str(m["ReceiptHandle"]),
+                body=str(m["Body"]),
+                receive_count=_receive_count(m.get("Attributes")),
             )
             for m in raw
         ]
@@ -290,6 +298,16 @@ class SqsQueueClient:
         )
 
 
+def _receive_count(attributes: object) -> int | None:
+    if not isinstance(attributes, Mapping):
+        return None
+    value = cast(Mapping[str, object], attributes).get("ApproximateReceiveCount")
+    try:
+        return int(str(value)) if value is not None else None
+    except ValueError:
+        return None
+
+
 def _boto3_sqs(region: str) -> _SqsApi:
     import boto3  # pyright: ignore[reportMissingTypeStubs]
 
@@ -297,6 +315,19 @@ def _boto3_sqs(region: str) -> _SqsApi:
 
 
 # --- Worker ----------------------------------------------------------------
+
+
+def _log_job(message: QueueMessage, outcome: Outcome, started: float) -> None:
+    """One line per job: outcome, duration and delivery attempt (job and tenant are bound)."""
+    logger.log(
+        logging.INFO if outcome == "handled" else logging.WARNING,
+        "job",
+        extra={
+            "outcome": outcome,
+            "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+            "attempt": message.receive_count,
+        },
+    )
 
 
 class Worker:
@@ -335,22 +366,26 @@ class Worker:
         if handler is None:
             return await self._park(message, "unknown_type", envelope)
 
-        try:
-            await handler(envelope)
-        except Exception:
-            # Left on the queue: it becomes visible again after the visibility
-            # timeout and is retried.
-            logger.exception(
-                "handler failed type=%s tenant=%s key=%s message=%s",
-                envelope.type,
-                envelope.tenant_id,
-                envelope.idempotency_key,
-                message.message_id,
-            )
-            return "failed"
+        with bind(job=envelope.type, tenant_id=envelope.tenant_id, message_id=message.message_id):
+            started = time.perf_counter()
+            try:
+                await handler(envelope)
+            except Exception:
+                # Left on the queue: it becomes visible again after the visibility
+                # timeout and is retried.
+                logger.exception(
+                    "handler failed type=%s tenant=%s key=%s message=%s",
+                    envelope.type,
+                    envelope.tenant_id,
+                    envelope.idempotency_key,
+                    message.message_id,
+                )
+                _log_job(message, "failed", started)
+                return "failed"
 
-        await self._queue.delete(message)
-        return "handled"
+            await self._queue.delete(message)
+            _log_job(message, "handled", started)
+            return "handled"
 
     async def run_once(self) -> list[Outcome]:
         messages = await self._queue.receive(
@@ -409,8 +444,8 @@ async def main() -> None:
     from bido_back.fx.ecb import refresh_if_stale
     from bido_back.intake.consumer import build_intake_consumer, sqs_client
 
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     settings = get_settings()
+    configure_logging(settings, service="worker")
     init_observability(settings, service="worker")
     if not settings.sqs_queue_url:
         raise SystemExit("SQS_QUEUE_URL is not set")

@@ -404,7 +404,7 @@ async def test_me_over_http_with_v1_and_v2_org_claims(
         await resources.aclose()
 
     assert no_org.status_code == 403
-    assert no_org.json() == {"detail": "select an organization"}
+    assert no_org.json()["detail"] == "select an organization"
     assert v2.status_code == 200, v2.text
     assert v2.json()["clerk_org_id"] == org_id
     assert v2.json()["allow_self_approval"] is True
@@ -426,4 +426,4 @@ async def test_me_over_http_refuses_unlinked_orgs_without_auto_provision(
         await resources.aclose()
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "organization not enabled"}
+    assert response.json()["detail"] == "organization not enabled"

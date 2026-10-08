@@ -135,6 +135,8 @@ jobs:
           push: true
           # ECR tags are immutable: one image per commit, never overwritten.
           tags: ${{ steps.preflight.outputs.image }}
+          build-args: |
+            GIT_SHA=${{ steps.preflight.outputs.tag }}
           provenance: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
