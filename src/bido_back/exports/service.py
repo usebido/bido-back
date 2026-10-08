@@ -44,6 +44,9 @@ RFQ_LIST_HEADER: Final = (
     "Due",
     "Owner",
     "Created",
+    # Appended, so files read by column position keep working.
+    "Payment terms",
+    "Quote validity (days)",
 )
 
 COMPARISON_HEADER: Final = (
@@ -173,6 +176,8 @@ async def export_rfq_list(db: Db, principal: Principal, today: date) -> Table:
             rfq.response_due,
             owners.get(rfq.created_by),
             rfq.created_at.date(),
+            rfq.payment_terms,
+            rfq.quote_validity_days,
         ]
         for rfq in rfqs
     ]

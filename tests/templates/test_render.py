@@ -58,6 +58,8 @@ def render(
     display: TemplateContent | None = None,
     lines: tuple[RenderLine, ...] = (THERMISTOR, CAPACITOR),
     due: date | None = date(2026, 10, 20),
+    payment_terms: str | None = None,
+    quote_validity_days: int | None = None,
 ) -> RenderedRfq:
     return render_rfq(
         RenderInput(
@@ -70,6 +72,8 @@ def render(
             template=template,
             display=display or template,
             lines=lines,
+            payment_terms=payment_terms,
+            quote_validity_days=quote_validity_days,
         )
     )
 
@@ -244,3 +248,48 @@ def test_the_part_number_column_leads_with_the_buyers_code() -> None:
         "TH-NTC-10K",
         "NCP18XH103F03RB",
     ]
+
+
+def test_the_buyers_terms_are_stated_only_when_set() -> None:
+    plain = render(BUYER_TEMPLATE)
+    termed = render(BUYER_TEMPLATE, payment_terms="28 DDL", quote_validity_days=30)
+    english = render(STANDARD_TEMPLATE, language="en", payment_terms="30 days net")
+
+    payment = "Nossa condição de pagamento: 28 DDL"
+    validity = "Por favor, mantenha a proposta válida por no mínimo 30 dias."
+    for rendered in (termed.text, termed.html):
+        assert payment in rendered and validity in rendered
+    # After the questions and the alternative-part note, before the due date.
+    paragraphs = termed.text.split("\n\n")
+    at = paragraphs.index(f"{payment}\n{validity}")
+    assert paragraphs[at - 1].startswith("Se oferecer um item alternativo")
+    assert paragraphs[at + 1] == "Por favor, envie sua proposta até 20/10/2026."
+    # Unset: no statement at all; the footer's own question to the supplier stays.
+    assert "Nossa condição de pagamento" not in plain.text
+    assert "válida por no mínimo" not in plain.text
+    assert "- Condição de pagamento" in plain.text and "- Condição de pagamento" in termed.text
+    assert "Our payment terms: 30 days net" in english.text
+    assert "Please keep your quote valid" not in english.text
+
+
+def test_the_email_checks_require_the_payment_terms_when_set() -> None:
+    task = RfqEmailInput(
+        rfq_ref="RFQ-7",
+        rfq_title="BMS board rev C passives",
+        buyer_company="Voltwerk Ltda",
+        buyer_name="Carla Souza",
+        supplier_name="Rhein",
+        supplier_language="pt",
+        lines=[],
+        payment_terms="28 DDL",
+    )
+    with_terms = render(BUYER_TEMPLATE, payment_terms="28 DDL", quote_validity_days=30)
+    without = render(BUYER_TEMPLATE)
+
+    def problems(rendered: RenderedRfq) -> list[str]:
+        return rfq_email_problems(
+            task, RfqEmailOutput(subject=rendered.subject, body=rendered.text)
+        )
+
+    assert problems(with_terms) == []
+    assert problems(without) == ["payment_terms_missing"]

@@ -179,6 +179,8 @@ class RfqStatusOut(BaseModel):
     title: str
     status: str
     response_due: date | None
+    payment_terms: str | None
+    quote_validity_days: int | None
     lines: list[LineItem]
     invites: list[InviteItem]
     invites_by_status: dict[str, int]
@@ -448,6 +450,16 @@ class RemoveRfqLineIn(BaseModel):
     position: int = Field(ge=1, description="The line's position, as shown")
 
 
+_TERMS_FIELDS = Literal[
+    "incoterm",
+    "delivery_location",
+    "need_by",
+    "response_due",
+    "payment_terms",
+    "quote_validity_days",
+]
+
+
 class SetRfqTermsIn(BaseModel):
     rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
     incoterm: str | None = Field(
@@ -457,6 +469,24 @@ class SetRfqTermsIn(BaseModel):
     need_by: date | None = Field(default=None, description="For every line")
     response_due: date | None = Field(default=None, description="When suppliers must answer")
     title: str | None = Field(default=None, min_length=1, max_length=500)
+    payment_terms: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description=(
+            "The buyer's payment terms for suppliers, exactly as they wrote them "
+            "(e.g. '28 DDL', '30 days net'). Stated in the RFQ email"
+        ),
+    )
+    quote_validity_days: int | None = Field(
+        default=None,
+        ge=1,
+        le=365,
+        description="How many days suppliers' quotes must stay valid, at least (1-365)",
+    )
+    clear: list[_TERMS_FIELDS] = Field(
+        default_factory=list[_TERMS_FIELDS], description="Optional terms to empty"
+    )
 
 
 class EditedRfqOut(BaseModel):
@@ -465,6 +495,9 @@ class EditedRfqOut(BaseModel):
     title: str
     status: str
     response_due: date | None
+    # What is stored now: report these, not what was asked for.
+    payment_terms: str | None
+    quote_validity_days: int | None
     lines: list[LineItem]
 
 
@@ -484,6 +517,8 @@ def _edited(detail: RfqDetail) -> EditedRfqOut:
         title=detail.title,
         status=detail.status,
         response_due=detail.response_due,
+        payment_terms=detail.payment_terms,
+        quote_validity_days=detail.quote_validity_days,
         lines=[
             LineItem(
                 position=line.position,
@@ -838,6 +873,8 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             title=rfq.title,
             status=rfq.status,
             response_due=rfq.response_due,
+            payment_terms=rfq.payment_terms,
+            quote_validity_days=rfq.quote_validity_days,
             lines=[_line_item(line) for line in lines],
             invites=invites,
             invites_by_status=queries.count_by([i.status for i in invites]),
@@ -1142,13 +1179,14 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
     async def set_rfq_terms(ctx: ToolContext, args: SetRfqTermsIn) -> EditedRfqOut:
         async with tenant_session(db, ctx.tenant_id) as session:
             rfq = await _rfq(session, args.rfq)
-        changes = {
+        changes: dict[str, object] = {
             field: value
-            for field, value in args.model_dump(exclude={"rfq"}).items()
+            for field, value in args.model_dump(exclude={"rfq", "clear"}).items()
             if value is not None
         }
+        changes.update({field: None for field in args.clear})
         if not changes:
-            raise ToolError("nothing to change: pass the terms to set")
+            raise ToolError("nothing to change: pass the terms to set or to clear")
         patch = _request(UpdateRfqRequest, changes)
         try:
             return _edited(await rfq_service.update_rfq(db, _principal(ctx), rfq.id, patch))
@@ -1617,7 +1655,11 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         Tool(
             "set_rfq_terms",
             "Set a draft RFQ's terms for every line at once: Incoterm, delivery location, "
-            "need-by date; and the RFQ's response date or title." + _DRAFT_ONLY,
+            "need-by date; and the RFQ's response date, title, payment terms (the buyer's "
+            "words, e.g. '28 DDL') and minimum quote validity in days. The RFQ email states "
+            "the payment terms and validity to suppliers. Only the fields passed change; "
+            "`clear` empties optional ones. The result is what is stored: report those "
+            "values, and never claim a term the result does not show." + _DRAFT_ONLY,
             SetRfqTermsIn,
             EditedRfqOut,
             "draft",

@@ -162,6 +162,8 @@ async def list_rfq_overviews(
             status=cast(RfqStatus, rfq.status),
             response_due=rfq.response_due,
             created_at=rfq.created_at,
+            payment_terms=rfq.payment_terms,
+            quote_validity_days=rfq.quote_validity_days,
             stage=derive_stage(rfq.status, rfq.negotiation_status, facts[rfq.id]),
             next_step=derive_next_step(rfq.status, rfq.negotiation_status, facts[rfq.id]),
             supplier_names=facts[rfq.id].suppliers,
