@@ -23,6 +23,13 @@ Flow:
    approver of record, through the same executor (once, hash-checked).
 4. Pausing stops step 3 at once; closing the negotiation ends the mandate.
 
+A mandate can be proposed and approved before the buyer connects a mailbox:
+the emails are rendered and the limits approved, but nothing is approved for
+sending until the buyer's mailbox is connected. Until then the in-bounds emails
+wait (`mailbox_not_connected` in the activity, not held for a person). The
+connect endpoint and the worker's mailbox sync (every couple of minutes) run
+the sweep for the tenant, which releases them through the same checks, once.
+
 Awards and purchase orders are never covered: they keep their own approval.
 Logs carry ids, counts and reasons only.
 """
@@ -55,6 +62,7 @@ from bido_back.db.models import (
     AuditEvent,
     Contact,
     Invite,
+    MailboxConnection,
     MandateSend,
     NegotiationMandate,
     NegotiationMessage,
@@ -186,7 +194,8 @@ async def propose_mandate(
         )
         rfq_ref, currency = rfq.ref, rfq.base_currency
 
-    prepared = await prepare_send(db, principal, rfq_id, writer, mailboxes)
+    # No mailbox needed to propose: sends wait for one (see the module docstring).
+    prepared = await prepare_send(db, principal, rfq_id, writer, mailboxes, require_mailbox=False)
 
     async with tenant_session(db, principal.tenant_id) as session:
         initial: list[MandateInitialEmail] = []
@@ -281,7 +290,9 @@ async def propose_mandate(
         recipients = await check_recipients(
             session, principal.tenant_id, addresses, resolver or default_resolver()
         )
+        connected = await mailbox_connected(session, principal.tenant_id, principal.user_id)
     return ProposedMandate(
+        mailbox_connected=connected,
         recipients=recipients,
         rfq_id=rfq_id,
         approval_id=approval_id,
@@ -292,12 +303,28 @@ async def propose_mandate(
     )
 
 
+async def mailbox_connected(session: AsyncSession, tenant_id: UUID, user_id: UUID) -> bool:
+    """Whether `user_id` has an active mailbox connection (sends go out from it)."""
+    found = await session.scalar(
+        select(MailboxConnection.id)
+        .where(
+            MailboxConnection.tenant_id == tenant_id,
+            MailboxConnection.user_id == user_id,
+            MailboxConnection.status == "active",
+        )
+        .limit(1)
+    )
+    return found is not None
+
+
 # --- Executing the approved mandate ------------------------------------------------------
 
 
 class MandateOutcome(BaseModel):
     mandate_id: UUID
     initial_emails_approved: int
+    # In bounds, waiting for the buyer to connect a mailbox (released on connect).
+    initial_emails_waiting: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,6 +461,8 @@ class _ApproveMandate:
             )
             session.add(mandate)
             await session.flush()
+            connected = await mailbox_connected(session, ctx.tenant_id, args.sender_user_id)
+            waiting = 0
             for email in args.initial_emails:
                 row = await session.scalar(
                     select(Approval).where(Approval.id == email.approval_id).with_for_update()
@@ -455,8 +484,22 @@ class _ApproveMandate:
                 ):
                     _hold(session, row, mandate, email.invite_id, "recipient_domain_unconfirmed")
                     continue
+                if not connected:
+                    # In bounds, but nothing can go out yet: left pending, released
+                    # by `auto_approve_pending` once the mailbox is connected.
+                    waiting += 1
+                    continue
                 await _mark_auto_approved(session, row, mandate, email.invite_id, now)
                 approved.append(row.id)
+            if waiting:
+                session.add(
+                    AuditEvent(
+                        tenant_id=ctx.tenant_id,
+                        actor_user_id=ctx.user_id,
+                        action="mandate.waiting_for_mailbox",
+                        payload={"mandate_id": str(mandate.id), "emails": waiting},
+                    )
+                )
             session.add(
                 AuditEvent(
                     tenant_id=ctx.tenant_id,
@@ -481,7 +524,11 @@ class _ApproveMandate:
             mandate_id,
             len(approved),
         )
-        return MandateOutcome(mandate_id=mandate_id, initial_emails_approved=len(approved))
+        return MandateOutcome(
+            mandate_id=mandate_id,
+            initial_emails_approved=len(approved),
+            initial_emails_waiting=waiting,
+        )
 
 
 async def _enqueue(jobs: JobQueue | None, tenant_id: UUID, approval_ids: Sequence[UUID]) -> None:
@@ -565,6 +612,8 @@ async def _check(
     mandate: NegotiationMandate,
     terms: ApproveMandateArgs,
     now: datetime,
+    *,
+    mailbox_ready: bool = True,
 ) -> tuple[UUID | None, str | None, bool]:
     """(invite_id, reason to hold or None, retry later). Pure reads."""
     if not payload_matches(approval):
@@ -609,6 +658,9 @@ async def _check(
         return invite_id, "recipient_domain_unconfirmed", False
     if texts and commitment_language(*texts):
         return invite_id, "commitment_language", False
+    # No mailbox yet: not a reason to hold; the email waits for the connection.
+    if not mailbox_ready:
+        return invite_id, None, True
     # Daily cap: not a reason to hold; the email waits for the next window.
     sent_today = await session.scalar(
         select(func.count()).where(
@@ -645,15 +697,17 @@ async def auto_approve_pending(
         for mandate in mandates:
             terms = ApproveMandateArgs.model_validate(mandate.terms)
             rfq = await session.get(Rfq, mandate.rfq_id)
+            # Still a draft when the RFQ emails waited for the mailbox: none went out yet.
             if (
                 rfq is None
-                or rfq.status != "open"
+                or rfq.status not in ("draft", "open")
                 or rfq.negotiation_status not in ("open", "ready_to_close")
                 or at >= mandate.deadline
             ):
                 continue
             lines = list(await session.scalars(select(RfqLine).where(RfqLine.rfq_id == rfq.id)))
             unchanged = _limits_unchanged(rfq, lines, terms)
+            ready = await mailbox_connected(session, tenant_id, terms.sender_user_id)
             decided = select(MandateSend.approval_id).where(MandateSend.mandate_id == mandate.id)
             pending = list(
                 await session.scalars(
@@ -673,7 +727,9 @@ async def auto_approve_pending(
                     _hold(session, approval, mandate, None, "limits_changed")
                     result.held += 1
                     continue
-                invite_id, reason, retry = await _check(session, approval, mandate, terms, at)
+                invite_id, reason, retry = await _check(
+                    session, approval, mandate, terms, at, mailbox_ready=ready
+                )
                 if retry:
                     continue
                 if reason is not None:
@@ -816,7 +872,25 @@ async def get_activity(db: Db, principal: Principal, rfq_id: UUID) -> MandateAct
             )
             for send, approval in rows
         ]
-        return MandateActivity(rfq_id=rfq_id, mandate=_view(mandate), items=items)
+        terms = ApproveMandateArgs.model_validate(mandate.terms)
+        activity = MandateActivity(rfq_id=rfq_id, mandate=_view(mandate), items=items)
+        if mandate.status != "ended" and not await mailbox_connected(
+            session, principal.tenant_id, terms.sender_user_id
+        ):
+            decided = select(MandateSend.approval_id).where(MandateSend.mandate_id == mandate.id)
+            activity.waiting_reason = "mailbox_not_connected"
+            activity.waiting_emails = (
+                await session.scalar(
+                    select(func.count()).where(
+                        Approval.session_id == f"rfq:{rfq_id}",
+                        Approval.tool.in_(AUTO_TOOLS),
+                        Approval.status == "pending",
+                        Approval.id.not_in(decided),
+                    )
+                )
+                or 0
+            )
+        return activity
 
 
 def _subject(approval: Approval) -> str | None:

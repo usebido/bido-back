@@ -18,7 +18,8 @@ from sqlalchemy import delete, select, text, update
 from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from bido_back.api.deps import ApiResources, get_db, get_principal
+from bido_back.api import mailbox as mailbox_api
+from bido_back.api.deps import ApiResources, get_db, get_optional_job_queue, get_principal
 from bido_back.api.mailbox import get_mailbox_http, mailbox_router
 from bido_back.auth import Principal
 from bido_back.db import create_sessionmaker, tenant_session
@@ -39,6 +40,7 @@ from bido_back.mailbox.service import (
 from bido_back.rfqs.errors import MailboxNotConnected as RfqMailboxNotConnected
 from bido_back.rfqs.mailbox import default_mailbox_sender
 
+from ..approvals.conftest import FakeJobQueue
 from ..db.conftest import TwoTenants
 from .support import BUYER, FERNET_KEY, SUPPLIER, json_response, make_settings, raw_email
 
@@ -504,6 +506,7 @@ class Api:
     # The signed-in caller; tests switch it to act as another user.
     principal: Principal
     tenants: TwoTenants
+    app: FastAPI
 
 
 @pytest_asyncio.fixture
@@ -541,6 +544,7 @@ async def api(app_engine: AsyncEngine, tenants: TwoTenants) -> AsyncIterator[Api
             http=http,
             principal=Principal(tenant_id=tenants.a.tenant_id, user_id=tenants.a.user_id),
             tenants=tenants,
+            app=app,
         )
         app.dependency_overrides[get_db] = lambda: sessionmaker
         app.dependency_overrides[get_principal] = lambda: state.principal
@@ -612,6 +616,28 @@ async def test_connect_complete_status_and_delete(api: Api) -> None:
     assert missing.status_code == 404
     after = await api.http.get("/v1/mailbox")
     assert after.json()["connections"][0]["status"] == "revoked"
+
+
+async def test_complete_releases_mandate_emails_waiting_for_the_mailbox(
+    api: Api, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs = FakeJobQueue()
+    released: list[UUID] = []
+
+    async def release(db: object, tenant_id: UUID, *, jobs: object) -> None:
+        released.append(tenant_id)
+        raise RuntimeError("best effort: the mailbox sync releases them too")
+
+    monkeypatch.setattr(mailbox_api, "auto_approve_pending", release)
+    api.app.dependency_overrides[get_optional_job_queue] = lambda: jobs
+    state = _state_of(await api.http.get("/v1/mailbox/connect/google"))
+
+    completed = await api.http.post(
+        "/v1/mailbox/complete", json={"provider": "google", "code": "the-code", "state": state}
+    )
+
+    assert completed.status_code == 200, completed.text
+    assert released == [api.tenants.a.tenant_id]
 
 
 async def test_complete_refuses_a_user_other_than_the_one_who_started(api: Api) -> None:

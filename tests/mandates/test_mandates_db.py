@@ -22,7 +22,13 @@ from bido_back.approvals import (
     decide_approval,
 )
 from bido_back.db import tenant_session
-from bido_back.db.models import Approval, MandateSend, NegotiationMandate, RfqLine
+from bido_back.db.models import (
+    Approval,
+    MailboxConnection,
+    MandateSend,
+    NegotiationMandate,
+    RfqLine,
+)
 from bido_back.mandates import service as mandates
 from bido_back.mandates.schemas import ApproveMandateArgs, ProposeMandateRequest
 from bido_back.mandates.service import (
@@ -66,9 +72,15 @@ class MandateWorld(World):
         self.executor = ApprovalExecutor(engine, self.registry)
 
     async def setup(  # noqa: ARG002
-        self, *, silent: bool = False, lyon_email: str = "sales@lyon.example.test"
+        self,
+        *,
+        silent: bool = False,
+        lyon_email: str = "sales@lyon.example.test",
+        connected: bool = True,
     ) -> "MandateWorld":
         principal = buyer(self.people)
+        if connected:
+            await self.connect()
         rfq = await rfq_service.create_rfq_from_text(
             self.engine, principal, "Need MLCC and connectors", FakeIntake()
         )
@@ -114,6 +126,20 @@ class MandateWorld(World):
                     )
                 )
         return self
+
+    async def connect(self) -> None:
+        """The buyer's mailbox connection (the fake sender stands in for its API)."""
+        async with tenant_session(self.engine, self.people.tenant) as session:
+            session.add(
+                MailboxConnection(
+                    tenant_id=self.people.tenant,
+                    user_id=self.people.owner,
+                    provider="google",
+                    email_address="buyer@acme.example.test",
+                    token_ciphertext=b"not-real-ciphertext",
+                    status="active",
+                )
+            )
 
     async def propose(self, **overrides: object) -> UUID:
         fields: dict[str, object] = {"deadline": DEADLINE}
@@ -393,3 +419,89 @@ async def test_a_real_company_domain_needs_confirmation_before_the_mandate_start
     )
     await world.run_jobs()
     assert len(world.mailboxes.sender.sent) == 2
+
+
+async def test_a_mandate_can_be_approved_before_the_mailbox_is_connected(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    world = await MandateWorld(app_engine, rfq_rows).setup(connected=False)
+    proposed = await mandates.propose_mandate(
+        world.engine,
+        buyer(world.people),
+        world.rfq_id,
+        ProposeMandateRequest(deadline=DEADLINE),
+        writer=FakeWriter(),
+        mailboxes=world.mailboxes,
+    )
+    assert proposed.mailbox_connected is False
+    assert proposed.initial_emails == 2
+
+    await world.start(proposed.approval_id)
+    # Approved, but nothing went out: the RFQ emails wait for the mailbox.
+    assert world.mailboxes.sender.sent == []
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        mandate = await session.scalar(select(NegotiationMandate))
+        initial = list(
+            await session.scalars(select(Approval).where(Approval.tool == SEND_RFQ_EMAIL))
+        )
+    assert mandate is not None and mandate.status == "active"
+    assert {a.status for a in initial} == {"pending"}
+    assert await world.sends() == []
+    activity = await mandates.get_activity(world.engine, buyer(world.people), world.rfq_id)
+    assert (activity.waiting_reason, activity.waiting_emails) == ("mailbox_not_connected", 2)
+
+    # Sweeps before the connection keep waiting (not held for a person).
+    result = await world.auto()
+    assert (result.approved, result.held) == ([], 0)
+    assert world.mailboxes.sender.sent == []
+
+    await world.connect()
+    result = await world.auto()
+    assert len(result.approved) == 2
+    assert len(world.mailboxes.sender.sent) == 2
+    activity = await mandates.get_activity(world.engine, buyer(world.people), world.rfq_id)
+    assert (activity.waiting_reason, activity.waiting_emails) == (None, 0)
+
+    # Released once: later sweeps send nothing more.
+    await world.auto()
+    await world.auto()
+    assert len(world.mailboxes.sender.sent) == 2
+    assert {s.outcome for s in await world.sends()} == {"auto_approved"}
+
+
+async def test_the_recipient_guard_still_applies_while_waiting_for_the_mailbox(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    world = await MandateWorld(app_engine, rfq_rows).setup(
+        lyon_email="vendas@lyon-composants.fr", connected=False
+    )
+    proposed = await mandates.propose_mandate(
+        world.engine,
+        buyer(world.people),
+        world.rfq_id,
+        ProposeMandateRequest(deadline=DEADLINE),
+        writer=FakeWriter(),
+        mailboxes=world.mailboxes,
+        resolver=RealDomains(),
+    )
+    with pytest.raises(ApprovalRecipientsUnconfirmed):
+        await decide_approval(
+            world.engine, approver(world.people), proposed.approval_id, "approve", jobs=world.jobs
+        )
+    await decide_approval(
+        world.engine,
+        approver(world.people),
+        proposed.approval_id,
+        "approve",
+        jobs=world.jobs,
+        confirmed_domains=["lyon-composants.fr"],
+    )
+    await world.run_jobs()
+    assert world.mailboxes.sender.sent == []
+
+    await world.connect()
+    await world.auto()
+    assert sorted(m.to[0] for m in world.mailboxes.sender.sent) == [
+        "sales@rhein.example.test",
+        "vendas@lyon-composants.fr",
+    ]
