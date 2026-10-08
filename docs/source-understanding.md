@@ -104,6 +104,39 @@ analysis, returning only cell locators. It does not generate join code, quantiti
 normalized statuses or SQL. Manifest samples now include late headers and separate
 table blocks with original row numbers rather than only introductory rows.
 
+### Any export layout (`source_mapper.v3.md`)
+
+The mapper still returns locators only; code checks and copies everything:
+
+- **Checked columns.** Each column echoes its header text; a mismatch rejects the section
+  (`header_mismatch`). Before records exist, numeric, date, unit and e-mail columns must
+  read as their field for at least 80% of values (`inadmissible_mapping`). Total and
+  subtotal rows (keywords, ERP `*` marks, key-less sums of the rows above) never become
+  transactions. `fill_down` repeats a blank grouping key from the row above, for
+  identifier columns only, disclosed.
+- **Report-level values.** Section `constants` locate a title or header cell (a stock
+  position date, a plant, a currency, a unit in a header) outside the data rows; `text`
+  names the exact part of the cell. A row's own value wins. Continuation pages keep them.
+- **Categorical values.** `value_maps` interpret each distinct spelling of a status,
+  movement, demand/balance basis or unit column as a term of a closed vocabulary
+  (`vocabulary.py`); code checks that the spelling occurs and the term is allowed, and
+  records it in `Record.canonical` next to the source spelling. Contradictions stay
+  unresolved. Built-in synonyms in six languages are the fallback; spellings with two
+  meanings ("fermé"/"ferme") are left out.
+- **Locale.** Ambiguous numbers (`1,000`) and day/month dates (`08/10/2026`) are read only
+  when other values of the column, sheet or source prove the separator or order, or (dates)
+  when the mapper declared the order from the source's language and nothing contradicts it.
+  Each reading is disclosed with the proving cell. Numbers stored as spreadsheet numbers
+  need no separator.
+- **Inline purchase facts.** A register's received date and received/rejected/open
+  quantities stand in for separate receipt and schedule tables of the same order line;
+  when both exist they must agree.
+- **Identifiers.** Joins ignore case, spacing and the zero padding of purely numeric codes
+  (disclosed); two such spellings inside one table are an `identifier_collision` blocker.
+- **Readers.** Formulas are read from their saved values (disclosed); a formula without one
+  is empty. `.xlsm`, `.tsv`, tab/semicolon/pipe-delimited `.txt`, UTF-16 and Windows-1252
+  exports are read.
+
 Both source tools and `POST /v1/procurement-assessments` accept optional `scope`:
 
 ```json
