@@ -91,6 +91,7 @@ from bido_back.followups.send import (
     followup_proposal_ids,
 )
 from bido_back.rfqs.errors import AgentFailed, NotFound
+from bido_back.rfqs.language import supplier_email_language
 from bido_back.rfqs.send import SEND_RFQ_EMAIL, send_proposal_ids, subject_marker
 from bido_back.rfqs.service import buyer_display_name
 
@@ -578,7 +579,7 @@ async def _build(
             buyer_company=tenant.name,
             buyer_name=await buyer_display_name(session, user, tenant.name),
             supplier_name=supplier.name,
-            supplier_language=supplier.language,
+            supplier_language=supplier_email_language(supplier),
             chase_number=sequence if kind == "chase" else 0,
             original_sent_on=invite.sent_at.date() if invite.sent_at else None,
             response_due=rfq.response_due,

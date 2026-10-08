@@ -161,7 +161,8 @@ def test_the_supplier_language_drives_fixed_phrases_and_the_display_labels() -> 
     assert rendered.subject == "[RFQ-7] Angebotsanfrage: BMS board rev C passives"
     assert rendered.text.startswith("Sehr geehrte Damen und Herren, wir bitten um ein Angebot:")
     assert "Unsere Referenz: RFQ-7." in rendered.text
-    assert table_rows(rendered.text)[0][:3] == ["Pos.", "Pos. und Bezeichnung", "Menge"]
+    # Columns Bido fills get its own heading in the supplier's language.
+    assert table_rows(rendered.text)[0][:3] == ["Pos.", "Bezeichnung", "Menge"]
     assert "- Zahlungsbedingungen" in rendered.text  # the buyer's field, localized
     assert "- Verpackungseinheit" in rendered.text  # a required one, from our labels
     assert "Bitte senden Sie Ihr Angebot bis 20.10.2026." in rendered.text
@@ -232,22 +233,117 @@ def test_html_escapes_the_buyers_text() -> None:
     assert "<table" in rendered.html and "<td" in rendered.html
 
 
-def test_the_part_number_column_leads_with_the_buyers_code() -> None:
+def test_the_buyers_code_and_the_mpn_get_their_own_columns() -> None:
     own = replace(THERMISTOR, part_number="TH-NTC-10K")
     same = replace(THERMISTOR, part_number="NCP18XH103F03RB")
     only_own = replace(THERMISTOR, part_number="TH-NTC-10K", mpn=None)
 
-    cells = [
-        table_rows(render(STANDARD_TEMPLATE, language="en", lines=(line,), due=None).text)[1]
-        for line in (own, same, only_own, THERMISTOR)
-    ]
+    def columns(line: RenderLine) -> dict[str, str]:
+        rows = table_rows(render(STANDARD_TEMPLATE, language="en", lines=(line,), due=None).text)
+        return dict(zip(rows[0], rows[1], strict=True))
 
-    assert [next(c for c in row if "NCP" in c or "TH-" in c) for row in cells] == [
-        "TH-NTC-10K (NCP18XH103F03RB)",
-        "NCP18XH103F03RB",
-        "TH-NTC-10K",
-        "NCP18XH103F03RB",
-    ]
+    assert columns(own)["Part no."] == "TH-NTC-10K"
+    assert columns(own)["MPN"] == "NCP18XH103F03RB"
+    # The same code twice is the buyer's code: no MPN column.
+    assert columns(same)["Part no."] == "NCP18XH103F03RB" and "MPN" not in columns(same)
+    # The buyer's code is never presented as a manufacturer part number.
+    assert columns(only_own).get("Part no.") == "TH-NTC-10K" and "MPN" not in columns(only_own)
+    assert columns(THERMISTOR)["MPN"] == "NCP18XH103F03RB"
+    assert "Part no." not in columns(THERMISTOR)
+
+
+# --- RFQ-3 (2026-10-08): steel, fasteners and paint from an MRP, to Brazilian suppliers
+
+STEEL = RenderLine(
+    position=1,
+    description="AÇO CARBONO SAE 1020 CHAPA 3MM",
+    part_number="100000101",
+    mpn=None,
+    manufacturer=None,
+    quantities=[Decimal(7500)],
+    unit="kg",
+    need_by=date(2026, 10, 31),
+    incoterm="DAP",
+    delivery_location="Vila Solana 732",
+    qualification=None,
+)
+PAINT = replace(
+    STEEL,
+    position=2,
+    description="TINTA EPOXI CINZA RAL 7035",
+    part_number="100000112",
+    quantities=[Decimal(1850)],
+    unit="l",
+)
+
+
+def test_an_english_translation_of_prazo_is_still_the_need_by_date() -> None:
+    # The email writer translated the standard template's "Prazo" to "Lead time":
+    # the column holds our need-by dates, so it is headed as such.
+    display = replace(
+        STANDARD_TEMPLATE, language="en", columns=["Item", "Qty.", "Unit", "Lead time"]
+    )
+
+    rows = table_rows(
+        render(STANDARD_TEMPLATE, language="en", display=display, lines=(STEEL,)).text
+    )
+
+    assert "Lead time" not in rows[0]
+    assert dict(zip(rows[0], rows[1], strict=True))["Need-by date"] == "2026-10-31"
+
+
+def test_the_unit_is_the_lines_own() -> None:
+    rows = table_rows(render(STANDARD_TEMPLATE, language="pt", lines=(STEEL, PAINT)).text)
+    units = [dict(zip(rows[0], r, strict=True))["Un."] for r in rows[1:]]
+
+    assert units == ["kg", "l"]
+
+
+def test_no_tier_wording_without_tiers_and_tiers_when_there_are() -> None:
+    single = render(STANDARD_TEMPLATE, language="en", lines=(STEEL,)).text
+    tiered = render(STANDARD_TEMPLATE, language="en", lines=(THERMISTOR,)).text
+
+    assert "quantity tier" not in single
+    assert "Please quote the unit price, with the currency." in single
+    assert "Please quote the unit price for each quantity tier, with the currency." in tiered
+
+
+def test_rohs_and_reach_only_for_electronic_parts() -> None:
+    materials = render(STANDARD_TEMPLATE, language="pt", lines=(STEEL, PAINT)).text
+    electronics = render(STANDARD_TEMPLATE, language="pt", lines=(CAPACITOR,)).text
+
+    assert "RoHS" not in materials and "REACH" not in materials
+    assert "Declarações RoHS e REACH" in electronics
+
+
+def test_the_signature_is_the_buyer_then_the_company_never_a_made_up_department() -> None:
+    def closing(name: str) -> str:
+        return render_rfq(
+            RenderInput(
+                rfq_ref="RFQ-3",
+                rfq_title="Necessidades de materiais BR01",
+                response_due=None,
+                buyer_name=name,
+                buyer_company="Biduuuuu",
+                language="pt",
+                template=STANDARD_TEMPLATE,
+                display=STANDARD_TEMPLATE,
+                lines=(STEEL,),
+            )
+        ).text
+
+    assert closing("Ana Lima").endswith("Atenciosamente,\nAna Lima\nBiduuuuu\n")
+    # No buyer name: the company alone (not "Biduuuuu purchasing").
+    assert closing("Biduuuuu").endswith("Atenciosamente,\nBiduuuuu\n")
+    assert "purchasing" not in closing("Biduuuuu")
+
+
+def test_the_html_is_a_document_with_a_real_table() -> None:
+    rendered = render(STANDARD_TEMPLATE, language="pt", lines=(STEEL, PAINT))
+
+    assert rendered.html.startswith('<!doctype html><html lang="pt">')
+    assert rendered.html.count("<tr>") == 3  # heading + two lines
+    assert ">7500</td>" in rendered.html and "text-align:right" in rendered.html
 
 
 def test_the_buyers_terms_are_stated_only_when_set() -> None:

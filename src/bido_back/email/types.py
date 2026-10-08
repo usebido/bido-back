@@ -23,6 +23,8 @@ class OutboundEmail:
     subject: str
     text_body: str
     cc: tuple[str, ...] = ()
+    # The same message as HTML, sent as multipart/alternative next to the text.
+    html_body: str | None = None
     reply_to: str | None = None
     # Our own Message-ID (angle brackets included), set by the caller so it can be
     # stored before sending and matched on replies.

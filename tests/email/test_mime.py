@@ -123,3 +123,44 @@ async def test_ses_sender_sends_raw_and_returns_the_ses_message_id() -> None:
     }
     assert call["Content"] == {"Raw": {"Data": sent.raw}}
     assert sent.message_id == "<0107019abc-def@eu-central-1.amazonses.com>"
+
+
+def test_an_html_body_goes_as_multipart_alternative_next_to_the_text() -> None:
+    from bido_back.email.mime import build_mime
+    from bido_back.email.types import OutboundEmail
+
+    msg = build_mime(
+        OutboundEmail(
+            from_name="Ana Lima",
+            from_address="ana@buyer.example.test",
+            to=("vendas@supplier.example.test",),
+            subject="[RFQ-3] Solicitação de cotação",
+            text_body="Itens solicitados:\n1 | Aço",
+            html_body=(
+                "<!doctype html><html><body><table><tr><td>Aço</td></tr></table></body></html>"
+            ),
+        )
+    )
+
+    assert msg.get_content_type() == "multipart/alternative"
+    plain = msg.get_body(preferencelist=("plain",))
+    rich = msg.get_body(preferencelist=("html",))
+    assert plain is not None and "1 | Aço" in plain.get_content()
+    assert rich is not None and "<table>" in rich.get_content()
+
+
+def test_without_html_the_message_stays_plain_text() -> None:
+    from bido_back.email.mime import build_mime
+    from bido_back.email.types import OutboundEmail
+
+    msg = build_mime(
+        OutboundEmail(
+            from_name="Ana",
+            from_address="ana@buyer.example.test",
+            to=("x@supplier.example.test",),
+            subject="s",
+            text_body="t",
+        )
+    )
+
+    assert msg.get_content_type() == "text/plain"
