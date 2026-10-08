@@ -29,13 +29,14 @@ from bido_back.purchasing.sources.evidence import (
 from bido_back.purchasing.sources.joins import (
     CANCELLED,
     CLOSED,
+    OPEN,
     ZERO,
     coalesce,
     incoming_for,
     inventory_at,
-    receipts_for,
     state,
 )
+from bido_back.purchasing.sources.pricing import ORDER_KEY, OrderFacts, measure, reconcile_order
 
 _ACTIVE_PLANS = frozenset(
     {"planned", "planejada", "planejado", "released", "liberada", "liberado", "open", "em aberto"}
@@ -392,28 +393,49 @@ def _direct_demand(
         )
 
 
+def _listed_supplier(
+    code: str | None, masters: Sequence[Record], issues: list[Issue], code_on_gap: str, gap: str
+) -> SupplierEvidence:
+    """A supplier without a completed purchase of the item: identity from the masters."""
+    matching = [r for r in masters if source_text(r, "supplier_code") == code]
+    names = {source_text(r, "name") for r in matching} - {None}
+    emails = {source_text(r, "email") for r in matching} - {None}
+    if len(names) != 1 or len(emails) > 1:
+        add_issue(issues, code_on_gap, gap, matching, warning=True)
+    return SupplierEvidence(
+        supplier_code=code,
+        name=next(iter(names)) if len(names) == 1 else None,
+        email=next(iter(emails)) if len(emails) == 1 and len(names) == 1 else None,
+        evidence=source_refs(matching),
+    )
+
+
 def _history(
     records: Sequence[Record],
     part: str,
     unit: str | None,
     scope: PlanningScope,
     issues: list[Issue],
-) -> list[SupplierEvidence]:
+) -> tuple[list[SupplierEvidence], list[OrderFacts]]:
+    """Suppliers of the item at the plant and its orders reconciled with their receipts.
+
+    Only completed purchases (closed, fully received) set a supplier's last price; every
+    reconciled order, open or closed, is delivery and quality evidence for `measure`.
+    """
     masters = [r for r in records if r.kind == "supplier"]
     performance = [r for r in records if r.kind == "supplier_performance"]
     grouped: dict[str, list[Record]] = defaultdict(list)
-    histories = [
+    candidates = [
         r
         for r in records
         if r.kind == "purchase"
         and source_text(r, "part_number") == part
         and source_text(r, "location") == scope.location
-        and state(r) in CLOSED
     ]
+    histories = [r for r in candidates if state(r) in CLOSED]
     verified: list[Record] = []
-    for order in coalesce(
-        histories, ("po_number", "po_line", "location"), issues, "conflicting_purchase_history"
-    ):
+    orders: list[OrderFacts] = []
+    for order in coalesce(histories, ORDER_KEY, issues, "conflicting_purchase_history"):
         ordered_at = source_date(order, "ordered_at", issues)
         if ordered_at is None or ordered_at > scope.as_of:
             continue
@@ -426,27 +448,63 @@ def _history(
                 [order],
                 warning=True,
             )
+            if code is not None:  # Still a delivery: performance does not depend on the unit.
+                orders.append(
+                    reconcile_order(
+                        order,
+                        records,
+                        supplier=code,
+                        ordered_at=ordered_at,
+                        unit=unit,
+                        as_of=scope.as_of,
+                        issues=[],
+                    )
+                )
             continue
         # Keep errors in historical delivery records visible without fabricating received prices.
-        receipt_issues: list[Issue] = []
-        receipts, received = receipts_for(order, records, scope.as_of, receipt_issues)
-        ordered = source_number(order, "quantity", receipt_issues)
-        issues.extend(i.model_copy(update={"severity": "warning"}) for i in receipt_issues)
-        if not receipts or receipt_issues or ordered is None or received != ordered:
+        facts = reconcile_order(
+            order,
+            records,
+            supplier=code,
+            ordered_at=ordered_at,
+            unit=unit,
+            as_of=scope.as_of,
+            issues=issues,
+        )
+        orders.append(facts)
+        if not facts.completed:
             add_issue(
                 issues,
                 "unverified_purchase_receipt",
                 "A closed order lacks a reconciled "
                 "full receipt and is excluded from completed-purchase price references.",
-                [order, *receipts],
+                [order, *facts.receipts],
                 warning=True,
             )
             continue
         verified_order = order.model_copy(deep=True)
-        for i, ref in enumerate(source_refs(receipts)):
+        for i, ref in enumerate(source_refs(facts.receipts)):
             verified_order.evidence[f"receipt#{i}"] = ref
         grouped[code].append(verified_order)
         verified.append(verified_order)
+    # `incoming_for` reports open lines' problems; here they are delivery evidence only.
+    for order in coalesce(
+        [r for r in candidates if state(r) in OPEN], ORDER_KEY, [], "conflicting_purchase_order"
+    ):
+        ordered_at = source_date(order, "ordered_at", [])
+        code = source_text(order, "supplier_code")
+        if ordered_at is not None and ordered_at <= scope.as_of and code is not None:
+            orders.append(
+                reconcile_order(
+                    order,
+                    records,
+                    supplier=code,
+                    ordered_at=ordered_at,
+                    unit=unit,
+                    as_of=scope.as_of,
+                    issues=[],
+                )
+            )
     suppliers = [
         supplier_evidence(
             rows, masters, performance, verified, issues, include_history_evidence=False
@@ -455,6 +513,17 @@ def _history(
     ]
     for supplier in suppliers:
         supplier.last_price_basis = "received_order"
+    for code in dict.fromkeys(order.supplier for order in orders):
+        if code not in grouped:  # Orders, but no completed purchase: no price, yet measured.
+            suppliers.append(
+                _listed_supplier(
+                    code,
+                    masters,
+                    issues,
+                    "unresolved_supplier_code",
+                    "A supplier's name or contact is not uniquely established.",
+                )
+            )
     qualifications = coalesce(
         [r for r in records if r.kind == "supplier_item" and source_text(r, "part_number") == part],
         ("part_number", "supplier_code"),
@@ -468,29 +537,19 @@ def _history(
         code = source_text(qualification, "supplier_code")
         existing = next((s for s in suppliers if s.supplier_code == code), None)
         if existing is None:
-            matching = [r for r in masters if source_text(r, "supplier_code") == code]
-            names = {source_text(r, "name") for r in matching} - {None}
-            emails = {source_text(r, "email") for r in matching} - {None}
-            existing = SupplierEvidence(
-                supplier_code=code,
-                name=next(iter(names)) if len(names) == 1 else None,
-                email=next(iter(emails)) if len(emails) == 1 and len(names) == 1 else None,
-                evidence=source_refs(matching),
+            existing = _listed_supplier(
+                code,
+                masters,
+                issues,
+                "unresolved_qualified_supplier",
+                "A qualified supplier's name or contact is not uniquely established.",
             )
-            if len(names) != 1 or len(emails) > 1:
-                add_issue(
-                    issues,
-                    "unresolved_qualified_supplier",
-                    "A qualified supplier's name or contact is not uniquely established.",
-                    matching,
-                    warning=True,
-                )
             suppliers.append(existing)
         existing.qualification_status = source_text(qualification, "status")
         existing.evidence.extend(
             r for r in source_refs([qualification]) if r not in existing.evidence
         )
-    return suppliers
+    return suppliers, orders
 
 
 def _net(line: AssessmentLine) -> None:
@@ -581,10 +640,17 @@ def assess_plan(records: Sequence[Record], scope: PlanningScope) -> Assessment:
                 "No order register was mapped; zero outstanding purchases cannot be established.",
                 [],
             )
-        line.suppliers = _history(records, part, unit, scope, line.issues)
+        line.suppliers, orders = _history(records, part, unit, scope, line.issues)
         if not any(i.severity == "blocker" for i in [*result.issues, *line.issues]):
             _net(line)
         line.ready = line.calculated_to_buy is not None
+        # Supplier performance and the internal price benchmark (an internal reference only).
+        measure(
+            line,
+            {s.supplier_code: s for s in line.suppliers if s.supplier_code is not None},
+            orders,
+            scope.as_of,
+        )
         result.lines.append(line)
     if not demands:
         add_issue(

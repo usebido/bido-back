@@ -34,7 +34,8 @@ Formulas (per item of the product's BOM):
   recent price and the year's average (a recent increase is not accepted as
   the new normal). `max_price = max(last_price, avg_price) * (1 +
   max_over_pct / 100)` (5% by default): the most the buyer should accept
-  without escalating.
+  without escalating, a historical escalation threshold rather than a
+  walk-away price (a walk-away comes from a current alternative).
 * Per supplier: `on_time_rate` measures complete, timely receipts and overdue
   open lines; partial receipts are failures, missing receipt quantities unknown.
   `quality_rate = 1 - rejected / received` over validated, dated receipts.
@@ -53,6 +54,10 @@ Flags per line: `no_history`, `single_source`, `price_up` (trend above
 `price_up_pct`), `supplier_late` (on-time below `late_threshold`),
 `quality_issue` (quality below `quality_threshold`), `broker_source`,
 `mixed_currency`, `covered_by_stock` (nothing to buy).
+
+The price, supplier and flag rules are public helpers typed against small
+protocols, so source assessments (`purchasing.sources.pricing`) apply the same
+rules to orders reconciled from uploaded evidence.
 """
 
 from collections import defaultdict
@@ -60,7 +65,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
-from typing import Final, Literal
+from typing import Final, Literal, Protocol
 from uuid import UUID
 
 PRICE_PLACES: Final = Decimal("0.0001")
@@ -257,6 +262,54 @@ class AnalysisResult:
     params: Params = field(default_factory=Params)
 
 
+class PricedPurchase(Protocol):
+    """What the price rules read from a purchase line (a `Purchase` or a source order)."""
+
+    @property
+    def currency(self) -> str: ...
+
+    @property
+    def supplier_type(self) -> str: ...
+
+    @property
+    def ordered_at(self) -> date: ...
+
+    @property
+    def quantity(self) -> Decimal: ...
+
+    @property
+    def unit_price(self) -> Decimal: ...
+
+
+class DeliveredPurchase(Protocol):
+    """What the delivery and quality rules read from a purchase line and its receipts."""
+
+    @property
+    def quantity(self) -> Decimal: ...
+
+    @property
+    def promised_at(self) -> date | None: ...
+
+    @property
+    def received_at(self) -> date | None: ...
+
+    @property
+    def received_qty(self) -> Decimal | None: ...
+
+    @property
+    def rejected_qty(self) -> Decimal: ...
+
+
+@dataclass(frozen=True, slots=True)
+class RatedSupplier:
+    """A supplier of an item's history, as the line flags see it."""
+
+    name: str | None
+    on_time_rate: Decimal | None
+    quality_rate: Decimal | None
+    broker: bool = False
+
+
 # --- Helpers ---------------------------------------------------------------------------
 
 
@@ -268,18 +321,18 @@ def round_up_quantity(quantity: Decimal, unit: str) -> Decimal:
     return quantity.quantize(QTY_PLACES, rounding=ROUND_CEILING)
 
 
-def _price(value: Decimal) -> Decimal:
+def round_price(value: Decimal) -> Decimal:
     return value.quantize(PRICE_PLACES, rounding=ROUND_HALF_UP)
 
 
-def _weighted_avg(rows: Sequence[Purchase]) -> Decimal | None:
+def weighted_avg(rows: Sequence[PricedPurchase]) -> Decimal | None:
     quantity = sum((p.quantity for p in rows), Decimal(0))
     if quantity <= 0:
         return None
     return sum((p.quantity * p.unit_price for p in rows), Decimal(0)) / quantity
 
 
-def _main_currency(rows: Sequence[Purchase]) -> str:
+def main_currency(rows: Sequence[PricedPurchase]) -> str:
     """Most lines; on a tie, a currency some non-broker sold in; then the latest."""
     counts: dict[str, int] = defaultdict(int)
     regular: set[str] = set()
@@ -289,10 +342,10 @@ def _main_currency(rows: Sequence[Purchase]) -> str:
             regular.add(row.currency)
     most = max(counts.values())
     tied = [r for r in rows if counts[r.currency] == most]
-    return _latest([r for r in tied if r.currency in regular] or tied).currency
+    return latest([r for r in tied if r.currency in regular] or tied).currency
 
 
-def _latest(rows: Sequence[Purchase]) -> Purchase:
+def latest[T: PricedPurchase](rows: Sequence[T]) -> T:
     # Stable: among purchases on the same day, the last one listed wins.
     best = rows[0]
     for row in rows[1:]:
@@ -301,7 +354,8 @@ def _latest(rows: Sequence[Purchase]) -> Purchase:
     return best
 
 
-def _delivery_outcomes(rows: Sequence[Purchase], today: date) -> list[bool]:
+def delivery_outcomes(rows: Sequence[DeliveredPurchase], today: date) -> list[bool]:
+    """Complete and timely (True) or not; lines without a measurable outcome are skipped."""
     outcomes: list[bool] = []
     for row in rows:
         if row.promised_at is None:
@@ -323,11 +377,16 @@ def _delivery_outcomes(rows: Sequence[Purchase], today: date) -> list[bool]:
     return outcomes
 
 
-def _supplier_stats(rows: Sequence[Purchase], today: date) -> SupplierStats:
-    latest = _latest(rows)
-    avg = _weighted_avg(rows)
-    assert avg is not None  # rows have positive quantities
-    delivery = _delivery_outcomes(rows, today)
+def measure_on_time(rows: Sequence[DeliveredPurchase], today: date) -> tuple[Decimal | None, int]:
+    """The on-time rate over the measurable deliveries, and how many were measured."""
+    delivery = delivery_outcomes(rows, today)
+    if not delivery:
+        return None, 0
+    return (Decimal(sum(delivery)) / len(delivery)).quantize(RATE_PLACES), len(delivery)
+
+
+def measure_quality(rows: Sequence[DeliveredPurchase], today: date) -> tuple[Decimal | None, int]:
+    """`1 - rejected / received` over validated, dated receipts, and how many lines."""
     quality = [
         p
         for p in rows
@@ -339,38 +398,68 @@ def _supplier_stats(rows: Sequence[Purchase], today: date) -> SupplierStats:
     ]
     received = sum((p.received_qty for p in quality if p.received_qty is not None), Decimal(0))
     rejected = sum((p.rejected_qty for p in quality), Decimal(0))
+    rate = (1 - rejected / received).quantize(RATE_PLACES) if received else None
+    return rate, len(quality)
+
+
+def _supplier_stats(rows: Sequence[Purchase], today: date) -> SupplierStats:
+    last = latest(rows)
+    avg = weighted_avg(rows)
+    assert avg is not None  # rows have positive quantities
+    on_time, deliveries = measure_on_time(rows, today)
+    quality, inspected = measure_quality(rows, today)
     return SupplierStats(
-        supplier_id=latest.supplier_id,
-        name=latest.supplier_name,
-        type=latest.supplier_type,
+        supplier_id=last.supplier_id,
+        name=last.supplier_name,
+        type=last.supplier_type,
         orders=len(rows),
         quantity=sum((p.quantity for p in rows), Decimal(0)),
-        last_price=_price(latest.unit_price),
-        last_ordered_at=latest.ordered_at,
-        avg_price=_price(avg),
-        min_price=_price(min(p.unit_price for p in rows)),
-        on_time_rate=(Decimal(sum(delivery)) / len(delivery)).quantize(RATE_PLACES)
-        if delivery
-        else None,
-        quality_rate=(1 - rejected / received).quantize(RATE_PLACES) if received else None,
-        delivery_observations=len(delivery),
-        quality_observations=len(quality),
+        last_price=round_price(last.unit_price),
+        last_ordered_at=last.ordered_at,
+        avg_price=round_price(avg),
+        min_price=round_price(min(p.unit_price for p in rows)),
+        on_time_rate=on_time,
+        quality_rate=quality,
+        delivery_observations=deliveries,
+        quality_observations=inspected,
         last_received_at=max(
             (p.received_at for p in rows if p.received_at and p.received_at <= today), default=None
         ),
     )
 
 
-def _rank_key(stats: SupplierStats) -> tuple[bool, bool, Decimal, bool, Decimal, Decimal, str]:
+def supplier_rank(
+    *,
+    broker: bool,
+    quality_rate: Decimal | None,
+    on_time_rate: Decimal | None,
+    avg_price: Decimal | None,
+) -> tuple[bool, bool, Decimal, bool, Decimal, bool, Decimal]:
+    """Brokers last, then measured quality, on-time rate and average price (ascending).
+
+    Unknown performance or price follows the measured ones; it is never treated as perfect.
+    """
     return (
-        stats.type in BROKER_TYPES,
-        stats.quality_rate is None,
-        -(stats.quality_rate if stats.quality_rate is not None else Decimal(0)),
-        stats.on_time_rate is None,
-        -(stats.on_time_rate if stats.on_time_rate is not None else Decimal(0)),
-        stats.avg_price,
-        str(stats.supplier_id),
+        broker,
+        quality_rate is None,
+        -(quality_rate if quality_rate is not None else Decimal(0)),
+        on_time_rate is None,
+        -(on_time_rate if on_time_rate is not None else Decimal(0)),
+        avg_price is None,
+        avg_price if avg_price is not None else Decimal(0),
     )
+
+
+def _rank_key(
+    stats: SupplierStats,
+) -> tuple[bool, bool, Decimal, bool, Decimal, bool, Decimal, str]:
+    rank = supplier_rank(
+        broker=stats.type in BROKER_TYPES,
+        quality_rate=stats.quality_rate,
+        on_time_rate=stats.on_time_rate,
+        avg_price=stats.avg_price,
+    )
+    return (*rank, str(stats.supplier_id))
 
 
 def _ranked(stats: list[SupplierStats]) -> tuple[SupplierStats, ...]:
@@ -381,13 +470,46 @@ def _ranked(stats: list[SupplierStats]) -> tuple[SupplierStats, ...]:
     return tuple(replace(s, suggested=s.supplier_id in chosen) for s in ordered)
 
 
-def _trend(rows: Sequence[Purchase], today: date) -> Decimal | None:
+def price_trend(rows: Sequence[PricedPurchase], today: date) -> Decimal | None:
     cutoff = today - timedelta(days=RECENT_DAYS)
-    recent = _weighted_avg([p for p in rows if p.ordered_at > cutoff])
-    older = _weighted_avg([p for p in rows if p.ordered_at <= cutoff])
+    recent = weighted_avg([p for p in rows if p.ordered_at > cutoff])
+    older = weighted_avg([p for p in rows if p.ordered_at <= cutoff])
     if recent is None or older is None or older == 0:
         return None
     return ((recent - older) / older * 100).quantize(PCT_PLACES, rounding=ROUND_HALF_UP)
+
+
+def price_limits(last: Decimal, avg: Decimal, max_over_pct: Decimal) -> tuple[Decimal, Decimal]:
+    """`target = min(last, avg)`, `max = max(last, avg) * (1 + max_over_pct / 100)`.
+
+    The maximum is a historical escalation threshold, not a walk-away price.
+    """
+    return min(last, avg), round_price(max(last, avg) * (1 + max_over_pct / 100))
+
+
+def history_flags(
+    suppliers: Sequence[RatedSupplier],
+    *,
+    mixed_currency: bool,
+    trend_pct: Decimal | None,
+    params: Params,
+) -> list[Flag]:
+    """The flags of an item with purchase history, suppliers in their ranked order."""
+    flags: list[Flag] = []
+    if mixed_currency:
+        flags.append(Flag("mixed_currency"))
+    if len(suppliers) == 1:
+        flags.append(Flag("single_source", supplier=suppliers[0].name))
+    if trend_pct is not None and trend_pct > params.price_up_pct:
+        flags.append(Flag("price_up", value=trend_pct))
+    for supplier in suppliers:
+        if supplier.on_time_rate is not None and supplier.on_time_rate < params.late_threshold:
+            flags.append(Flag("supplier_late", supplier=supplier.name, value=supplier.on_time_rate))
+        if supplier.quality_rate is not None and supplier.quality_rate < params.quality_threshold:
+            flags.append(Flag("quality_issue", supplier=supplier.name, value=supplier.quality_rate))
+        if supplier.broker:
+            flags.append(Flag("broker_source", supplier=supplier.name))
+    return flags
 
 
 # --- The analysis ----------------------------------------------------------------------
@@ -619,35 +741,31 @@ def _line(
             flags=tuple(flags),
         )
 
-    currency = _main_currency(history)
+    currency = main_currency(history)
     rows = [p for p in history if p.currency == currency]
-    if len(rows) < len(history):
-        flags.append(Flag("mixed_currency"))
 
     per_supplier: dict[UUID, list[Purchase]] = defaultdict(list)
     for row in rows:
         per_supplier[row.supplier_id].append(row)
     suppliers = _ranked([_supplier_stats(group, today) for group in per_supplier.values()])
 
-    last = _price(_latest(rows).unit_price)
-    avg_raw = _weighted_avg(rows)
+    last = round_price(latest(rows).unit_price)
+    avg_raw = weighted_avg(rows)
     assert avg_raw is not None
-    avg = _price(avg_raw)
-    trend = _trend(rows, today)
-    target = min(last, avg)
-    maximum = _price(max(last, avg) * (1 + params.max_over_pct / 100))
-
-    if len(suppliers) == 1:
-        flags.append(Flag("single_source", supplier=suppliers[0].name))
-    if trend is not None and trend > params.price_up_pct:
-        flags.append(Flag("price_up", value=trend))
-    for stats in suppliers:
-        if stats.on_time_rate is not None and stats.on_time_rate < params.late_threshold:
-            flags.append(Flag("supplier_late", supplier=stats.name, value=stats.on_time_rate))
-        if stats.quality_rate is not None and stats.quality_rate < params.quality_threshold:
-            flags.append(Flag("quality_issue", supplier=stats.name, value=stats.quality_rate))
-        if stats.type in BROKER_TYPES:
-            flags.append(Flag("broker_source", supplier=stats.name))
+    avg = round_price(avg_raw)
+    trend = price_trend(rows, today)
+    target, maximum = price_limits(last, avg, params.max_over_pct)
+    flags.extend(
+        history_flags(
+            [
+                RatedSupplier(s.name, s.on_time_rate, s.quality_rate, s.type in BROKER_TYPES)
+                for s in suppliers
+            ],
+            mixed_currency=len(rows) < len(history),
+            trend_pct=trend,
+            params=params,
+        )
+    )
 
     return LineResult(
         position=position,
@@ -660,7 +778,7 @@ def _line(
         currency=currency,
         last_price=last,
         avg_price=avg,
-        min_price=_price(min(p.unit_price for p in rows)),
+        min_price=round_price(min(p.unit_price for p in rows)),
         trend_pct=trend,
         target_price=target,
         max_price=maximum,
@@ -676,21 +794,39 @@ def currency_totals(
 
     Lines without a currency (no purchase history) have no price: not counted.
     """
-    grouped: dict[str, list[tuple[Decimal, Decimal | None, Decimal | None]]] = defaultdict(list)
-    for currency, to_buy, target, last in lines:
-        if currency is not None and to_buy > 0:
-            grouped[currency].append((to_buy, target, last))
+    return totals_by_currency(
+        (
+            currency,
+            to_buy * target if target is not None else Decimal(0),
+            to_buy * last if last is not None else Decimal(0),
+        )
+        for currency, to_buy, target, last in lines
+        if currency is not None and to_buy > 0
+    )
+
+
+def totals_by_currency(
+    amounts: Iterable[tuple[str, Decimal, Decimal]],
+) -> tuple[CurrencyTotal, ...]:
+    """Per-currency sums of (currency, amount at target, amount at last price), to the cent.
+
+    Amounts in different currencies are never added up or converted. The currency with
+    the most lines comes first (then by code).
+    """
+    grouped: dict[str, list[tuple[Decimal, Decimal]]] = defaultdict(list)
+    for currency, at_target, at_last in amounts:
+        grouped[currency].append((at_target, at_last))
     cents = Decimal("0.01")
     return tuple(
         CurrencyTotal(
             currency=currency,
             items_to_buy=len(rows),
-            total_at_target=sum((q * t for q, t, _ in rows if t is not None), Decimal(0)).quantize(
+            total_at_target=sum((t for t, _ in rows), Decimal(0)).quantize(
                 cents, rounding=ROUND_HALF_UP
             ),
-            total_at_last_price=sum(
-                (q * p for q, _, p in rows if p is not None), Decimal(0)
-            ).quantize(cents, rounding=ROUND_HALF_UP),
+            total_at_last_price=sum((p for _, p in rows), Decimal(0)).quantize(
+                cents, rounding=ROUND_HALF_UP
+            ),
         )
         for currency, rows in sorted(grouped.items(), key=lambda kv: (-len(kv[1]), kv[0]))
     )

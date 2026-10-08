@@ -284,6 +284,11 @@ async def test_workbook_read_mapping_calculation_and_disclosed_scope() -> None:
         ("MTR-100", "Plant B"),
     }
     assert {line.part_number: line.calculated_to_buy for line in result.lines} == EXPECTED
+    # One completed purchase per part is too thin for a benchmark: no spend is estimated.
+    assert result.totals == []
+    assert all(
+        "insufficient_price_history" in {i.code for i in line.issues} for line in result.lines
+    )
     assert len(result.coverage) == 3 and all(row.inspected for row in result.coverage)
     assert {ref.table for line in result.lines for ref in line.evidence} == set(layouts)
 
