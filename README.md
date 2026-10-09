@@ -125,9 +125,13 @@ tool loop, sessions and memory. Bido keeps everything that commits: auth,
 tenants, approvals, the outbox, and the business endpoints.
 
 - **Models:** OpenAI, through the Responses API (`OPENAI_API_KEY`).
-  `gpt-6-luna` by default, `gpt-6.1-sol` for quote extraction; each agent's
-  model is set in `agents/catalog/definitions.py`. Requests are stateless
-  (`store=False`): OpenAI keeps no conversation state between turns.
+  `gpt-6-luna` by default (the Copilot included); `gpt-6.1-sol` for quote
+  extraction, the sheet and source mappers, the template builder, and the reply
+  of a Copilot turn that ran the purchase analysis (`analysis_reply_writer`, a
+  handoff: the Copilot stops after the analysis tool and the writer answers).
+  Each agent's model is set in `agents/catalog/definitions.py` or
+  `copilot/agent.py`. Requests are stateless (`store=False`): OpenAI keeps no
+  conversation state between turns.
 - **Pinned exactly** (`agno==<version>` in `pyproject.toml`). Upgrades are
   deliberate, in their own PR, after reading the changelog.
 - **Contained:** Agno and OpenAI types live only in
