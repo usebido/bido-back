@@ -131,6 +131,8 @@ _REASONS: Final[dict[str, str]] = {
 _WARNINGS: Final[dict[str, str]] = {
     "reply_by_misses_need_by": "ordering at the RFQ's reply-by date would deliver after the "
     "need-by date",
+    "order_by_before_decision": "order by this date to meet the need-by date, before the "
+    "negotiation ends: decide earlier or it arrives late",
     "moq_above_quantity": "minimum order quantity above the requested quantity",
     "need_by_unreachable": "the need-by date can no longer be met",
     "delivery_estimated": "delivery date estimated from an approximate lead time",

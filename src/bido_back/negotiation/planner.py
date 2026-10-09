@@ -462,6 +462,16 @@ def _warnings(
             found.append(
                 PlanWarning("reply_by_misses_need_by", plan.position, quote.delivery_at_reply_by)
             )
+        decided_by = ctx.cutoff_at or ctx.deadline
+        if (
+            plan.latest_order_date is not None
+            and decided_by is not None
+            and plan.latest_order_date < decided_by.date()
+        ):
+            # Waiting for the end of the negotiation makes this line late: decide earlier.
+            found.append(
+                PlanWarning("order_by_before_decision", plan.position, plan.latest_order_date)
+            )
         if "moq_above_quantity" in plan.reasons:
             found.append(PlanWarning("moq_above_quantity", plan.position))
         if plan.delivery is not None and plan.delivery.status == "need_by_unreachable":

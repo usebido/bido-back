@@ -704,6 +704,20 @@ def test_a_reply_by_date_that_makes_the_need_by_late_is_a_visible_warning() -> N
     assert (warning.position, warning.on) == (1, TODAY + timedelta(days=20))
 
 
+def test_a_line_that_must_be_ordered_before_the_negotiation_ends_is_flagged() -> None:
+    order_by = TODAY + timedelta(days=4)
+    urgent = offer(
+        replace(quote(L1, "44.90", 10), latest_order_date=order_by),
+        quote(L2, "229.00", 12),
+        quote(L3, "112.00", 14),
+    )
+    result = plan(facts(urgent))
+    assert result.phase == "accepted_internally" and result.order_by == order_by
+    warning = next(w for w in result.warnings if w.code == "order_by_before_decision")
+    assert (warning.position, warning.on) == (1, order_by)
+    assert "order by" in phase_label(result)
+
+
 def test_ready_to_close_needs_every_line_accepted_and_every_supplier_answered() -> None:
     accepted = plan(facts(WITHIN))
     asking = plan(facts(ABOVE))
