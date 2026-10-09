@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -55,6 +56,26 @@ EXPECTED_TOOLS = {
     "get_negotiation_outcome": "read",
     "list_extra_offers": "read",
 }
+
+
+def test_rfq_titles_are_asked_for_in_the_buyers_language() -> None:
+    # RFQ-3 (2026-10-08): a Portuguese conversation got an English RFQ title. The title goes
+    # on the RFQ and in supplier emails, so every field the title is written from says so.
+    engine = create_async_engine("postgresql+asyncpg://app@localhost:5432/unused")
+    tools = {
+        tool.name: tool
+        for tool in copilot_tools(
+            CopilotToolDeps(db=engine, agents=fake_agents(), mailboxes=FakeMailboxes())
+        )
+    }
+
+    for name, field in (
+        ("create_rfq", "text"),
+        ("create_rfq_from_assessment", "title"),
+        ("set_rfq_terms", "title"),
+    ):
+        properties = cast(dict[str, dict[str, Any]], tools[name].input_schema()["properties"])
+        assert "buyer's language" in str(properties[field]["description"]), (name, field)
 
 
 def test_definition_and_tools() -> None:
