@@ -168,8 +168,21 @@ class RfqRef(BaseModel):
 # --- list_rfqs ---------------------------------------------------------------------------
 
 
+RFQ_STATUS_HINT: Final = (
+    "The RFQ lifecycle: `draft` = being prepared, not sent to any supplier yet; "
+    "`open` = sent to suppliers, quotes pending or under negotiation; "
+    "`closed` = awarded or otherwise finished; `cancelled`. "
+    "When the buyer says open, active, ongoing, in progress or pending, they mean "
+    "everything not finished (draft AND open), so leave `status` empty and report drafts "
+    "and sent RFQs separately; only filter by `open` when they clearly mean RFQs already "
+    "sent to suppliers."
+)
+
+
 class ListRfqsIn(BaseModel):
-    status: RfqStatus | None = Field(default=None, description="Only RFQs in this status")
+    status: RfqStatus | None = Field(
+        default=None, description="Only RFQs in this status. " + RFQ_STATUS_HINT
+    )
     limit: int = Field(default=10, ge=1, le=MAX_LIST)
 
 
@@ -184,6 +197,13 @@ class RfqItem(BaseModel):
 
 class ListRfqsOut(BaseModel):
     rfqs: list[RfqItem]
+    by_status: dict[str, int] = Field(
+        description=(
+            "How many RFQs the company has in each status, counted over ALL its RFQs "
+            "(ignoring `status` and `limit`). An empty `rfqs` with drafts counted here "
+            "means the filter excluded them, not that the buyer has nothing in progress."
+        )
+    )
 
 
 # --- get_rfq_status / who_responded -------------------------------------------------------
@@ -1063,6 +1083,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
     async def list_rfqs(ctx: ToolContext, args: ListRfqsIn) -> ListRfqsOut:
         async with tenant_session(db, ctx.tenant_id) as session:
             rows = await queries.rfqs(session, args.status, args.limit)
+            by_status = await queries.rfq_counts(session)
         return ListRfqsOut(
             rfqs=[
                 RfqItem(
@@ -1074,7 +1095,8 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                     response_due=r.response_due,
                 )
                 for r in rows
-            ]
+            ],
+            by_status=by_status,
         )
 
     async def get_rfq_status(ctx: ToolContext, args: RfqRef) -> RfqStatusOut:
@@ -2000,7 +2022,8 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
     return (
         Tool(
             "list_rfqs",
-            "List the company's RFQs, newest first.",
+            "List the company's RFQs, newest first, with a count per status over all of "
+            "them. " + RFQ_STATUS_HINT,
             ListRfqsIn,
             ListRfqsOut,
             "read",
