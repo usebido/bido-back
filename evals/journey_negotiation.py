@@ -31,8 +31,10 @@ for, or a shorter lead time on a line it asked a date for.
    as its reply-by date.
 3. `final_round_only_bafo`: once the first BAFO is decided, every later request to
    any supplier is a BAFO: the final round is common.
-4. `no_bafo_after_final_offer`: nothing is asked in answer to an offer the supplier
-   declared its best and final (as the e-mail says, or as stored).
+4. `no_bafo_after_final_offer`: once the supplier declared an offer its best and
+   final (as the e-mail says, or as stored), nothing is asked in answer to it or to
+   a later offer, unless that later offer improved on the final one (the supplier
+   moved on its own).
 5. `asks_within_limits`: every price asked is above zero, at or below the line's
    maximum and below the supplier's own price at that moment, in cents (BRL,
    quoted in cents: at most 2 decimals).
@@ -467,13 +469,37 @@ def check_final_round(n: Negotiation) -> list[str]:
 
 
 def check_final_offers(n: Negotiation) -> list[str]:
-    """Rule 4: nothing is asked in answer to a final offer (as written or as stored)."""
-    return [
-        f"{s}: a {r.kind} ({r.state}) answers v{r.offer_version}, its declared final offer"
-        for s in n.suppliers
-        for r in n.requests.get(s, ())
-        if not r.reminder and r.offer_version in n.final_versions(s)
-    ]
+    """Rule 4: after a final offer (as written or as stored) nothing is asked, unless a later
+    offer of the supplier's own improved on it."""
+    problems: list[str] = []
+    for s in n.suppliers:
+        offers = n.offers.get(s, {})
+        for final in sorted(n.final_versions(s)):
+            for r in n.requests.get(s, ()):
+                if r.reminder or r.offer_version < final:
+                    continue
+                later = offers.get(r.offer_version)
+                if r.offer_version == final:
+                    why = "its declared final offer"
+                elif later is None or not improves(later, offers.get(final, {})):
+                    why = f"no better than its declared final offer v{final}"
+                else:
+                    continue
+                problems.append(f"{s}: a {r.kind} ({r.state}) answers v{r.offer_version}, {why}")
+    return problems
+
+
+def improves(later: Offer, earlier: Offer) -> bool:
+    """Whether `later` beats `earlier` on some line: a lower price or a shorter lead time."""
+    for part, quote in later.items():
+        before = earlier.get(part)
+        if before is None or quote.price is None or before.price is None:
+            continue
+        if quote.price < before.price:
+            return True
+        if quote.lead is not None and before.lead is not None and quote.lead < before.lead:
+            return True
+    return False
 
 
 def check_limits(n: Negotiation) -> list[str]:

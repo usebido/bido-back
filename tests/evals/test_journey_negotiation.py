@@ -180,6 +180,14 @@ def test_no_bafo_after_the_suppliers_final_offer() -> None:
     n = clean()
     assert rules.check_final_offers(replace(n, finals={"a": frozenset({2})}))
     assert rules.check_final_offers(replace(n, stored_finals={"a": frozenset({2})}))
+    # Declared final at v1: the BAFO answers v2, which beats it (10.80 < 11.00) ...
+    assert rules.check_final_offers(replace(n, finals={"a": frozenset({1})})) == [
+        "a: a revised_offer (sent) answers v1, its declared final offer"
+    ]
+    # ... and nothing may answer a later offer that is no better than the final one.
+    same = with_offer(replace(n, requests={"a": n.requests["a"][1:]}), 2, "11.00")
+    found = rules.check_final_offers(replace(same, finals={"a": frozenset({1})}))
+    assert found == ["a: a bafo (sent) answers v2, no better than its declared final offer v1"]
 
 
 def test_asks_stay_within_the_maximum_in_cents() -> None:
