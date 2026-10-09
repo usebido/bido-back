@@ -8,8 +8,8 @@ from bido_back.agents.definition import AgentDefinition
 from bido_back.agents.tools import AnyTool
 from bido_back.copilot.contracts import CopilotReply
 
-COPILOT_PROMPT_FILE: Final = "copilot.v22.md"
-COPILOT_PROMPT_VERSION: Final = 22
+COPILOT_PROMPT_FILE: Final = "copilot.v23.md"
+COPILOT_PROMPT_VERSION: Final = 23
 # Earlier turns of the same conversation the model sees (needs Agno storage).
 HISTORY_RUNS: Final = 10
 # Model requests per message: a few lookups, maybe a draft action, the answer.
