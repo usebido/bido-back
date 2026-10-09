@@ -23,6 +23,8 @@ from bido_back.rfqs.document import (
     RfqDocument,
     document_filename,
     document_html,
+    document_problems,
+    document_text,
     render_html_pdf,
     render_pdf,
     stale_reasons,
@@ -327,3 +329,95 @@ def test_no_need_by_column_or_band_entry_when_no_line_has_a_date() -> None:
     undated = document_html(_doc(lines=undated_lines))
     assert "Necessário em" not in undated
     assert '<col class="col-need">' not in undated
+
+
+def test_the_pdf_carries_what_the_full_email_would() -> None:
+    lines = [
+        DocumentLine(
+            position=1,
+            description="NTC thermistor 10k",
+            mpn="NCP18XH103F03RB",
+            manufacturer="Murata",
+            quantities=["10000", "50000"],
+            unit="pcs",
+            need_by=date(2027, 1, 15),
+            incoterm="DAP",
+            delivery_location="Leipzig",
+            qualification="AEC-Q200",
+        )
+    ]
+    asks = [
+        "Prazo de entrega",
+        "Validade da proposta",
+        "Embalagem",
+        "Declarações RoHS e REACH",
+        "Quantidade mínima (MOQ)",
+        "Qualificação (ex.: AEC-Q200) e certificados",
+    ]
+    doc = _doc(lines=lines, asks=asks, intro="Prezados, solicitamos cotação para os itens abaixo.")
+    text = document_text(doc)
+    for expected in (
+        "Prezados, solicitamos cotação para os itens abaixo.",
+        "NCP18XH103F03RB",
+        "Murata",
+        "Qualificação AEC-Q200",
+        "10000 / 50000",
+        "Por favor, informe o preço unitário para cada quantidade, com a moeda.",
+        "Se oferecer um item alternativo, indique claramente, com o código e o fabricante.",
+        "Mantenha RFQ-3 no assunto da sua resposta.",
+    ):
+        assert expected in text, expected
+    pdf = _text(render_pdf(doc))
+    assert "AEC-Q200" in pdf and "item alternativo" in pdf
+    assert document_problems(doc) == []
+
+    # Strict: a required question the PDF does not ask fails.
+    assert document_problems(doc.model_copy(update={"asks": asks[1:]})) == ["ask_missing:lead_time"]
+    # A translated label is recognised through the template's own (original) label.
+    translated = doc.model_copy(update={"asks": ["Tempo de fornecimento", *asks[1:]]})
+    assert document_problems(translated) == ["ask_missing:lead_time"]
+    assert document_problems(translated, ["Prazo de entrega"]) == []
+    no_qualification = [a for a in asks if not a.startswith("Qualificação")]
+    assert document_problems(doc.model_copy(update={"asks": no_qualification})) == [
+        "ask_missing:qualification"
+    ]
+    # RoHS/REACH only for electronic parts: steel by the buyer's code does not need it.
+    steel = _doc(asks=["Prazo de entrega", "Validade da proposta", "Embalagem", "MOQ"])
+    assert document_problems(steel) == []
+
+
+@pytest.mark.db
+async def test_without_a_pdf_the_full_email_goes_and_the_log_has_ids_only(
+    app_engine: AsyncEngine,
+    rfq_rows: People,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    def broken(document: RfqDocument) -> bytes:
+        raise RuntimeError(f"cannot lay out {document.lines[0].mpn}")
+
+    monkeypatch.setattr(service, "render_pdf", broken)
+    mailboxes = FakeMailboxes()
+    with caplog.at_level("WARNING", logger="bido_back.rfqs.service"):
+        _, invites = await _prepare_two(app_engine, rfq_rows, mailboxes)
+
+    approval = await _approval(app_engine, rfq_rows.tenant, invites["Rhein"])
+    args = SendRfqEmailArgs.model_validate(approval.args)
+    # The full email: item table and questions in the body, nothing attached.
+    assert args.document is None
+    assert "GRM188R71H104KA93D" in args.body and "<table" in (args.html_body or "")
+    assert "Lieferzeit" in args.body
+    [record, *_] = [r for r in caplog.records if "did not render" in r.getMessage()]
+    message = record.getMessage()
+    assert "error=RuntimeError" in message
+    assert "GRM188R71H104KA93D" not in message and "Rhein" not in message
+
+    registry = ActToolRegistry()
+    register_act_tools(
+        registry, RfqActDeps(db=app_engine, email_domain=EMAIL_DOMAIN, mailbox_senders=mailboxes)
+    )
+    jobs = FakeJobQueue()
+    await decide_approval(app_engine, approver(rfq_rows), approval.id, "approve", jobs=jobs)
+    await ApprovalExecutor(app_engine, registry)(jobs.jobs[0])
+    [sent] = mailboxes.sender.sent
+    assert sent.attachments == () and sent.text_body == args.body

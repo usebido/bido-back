@@ -87,3 +87,6 @@ class RfqEmailPreview(BaseModel):
     template_id: UUID | None
     template_version: int
     missing_required: list[RequiredFieldView]
+    # The RFQ document attached as a PDF (the email is then a short cover note);
+    # null when the full email goes without it.
+    attachment_name: str | None = None

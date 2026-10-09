@@ -207,8 +207,8 @@ async def test_rfq_flow_over_http(api: Api, rfq_rows: People) -> None:
     assert email["to"] == ["jonas@rhein.example.test"]
     assert email["subject"].startswith("[RFQ-1] ")
     assert email["sender_user_id"] == str(rfq_rows.owner)
-    # The approver previews the HTML version and the attached RFQ document.
-    assert "<table" in (email["html_body"] or "")
+    # The approver previews the cover note (HTML) and the attached RFQ document.
+    assert "[RFQ-1]" in (email["html_body"] or "") and "<table" not in email["html_body"]
     attachment = email["attachment_name"]
     assert attachment.startswith("RFQ-1-") and attachment.endswith(".pdf")
 

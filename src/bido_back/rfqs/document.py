@@ -4,10 +4,16 @@ It follows the RFQ sheet the buyer sees in the app (bido-front `PdfPreview`),
 but it goes out in the BUYER COMPANY's name, as large companies' RFQs do: the
 company's logo (or its name as a text header), legal name, tax id and address
 on top, "Request for quotation", the RFQ title, number and date, the addressee
-and the delivery place, a band with the reply-by and need-by dates, the item
-table (description with part no. / MPN under it, quantity, unit, need-by), the
-terms, what to include in the quote, and the company's footer text. Bido shows
-only as a small "sent via Bido" line in the footer.
+and the delivery place, a band with the reply-by and need-by dates, the buyer's
+own opening (their template's greeting), the item table (description with
+part no. / MPN, manufacturer and qualification under it, quantity, unit,
+need-by), the terms, how to price, what to include in the quote, the
+alternative-part policy, and the company's footer text. Bido shows only as a
+small "sent via Bido" line in the footer.
+
+The PDF IS the RFQ: the email that carries it is a short cover note
+(`bido_back.templates.render.render_cover`), so the PDF carries everything the
+full email would (`document_problems` checks the required fields on it).
 
 One rule the app's sheet does not have: a supplier's PDF is addressed to that
 supplier ONLY. The app lists every invited supplier under "To" for the buyer;
@@ -39,7 +45,14 @@ from weasyprint import HTML  # pyright: ignore[reportMissingTypeStubs]
 from weasyprint.urls import URLFetcher  # pyright: ignore[reportMissingTypeStubs]
 
 from bido_back.db.models import Rfq, RfqLine
-from bido_back.templates.render import RenderInput, asks, format_date, format_quantity
+from bido_back.templates.render import (
+    RenderInput,
+    document_asks,
+    format_date,
+    format_quantity,
+    phrases,
+)
+from bido_back.templates.required import REQUIRED_FIELDS, covered_keys
 
 PDF_CONTENT_TYPE: Final = "application/pdf"
 
@@ -58,6 +71,7 @@ _LABELS: Final[dict[str, dict[str, str]]] = {
         "unit": "Unit",
         "part_no": "Part no.",
         "mpn": "MPN",
+        "qualification": "Qualification",
         "incoterm": "Incoterm",
         "payment_terms": "Payment terms",
         "validity": "Quote validity",
@@ -82,6 +96,7 @@ _LABELS: Final[dict[str, dict[str, str]]] = {
         "unit": "Un.",
         "part_no": "Código",
         "mpn": "Cód. fabricante",
+        "qualification": "Qualificação",
         "incoterm": "Incoterm",
         "payment_terms": "Condição de pagamento",
         "validity": "Validade da proposta",
@@ -106,6 +121,7 @@ _LABELS: Final[dict[str, dict[str, str]]] = {
         "unit": "Einheit",
         "part_no": "Artikelnr.",
         "mpn": "Herstellernr.",
+        "qualification": "Qualifikation",
         "incoterm": "Incoterm",
         "payment_terms": "Zahlungsbedingungen",
         "validity": "Angebotsgültigkeit",
@@ -130,6 +146,7 @@ _LABELS: Final[dict[str, dict[str, str]]] = {
         "unit": "Unité",
         "part_no": "Référence",
         "mpn": "Réf. fabricant",
+        "qualification": "Qualification",
         "incoterm": "Incoterm",
         "payment_terms": "Conditions de paiement",
         "validity": "Validité de l'offre",
@@ -154,6 +171,7 @@ _LABELS: Final[dict[str, dict[str, str]]] = {
         "unit": "Unidad",
         "part_no": "Código",
         "mpn": "Cód. fabricante",
+        "qualification": "Calificación",
         "incoterm": "Incoterm",
         "payment_terms": "Condiciones de pago",
         "validity": "Validez de la oferta",
@@ -178,6 +196,7 @@ _LABELS: Final[dict[str, dict[str, str]]] = {
         "unit": "Unità",
         "part_no": "Codice",
         "mpn": "Codice produttore",
+        "qualification": "Qualifica",
         "incoterm": "Incoterm",
         "payment_terms": "Condizioni di pagamento",
         "validity": "Validità dell'offerta",
@@ -287,6 +306,8 @@ class DocumentLine(BaseModel):
     need_by: date | None = None
     incoterm: str | None = None
     delivery_location: str | None = None
+    # E.g. AEC-Q200. Optional: older approved documents have none.
+    qualification: str | None = None
 
 
 class RfqDocument(BaseModel):
@@ -308,6 +329,9 @@ class RfqDocument(BaseModel):
     quote_validity_days: int | None = None
     lines: list[DocumentLine] = Field(min_length=1)
     asks: list[str] = Field(default_factory=list[str])
+    # The buyer's own opening (their template's greeting, in the supplier's language),
+    # above the items. Optional: older approved documents have none.
+    intro: str | None = Field(default=None, max_length=4000)
     # The buyer company the RFQ goes out from.
     branding: DocumentBranding
 
@@ -351,10 +375,12 @@ def build_document(
                 need_by=line.need_by,
                 incoterm=line.incoterm,
                 delivery_location=line.delivery_location,
+                qualification=line.qualification,
             )
             for line in data.lines
         ],
-        asks=asks(data),
+        asks=document_asks(data),
+        intro=data.display.greeting.strip() or None,
         branding=branding or default_branding(data.buyer_company),
     )
 
@@ -383,6 +409,7 @@ def content_key(document: RfqDocument) -> tuple[object, ...]:
                 line.need_by,
                 line.incoterm,
                 line.delivery_location,
+                line.qualification,
             )
             for line in document.lines
         ),
@@ -411,6 +438,7 @@ def with_current_facts(approved: RfqDocument, rfq: Rfq, lines: Sequence[RfqLine]
                     need_by=line.need_by,
                     incoterm=line.incoterm,
                     delivery_location=line.delivery_location,
+                    qualification=line.qualification,
                 )
                 for line in lines
             ],
@@ -493,6 +521,9 @@ table.items tr { page-break-inside: avoid; }
 .asks { margin-top: 20px; }
 .asks ul { margin: 6px 0 0 0; padding-left: 16px; }
 .asks li { margin-bottom: 2px; }
+.asks .note { margin: 0 0 8px 0; }
+.asks ul + .note { margin-top: 10px; }
+.intro { margin: 16px 0 0 0; white-space: pre-line; }
 .reference { margin-top: 14px; color: #6b7280; font-size: 8.5pt; }
 .page-footer { position: running(page-footer); font-size: 7.5pt; color: #9aa1ad; }
 .page-footer .text { color: #6b7280; margin-bottom: 2px; }
@@ -645,6 +676,8 @@ def document_html(document: RfqDocument) -> str:
             meta_bits.append(f"{words['mpn']} {line.mpn}")
         if line.manufacturer:
             meta_bits.append(line.manufacturer)
+        if line.qualification:
+            meta_bits.append(f"{words['qualification']} {line.qualification}")
         meta_line = f'<div class="meta-line">{_e(" · ".join(meta_bits))}</div>' if meta_bits else ""
         rows.append(
             "<tr>"
@@ -688,13 +721,21 @@ def document_html(document: RfqDocument) -> str:
         else ""
     )
 
+    said = phrases(lang)
+    tiered = any(len(line.quantities) > 1 for line in document.lines)
+    price = said["prices"] if tiered else said["price"]
     asks_html = (
-        f'<div class="asks"><div class="eyebrow">{_e(words["include"])}</div><ul>'
-        + "".join(f"<li>{_e(ask)}</li>" for ask in document.asks)
-        + "</ul></div>"
-        if document.asks
-        else ""
+        f'<div class="asks"><p class="note">{_e(price)}</p>'
+        + (
+            f'<div class="eyebrow">{_e(words["include"])}</div><ul>'
+            + "".join(f"<li>{_e(ask)}</li>" for ask in document.asks)
+            + "</ul>"
+            if document.asks
+            else ""
+        )
+        + f'<p class="note">{_e(said["alternative"])}</p></div>'
     )
+    intro = f'<p class="intro">{_e(document.intro)}</p>' if document.intro else ""
     reference_text = words["reference"].format(ref=document.rfq_ref)
     reference = f'<div class="reference">{_e(reference_text)}</div>'
 
@@ -708,12 +749,88 @@ def document_html(document: RfqDocument) -> str:
         + "".join(parties)
         + f'</div><div class="meta"><table>{meta}</table></div></div>'
         + band
+        + intro
         + items
         + terms
         + asks_html
         + reference
         + "</body></html>"
     )
+
+
+_BLOCK_END: Final = re.compile(r"</(?:div|p|li|tr|td|th|span)>|<br\s*/?>")
+_TAG: Final = re.compile(r"<[^>]+>")
+
+
+def document_text(document: RfqDocument) -> str:
+    """What the PDF says, as plain text (one block per line): for the checks and the evals."""
+    markup = document_html(document)
+    body = markup[markup.index("<body>") + len("<body>") :]
+    text = _TAG.sub("", _BLOCK_END.sub("\n", body))
+    lines = (" ".join(html.unescape(line).split()) for line in text.split("\n"))
+    return "\n".join(line for line in lines if line)
+
+
+def _line_values(key: str, line: DocumentLine, language: str) -> list[str]:
+    """The line's data a required item field stands for, as the PDF prints it."""
+    match key:
+        case "mpn":
+            return [v for v in (line.part_number, line.mpn) if v]
+        case "manufacturer":
+            return [line.manufacturer] if line.manufacturer else []
+        case "quantity_tiers":
+            return list(line.quantities)
+        case "unit":
+            return [line.unit]
+        case "need_by":
+            return [format_date(line.need_by, language)] if line.need_by else []
+        case "incoterm_place":
+            return [v for v in (line.incoterm, line.delivery_location) if v]
+        case "qualification":
+            return [line.qualification] if line.qualification else []
+        case _:
+            raise ValueError(f"no document check for required field {key}")
+
+
+def _electronic(lines: Sequence[DocumentLine]) -> bool:
+    """`bido_back.templates.render.electronic` on the document's lines."""
+    return any(
+        (line.mpn and line.mpn != line.part_number) or line.manufacturer or line.qualification
+        for line in lines
+    )
+
+
+def document_problems(document: RfqDocument, template_labels: Sequence[str] = ()) -> list[str]:
+    """Required fields (`bido_back.templates.required`) the PDF does not carry, as codes.
+
+    Item fields: every line's data is printed. Ask fields: the PDF asks for each
+    one (its questions, or the template's own labels behind them, given in the
+    template's language as `template_labels`); RoHS/REACH only for electronic
+    parts, the qualification only when a line names one. Empty means the PDF
+    carries everything the full email would.
+    """
+    text = document_text(document)
+    problems: list[str] = []
+    for field in REQUIRED_FIELDS:
+        if field.kind != "item":
+            continue
+        for line in document.lines:
+            for value in _line_values(field.key, line, document.language):
+                if " ".join(value.split()) not in text:
+                    problems.append(f"{field.key}_missing:{line.position}")
+                    break
+    covered = covered_keys([*template_labels, *document.asks])
+    for field in REQUIRED_FIELDS:
+        if field.kind != "ask" or field.key in covered:
+            continue
+        if field.key == "rohs_reach" and not _electronic(document.lines):
+            continue
+        problems.append(f"ask_missing:{field.key}")
+    if any(line.qualification for line in document.lines) and "qualification" not in covered:
+        problems.append("ask_missing:qualification")
+    if any(" ".join(ask.split()) not in text for ask in document.asks):
+        problems.append("ask_not_shown")
+    return problems
 
 
 def _from_line(document: RfqDocument) -> str:
