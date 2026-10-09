@@ -11,7 +11,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
-from typing import Final
+from typing import Final, Literal
 
 from bido_back.purchasing.importers import norm
 from bido_back.purchasing.sources.contracts import DateOrder, EvidenceTable, SourceRef
@@ -260,6 +260,19 @@ def _embedded(text: str) -> list[str]:
         if any(t in _MONTHS for t in tokens[i : i + 3]) and _named(window) is not None:
             found.append(window)
     return found
+
+
+def value_kind(text: str) -> Literal["number", "date", "text"]:
+    """How a cell reads on its own. A date is a written one ("2026-10-08", "08/10/2026",
+    "8 de outubro de 2026"); an Excel serial or YYYYMMDD reads as a number, and text
+    naming a number or a date ("12 kg", "Posição em 08/10/2026") is text."""
+    raw = text.strip()
+    bare = _TIME.sub("", raw).strip()
+    if _YMD.fullmatch(bare) or _NUMERIC.fullmatch(bare) or _named(bare) is not None:
+        return "date"
+    if _SCIENTIFIC.fullmatch(raw) or _PURE_NUMBER.fullmatch(raw):
+        return "number"
+    return "text"
 
 
 def read_date(text: str) -> DateReading:

@@ -49,7 +49,7 @@ windows needs its own focused change, beyond source understanding.
 ```mermaid
 flowchart LR
     A[Files or connector evidence] --> B[Located tables and text]
-    B --> C[Manifest and bounded pages]
+    B --> C[Manifest; each table whole or summarized]
     C --> D[Parallel semantic mapping]
     D --> E[Validate locators and copy source values]
     E --> F[Resolve identities and reconcile quantities]
@@ -64,17 +64,23 @@ flowchart LR
    located text slices. `EvidenceTable` is independent of file format and can
    also receive connector records. Scans/images require a future vision
    adapter; unsupported files, limits and partial coverage are explicit issues.
-2. Code inventories all sources, then presents all rows in bounded pages.
-   Up to four interpretation calls run concurrently; pages of the same table
-   run in sequence to retain header interpretation. Source/page/cell/character
-   limits fail explicitly rather than claiming complete coverage.
+2. Code inventories all sources and interprets each table once: every row when
+   it is small (48,000 characters), otherwise a summary computed over every row
+   (chosen rows with their numbers, bands between blank rows, row shapes and a
+   profile of each column with its spellings). The mapper's sections then apply
+   to every row of the table, so its work does not grow with the rows; see
+   [Large sources](large-sources.md). Text sources are still read in bounded
+   pages. Up to four calls run concurrently. Source/page/cell/character limits
+   fail explicitly rather than claiming complete coverage.
 3. The tool-free mapper proposes semantic table columns or exact text slices.
    It cannot manufacture values or invoke an importer. Arbitrary header names
    and languages are interpreted against a domain catalog, rather than requiring
    a new header alias for every customer.
 4. Code checks field names, row and column bounds, slices and overlaps, copies
-   original values, and records field-level provenance. Invalid proposals and
-   failed pages remain visible. Typed output constrains structure; it does not
+   original values, and records field-level provenance. Rows that repeat the
+   section's header are skipped, and a section's `required_fields` keep group
+   headings and notes out of its records while their fill-down values still name
+   the rows below. Invalid proposals and failed calls remain visible. Typed output constrains structure; it does not
    prove the model interpreted the business meaning correctly.
 5. Deterministic assessment resolves supplier codes/names, retains purchase
    history and supplier performance, reconciles source calculations, and reports
@@ -116,7 +122,7 @@ The mapper still returns locators only; code checks and copies everything:
   identifier columns only, disclosed.
 - **Report-level values.** Section `constants` locate a title or header cell (a stock
   position date, a plant, a currency, a unit in a header) outside the data rows; `text`
-  names the exact part of the cell. A row's own value wins. Continuation pages keep them.
+  names the exact part of the cell. A row's own value wins. Continued text pages keep them.
 - **Categorical values.** `value_maps` interpret each distinct spelling of a status,
   movement, demand/balance basis or unit column as a term of a closed vocabulary
   (`vocabulary.py`); code checks that the spelling occurs and the term is allowed, and
@@ -310,8 +316,8 @@ header mismatches, source limits) still reject invented data.
 
 ## Validation approach
 
-Tests assert canonical structures, exact copied values and provenance, complete
-page iteration, bounded concurrency, invalid/overlapping references, source
+Tests assert canonical structures, exact copied values and provenance, whole-table
+sections from summaries, text page iteration, bounded concurrency, invalid/overlapping references, source
 limits, identifier resolution, unit conflicts, demand basis, receipt dates,
 duplicate scope and tenant/user/conversation access. They use synthetic fixtures
 and injected structured mapper results; no real customer data is sent to a model.

@@ -21,6 +21,7 @@ from bido_back.purchasing.sources.formats import (
     number_needs_separator,
     read_date,
     read_number,
+    value_kind,
 )
 from bido_back.purchasing.sources.vocabulary import VOCABULARY, allowed, built_in
 from evals.source_fixtures import fact
@@ -282,3 +283,28 @@ def test_an_ambiguous_date_is_reported_as_such() -> None:
     issues: list[Issue] = []
     assert source_date(fact("inventory", as_of="08/10/2026"), "as_of", issues) is None
     assert [issue.code for issue in issues] == ["ambiguous_date"]
+
+
+@pytest.mark.parametrize(
+    ("text", "kind"),
+    [
+        ("1.234,56", "number"),
+        ("1,000", "number"),
+        ("1.250,00-", "number"),
+        ("45000", "number"),  # an Excel serial reads as a date only in a date column
+        ("20261008", "number"),
+        ("1.5E-7", "number"),
+        ("2026-10-08", "date"),
+        ("2026-10-08 14:30", "date"),
+        ("08/10/2026", "date"),
+        ("08.10.26", "date"),
+        ("8 de outubro de 2026", "date"),
+        ("12 kg", "text"),
+        ("M-00001", "text"),
+        ("Peça número 12", "text"),
+        ("Posição em 08/10/2026", "text"),
+        ("UN", "text"),
+    ],
+)
+def test_a_cells_kind_of_value_reads_the_cell_on_its_own(text: str, kind: str) -> None:
+    assert value_kind(text) == kind

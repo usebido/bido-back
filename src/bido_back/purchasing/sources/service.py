@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 from uuid import UUID
 
@@ -23,12 +23,13 @@ from bido_back.purchasing.sources.contracts import (
     EvidenceTable,
     Issue,
     PlanningScope,
+    Record,
     ScopeRequest,
     SourceAssessment,
 )
 from bido_back.purchasing.sources.evidence import same_key
 from bido_back.purchasing.sources.mapping import Mapper, map_sources
-from bido_back.purchasing.sources.packs import read_known
+from bido_back.purchasing.sources.packs import PackResult, read_known
 from bido_back.purchasing.sources.packs.base import PackContext
 from bido_back.purchasing.sources.planning import assess_plan, planning_context
 from bido_back.purchasing.sources.pricing import spend_totals
@@ -94,10 +95,29 @@ async def analyze_documents(
                     rows=0,
                 )
             )
-    known = read_known(tables, PackContext(filenames=names, today=today))
+    known = await asyncio.to_thread(read_known, tables, PackContext(filenames=names, today=today))
     mapped, problems, coverage = await map_sources(
         known.remaining, objective, context, mapper, known=known.records
     )
+    # The rest is computation: off the event loop, so a large source does not hold up the
+    # other requests this process serves.
+    return await asyncio.to_thread(
+        _settle, known, mapped, problems, coverage, issues, unread, names, scope, today
+    )
+
+
+def _settle(
+    known: PackResult,
+    mapped: Sequence[Record],
+    problems: Sequence[Issue],
+    coverage: Sequence[Coverage],
+    issues: Sequence[Issue],
+    unread: Sequence[Coverage],
+    names: Mapping[str, str],
+    scope: ScopeRequest | PlanningScope | None,
+    today: date,
+) -> SourceAssessment:
+    """Units, the buyer's boundaries and the assessment of the read records."""
     records = [*known.records, *mapped]
     unit_issues, conversions = convert_units(records)
     problems = [*known.issues, *problems, *unit_issues]
@@ -210,8 +230,10 @@ async def analyze_documents(
         row.filename = names[row.source_id]
     all_coverage = [*coverage, *unread]
     _disclose(result, all_coverage)
+    # The assessment's own objects, not a dump and a re-validation: on a large source the
+    # copy would nearly double the memory this call needs.
     return SourceAssessment(
-        **result.model_dump(),
+        **dict(result),
         scope=planning,
         scope_resolution=resolved.resolution if resolved is not None else None,
         planning_candidates=candidates,

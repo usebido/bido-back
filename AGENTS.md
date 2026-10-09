@@ -129,8 +129,8 @@ Buyers' sources reach ERP scale; the direction is in
 - **A model reads a bounded view of a table, never the table:** structure, column
   profiles over every row, distinct values and a sample code chose, within a fixed
   budget whatever the row count. Code reads, transforms, joins and computes every
-  row. The source mapper's row paging is being replaced; never add a path that pages
-  rows through a model.
+  row. The source mapper reads a table whole only when it is small, otherwise its
+  summary; never add a path that pages a table's rows through a model.
 - **A model emits typed plans, never values, SQL or code**, and code validates a plan
   against the data before running it. Never execute model-written SQL or code.
 - **Per-row meaning is decided per distinct value**, cached per tenant: deterministic

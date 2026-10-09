@@ -1,5 +1,11 @@
 """Bounded parallel interpretation with a deterministic, locator-only materializer.
 
+Each table is interpreted once: whole when it is small, otherwise from a summary that
+code computes over every row (the rows it chose, the bands between blank rows, the row
+shapes and a profile of every column). The mapper's sections then apply to every row of
+the table, so the model's work does not grow with the number of rows. Text sources are
+read in pages.
+
 The mapper proposes locators: table sections (columns, report-level constants), text
 records, the meaning of a categorical column's distinct spellings (`value_maps`) and,
 when the source's language establishes it, how numeric dates are written. Code checks
@@ -12,6 +18,7 @@ order they prove. A value that stays ambiguous is never guessed.
 import asyncio
 import re
 import unicodedata
+from collections import Counter
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
@@ -26,6 +33,7 @@ from bido_back.purchasing.sources.contracts import (
     CanonicalBasis,
     CanonicalValue,
     CellRef,
+    ColumnProfile,
     ConstantMapping,
     Coverage,
     DateOrder,
@@ -35,9 +43,14 @@ from bido_back.purchasing.sources.contracts import (
     MappingTask,
     Record,
     RecordKind,
+    RowBand,
+    RowShape,
+    ShownRow,
     SourceRef,
+    SpellingCount,
     TableManifest,
     TableProposal,
+    TableSummary,
 )
 from bido_back.purchasing.sources.evidence import (
     DATE_FIELDS,
@@ -53,6 +66,7 @@ from bido_back.purchasing.sources.formats import (
     read_number,
     resolve_date,
     scan_formats,
+    value_kind,
 )
 from bido_back.purchasing.sources.vocabulary import (
     UNIT_VOCABULARY,
@@ -242,6 +256,26 @@ MAX_PAGES = 100
 CONCURRENCY = 4
 MAX_TABLES = 100
 MANIFEST_CHARS = 20_000
+# A table this size (its cells' characters, with JSON overhead) is shown whole; a larger
+# one through its summary, whatever its number of rows.
+WHOLE_TABLE_CHARS = 48_000
+# Characters of rows a summary shows verbatim.
+SUMMARY_CHARS = 32_000
+# A summary shows the first and last rows of each band (titles, headers, totals).
+BAND_HEAD = 6
+BAND_TAIL = 2
+SUMMARY_BANDS = 30
+SUMMARY_SHAPES = 12
+SHAPE_EXAMPLES = 3
+# Rows spread evenly over the table, so a summary shows its variety.
+SPREAD_ROWS = 12
+# A text column with this many distinct spellings or fewer lists them all; otherwise,
+# and for number and date columns, its most frequent ones.
+PROFILE_VALUES = 20
+PROFILE_TOP = 6
+PROFILE_VALUE_CHARS = 80
+# Characters of column profiles; a wide table's profiles list fewer spellings.
+PROFILE_CHARS = 24_000
 # Columns whose blank cells may repeat the value above them (a grouping key).
 FILL_DOWN_FIELDS = frozenset(
     {
@@ -263,8 +297,8 @@ _TOTAL_MARKS = frozenset({"*", "**", "***"})
 _EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 # Share of a mapped column's values that must read as its field's type.
 ADMISSIBLE_SHARE = 0.8
-PROMPT_FILE = "source_mapper.v4.md"
-PROMPT_VERSION = 4
+PROMPT_FILE = "source_mapper.v5.md"
+PROMPT_VERSION = 5
 
 
 def _anchors(table: EvidenceTable) -> list[int]:
@@ -312,7 +346,15 @@ def default_mapper(config: RunnerConfig | None = None) -> Mapper:
     return call
 
 
+def _whole(table: EvidenceTable) -> list[tuple[int, int]]:
+    """A table's one task: every row (none may be longer than a page)."""
+    if any(_row_chars(row) > PAGE_CHARS for row in table.rows):
+        raise ValueError("source_row_limit")
+    return [(0, len(table.rows))] if table.rows else []
+
+
 def _pages(table: EvidenceTable) -> list[tuple[int, int]]:
+    """A text source's pages."""
     result: list[tuple[int, int]] = []
     first, size = 0, 0
     for i, row in enumerate(table.rows):
@@ -326,6 +368,158 @@ def _pages(table: EvidenceTable) -> list[tuple[int, int]]:
     if first < len(table.rows):
         result.append((first, len(table.rows)))
     return result
+
+
+def _row_chars(row: Sequence[str | None]) -> int:
+    return sum(len(v or "") + 8 for v in row)
+
+
+def _filled(row: Sequence[str | None]) -> bool:
+    return any(v is not None and v.strip() for v in row)
+
+
+# A shape's letter for each kind of value.
+_LETTERS = {"number": "n", "date": "d", "text": "t"}
+
+
+def _kind(table: EvidenceTable, row: int, column: int, value: str, seen: dict[str, str]) -> str:
+    """A cell's kind of value: n number, d date, t text."""
+    if (row, column) in table.numbers:
+        return "n"
+    kind = seen.get(value)
+    if kind is None:
+        kind = _LETTERS[value_kind(value)]
+        seen[value] = kind
+    return kind
+
+
+def summarize(table: EvidenceTable) -> TableSummary:
+    """What the mapper reads of a table too large to show whole (see `TableSummary`).
+
+    Every count covers every row; the rows shown are chosen by rule, never at random, so
+    one table always gives one summary.
+    """
+    width = max((len(row) for row in table.rows), default=0)
+    seen: dict[str, str] = {}
+    spellings: list[Counter[str]] = [Counter() for _ in range(width)]
+    first_spelling: list[dict[str, str]] = [{} for _ in range(width)]
+    numbers, dates = [0] * width, [0] * width
+    shape_rows: Counter[str] = Counter()
+    examples: dict[str, list[int]] = {}
+    bands: list[RowBand] = []
+    start: int | None = None
+    for number, row in enumerate(table.rows, start=1):
+        if not _filled(row):
+            if start is not None:
+                bands.append(RowBand(first_row=start, last_row=number - 1))
+                start = None
+            continue
+        start = number if start is None else start
+        letters: list[str] = []
+        for column, value in enumerate(row, start=1):
+            if value is None or not value.strip():
+                letters.append(".")
+                continue
+            kind = _kind(table, number, column, value, seen)
+            letters.append(kind)
+            numbers[column - 1] += kind == "n"
+            dates[column - 1] += kind == "d"
+            key = _spelling(value)
+            spellings[column - 1][key] += 1
+            first_spelling[column - 1].setdefault(key, value.strip())
+        pattern = "".join(letters).rstrip(".")
+        shape_rows[pattern] += 1
+        if len(found := examples.setdefault(pattern, [])) < SHAPE_EXAMPLES:
+            found.append(number)
+    if start is not None:
+        bands.append(RowBand(first_row=start, last_row=len(table.rows)))
+    shapes = shape_rows.most_common()
+    listed = shapes[:SUMMARY_SHAPES]
+    profiles: list[ColumnProfile] = []
+    for index, counts in enumerate(spellings):
+        filled = counts.total()
+        if not filled:
+            continue
+        text = numbers[index] + dates[index] < filled / 2
+        top = PROFILE_VALUES if text and len(counts) <= PROFILE_VALUES else PROFILE_TOP
+        profiles.append(
+            ColumnProfile(
+                column=index + 1,
+                filled=filled,
+                numbers=numbers[index],
+                dates=dates[index],
+                distinct=len(counts),
+                values=[
+                    SpellingCount(value=first_spelling[index][key][:PROFILE_VALUE_CHARS], rows=n)
+                    for key, n in counts.most_common(top)
+                ],
+            )
+        )
+    _fit(profiles)
+    # Rows to show, most telling first: each band's first rows (titles and headers), one
+    # row of each shape, each band's last rows (totals), more examples, an even spread.
+    heads = [
+        r for b in bands[:SUMMARY_BANDS] for r in range(b.first_row, b.last_row + 1)[:BAND_HEAD]
+    ]
+    tails = [
+        r for b in bands[:SUMMARY_BANDS] for r in range(b.first_row, b.last_row + 1)[-BAND_TAIL:]
+    ]
+    candidates = [
+        *heads,
+        *(examples[p][0] for p, _ in listed),
+        *tails,
+        *(r for p, _ in listed for r in examples[p][1:]),
+        *_spread(bands, SPREAD_ROWS),
+    ]
+    chosen: set[int] = set()
+    used = 0
+    for row in candidates:
+        size = _row_chars(table.rows[row - 1])
+        if row in chosen or used + size > SUMMARY_CHARS:
+            continue
+        chosen.add(row)
+        used += size
+    return TableSummary(
+        rows=len(table.rows),
+        columns=width,
+        shown=[ShownRow(row=r, cells=_trimmed(table.rows[r - 1])) for r in sorted(chosen)],
+        bands=bands[:SUMMARY_BANDS],
+        bands_left_out=max(0, len(bands) - SUMMARY_BANDS),
+        shapes=[RowShape(pattern=p, rows=n, examples=examples[p]) for p, n in listed],
+        shapes_left_out=sum(n for _, n in shapes[SUMMARY_SHAPES:]),
+        profiles=profiles,
+    )
+
+
+def _fit(profiles: list[ColumnProfile]) -> None:
+    """Shorten the spellings listed until the profiles fit their budget: first those of
+    number and date columns (they only show how values are written), then the rest."""
+
+    def size() -> int:
+        return sum(len(profile.model_dump_json()) for profile in profiles)
+
+    for keep, text_too in ((2, False), (PROFILE_TOP, True), (2, True), (0, True)):
+        if size() <= PROFILE_CHARS:
+            return
+        for profile in profiles:
+            if text_too or profile.numbers + profile.dates >= profile.filled / 2:
+                profile.values = profile.values[:keep]
+
+
+def _spread(bands: Sequence[RowBand], count: int) -> list[int]:
+    """`count` rows with content, evenly spaced over all of them."""
+    rows = [r for band in bands for r in range(band.first_row, band.last_row + 1)]
+    if len(rows) <= count:
+        return rows
+    step = (len(rows) - 1) / (count - 1)
+    return [rows[round(i * step)] for i in range(count)]
+
+
+def _trimmed(row: Sequence[str | None]) -> list[str | None]:
+    cells = list(row)
+    while cells and (cells[-1] is None or not cells[-1].strip()):
+        cells.pop()
+    return cells
 
 
 def _copy(table: EvidenceTable, ref: CellRef) -> tuple[str, SourceRef]:
@@ -404,6 +598,20 @@ def _header_matches(table: EvidenceTable, header_row: int, column: int, text: st
         (cell := _cell(table, row, column)) is not None and _spelling(cell) == wanted
         for row in (header_row, header_row - 1)
     )
+
+
+def _repeated_header(
+    table: EvidenceTable, row: int, header_row: int, columns: dict[str, int]
+) -> bool:
+    """A row repeating the section's header, as printed reports do on every page."""
+    same = sum(
+        1
+        for column in columns.values()
+        if (cell := _cell(table, row, column)) is not None
+        and (header := _cell(table, header_row, column)) is not None
+        and _spelling(cell) == _spelling(header)
+    )
+    return same > 0 and 2 * same >= len(columns)
 
 
 def _derived_row(
@@ -796,6 +1004,16 @@ def materialize(
                 )
             )
             continue
+        required = set(section.required_fields)
+        if required - set(columns):
+            issues.append(
+                Issue(
+                    code="invalid_mapping",
+                    severity="blocker",
+                    message=f"{table.name}: a required field is not one of the section's columns.",
+                )
+            )
+            continue
         fills = {a.field for a in section.columns if a.fill_down}
         if fills - FILL_DOWN_FIELDS:
             issues.append(
@@ -810,18 +1028,41 @@ def materialize(
         maps = _value_maps(table, section, columns, constants, issues)
         transactions: list[int] = []
         derived: list[int] = []
+        repeated: list[int] = []
         for row in range(section.first_row, section.last_row + 1):
             if not any(table.rows[row - 1]):
                 continue
-            if _derived_row(table, row, columns, transactions):
+            if _repeated_header(table, row, section.header_row, columns):
+                repeated.append(row)
+            elif _derived_row(table, row, columns, transactions):
                 derived.append(row)
             else:
                 transactions.append(row)
+        # Fill-down values flow in row order, also from rows that are not records (a group
+        # heading); a row without a required field is not a record.
+        kept: list[tuple[int, dict[str, tuple[str, SourceRef]]]] = []
+        lacking: list[int] = []
+        above: dict[str, tuple[str, SourceRef]] = {}
+        for row in transactions:
+            row_fills: dict[str, tuple[str, SourceRef]] = {}
+            for name in fills:
+                if _cell(table, row, columns[name]) is not None:
+                    above[name] = _copy(table, CellRef(row=row, column=columns[name]))
+                elif name in above:
+                    row_fills[name] = above[name]
+            if any(
+                _cell(table, row, columns[name]) is None and name not in row_fills
+                for name in required
+            ):
+                lacking.append(row)
+            else:
+                kept.append((row, row_fills))
+        records_rows = [row for row, _ in kept]
         inadmissible = [
             name
             for name, column in columns.items()
             if not _admissible(
-                table, section.kind, name, [(r, column) for r in transactions], maps.get(name, {})
+                table, section.kind, name, [(r, column) for r in records_rows], maps.get(name, {})
             )
         ] + [
             name
@@ -844,14 +1085,7 @@ def materialize(
             continue
         found: list[Record] = []
         filled = 0
-        above: dict[str, tuple[str, SourceRef]] = {}
-        for row in transactions:
-            row_fills: dict[str, tuple[str, SourceRef]] = {}
-            for name in fills:
-                if _cell(table, row, columns[name]) is not None:
-                    above[name] = _copy(table, CellRef(row=row, column=columns[name]))
-                elif name in above:
-                    row_fills[name] = above[name]
+        for row, row_fills in kept:
             record = add(
                 section.kind,
                 {name: CellRef(row=row, column=column) for name, column in columns.items()},
@@ -860,6 +1094,27 @@ def materialize(
             if record is not None:
                 found.append(record)
                 filled += bool(row_fills)
+        for code, skipped, what in (
+            ("repeated_headers_skipped", repeated, "repeat the section's header"),
+            (
+                "rows_without_required_fields",
+                lacking,
+                f"lack {', '.join(sorted(required))} (group headings or notes)",
+            ),
+        ):
+            if skipped:
+                issues.append(
+                    Issue(
+                        code=code,
+                        severity="warning",
+                        message=f"{table.name}: {len(skipped)} row(s) inside a section "
+                        f"{what} and were not read as records.",
+                        evidence=[
+                            SourceRef(source_id=table.source_id, table=table.name, row=r, column=1)
+                            for r in skipped[:10]
+                        ],
+                    )
+                )
         if derived:
             issues.append(
                 Issue(
@@ -958,10 +1213,12 @@ async def map_sources(
     *,
     known: Sequence[Record] = (),
 ) -> tuple[list[Record], list[Issue], list[Coverage]]:
-    """Interpret every table with the mapper, pages in parallel.
+    """Interpret every table with the mapper, tables in parallel.
 
-    `known` are records already read without the mapper (report packs): they take part
-    in the cross-source identifier checks but are not returned.
+    A table is one call: its rows, or its summary when it is too large to show whole; the
+    sections apply to every row. A text source is read page by page. `known` are records
+    already read without the mapper (report packs): they take part in the cross-source
+    identifier checks but are not returned.
     """
     if len(tables) > MAX_TABLES:
         return (
@@ -998,8 +1255,9 @@ async def map_sources(
     ]
     semaphore = asyncio.Semaphore(CONCURRENCY)
     try:
-        pages = [_pages(t) for t in tables]
-        if sum(map(len, pages)) > MAX_PAGES:
+        pages = [_pages(t) if t.layout == "text" else _whole(t) for t in tables]
+        text_pages = sum(len(p) for t, p in zip(tables, pages, strict=True) if t.layout == "text")
+        if text_pages > MAX_PAGES:
             raise ValueError("source_page_limit")
     except ValueError:
         return (
@@ -1029,19 +1287,24 @@ async def map_sources(
         previous: list[TableProposal] = []
         covered: set[int] = set()
         complete = True
+        large = table.layout == "table" and (
+            sum(_row_chars(row) for row in table.rows) > WHOLE_TABLE_CHARS
+        )
+        summary = await asyncio.to_thread(summarize, table) if large else None
         for first, last in spans:
             task = MappingTask(
+                catalog=CATALOG,
+                vocabulary=VOCABULARY,
+                manifest=manifest,
                 objective=objective,
                 source_id=table.source_id,
                 table=table.name,
                 layout=table.layout,
                 first_row=first + 1,
                 last_row=last,
-                rows=table.rows[first:last],
+                rows=[] if summary is not None else table.rows[first:last],
+                summary=summary,
                 previous_sections=previous,
-                manifest=manifest,
-                catalog=CATALOG,
-                vocabulary=VOCABULARY,
             )
             try:
                 async with semaphore:
@@ -1057,7 +1320,7 @@ async def map_sources(
                     Issue(
                         code="mapping_failed",
                         severity="blocker",
-                        message="Source interpretation failed for a page.",
+                        message="Source interpretation failed for a table or page.",
                     )
                 )
                 continue
@@ -1065,7 +1328,9 @@ async def map_sources(
                 complete = False
             sections = _continue(output.sections, previous)
             output = output.model_copy(update={"sections": sections})
-            found, problems, rows = materialize(table, output, first + 1, last, formats=formats)
+            found, problems, rows = await asyncio.to_thread(
+                materialize, table, output, first + 1, last, formats=formats
+            )
             records.extend(found)
             issues.extend(problems)
             covered.update(rows)

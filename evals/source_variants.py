@@ -171,10 +171,37 @@ class Style:
     stock_date_in_title: bool = False
     inline_receipts: bool = False
     formulas: bool = False
+    # Older closed order lines of materials outside the scenario, so that the register is
+    # too large to show the mapper whole; they change no expected answer.
+    history: int = 0
 
 
 def _unit(loc: Locale, style: Style, s: Scenario, code: str) -> str:
-    return (style.units or loc.units)[s.unit_of(code)]
+    units = style.units or loc.units
+    try:
+        return units[s.unit_of(code)]
+    except KeyError:
+        return units["pcs"]  # a material of the older history
+
+
+def _older_history(s: Scenario, count: int) -> list[PurchaseLine]:
+    """`count` closed order lines of 2024, for 400 materials no BOM uses."""
+    start = date(2024, 1, 2)
+    return [
+        PurchaseLine(
+            po_number=f"3{i:09d}",
+            po_line="10",
+            plant="A" if i % 3 else "B",
+            material=f"9{i % 400:05d}",
+            supplier=s.suppliers[i % len(s.suppliers)].code,
+            quantity=Decimal(10 + i % 90),
+            unit_price=Decimal(i % 500 + 100) / 10,
+            ordered_at=start + timedelta(days=i % 300),
+            promised_at=start + timedelta(days=i % 300 + 14),
+            status="closed",
+        )
+        for i in range(count)
+    ]
 
 
 def _po_block(s: Scenario, loc: Locale, style: Style, title: Title) -> Block:
@@ -237,7 +264,7 @@ def _po_block(s: Scenario, loc: Locale, style: Style, title: Title) -> Block:
             Column(h["rejected"], "qty", rejected, _f("purchase", "rejected_quantity")),
             Column(h["open_quantity"], "qty", open_quantity, _f("purchase", "open_quantity")),
         ]
-    block = _block(columns, s.purchases, title=title)
+    block = _block(columns, [*s.purchases, *_older_history(s, style.history)], title=title)
     # The register is read as purchase lines; its own receipt and balance columns, when
     # present, are purchase fields (the delivery_schedule readings are not used).
     block.mappings = [(kind, fields) for kind, fields in block.mappings if kind == "purchase"]
@@ -1095,6 +1122,13 @@ VARIANTS: Final = (
         PT,
         lambda: scattered(PT, grid=True),
         accepts=frozenset({"exact", "review", "estimate"}),
+    ),
+    Variant(
+        "long_history",
+        "The SAP-like export with 4,000 older closed order lines of other materials: the "
+        "register is too large to show whole, so the mapper reads its summary",
+        PT,
+        lambda: scattered(PT, Style(history=4000)),
     ),
     Variant(
         "sap_text_numbers",

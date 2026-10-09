@@ -130,12 +130,34 @@ def test_report_level_values_must_be_real_cells_outside_the_data_rows(
     assert "as_of" not in records[0].values
 
 
-async def test_a_continued_section_keeps_its_report_level_values(
+async def test_a_table_is_one_task_and_its_report_level_values_reach_every_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Pages are for text: a table is interpreted once, however many rows it has.
+    monkeypatch.setattr(mapping, "PAGE_ROWS", 4)
+    rows: list[list[str | None]] = [[f"0001{i:02d}", str(i), "pcs"] for i in range(1, 7)]
+    table = stock_table(*rows)
+    tasks: list[MappingTask] = []
+
+    async def mapper(task: MappingTask, _: ToolContext) -> MappingProposal:
+        tasks.append(task)
+        return MappingProposal(sections=[stock_section(last_row=task.last_row)])
+
+    records, issues, _ = await map_sources([table], "Read", context(), mapper)
+
+    assert [(task.first_row, task.last_row) for task in tasks] == [(1, 9)]
+    assert len(records) == 6
+    assert {r.values["as_of"] for r in records} == {"08/10/2026"}
+    assert {r.canonical["as_of"].value for r in records} == {"2026-10-08"}
+    assert not any(i.severity == "blocker" for i in issues)
+
+
+async def test_a_continued_text_page_keeps_its_report_level_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(mapping, "PAGE_ROWS", 4)
     rows: list[list[str | None]] = [[f"0001{i:02d}", str(i), "pcs"] for i in range(1, 7)]
-    table = stock_table(*rows)
+    table = stock_table(*rows).model_copy(update={"layout": "text"})
 
     async def mapper(task: MappingTask, _: ToolContext) -> MappingProposal:
         first = max(task.first_row, 4)
@@ -485,3 +507,106 @@ def test_proposal_schema_is_accepted_by_strict_structured_output() -> None:
         return []
 
     assert siblings(schema) == []
+
+
+def grouped_purchases() -> EvidenceTable:
+    """Purchase lines under supplier headings, as grouped ERP reports print them."""
+    return EvidenceTable(
+        source_id="S",
+        name="Compras",
+        rows=[
+            ["Fornecedor", "Material", "Qtd"],
+            ["ACME Ltda", None, None],
+            [None, "P-1", "10"],
+            [None, "P-2", "20"],
+            ["Beta S.A.", None, None],
+            [None, "P-3", "5"],
+        ],
+    )
+
+
+def grouped_section(**update: object) -> TableProposal:
+    section = TableProposal(
+        kind="purchase",
+        header_row=1,
+        first_row=2,
+        last_row=6,
+        columns=[
+            ColumnMapping(
+                field="supplier_name", column=1, header_text="Fornecedor", fill_down=True
+            ),
+            ColumnMapping(field="part_number", column=2, header_text="Material"),
+            ColumnMapping(field="quantity", column=3, header_text="Qtd"),
+        ],
+        required_fields=["part_number", "quantity"],
+    )
+    return section.model_copy(update=update)
+
+
+def test_group_headings_name_the_rows_below_them_and_are_not_records() -> None:
+    records, issues, covered = materialize(
+        grouped_purchases(), MappingProposal(sections=[grouped_section()]), 1, 6
+    )
+
+    assert [(r.values["supplier_name"], r.values["part_number"]) for r in records] == [
+        ("ACME Ltda", "P-1"),
+        ("ACME Ltda", "P-2"),
+        ("Beta S.A.", "P-3"),
+    ]
+    # The supplier's evidence is the heading cell that names it.
+    assert records[0].evidence["supplier_name"].row == 2
+    assert records[2].evidence["supplier_name"].row == 5
+    skipped = next(i for i in issues if i.code == "rows_without_required_fields")
+    assert skipped.severity == "warning"
+    assert [ref.row for ref in skipped.evidence] == [2, 5]
+    assert covered == {2, 3, 4, 5, 6}
+    assert not any(i.severity == "blocker" for i in issues)
+
+
+def test_without_required_fields_a_heading_is_a_record() -> None:
+    records, _, _ = materialize(
+        grouped_purchases(),
+        MappingProposal(sections=[grouped_section(required_fields=[])]),
+        1,
+        6,
+    )
+
+    assert len(records) == 5
+
+
+def test_a_required_field_must_be_one_of_the_sections_columns() -> None:
+    _, issues, _ = materialize(
+        grouped_purchases(),
+        MappingProposal(sections=[grouped_section(required_fields=["unit_price"])]),
+        1,
+        6,
+    )
+
+    assert [i.code for i in issues] == ["invalid_mapping"]
+
+
+def test_rows_repeating_the_header_are_not_records() -> None:
+    table = EvidenceTable(
+        source_id="S",
+        name="Relatório",
+        rows=[
+            ["Material", "Saldo", "UM"],
+            ["000101", "20", "pcs"],
+            ["Material", "Saldo", "UM"],
+            ["000102", "10", "pcs"],
+        ],
+    )
+    section = TableProposal(
+        kind="inventory",
+        header_row=1,
+        first_row=2,
+        last_row=4,
+        columns=columns({"part_number": 1, "available": 2, "unit": 3}),
+    )
+
+    records, issues, _ = materialize(table, MappingProposal(sections=[section]), 1, 4)
+
+    assert [r.values["part_number"] for r in records] == ["000101", "000102"]
+    repeated = next(i for i in issues if i.code == "repeated_headers_skipped")
+    assert [ref.row for ref in repeated.evidence] == [3]
+    assert not any(i.severity == "blocker" for i in issues)
