@@ -310,3 +310,25 @@ def test_sourcing_proposes_suppliers_of_the_same_group_only() -> None:
     assert line.sourcing is not None
     assert line.sourcing.material_group == "VEDA"
     assert line.sourcing.candidates == ["Seals Example"]
+
+
+async def test_timing_alerts_list_every_line_that_runs_short_most_urgent_first() -> None:
+    result = await _review()
+    assert [(a.part_number, a.outcome) for a in result.timing_alerts] == [
+        ("100000120", "unavoidable_stockout"),
+        ("100000152", "unavoidable_stockout"),
+        ("100000101", "meets_consuming_safety_stock"),
+        ("100000110", "meets_consuming_safety_stock"),
+        ("100000180", "meets_consuming_safety_stock"),
+        ("100000141", "unknown"),
+    ]
+    motor = next(a for a in result.timing_alerts if a.part_number == "100000152")
+    assert "Unavoidable stockout from 2026-10-12" in motor.summary
+    assert "100000103 CARCACA FERRO FUNDIDO GG20 BOMBA BC-125" in motor.summary
+    # Expedite first, then production planning, then the purchase that can still help.
+    assert motor.actions[0].startswith("Ask MOTORES EXEMPLO SUL LTDA to move PO 4500019736/10")
+    assert motor.actions[1].startswith("Involve production planning")
+    assert motor.actions[2].startswith("Buy from ELETROMOTORES EXEMPLO SA (45 days")
+    assert "MOTORES EXEMPLO SUL LTDA is not recommended: it arrives too late" in motor.actions[2]
+    carcass = next(a for a in result.timing_alerts if a.part_number == "100000101")
+    assert "15 UN below it" in carcass.summary

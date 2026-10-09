@@ -70,6 +70,7 @@ ASSESSMENT_LIST_ITEMS: Final[Mapping[str, int]] = {
     "coverage": 40,
     "snapshot_dates": 12,
     "reports": 40,
+    "timing_alerts": 40,
 }
 CANDIDATE_NEED_DATES: Final = 6
 
@@ -141,13 +142,20 @@ def assessment_view(assessment: SourceAssessment) -> JsonValue:
     summarized = _within(
         rest, [_size(summaries.get(i, {})) for i in range(len(lines))], SUMMARY_LINES_CHARS
     )
-    view: dict[str, JsonValue] = {"lines": [lines[i] for i in sorted(full)]}
+    view: dict[str, JsonValue] = {}
+    alerts = data.get("timing_alerts")
+    if isinstance(alerts, list):
+        # What runs short before a new order arrives is read before the lines.
+        view["timing_alerts"] = alerts[: ASSESSMENT_LIST_ITEMS["timing_alerts"]]
+        if len(alerts) > ASSESSMENT_LIST_ITEMS["timing_alerts"]:
+            view["timing_alerts_left_out"] = len(alerts) - ASSESSMENT_LIST_ITEMS["timing_alerts"]
+    view["lines"] = [lines[i] for i in sorted(full)]
     if summarized:
         view["more_lines"] = [summaries[i] for i in sorted(summarized)]
     if len(lines) > len(full) + len(summarized):
         view["lines_left_out"] = len(lines) - len(full) - len(summarized)
     for key, item in _capped(data, ASSESSMENT_LIST_ITEMS).items():
-        if key == "lines":
+        if key in ("lines", "timing_alerts", "timing_alerts_left_out"):
             continue
         if key == "planning_candidates" and isinstance(item, list):
             item = [

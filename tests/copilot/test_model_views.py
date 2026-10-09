@@ -25,6 +25,7 @@ from bido_back.purchasing.sources.contracts import (
     SourceAssessment,
     SourceRef,
     SupplierEvidence,
+    TimingAlert,
     TimingCheck,
 )
 
@@ -247,3 +248,22 @@ def test_a_lines_timing_is_read_with_its_lists_bounded() -> None:
     assert (len(read["need_schedule"]), read["need_schedule_left_out"]) == (16, 14)
     names = [s["name"] for s in read["suppliers"]]
     assert "Fornecedor 0" in names and "Fornecedor 7" in names
+
+
+def test_timing_alerts_are_read_before_the_lines() -> None:
+    assessment = SourceAssessment(
+        lines=[line("P1", "40")],
+        timing_alerts=[
+            TimingAlert(
+                part_number="P1",
+                outcome="unavoidable_stockout",
+                summary="Unavoidable stockout from 2026-10-12.",
+                actions=["Ask S to move PO 1/10 from 2026-12-11 to 2026-10-12."],
+            )
+        ],
+    )
+
+    view = cast(dict[str, Any], assessment_view(assessment))
+
+    assert list(view)[:2] == ["timing_alerts", "lines"]
+    assert view["timing_alerts"][0]["summary"] == "Unavoidable stockout from 2026-10-12."

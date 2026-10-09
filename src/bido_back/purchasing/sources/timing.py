@@ -49,6 +49,7 @@ from bido_back.purchasing.sources.contracts import (
     Record,
     SourcingProposal,
     SupplierEvidence,
+    TimingAlert,
     TimingCheck,
 )
 from bido_back.purchasing.sources.evidence import (
@@ -584,4 +585,121 @@ def _sourcing(
     return SourcingProposal(excluded=excluded, material_group=group, candidates=candidates)
 
 
-__all__ = ["check_timing", "demand_schedule", "late", "need_schedule", "project", "usable"]
+_ORDER: Final = {"unavoidable_stockout": 0, "meets_consuming_safety_stock": 1, "unknown": 2}
+
+
+def timing_alerts(lines: Sequence[AssessmentLine]) -> list[TimingAlert]:
+    """The lines that run short before a new order arrives, most urgent first."""
+    alerts: list[TimingAlert] = []
+    for line in lines:
+        timing = line.timing
+        if timing is None or timing.first_shortage_date is None or timing.outcome == "meets":
+            continue
+        alerts.append(
+            TimingAlert(
+                part_number=line.part_number,
+                description=line.description,
+                outcome=timing.outcome,
+                summary=_summary(line, timing),
+                actions=_actions(line, timing),
+            )
+        )
+    alerts.sort(key=lambda a: _ORDER[a.outcome])
+    return alerts
+
+
+def _summary(line: AssessmentLine, timing: TimingCheck) -> str:
+    unit = line.unit or ""
+    shortage = timing.first_shortage_date
+    if timing.outcome == "meets_consuming_safety_stock" and timing.recommended_arrival:
+        before = [p.balance for p in timing.projected if p.on < timing.recommended_arrival]
+        lowest = min(before, default=timing.safety_stock)
+        gap = max(timing.safety_stock - lowest, ZERO)
+        return (
+            f"Consumes safety stock from {shortage} until the purchase from "
+            f"{timing.recommended_supplier} arrives on {timing.recommended_arrival}: the "
+            f"balance falls to {_plain(lowest)} {unit} against a safety stock of "
+            f"{_plain(timing.safety_stock)} ({_plain(gap)} {unit} below it)."
+        )
+    if timing.outcome == "unavoidable_stockout":
+        after = timing.uncovered_after_expedite
+        orders = "; ".join(
+            f"order {a.reference} ({_plain(a.quantity)} {unit} on {a.need_by}"
+            + (f", product {a.product_code}" if a.product_code else "")
+            + (
+                f" {a.product_description}"
+                if a.product_description
+                else f", which also needs {a.product_components[0]}"
+                if a.product_components
+                else ""
+            )
+            + ")"
+            for a in timing.affected_demand
+        )
+        return (
+            f"Unavoidable stockout from {timing.first_stockout_date}: no new order placed on "
+            f"{timing.order_date} arrives before then. Up to {_plain(timing.uncovered_quantity)}"
+            f" {unit} short before {timing.recommended_supplier} arrives on "
+            f"{timing.recommended_arrival}"
+            + (
+                f"; {_plain(after)} {unit} if the expedites are honored"
+                + (" (mitigated)" if after == 0 else "")
+                if after is not None
+                else ""
+            )
+            + "."
+            + (f" At risk: {orders}." if orders else "")
+            + " Involve production planning (PCP) now to resequence or reschedule them."
+        )
+    return (
+        f"Runs below its safety stock from {shortage}; no usable supplier has a known lead "
+        "time, so the arrival could not be checked."
+    )
+
+
+def _actions(line: AssessmentLine, timing: TimingCheck) -> list[str]:
+    unit = line.unit or ""
+    actions: list[str] = []
+    for action in line.expedite:
+        who = action.supplier_name or action.supplier_code or "the supplier"
+        if action.reason == "overdue":
+            actions.append(
+                f"Chase overdue PO {action.po_number}/{action.po_line} ({who}, "
+                f"{_plain(action.quantity)} {unit}, due {action.current_date})."
+            )
+            continue
+        actions.append(
+            f"Ask {who} to move PO {action.po_number}/{action.po_line} "
+            f"({_plain(action.quantity)} {unit}) from {action.current_date} to "
+            f"{action.requested_date}"
+            + (" (the MRP asks for it)" if action.reason.startswith("mrp_") else "")
+            + (f": covers {_plain(action.would_cover)} {unit}." if action.would_cover else ".")
+        )
+    if timing.involve:
+        actions.append("Involve production planning (PCP) for the orders at risk.")
+    if timing.recommended_supplier is not None:
+        chosen = next((s for s in line.suppliers if s.recommended), None)
+        days = chosen.planned_lead_time_days if chosen is not None else None
+        actions.append(
+            f"Buy from {timing.recommended_supplier}"
+            + (f" ({days} days, arriving {timing.recommended_arrival})" if days else "")
+            + (
+                f"; {timing.switched_from} is not recommended: it arrives too late."
+                if timing.switched_from
+                else "."
+            )
+        )
+    elif line.sourcing is not None:
+        actions.append("Find a supplier first: no known supplier can be used.")
+    return actions
+
+
+__all__ = [
+    "check_timing",
+    "demand_schedule",
+    "late",
+    "need_schedule",
+    "project",
+    "timing_alerts",
+    "usable",
+]

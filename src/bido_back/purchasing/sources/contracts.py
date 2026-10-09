@@ -587,6 +587,17 @@ class Assessment(BaseModel):
     record_counts: dict[str, int] = Field(default_factory=dict[str, int])
 
 
+class TimingAlert(BaseModel):
+    """A line that runs short before a new order can arrive, worded by code (the model
+    only translates it), with what to do in order: expedites first."""
+
+    part_number: str
+    description: str | None = None
+    outcome: Literal["unavoidable_stockout", "meets_consuming_safety_stock", "unknown"]
+    summary: str
+    actions: list[str] = Field(default_factory=list[str])
+
+
 class EvidenceTable(BaseModel):
     source_id: str
     name: str
@@ -633,6 +644,9 @@ class SourceAssessment(Assessment):
     # Spend per currency of the lines to buy, at the internal target and last prices.
     # Amounts in different currencies are never added up or converted.
     totals: list[SpendTotal] = Field(default_factory=list[SpendTotal])
+    # Every line that runs short before a new order arrives: stockouts first, then lines
+    # that consume their safety stock until the purchase arrives.
+    timing_alerts: list[TimingAlert] = Field(default_factory=list[TimingAlert])
 
 
 class CellRef(BaseModel):

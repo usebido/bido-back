@@ -12551,6 +12551,13 @@
             "title": "Status",
             "type": "string"
           },
+          "timing_alerts": {
+            "items": {
+              "$ref": "#/components/schemas/TimingAlert"
+            },
+            "title": "Timing Alerts",
+            "type": "array"
+          },
           "totals": {
             "items": {
               "$ref": "#/components/schemas/SpendTotal"
@@ -14280,6 +14287,53 @@
           "complete"
         ],
         "title": "TierTotal",
+        "type": "object"
+      },
+      "TimingAlert": {
+        "description": "A line that runs short before a new order can arrive, worded by code (the model\nonly translates it), with what to do in order: expedites first.",
+        "properties": {
+          "actions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "outcome": {
+            "enum": [
+              "unavoidable_stockout",
+              "meets_consuming_safety_stock",
+              "unknown"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "part_number": {
+            "title": "Part Number",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "part_number",
+          "outcome",
+          "summary"
+        ],
+        "title": "TimingAlert",
         "type": "object"
       },
       "TimingCheck": {
