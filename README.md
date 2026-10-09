@@ -73,6 +73,13 @@ purchase history, a production plan) through the same spreadsheet importer as
 `X-Dev-User: user_motori_buyer`, `POST /v1/analyses {"product": "motor"}` or ask
 the copilot "faz uma análise de motor".
 
+Suppliers saved before 2026-10-09 from just a name and an email have no country,
+so their RFQ documents go out in English. `uv run python
+scripts/backfill_supplier_locale.py --tenant <uuid>` prints what the email's
+country TLD or the name's legal suffix (`.com.br`, `Ltda`, `GmbH`...) would set;
+`--apply` writes it. Ambiguous ones (`S.A.`, a `.com` address) are left for the
+buyer to settle in the chat.
+
 ## Sign-in: Clerk organizations are companies
 
 - The frontend signs users in with Clerk and every session has an active

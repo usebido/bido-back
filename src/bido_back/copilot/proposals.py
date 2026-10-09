@@ -77,6 +77,12 @@ class ProposedSupplier(BaseModel):
     # and email; or add this email as a contact of the buyer's existing supplier.
     new_supplier: bool = False
     new_contact: bool = False
+    # The language of the RFQ document it would receive (its own, else its country's,
+    # else English), so the buyer sees "Cobre Sul: pt" before confirming. None: not shown.
+    document_language: str | None = Field(
+        default=None,
+        description="The language of the RFQ document this supplier would receive; show it",
+    )
 
 
 class QuotedLinePreview(BaseModel):
