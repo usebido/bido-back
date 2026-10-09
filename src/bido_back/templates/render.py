@@ -318,6 +318,10 @@ def _cell(key: str | None, line: RenderLine, language: str) -> str:
             return ""
 
 
+# Columns kept even when every cell is empty.
+_ALWAYS_SHOWN: Final = frozenset({"position", "description", "quantity", "unit"})
+
+
 def table(data: RenderInput) -> tuple[list[str], list[list[str]], str | None]:
     """Headings, rows, and the Incoterm line under the table when all lines share one."""
     keys: list[str | None] = []
@@ -363,6 +367,17 @@ def table(data: RenderInput) -> tuple[list[str], list[list[str]], str | None]:
             keys.insert(at, key)
             headings.insert(at, shown_headings["mpn" if key == "mpn_only" else key])
     rows = [[_cell(key, line, data.language) for key in keys] for line in lines]
+    # A column Bido fills that is empty on every line (a template's "Prazo" when no line
+    # has a need-by date) says nothing: drop it. Columns the supplier fills (key None)
+    # stay empty on purpose, and the core columns always stay.
+    keep = [
+        i
+        for i, key in enumerate(keys)
+        if key is None or key in _ALWAYS_SHOWN or any(row[i] for row in rows)
+    ]
+    if len(keep) != len(keys):
+        headings = [headings[i] for i in keep]
+        rows = [[row[i] for i in keep] for row in rows]
     return headings, rows, (None if "incoterm" in seen else uniform_incoterm)
 
 

@@ -582,9 +582,13 @@ def document_html(document: RfqDocument) -> str:
         '<div class="band"><div class="band-inner">'
         f'<div><div class="eyebrow">{_e(words["reply_by"])}</div>'
         f'<div class="value">{_e(_date(document.reply_by, lang))}</div></div>'
-        f'<div><div class="eyebrow">{_e(words["need_by"])}</div>'
-        f'<div class="value">{_e(need_text)}</div></div>'
-        "</div></div>"
+        + (
+            f'<div><div class="eyebrow">{_e(words["need_by"])}</div>'
+            f'<div class="value">{_e(need_text)}</div></div>'
+            if need_dates
+            else ""
+        )
+        + "</div></div>"
     )
 
     rows: list[str] = []
@@ -602,15 +606,19 @@ def document_html(document: RfqDocument) -> str:
             f'<td class="desc">{_e(line.position)}. {_e(line.description)}{meta_line}</td>'
             f'<td class="num">{_e(" / ".join(line.quantities))}</td>'
             f'<td class="num">{_e(line.unit)}</td>'
-            f'<td class="num">{_e(_date(line.need_by, lang))}</td>'
-            "</tr>"
+            + (f'<td class="num">{_e(_date(line.need_by, lang))}</td>' if need_dates else "")
+            + "</tr>"
         )
     items = (
         '<table class="items"><colgroup><col><col class="col-qty"><col class="col-unit">'
-        '<col class="col-need"></colgroup><thead><tr>'
+        + ('<col class="col-need">' if need_dates else "")
+        + "</colgroup><thead><tr>"
         f'<th>{_e(words["item"])}</th><th class="num">{_e(words["qty"])}</th>'
-        f'<th class="num">{_e(words["unit"])}</th><th class="num">{_e(words["need_by"])}</th>'
-        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+        f'<th class="num">{_e(words["unit"])}</th>'
+        + (f'<th class="num">{_e(words["need_by"])}</th>' if need_dates else "")
+        + "</tr></thead><tbody>"
+        + "".join(rows)
+        + "</tbody></table>"
     )
 
     term_rows: list[tuple[str, str]] = []
