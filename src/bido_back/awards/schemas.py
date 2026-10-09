@@ -84,6 +84,9 @@ class SendThreadEmailArgs(BaseModel):
     cc: list[EmailAddress] = Field(default_factory=list[str], max_length=10)
     subject: Subject
     body: str = Field(min_length=1, max_length=50_000)
+    # The same email as HTML (the "not selected" notice). Left out of the arguments when
+    # unset: proposals made before it existed keep their hash, and go out as text only.
+    html_body: str | None = Field(default=None, max_length=200_000, exclude_if=lambda v: v is None)
 
 
 class SendPurchaseOrderArgs(SendThreadEmailArgs):

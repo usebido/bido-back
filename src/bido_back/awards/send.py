@@ -372,6 +372,7 @@ class _SendAwardNotice:
                     cc=tuple(args.cc),
                     subject=args.subject,
                     body=args.body,
+                    html_body=args.html_body,
                     message_id=claim.message_id,
                     thread_message_id=claim.thread_message_id,
                     possibly_sent=claim.possibly_sent,

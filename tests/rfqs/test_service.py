@@ -227,7 +227,7 @@ async def test_prepare_send_records_pending_approvals_with_the_exact_email(
     company = await _tenant_name(app_engine, rfq_rows.tenant)
     assert body.startswith("<de> Olá, gostaríamos de receber a cotação")  # localized greeting
     assert f"Unsere Referenz: {rfq.ref}." in body
-    assert "GRM188R71H104KA93D" in body and "4000 / 10000" in body
+    assert "GRM188R71H104KA93D" in body and "4.000 / 10.000" in body
     assert "Board-to-board connector 40 pin" in body
     assert "Incoterm" in body and "DAP" in body
     # The standard footer, localized, then the required questions it does not cover.

@@ -18,10 +18,13 @@ per tenant, in three steps:
    proposal is checked (`bido_back.followups.missing`); if anything required is
    missing or unclear, one clarification is proposed for that proposal.
 
-A due follow-up is written by the follow-up writer agent, checked
-(`followup_email_problems`), and recorded as a PENDING approval of
+A due follow-up is rendered by code in the standard layout
+(`bido_back.supplier_email`: a reminder, or a clarification of exactly the open
+items), in the language of the thread's RFQ email, with a reply-by date; the
+follow-up writer agent may only add an optional note. It is checked by the
+send gate (`supplier_email.checks`) and recorded as a PENDING approval of
 `send_followup_email` requested on behalf of the buyer who sent the RFQ
-email, exactly like that first send: another approver decides, and the worker
+email, exactly like that first send: a person decides, and the worker
 sends it once, in the invite's thread (`bido_back.followups.send`).
 
 Intake calls two hooks in its own transaction: `cancel_on_reply` when a
@@ -49,7 +52,6 @@ from bido_back.agents.catalog.contracts import (
     FollowupItem,
     FollowupKind,
 )
-from bido_back.agents.catalog.definitions import followup_email_problems
 from bido_back.agents.context import ToolContext
 from bido_back.agents.events import args_hash
 from bido_back.approvals.errors import ApprovalConflict
@@ -91,9 +93,22 @@ from bido_back.followups.send import (
     followup_proposal_ids,
 )
 from bido_back.rfqs.errors import AgentFailed, NotFound
-from bido_back.rfqs.language import supplier_email_language
-from bido_back.rfqs.send import SEND_RFQ_EMAIL, send_proposal_ids, subject_marker
+from bido_back.rfqs.send import SEND_RFQ_EMAIL, send_proposal_ids
 from bido_back.rfqs.service import buyer_display_name
+from bido_back.supplier_email.builders import (
+    Gap,
+    Header,
+    clarification_email,
+    email_line,
+    reminder_email,
+)
+from bido_back.supplier_email.checks import GateContext, problems_text
+from bido_back.supplier_email.compose import Refused, compose
+from bido_back.supplier_email.deadlines import reply_by_for
+from bido_back.supplier_email.language import thread_language, thread_locale
+from bido_back.supplier_email.model import Answered, Signature, SupplierEmail
+from bido_back.supplier_email.render import RenderedEmail
+from bido_back.supplier_email.subject import reply_subject
 
 logger = logging.getLogger(__name__)
 
@@ -101,7 +116,6 @@ Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
 # Chases that count toward `max_chases`: sent, waiting, or turned down.
 _COUNTED: Final = ("proposed", "sent", "rejected")
-_REPLY_PREFIXES: Final = ("re:", "aw:", "sv:", "réf:", "rif:", "res:")
 
 
 # --- The schedule ------------------------------------------------------------------
@@ -291,7 +305,7 @@ class SweepResult:
 
 @dataclass(frozen=True, slots=True)
 class _Due:
-    """One follow-up to write and propose. Everything the writer and the email need."""
+    """One follow-up to render and propose: the email, its gate, and the writer's task."""
 
     kind: FollowupKind
     sequence: int
@@ -300,7 +314,9 @@ class _Due:
     rfq_id: UUID
     sender_user_id: UUID
     to: str
-    subject: str
+    email: SupplierEmail
+    gate: GateContext
+    # What the writer agent sees when it may add its optional note.
     task: FollowupEmailInput
 
 
@@ -321,23 +337,32 @@ async def sweep_tenant(
     sink = PostgresApprovalSink(db)
     for item in due:
         context = ToolContext(tenant_id=tenant_id, user_id=item.sender_user_id, run_id=uuid4())
-        try:
-            draft = await writer(item.task, context)
-        except AgentFailed:
-            skipped += 1
-            continue
-        problems = followup_email_problems(item.task, draft)
-        if problems:
+
+        async def note(item: _Due = item, context: ToolContext = context) -> str:
+            try:
+                return (await writer(item.task, context)).note
+            except AgentFailed:
+                return ""
+
+        composed = await compose(item.email, item.gate, note)
+        if isinstance(composed, Refused):
             logger.warning(
-                "followup draft refused tenant=%s invite=%s kind=%s problems=%s",
+                "followup email refused tenant=%s invite=%s kind=%s problems=%s",
                 tenant_id,
                 item.invite_id,
                 item.kind,
-                ",".join(problems),
+                problems_text(composed.problems),
             )
             skipped += 1
             continue
-        if await _propose(db, sink, tenant_id, item, draft.body.strip()):
+        if composed.note_dropped:
+            logger.info(
+                "followup note left out tenant=%s invite=%s problems=%s",
+                tenant_id,
+                item.invite_id,
+                problems_text(composed.note_dropped),
+            )
+        if await _propose(db, sink, tenant_id, item, composed.rendered):
             proposed[item.kind] += 1
 
     result = SweepResult(
@@ -427,12 +452,23 @@ async def _due_followups(session: AsyncSession, tenant_id: UUID, now: datetime) 
     tenant = await session.get(Tenant, tenant_id)
     if tenant is None:
         return []
+    # Every supplier invited to these RFQs: a note may name none of the others.
+    invited = (
+        await session.execute(
+            select(Invite.rfq_id, Invite.id, Supplier.name)
+            .join(Supplier, Supplier.id == Invite.supplier_id)
+            .where(Invite.rfq_id.in_({rfq.id for _, rfq, _, _ in rows}))
+        )
+    ).all()
 
     due: list[_Due] = []
     for invite, rfq, supplier, contact_email in rows:
         if not contact_email or invite.thread_message_id is None:
             continue
         mine = [f for f in followups if f.invite_id == invite.id]
+        others = tuple(
+            name for rfq_id, other, name in invited if rfq_id == rfq.id and other != invite.id
+        )
         if invite.status == "sent":
             plan = plan_chase(
                 invite_status=invite.status,
@@ -458,8 +494,11 @@ async def _due_followups(session: AsyncSession, tenant_id: UUID, now: datetime) 
                 contact_email,
                 kind="chase",
                 sequence=sequence,
-                proposal_id=None,
+                proposal=None,
+                lines=[],
                 items=[],
+                others=others,
+                now=now,
             )
         else:
             proposal = await session.scalar(
@@ -470,7 +509,12 @@ async def _due_followups(session: AsyncSession, tenant_id: UUID, now: datetime) 
             )
             if proposal is None or any(f.proposal_id == proposal.id for f in mine):
                 continue
-            items = await _open_items(session, rfq.id, proposal)
+            lines = list(
+                await session.scalars(
+                    select(RfqLine).where(RfqLine.rfq_id == rfq.id).order_by(RfqLine.position)
+                )
+            )
+            items = await _open_items(session, proposal, lines)
             if not items:
                 continue
             built = await _build(
@@ -482,8 +526,11 @@ async def _due_followups(session: AsyncSession, tenant_id: UUID, now: datetime) 
                 contact_email,
                 kind="clarification",
                 sequence=proposal.version,
-                proposal_id=proposal.id,
+                proposal=proposal,
+                lines=lines,
                 items=items,
+                others=others,
+                now=now,
             )
         if built is not None:
             due.append(built)
@@ -491,7 +538,7 @@ async def _due_followups(session: AsyncSession, tenant_id: UUID, now: datetime) 
 
 
 async def _open_items(
-    session: AsyncSession, rfq_id: UUID, proposal: Proposal
+    session: AsyncSession, proposal: Proposal, lines: Sequence[RfqLine]
 ) -> list[FollowupItem]:
     review = proposal.fields.get("_review")
     if isinstance(review, dict) and cast(dict[str, object], review).get("declined") is True:
@@ -500,7 +547,7 @@ async def _open_items(
         RequestedLine(
             id=line.id, position=line.position, description=line.description, mpn=line.mpn
         )
-        for line in await session.scalars(select(RfqLine).where(RfqLine.rfq_id == rfq_id))
+        for line in lines
     ]
     offered = [
         OfferedLine(
@@ -534,8 +581,11 @@ async def _build(
     *,
     kind: FollowupKind,
     sequence: int,
-    proposal_id: UUID | None,
+    proposal: Proposal | None,
+    lines: Sequence[RfqLine],
     items: list[FollowupItem],
+    others: tuple[str, ...],
+    now: datetime,
 ) -> _Due | None:
     # Whose mailbox: the buyer who requested the RFQ email (its executed approval).
     original = await session.scalar(
@@ -563,23 +613,78 @@ async def _build(
             Message.message_id_header == invite.thread_message_id,
         )
     )
+    buyer_name = await buyer_display_name(session, user, tenant.name)
+    language = thread_language(
+        rfq_email_args=original.args,
+        first_subject=first_subject,
+        supplier_language=supplier.language,
+        supplier_country=supplier.country,
+    )
+    header = Header(
+        rfq_ref=rfq.ref,
+        subject=reply_subject(first_subject, rfq.ref, rfq.title),
+        locale=thread_locale(language, supplier.country),
+        supplier_name=supplier.name,
+        buyer_company=tenant.name,
+        signature=Signature(name=buyer_name, company=tenant.name),
+    )
+    if kind == "chase":
+        email = reminder_email(
+            header,
+            requested_on=invite.sent_at.date() if invite.sent_at else None,
+            reply_by=reply_by_for(
+                "reminder",
+                now=now,
+                country=supplier.country,
+                response_due=rfq.response_due,
+                deadline=rfq.negotiation_deadline,
+            ),
+        )
+    else:
+        answered: Answered | None = None
+        if proposal is not None:
+            received = await session.scalar(
+                select(Message.occurred_at).where(Message.id == proposal.message_id)
+            )
+            if received is not None:
+                kind_answered = "offer" if proposal.version == 1 else "reply"
+                answered = Answered(kind_answered, received.date())
+        email = clarification_email(
+            header,
+            answered=answered,
+            lines=[email_line(line) for line in lines],
+            gaps=[Gap(i.position, i.field, i.problem) for i in items],
+            reply_by=reply_by_for(
+                "clarification",
+                now=now,
+                country=supplier.country,
+                response_due=rfq.response_due,
+                deadline=rfq.negotiation_deadline,
+            ),
+        )
     return _Due(
         kind=kind,
         sequence=sequence,
-        proposal_id=proposal_id,
+        proposal_id=proposal.id if proposal is not None else None,
         invite_id=invite.id,
         rfq_id=rfq.id,
         sender_user_id=sender_user_id,
         to=contact_email,
-        subject=reply_subject(first_subject, rfq.ref, rfq.title),
+        email=email,
+        gate=GateContext(
+            thread_language=language,
+            first_subject=first_subject,
+            rfq_title=rfq.title,
+            other_suppliers=others,
+        ),
         task=FollowupEmailInput(
             kind=kind,
             rfq_ref=rfq.ref,
             rfq_title=rfq.title,
             buyer_company=tenant.name,
-            buyer_name=await buyer_display_name(session, user, tenant.name),
+            buyer_name=buyer_name,
             supplier_name=supplier.name,
-            supplier_language=supplier_email_language(supplier),
+            supplier_language=language,
             chase_number=sequence if kind == "chase" else 0,
             original_sent_on=invite.sent_at.date() if invite.sent_at else None,
             response_due=rfq.response_due,
@@ -588,17 +693,8 @@ async def _build(
     )
 
 
-def reply_subject(original: str | None, rfq_ref: str, title: str) -> str:
-    """`Re: <the RFQ email's subject>`, always carrying the `[RFQ-n]` marker, one line."""
-    base = " ".join((original or f"{subject_marker(rfq_ref)} {title}").split())
-    if subject_marker(rfq_ref) not in base:
-        base = f"{subject_marker(rfq_ref)} {base}"
-    subject = base if base.lower().startswith(_REPLY_PREFIXES) else f"Re: {base}"
-    return subject[:300]
-
-
 async def _propose(
-    db: Db, sink: PostgresApprovalSink, tenant_id: UUID, item: _Due, body: str
+    db: Db, sink: PostgresApprovalSink, tenant_id: UUID, item: _Due, rendered: RenderedEmail
 ) -> bool:
     """Record the approval, then the follow-up row; once per (invite, kind, sequence)."""
     row_id = followup_id(item.invite_id, item.kind, item.sequence)
@@ -608,8 +704,9 @@ async def _propose(
         kind=item.kind,
         sender_user_id=item.sender_user_id,
         to=[item.to],
-        subject=item.subject,
-        body=body,
+        subject=rendered.subject,
+        body=rendered.text,
+        html_body=rendered.html,
     )
     payload = cast(dict[str, JsonValue], args.model_dump(mode="json"))
     run_id, call_id = followup_proposal_ids(row_id)
