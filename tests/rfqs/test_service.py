@@ -388,6 +388,41 @@ async def test_prepare_send_renders_the_tenants_default_template_and_pins_its_ve
     assert "Gültigkeit des Angebots" not in body  # "Gültigkeit" covers it
 
 
+async def test_a_supplier_added_with_a_name_and_an_email_gets_the_buyers_language(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    """RFQ-6 (email audit F5): a Brazilian supplier added like the copilot adds one (no
+    country, the language column's default "en") got English. Its legal form and the
+    buyer's Portuguese template now decide, once, for the whole thread."""
+    principal = buyer(rfq_rows)
+    rfq = await make_rfq(app_engine, principal)
+    supplier = await suppliers.create_supplier(
+        app_engine,
+        principal,
+        CreateSupplierRequest(
+            name="MetalNova Teste Ltda",
+            contacts=[ContactIn(email="vendas@metalnova.example.test")],
+        ),
+    )
+    assert supplier.language == "en"  # stored as created: never changed
+    invite = await service.add_invite(
+        app_engine, principal, rfq.id, supplier.id, supplier.contacts[0].id
+    )
+    preview = await service.preview_email(app_engine, principal, rfq.id, invite.id, FakeWriter())
+    assert preview.language == "pt"
+    assert preview.subject == f"[{rfq.ref}] Solicitação de cotação: {rfq.title}"
+
+    result = await service.prepare_send(
+        app_engine, principal, rfq.id, FakeWriter(), FakeMailboxes()
+    )
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        approval = await session.get(Approval, result.approvals[0].approval_id)
+    assert approval is not None
+    assert approval.args["subject"] == preview.subject
+    # The approved document records the thread's language for every later email.
+    assert approval.args["document"]["language"] == "pt"
+
+
 async def test_prepare_send_without_a_mailbox_fails_before_any_draft(
     app_engine: AsyncEngine, rfq_rows: People
 ) -> None:

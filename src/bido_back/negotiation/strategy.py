@@ -48,6 +48,8 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Final, Literal
 from uuid import UUID
 
+from bido_back.decimals import plain_decimal
+
 BAFO_WINDOW: Final = timedelta(hours=24)
 NO_TARGET_DISCOUNT: Final = Decimal("0.95")
 PRICE_STEP: Final = Decimal("0.0001")
@@ -155,7 +157,9 @@ def stagnant_rounds(current: Mapping[UUID, LineOffer], previous: Sequence[Previo
 
 
 def _round(value: Decimal) -> Decimal:
-    return value.quantize(PRICE_STEP, rounding=ROUND_HALF_UP).normalize()
+    # Not `normalize()`: a round ask (90.0000) would become 9E+1 in the writer's
+    # input, the approval and the API, and the email would carry it.
+    return plain_decimal(value.quantize(PRICE_STEP, rounding=ROUND_HALF_UP))
 
 
 def _lead_ok(lead: int | None, max_lead: int | None) -> bool:

@@ -28,6 +28,7 @@ from bido_back.db.models import (
 from bido_back.email.types import OutboundAttachment, OutboundEmail
 from bido_back.followups.service import reply_subject
 from bido_back.rfqs.errors import NotFound
+from bido_back.rfqs.language import thread_language
 from bido_back.rfqs.send import SEND_RFQ_EMAIL, RfqActDeps, send_proposal_ids
 
 _MESSAGES_UNIQUE = "messages_tenant_id_message_id_header_key"
@@ -42,6 +43,8 @@ class Thread:
     # None when the RFQ email was never sent through Bido.
     sender_user_id: UUID | None
     subject: str
+    # The language the RFQ email went out in: every email of the thread keeps it.
+    language: str
 
 
 async def thread_of(session: AsyncSession, invite_id: UUID) -> Thread:
@@ -84,6 +87,7 @@ async def thread_of(session: AsyncSession, invite_id: UUID) -> Thread:
         contact_email=contact_email,
         sender_user_id=sender,
         subject=reply_subject(first_subject, rfq.ref, rfq.title),
+        language=thread_language(sent.args if sent is not None else None, supplier),
     )
 
 

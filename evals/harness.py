@@ -21,7 +21,7 @@ deterministic code, not the model.
 import json
 import re
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
@@ -62,6 +62,7 @@ from bido_back.purchasing.schemas import AnalysisRequest
 from bido_back.purchasing.workbook import SheetMapper, default_sheet_mapper, import_workbook
 from bido_back.quotes.parsing import decimal_separator_for
 from bido_back.quotes.validation import QuoteSources, RequestedLine, validate_quote
+from bido_back.templates.signature import signed
 from evals.golden import golden_analysis, golden_contacts
 from evals.layouts import Fixture
 from evals.quotes import REQUESTED, QuoteCase
@@ -114,6 +115,25 @@ class Env:
     runner_config: RunnerConfig
     mode: Mode
     today: date
+
+
+def as_drafted(sent: str, drafts: Iterable[str]) -> bool:
+    """The sent text is a writer's draft, closed by code with the buyer's signature.
+
+    The writers do not sign: `bido_back.templates.signature.signed` puts the
+    buyer's name and company (one or two lines, the email's last) under the
+    draft. Nothing else may change between the draft and the email.
+    """
+    text = sent.strip()
+    lines = text.splitlines() or [""]
+    names: list[tuple[str, str]] = [(lines[-1], lines[-1])]
+    if len(lines) > 1:
+        names.append((lines[-2], lines[-1]))
+    return any(
+        text == draft.strip() or text == signed(draft.strip(), name, company)
+        for draft in drafts
+        for name, company in names
+    )
 
 
 # --- A fresh company per run ---------------------------------------------------------------

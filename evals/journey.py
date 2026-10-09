@@ -115,7 +115,7 @@ from bido_back.rfqs import suppliers as supplier_service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
 from bido_back.settings import get_settings
-from evals.harness import Env, MemoryStorage, Mode
+from evals.harness import Env, MemoryStorage, Mode, as_drafted
 from evals.journey_suppliers import (
     DAYS,
     EXTRA_PART,
@@ -477,7 +477,7 @@ def negotiation_pt(task: NegotiationEmailInput) -> NegotiationEmailOutput:
     if task.reply_by is not None:
         lines.append(f"Pedimos retorno até {task.reply_by:%d/%m/%Y}.")
     body = "\n".join(lines)
-    return NegotiationEmailOutput(body=f"Prezados,\n\n{body}\n\nAtenciosamente,\n{task.buyer_name}")
+    return NegotiationEmailOutput(body=f"Prezados,\n\n{body}\n\nAtenciosamente,")
 
 
 class JourneyModel(ScriptedModel):
@@ -1851,7 +1851,7 @@ async def step_negotiation(j: Journey, step: Step) -> None:
         hidden = {m.normalize() for m in maxima.values()} - own[supplier.key] - disclosed
         for email in [e for e in j.world.outbox.to(supplier.email) if e not in j.rfq_emails]:
             body = email.body
-            if body.strip() not in drafts:
+            if not as_drafted(body, drafts):
                 problems["as_drafted"].append(supplier.key)
             if numbers(body) & hidden:
                 problems["no_max_revealed"].append(

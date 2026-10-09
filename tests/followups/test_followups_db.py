@@ -4,7 +4,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from email.message import EmailMessage
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select, update
@@ -24,6 +24,8 @@ from bido_back.db.models import (
     ProposalLine,
     Rfq,
     RfqLine,
+    Supplier,
+    Tenant,
 )
 from bido_back.followups import service
 from bido_back.followups.jobs import ALL_TENANTS, FollowupSweepHandler, followup_tenants
@@ -36,6 +38,7 @@ from bido_back.followups.send import (
 from bido_back.intake.service import InboundService
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs import suppliers
+from bido_back.rfqs.activity import rfq_activity
 from bido_back.rfqs.errors import AgentFailed
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
 from bido_back.rfqs.send import RfqActDeps, register_act_tools
@@ -51,20 +54,30 @@ EMAIL_DOMAIN = "quotes.example.test"
 
 
 class FakeFollowupWriter:
-    def __init__(self, *, fail: bool = False) -> None:
+    def __init__(
+        self, *, fail: bool = False, refused: bool = False, signs_with: str | None = None
+    ) -> None:
         self.calls: list[FollowupEmailInput] = []
         self.fail = fail
+        # Writes a price, which the checks refuse.
+        self.refused = refused
+        # Signs anyway, twice, as the v1 prompt did with no buyer contact.
+        self.signs_with = signs_with
 
     async def __call__(self, task: FollowupEmailInput, context: ToolContext) -> FollowupEmailOutput:
         self.calls.append(task)
         if self.fail:
             raise AgentFailed("writer down")
         if task.kind == "chase":
-            return FollowupEmailOutput(body=f"Reminder {task.chase_number} about {task.rfq_ref}.")
-        asks = "; ".join(f"{i.position}:{i.field}:{i.problem}" for i in task.open_items)
-        return FollowupEmailOutput(
-            body=f"Thanks for your offer on {task.rfq_ref}. Please send {asks}."
-        )
+            body = f"Reminder {task.chase_number} about {task.rfq_ref}."
+        else:
+            asks = "; ".join(f"{i.position}:{i.field}:{i.problem}" for i in task.open_items)
+            body = f"Thanks for your offer on {task.rfq_ref}. Please send {asks}."
+        if self.refused:
+            body += " Others quote 0.40 EUR."
+        if self.signs_with:
+            body += f"\n\nBest regards,\n{self.signs_with}\n{self.signs_with}"
+        return FollowupEmailOutput(body=body)
 
 
 @pytest.fixture
@@ -327,7 +340,7 @@ async def _store_proposal(world: World, *, complete: bool) -> UUID:
             tenant_id=world.people.tenant,
             invite_id=world.invite_id,
             direction="in",
-            message_id_header=f"<offer-{complete}@rhein.example.test>",
+            message_id_header=f"<offer-{complete}-{uuid4().hex}@rhein.example.test>",
             status="extracted",
             occurred_at=datetime.now(UTC),
         )
@@ -415,6 +428,94 @@ async def test_the_scheduled_job_finds_tenants_through_the_lookup_function(
     )
     await handler(Envelope(type=FOLLOWUPS_SWEEP, tenant_id=ALL_TENANTS, idempotency_key="sweep:1"))
     assert [f.kind for f in await world.followups()] == ["chase"]
+
+
+async def _tenant_name(world: World) -> str:
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        tenant = await session.get(Tenant, world.people.tenant)
+    assert tenant is not None
+    return tenant.name
+
+
+async def test_a_refused_chase_is_held_once_and_the_schedule_moves_on(world: World) -> None:
+    """Email audit F3: a refused draft was written again every 15-minute sweep, unseen."""
+    await service.update_followups(
+        world.engine,
+        buyer(world.people),
+        world.rfq_id,
+        FollowupSettingsUpdate(first_after_business_days=0, every_business_days=2),
+    )
+    writer = FakeFollowupWriter(refused=True)
+    now = datetime.now(UTC)
+    result = await world.sweep(writer, now)
+    assert (result.chases, result.held, result.skipped) == (0, 1, 0)
+    [held] = await world.followups()
+    assert (held.kind, held.sequence, held.status, held.canceled_reason, held.approval_id) == (
+        "chase",
+        1,
+        "canceled",
+        "draft_refused",
+        None,
+    )
+    # The next sweeps do not write the same chase again.
+    for minutes in (15, 30, 45):
+        assert await world.sweep(writer, now + timedelta(minutes=minutes)) == service.SweepResult()
+    assert len(writer.calls) == 1
+    view = await service.get_followups(world.engine, buyer(world.people), world.rfq_id)
+    [invite_view] = view.invites
+    assert (invite_view.chase_state, invite_view.chases_used) == ("scheduled", 1)
+    assert invite_view.next_chase_at is not None and invite_view.next_chase_at > now
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    [entry] = [a for a in feed if a.action == "rfq.followup_draft_held"]
+    assert entry.summary == (
+        "Reminder to Rhein not sent: the draft failed Bido's checks. Needs your decision"
+    )
+    # The next chase comes when the schedule says, and is proposed normally.
+    later = now + timedelta(days=7)
+    assert (await world.sweep(FakeFollowupWriter(), later)).chases == 1
+    assert [(r.sequence, r.status) for r in await world.followups()] == [
+        (1, "canceled"),
+        (2, "proposed"),
+    ]
+
+
+async def test_a_refused_clarification_is_held_once_per_offer(world: World) -> None:
+    await _store_proposal(world, complete=False)
+    writer = FakeFollowupWriter(refused=True)
+    now = datetime.now(UTC)
+    assert (await world.sweep(writer, now)).held == 1
+    assert (await world.sweep(writer, now + timedelta(minutes=15))).held == 0
+    assert len(writer.calls) == 1
+    [held] = await world.followups()
+    assert (held.kind, held.status, held.canceled_reason) == (
+        "clarification",
+        "canceled",
+        "draft_refused",
+    )
+    # A newer (still incomplete) offer gets its own clarification.
+    await _store_proposal(world, complete=False)
+    assert (await world.sweep(FakeFollowupWriter(), now)).clarifications == 1
+
+
+async def test_followups_are_signed_once_in_the_language_of_the_rfq_email(world: World) -> None:
+    """Email audit F4 and F5: the company signed twice (no buyer contact exists), and a
+    supplier edited mid-thread switched the thread's language."""
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        invite = await session.get(Invite, world.invite_id)
+        assert invite is not None
+        await session.execute(
+            update(Supplier).where(Supplier.id == invite.supplier_id).values(language="fr")
+        )
+    company = await _tenant_name(world)
+    writer = FakeFollowupWriter(signs_with=company)
+    assert (await world.sweep(writer, world.sent_at + timedelta(days=5))).chases == 1
+    [task] = writer.calls
+    assert task.supplier_language == "de"  # the RFQ email's, not the edited one
+    [chase] = await world.followups()
+    approval = await world.approval(chase.approval_id)
+    body = str(approval.args["body"])
+    assert body.endswith(f"Best regards,\n{company}")
+    assert body.count(company) == 1
 
 
 async def test_followups_of_another_tenant_are_invisible(world: World) -> None:

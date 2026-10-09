@@ -26,6 +26,8 @@ from bido_back.db.models import (
     ProposalLine,
     Rfq,
     RfqLine,
+    Supplier,
+    Tenant,
 )
 from bido_back.followups import service as followup_service
 from bido_back.followups.calendar import add_business_days
@@ -41,6 +43,7 @@ from bido_back.negotiation.send import (
 )
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs import suppliers
+from bido_back.rfqs.activity import rfq_activity
 from bido_back.rfqs.errors import InvalidState, NotFound
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
 from bido_back.rfqs.send import RfqActDeps, register_act_tools
@@ -265,6 +268,14 @@ async def world(app_engine: AsyncEngine, rfq_rows: People) -> World:
     return await World(app_engine, rfq_rows).setup()
 
 
+async def tenant_name(world: World) -> str:
+    """Who signs: no buyer contact exists, so the company (as in production)."""
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        tenant = await session.get(Tenant, world.people.tenant)
+    assert tenant is not None
+    return tenant.name
+
+
 async def test_nothing_is_negotiated_before_the_buyer_sets_it_up(world: World) -> None:
     await world.offer("rhein", ("0.050", "1.20"))
     writer = FakeNegotiationWriter()
@@ -370,11 +381,39 @@ async def test_a_rejected_counter_is_not_sent_and_a_drafted_wrong_number_is_refu
 ) -> None:
     await world.configure()
     await world.offer("rhein", ("0.050", "1.20"))
-    assert (await world.sweep(FakeNegotiationWriter(invent=True))).skipped == 1
-    assert await world.messages("rhein") == []
+    inventing = FakeNegotiationWriter(invent=True)
+    result = await world.sweep(inventing)
+    assert (result.held, result.proposed, result.skipped) == (1, 0, 0)
+    # Recorded once, for a person: the round is held (no approval was proposed) ...
+    [held] = await world.messages("rhein")
+    assert (held.round, held.status, held.canceled_reason, held.approval_id) == (
+        1,
+        "canceled",
+        "draft_refused",
+        None,
+    )
+    assert held.terms["refused"] == ["unknown_amount"]
+    # ... and later sweeps (every 15 minutes) do not write the same email again.
+    for _ in range(3):
+        assert (await world.sweep(inventing)).held == 0
+    assert len(inventing.calls) == 1
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.strategy_reasons == ["draft_refused_requires_buyer"]
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    [entry] = [a for a in feed if a.action == "rfq.negotiation_draft_held"]
+    assert (entry.supplier_name, entry.actor) == ("Rhein", "Bido")
+    assert entry.summary.endswith("Needs your decision")
 
-    await world.sweep(FakeNegotiationWriter())
-    [counter] = await world.messages("rhein")
+    # A person asks for counter-offers now (the copilot's `propose_counteroffers`).
+    result = await service.evaluate_rfq(
+        world.engine, world.people.tenant, world.rfq_id, writer=FakeNegotiationWriter(), force=True
+    )
+    assert result.proposed == 1
+    counter = (await world.messages("rhein"))[-1]
+    assert (counter.round, counter.status) == (2, "proposed")
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    assert next(i for i in view.invites if i.supplier_name == "Rhein").strategy_reasons == []
     sent_before = len(world.mailboxes.sender.sent)
     await decide_approval(
         world.engine,
@@ -384,9 +423,61 @@ async def test_a_rejected_counter_is_not_sent_and_a_drafted_wrong_number_is_refu
         jobs=FakeJobQueue(),
         on_reject=NEGOTIATION_REJECT_HOOKS,
     )
-    [counter] = await world.messages("rhein")
+    counter = (await world.messages("rhein"))[-1]
     assert counter.status == "rejected"
     assert len(world.mailboxes.sender.sent) == sent_before
+
+
+async def test_a_round_target_is_asked_in_plain_digits_and_the_counter_is_signed_once(
+    world: World,
+) -> None:
+    """Email audit F1 and F4: a target of 100.00 reached the writer as 1E+2 (the draft was
+    refused), and the company signed twice. No buyer contact exists, as in production."""
+    await world.configure(
+        lines=[
+            LineLimitsUpdate(
+                rfq_line_id=world.lines[0],
+                target_unit_price=Decimal("0.040"),
+                max_unit_price=Decimal("0.060"),
+                max_lead_time_days=42,
+            ),
+            LineLimitsUpdate(
+                rfq_line_id=world.lines[1],
+                target_unit_price=Decimal("100.00"),
+                max_unit_price=Decimal("150.00"),
+                max_lead_time_days=42,
+            ),
+        ]
+    )
+    await world.offer("rhein", ("0.039", "120.00"))
+    writer = FakeNegotiationWriter()
+    assert (await world.sweep(writer)).proposed == 1
+    [task] = writer.calls
+    [ask] = task.lines
+    assert (str(ask.target_unit_price), str(ask.offered_unit_price)) == ("100", "120")
+    assert '"target_unit_price":"100"' in task.model_dump_json()
+    [counter] = await world.messages("rhein")
+    assert counter.terms["lines"][1]["ask"] == "100"
+    approval = await world.approval(counter.approval_id)
+    tenant = await tenant_name(world)
+    body = str(approval.args["body"])
+    assert body.endswith(f"target 100 EUR.\n\n{tenant}")
+    assert body.count(tenant) == 1
+
+
+async def test_counters_keep_the_language_the_rfq_email_went_out_in(world: World) -> None:
+    await world.configure()
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        invite = await session.get(Invite, world.invites["rhein"])
+        assert invite is not None
+        # The supplier's language is edited after its RFQ email went out in German.
+        await session.execute(
+            update(Supplier).where(Supplier.id == invite.supplier_id).values(language="fr")
+        )
+    await world.offer("rhein", ("0.050", "1.20"))
+    writer = FakeNegotiationWriter()
+    await world.sweep(writer)
+    assert [t.supplier_language for t in writer.calls] == ["de"]
 
 
 async def test_the_deadline_closes_with_the_best_offers_and_stops_follow_ups(

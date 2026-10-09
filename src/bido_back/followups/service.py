@@ -19,10 +19,21 @@ per tenant, in three steps:
    missing or unclear, one clarification is proposed for that proposal.
 
 A due follow-up is written by the follow-up writer agent, checked
-(`followup_email_problems`), and recorded as a PENDING approval of
+(`followup_email_problems`), signed by code (`bido_back.templates.signature`;
+the writer does not sign), and recorded as a PENDING approval of
 `send_followup_email` requested on behalf of the buyer who sent the RFQ
 email, exactly like that first send: another approver decides, and the worker
-sends it once, in the invite's thread (`bido_back.followups.send`).
+sends it once, in the invite's thread (`bido_back.followups.send`). It is
+written in the language of the invite's RFQ email
+(`bido_back.rfqs.language.thread_language`).
+
+A draft the checks refuse is not written again every sweep: its row is
+recorded `canceled` with reason `draft_refused` (no approval), an
+`rfq.followup_draft_held` audit event puts it in the RFQ's activity feed for
+the buyer, and the follow-up counts as done: a refused chase uses that chase
+(the next one is due `every` business days later), a refused clarification
+closes that offer's clarification (the next offer gets its own). A writer that
+fails (the model is down) is retried on the next sweep.
 
 Intake calls two hooks in its own transaction: `cancel_on_reply` when a
 supplier answer is stored, and `pause_on_auto_reply` when an auto-reply
@@ -58,6 +69,7 @@ from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
+    AuditEvent,
     Contact,
     FollowupMessage,
     Invite,
@@ -91,9 +103,10 @@ from bido_back.followups.send import (
     followup_proposal_ids,
 )
 from bido_back.rfqs.errors import AgentFailed, NotFound
-from bido_back.rfqs.language import supplier_email_language
+from bido_back.rfqs.language import thread_language
 from bido_back.rfqs.send import SEND_RFQ_EMAIL, send_proposal_ids, subject_marker
 from bido_back.rfqs.service import buyer_display_name
+from bido_back.templates.signature import signed
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +114,8 @@ Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
 # Chases that count toward `max_chases`: sent, waiting, or turned down.
 _COUNTED: Final = ("proposed", "sent", "rejected")
+# A follow-up whose draft the checks refused: recorded, held for the buyer, not retried.
+DRAFT_REFUSED: Final = "draft_refused"
 _REPLY_PREFIXES: Final = ("re:", "aw:", "sv:", "réf:", "rif:", "res:")
 
 
@@ -120,6 +135,14 @@ class ChaseRow:
     status: str
     created_at: datetime
     sent_at: datetime | None
+    canceled_reason: str | None = None
+
+    @property
+    def counted(self) -> bool:
+        """Sent, waiting, turned down, or refused by the checks: it used a chase."""
+        return self.status in _COUNTED or (
+            self.status == "canceled" and self.canceled_reason == DRAFT_REFUSED
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +164,7 @@ def plan_chase(
     now: datetime,
 ) -> ChasePlan:
     """Where an invite stands on chasing, and when the next chase is due."""
-    counted = sorted((c for c in chases if c.status in _COUNTED), key=lambda c: c.created_at)
+    counted = sorted((c for c in chases if c.counted), key=lambda c: c.created_at)
     used = len(counted)
     if invite_status != "sent" or rfq_status != "open" or sent_at is None:
         return ChasePlan("not_applicable", None, used)
@@ -208,7 +231,11 @@ async def _view(session: AsyncSession, rfq: Rfq, now: datetime) -> RfqFollowups:
             invite_status=invite.status,
             rfq_status=rfq.status,
             sent_at=invite.sent_at,
-            chases=[ChaseRow(f.status, f.created_at, f.sent_at) for f in mine if f.kind == "chase"],
+            chases=[
+                ChaseRow(f.status, f.created_at, f.sent_at, f.canceled_reason)
+                for f in mine
+                if f.kind == "chase"
+            ],
             schedule=schedule,
             country=country,
             paused=invite.followups_paused_until,
@@ -287,6 +314,8 @@ class SweepResult:
     chases: int = 0
     clarifications: int = 0
     skipped: int = 0
+    # Drafts the checks refused, now held for the buyer.
+    held: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +331,9 @@ class _Due:
     to: str
     subject: str
     task: FollowupEmailInput
+    # Who signs: the writer does not (`bido_back.templates.signature`).
+    buyer_name: str
+    buyer_company: str
 
 
 async def sweep_tenant(
@@ -318,12 +350,14 @@ async def sweep_tenant(
 
     proposed = {"chase": 0, "clarification": 0}
     skipped = 0
+    held = 0
     sink = PostgresApprovalSink(db)
     for item in due:
         context = ToolContext(tenant_id=tenant_id, user_id=item.sender_user_id, run_id=uuid4())
         try:
             draft = await writer(item.task, context)
         except AgentFailed:
+            # The model is down or answered nothing usable: the next sweep tries again.
             skipped += 1
             continue
         problems = followup_email_problems(item.task, draft)
@@ -335,9 +369,13 @@ async def sweep_tenant(
                 item.kind,
                 ",".join(problems),
             )
-            skipped += 1
+            if await _hold(db, tenant_id, item, problems):
+                held += 1
+            else:
+                skipped += 1
             continue
-        if await _propose(db, sink, tenant_id, item, draft.body.strip()):
+        body = signed(draft.body.strip(), item.buyer_name, item.buyer_company)
+        if await _propose(db, sink, tenant_id, item, body):
             proposed[item.kind] += 1
 
     result = SweepResult(
@@ -345,15 +383,17 @@ async def sweep_tenant(
         chases=proposed["chase"],
         clarifications=proposed["clarification"],
         skipped=skipped,
+        held=held,
     )
     if result != SweepResult():
         logger.info(
-            "followups swept tenant=%s canceled=%d chases=%d clarifications=%d skipped=%d",
+            "followups swept tenant=%s canceled=%d chases=%d clarifications=%d skipped=%d held=%d",
             tenant_id,
             result.canceled,
             result.chases,
             result.clarifications,
             result.skipped,
+            result.held,
         )
     return result
 
@@ -439,7 +479,9 @@ async def _due_followups(session: AsyncSession, tenant_id: UUID, now: datetime) 
                 rfq_status=rfq.status,
                 sent_at=invite.sent_at,
                 chases=[
-                    ChaseRow(f.status, f.created_at, f.sent_at) for f in mine if f.kind == "chase"
+                    ChaseRow(f.status, f.created_at, f.sent_at, f.canceled_reason)
+                    for f in mine
+                    if f.kind == "chase"
                 ],
                 schedule=_schedule(rfq),
                 country=supplier.country,
@@ -576,15 +618,16 @@ async def _build(
             kind=kind,
             rfq_ref=rfq.ref,
             rfq_title=rfq.title,
-            buyer_company=tenant.name,
-            buyer_name=await buyer_display_name(session, user, tenant.name),
             supplier_name=supplier.name,
-            supplier_language=supplier_email_language(supplier),
+            # The thread's language: the one its RFQ email went out in.
+            supplier_language=thread_language(original.args, supplier),
             chase_number=sequence if kind == "chase" else 0,
             original_sent_on=invite.sent_at.date() if invite.sent_at else None,
             response_due=rfq.response_due,
             open_items=items,
         ),
+        buyer_name=await buyer_display_name(session, user, tenant.name),
+        buyer_company=tenant.name,
     )
 
 
@@ -655,3 +698,48 @@ async def _propose(
             .returning(FollowupMessage.id)
         )
     return inserted is not None
+
+
+async def _hold(db: Db, tenant_id: UUID, item: _Due, problems: Sequence[str]) -> bool:
+    """Record a follow-up whose draft the checks refused, once, for the buyer to see.
+
+    The row ends `canceled` with reason `draft_refused` (no approval: nothing
+    was proposed), and an audit event puts it in the RFQ's activity feed with
+    the problem codes. The row makes the follow-up done: the sweep does not
+    call the writer again for it. True when the hold was recorded now.
+    """
+    row_id = followup_id(item.invite_id, item.kind, item.sequence)
+    async with tenant_session(db, tenant_id) as session:
+        inserted = await session.scalar(
+            insert(FollowupMessage)
+            .values(
+                id=row_id,
+                tenant_id=tenant_id,
+                invite_id=item.invite_id,
+                kind=item.kind,
+                sequence=item.sequence,
+                proposal_id=item.proposal_id,
+                status="canceled",
+                canceled_reason=DRAFT_REFUSED,
+            )
+            .on_conflict_do_nothing()
+            .returning(FollowupMessage.id)
+        )
+        if inserted is None:
+            return False
+        session.add(
+            AuditEvent(
+                tenant_id=tenant_id,
+                actor_user_id=None,
+                action="rfq.followup_draft_held",
+                payload={
+                    "rfq_id": str(item.rfq_id),
+                    "invite_id": str(item.invite_id),
+                    "followup_id": str(row_id),
+                    "kind": item.kind,
+                    "sequence": item.sequence,
+                    "problems": list(problems),
+                },
+            )
+        )
+    return True

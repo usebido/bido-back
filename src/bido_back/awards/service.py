@@ -87,9 +87,9 @@ from bido_back.db.models import (
     User,
 )
 from bido_back.rfqs.errors import AgentFailed, InvalidState, NotFound, RfqError
-from bido_back.rfqs.language import supplier_email_language
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.service import buyer_display_name
+from bido_back.templates.signature import signed
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +295,9 @@ class _NoticeDraft:
     to: str
     subject: str
     task: AwardNoticeInput
+    # Who signs: the writer does not (`bido_back.templates.signature`).
+    buyer_name: str
+    buyer_company: str
 
 
 async def request_notices(
@@ -346,11 +349,11 @@ async def request_notices(
                     task=AwardNoticeInput(
                         rfq_ref=thread.rfq.ref,
                         rfq_title=thread.rfq.title,
-                        buyer_company=tenant.name,
-                        buyer_name=await buyer_display_name(session, sender, tenant.name),
                         supplier_name=thread.supplier.name,
-                        supplier_language=supplier_email_language(thread.supplier),
+                        supplier_language=thread.language,
                     ),
+                    buyer_name=await buyer_display_name(session, sender, tenant.name),
+                    buyer_company=tenant.name,
                 )
             )
         award_id = award.id
@@ -378,7 +381,7 @@ async def request_notices(
             sender_user_id=draft.sender_user_id,
             to=[draft.to],
             subject=draft.subject,
-            body=output.body.strip(),
+            body=signed(output.body.strip(), draft.buyer_name, draft.buyer_company),
         )
         approval_id = await _propose(
             db,
@@ -512,7 +515,7 @@ async def request_po_send(
         doc = await po_document(session, po)
         body = po_email_body(
             doc,
-            supplier_email_language(thread.supplier),
+            thread.language,
             await buyer_display_name(session, sender, tenant.name),
         )
         call_id = po_send_proposal_ids(po.id)[1]

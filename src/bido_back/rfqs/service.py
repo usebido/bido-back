@@ -11,8 +11,9 @@ caller (the buyer) has a connected mailbox, since that is where the emails will 
 (`MailboxNotConnected` otherwise). It pins the RFQ to the template version
 its emails use (`bido_back.templates.service.resolve_for_rfq`, recorded at
 the first send). Then, for each invite still in `draft`, it renders the email
-from that template in the supplier's language (`bido_back.templates.render`;
-the email writer agent only translates the buyer's own template text when the
+from that template in the supplier's language (decided here for the whole
+thread, `bido_back.rfqs.language`; `bido_back.templates.render`; the email
+writer agent only translates the buyer's own template text when the
 languages differ), checks it (`rfq_email_problems`), makes sure the subject
 carries the `[RFQ-<n>]` marker, records an `ApprovalProposal` for the act
 tool `send_rfq_email` through `PostgresApprovalSink` (requested by the
@@ -66,6 +67,7 @@ from bido_back.db.models import (
     Approval,
     AuditEvent,
     Contact,
+    CopilotConversation,
     Invite,
     MailboxConnection,
     Rfq,
@@ -92,7 +94,12 @@ from bido_back.rfqs.document import (
     render_pdf,
 )
 from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound, ReplyByRequired
-from bido_back.rfqs.language import DEFAULT_LANGUAGE, supplier_email_language
+from bido_back.rfqs.language import (
+    DEFAULT_LANGUAGE,
+    LanguageDecision,
+    decide_email_language,
+    supplier_email_language,
+)
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.readiness import reply_by_refusal, send_blockers, utc_today
 from bido_back.rfqs.schemas import (
@@ -893,6 +900,8 @@ class _SendContext:
     # Whose name the RFQ document goes out in: the company's branding (/v1/company), with
     # the RFQ's own logo and terms when it chose them. Part of the approved document.
     branding: DocumentBranding
+    # The buyer's own language (their latest copilot conversation's), when known.
+    buyer_language: str | None = None
 
 
 def _render_line(line: RfqLine) -> RenderLine:
@@ -941,6 +950,20 @@ async def _send_context(
         buyer_name=await buyer_display_name(session, user, tenant.name),
         buyer_company=tenant.name,
         branding=await _document_branding(session, principal, rfq, tenant.name, storage),
+        buyer_language=await _buyer_language(session, user.id),
+    )
+
+
+async def _buyer_language(session: AsyncSession, user_id: UUID) -> str | None:
+    """The language of the buyer's latest copilot conversation, when the titler stored one."""
+    return await session.scalar(
+        select(CopilotConversation.title_language)
+        .where(
+            CopilotConversation.user_id == user_id,
+            CopilotConversation.title_language.is_not(None),
+        )
+        .order_by(CopilotConversation.last_activity_at.desc())
+        .limit(1)
     )
 
 
@@ -986,16 +1009,37 @@ async def _document_branding(
     )
 
 
+def _invite_language(
+    ctx: _SendContext, supplier: Supplier, contact_email: str | None
+) -> LanguageDecision:
+    """The language this invite's thread is written in, decided at its first send.
+
+    The approved document records it (`RfqDocument.language`); every later email
+    of the thread reuses it (`bido_back.rfqs.language.thread_language`).
+    """
+    content = ctx.template.content
+    own_template = ctx.template.template_id is not None
+    return decide_email_language(
+        supplier_language=supplier.language,
+        supplier_country=supplier.country,
+        supplier_name=supplier.name,
+        email_addresses=(contact_email, supplier.email_domain),
+        buyer_template_language=content.language if own_template else None,
+        buyer_language=ctx.buyer_language,
+        standard_template_language=None if own_template else content.language,
+    )
+
+
 async def _render_for(
     ctx: _SendContext,
     supplier: Supplier,
+    language: str,
     writer: EmailWriterAgent,
     context: ToolContext,
     localized: dict[str, TemplateContent],
 ) -> tuple[RenderedRfq, RenderInput]:
-    """The supplier's email (and what it was rendered from); refuses one that fails
-    the deterministic checks."""
-    language = supplier_email_language(supplier)
+    """The supplier's email in `language` (and what it was rendered from); refuses one
+    that fails the deterministic checks."""
     display = localized.get(language)
     if display is None:
         display = await localize(ctx.template.content, language, writer, context)
@@ -1048,17 +1092,19 @@ async def preview_email(
         rfq = await _rfq(session, rfq_id)
         row = (
             await session.execute(
-                select(Invite, Supplier)
+                select(Invite, Supplier, Contact.email)
                 .join(Supplier, Supplier.id == Invite.supplier_id)
+                .join(Contact, Contact.id == Invite.contact_id)
                 .where(Invite.id == invite_id, Invite.rfq_id == rfq_id)
             )
         ).first()
         if row is None:
             raise NotFound(f"invite {invite_id} not found")
-        _, supplier = row
+        _, supplier, contact_email = row
         ctx = await _send_context(session, principal, rfq, storage)
     context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
-    rendered, _ = await _render_for(ctx, supplier, writer, context, {})
+    language = _invite_language(ctx, supplier, contact_email).language
+    rendered, _ = await _render_for(ctx, supplier, language, writer, context, {})
     return RfqEmailPreview(
         invite_id=invite_id,
         subject=with_marker(rendered.subject, rfq.ref),
@@ -1096,14 +1142,15 @@ async def preview_document(
         rfq = await _rfq(session, rfq_id)
         row = (
             await session.execute(
-                select(Invite, Supplier)
+                select(Invite, Supplier, Contact.email)
                 .join(Supplier, Supplier.id == Invite.supplier_id)
+                .join(Contact, Contact.id == Invite.contact_id)
                 .where(Invite.id == invite_id, Invite.rfq_id == rfq_id)
             )
         ).first()
         if row is None:
             raise NotFound(f"invite {invite_id} not found")
-        _, supplier = row
+        _, supplier, contact_email = row
         proposed = await session.scalar(
             select(Approval.args)
             .where(
@@ -1128,7 +1175,8 @@ async def preview_document(
         context = ToolContext(
             tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4()
         )
-        _, render_input = await _render_for(ctx, supplier, writer, context, {})
+        language = _invite_language(ctx, supplier, contact_email).language
+        _, render_input = await _render_for(ctx, supplier, language, writer, context, {})
         document = build_document(
             render_input,
             supplier_name=supplier.name,
@@ -1213,7 +1261,18 @@ async def prepare_send(
         context = ToolContext(
             tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4()
         )
-        rendered, render_input = await _render_for(ctx, supplier, writer, context, localized)
+        # The thread's language: decided here, once, and kept by every later email.
+        language = _invite_language(ctx, supplier, contact.email)
+        logger.info(
+            "rfq email language tenant=%s invite=%s language=%s source=%s",
+            principal.tenant_id,
+            invite.id,
+            language.language,
+            language.source,
+        )
+        rendered, render_input = await _render_for(
+            ctx, supplier, language.language, writer, context, localized
+        )
         args = SendRfqEmailArgs(
             invite_id=invite.id,
             sender_user_id=principal.user_id,

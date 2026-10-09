@@ -40,6 +40,7 @@ from bido_back.templates.required import (
     normalize,
     required_field,
 )
+from bido_back.templates.signature import signature
 
 # --- Fixed phrases --------------------------------------------------------------------
 
@@ -458,14 +459,6 @@ def _html_table(headings: list[str], rows: list[list[str]]) -> str:
 def tiered(lines: Sequence[RenderLine]) -> bool:
     """Whether any line asks for more than one quantity."""
     return any(len(line.quantities) > 1 for line in lines)
-
-
-def signature(buyer_name: str, buyer_company: str) -> list[str]:
-    """The closing's name lines: the buyer, then the company when it says something new."""
-    name, company = buyer_name.strip(), buyer_company.strip()
-    if not name or name.casefold() == company.casefold():
-        return [company] if company else []
-    return [name, company] if company else [name]
 
 
 def render_rfq(data: RenderInput) -> RenderedRfq:

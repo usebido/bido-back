@@ -25,6 +25,18 @@ does, per tenant, per RFQ whose negotiation is open:
    offer within target, the RFQ becomes `ready_to_close` (the buyer sees
    "pronto pra fechar" and closes, or waits for the deadline).
 
+A draft the checks refuse is never retried by the sweep: the round is recorded
+as held for a person (`canceled`, reason `draft_refused`, the problem codes in
+its terms, an `rfq.negotiation_draft_held` audit event the activity feed
+shows), the offer counts as evaluated, and the view says
+`draft_refused_requires_buyer`. A new offer, new limits, or a person asking for
+counter-offers (`evaluate_rfq(force=True)`) write it again. A writer that fails
+(the model is down) is retried on the next sweep.
+
+The writer does not sign: code puts the buyer's signature under its email
+(`bido_back.templates.signature`). The email is in the language of the
+invite's RFQ email (`bido_back.rfqs.language.thread_language`).
+
 Logs carry ids and counts only.
 """
 
@@ -71,6 +83,7 @@ from bido_back.db.models import (
     Tenant,
     User,
 )
+from bido_back.decimals import format_decimal, plain_decimal
 from bido_back.followups.service import reply_subject
 from bido_back.negotiation.agents import NegotiationWriter
 from bido_back.negotiation.history import PriceHistory, quoted_price_history
@@ -104,9 +117,10 @@ from bido_back.negotiation.strategy import (
     ready_to_close,
 )
 from bido_back.rfqs.errors import AgentFailed, InvalidState, NotFound
-from bido_back.rfqs.language import supplier_email_language
+from bido_back.rfqs.language import thread_language
 from bido_back.rfqs.send import SEND_RFQ_EMAIL, send_proposal_ids
 from bido_back.rfqs.service import buyer_display_name
+from bido_back.templates.signature import signed
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +130,9 @@ Db = AsyncEngine | async_sessionmaker[AsyncSession]
 _COUNTED: Final = ("proposed", "sent", "rejected")
 _ACTIVE: Final = ("open", "ready_to_close")
 _FINAL_INVITE: Final = ("rejected", "closed")
+# A round whose draft the checks refused: held for a person, never re-written by the sweep.
+DRAFT_REFUSED: Final = "draft_refused"
+DRAFT_REFUSED_REASON: Final = "draft_refused_requires_buyer"
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +142,8 @@ class EvaluationResult:
     closed: bool = False
     skipped: int = 0
     approval_ids: tuple[UUID, ...] = ()
+    # Drafts the checks refused, now held for a person.
+    held: int = 0
 
 
 @dataclass(slots=True)
@@ -135,6 +154,7 @@ class SweepResult:
     closed: int = 0
     skipped: int = 0
     rfqs: list[UUID] = field(default_factory=list[UUID])
+    held: int = 0
 
 
 # --- Loading what the strategy needs ---------------------------------------------------
@@ -208,6 +228,17 @@ def _rounds(messages: Sequence[NegotiationMessage]) -> tuple[int, bool, bool]:
     bafo = any(m.action == "bafo" and m.status in ("proposed", "sent") for m in messages)
     pending = any(m.status == "proposed" for m in messages)
     return len(counted), bafo, pending
+
+
+def _held(messages: Sequence[NegotiationMessage], proposal_id: UUID) -> bool:
+    """The latest round answers this offer and its draft was refused: a person decides."""
+    latest = max(messages, key=lambda m: m.round, default=None)
+    return (
+        latest is not None
+        and latest.proposal_id == proposal_id
+        and latest.status == "canceled"
+        and latest.canceled_reason == DRAFT_REFUSED
+    )
 
 
 def _decimal_value(value: JsonValue) -> Decimal | None:
@@ -369,6 +400,9 @@ async def _view(
                 if column is not None
                 else None
             )
+            reasons = list(decision.reasons) if decision else []
+            if column is not None and _held(mine, column.proposal_id):
+                reasons.append(DRAFT_REFUSED_REASON)
             invites.append(
                 InviteNegotiation(
                     invite_id=invite.id,
@@ -379,7 +413,7 @@ async def _view(
                     latest_proposal_id=column.proposal_id if column else None,
                     latest_proposal_version=column.proposal_version if column else None,
                     lines=_line_views(decision) if decision else [],
-                    strategy_reasons=list(decision.reasons) if decision else [],
+                    strategy_reasons=reasons,
                     stalled_rounds=decision.stalled_rounds if decision else 0,
                     messages=[
                         NegotiationMessageView(
@@ -735,6 +769,9 @@ class _Due:
     subject: str
     task: NegotiationEmailInput
     terms: dict[str, JsonValue]
+    # Who signs: the writer does not (`bido_back.templates.signature`).
+    buyer_name: str
+    buyer_company: str
 
 
 async def _reconcile(session: AsyncSession) -> int:
@@ -793,11 +830,14 @@ def _asks(
             NegotiationLineAsk(
                 position=line.row.position,
                 line=label,
-                quantity=line.quantity,
+                # Plain digits: the writer copies what it is given (never "9E+1").
+                quantity=plain_decimal(line.quantity),
                 unit=line.row.unit,
                 currency=currency,
-                offered_unit_price=d.offered_price.normalize() if d.offered_price else None,
-                target_unit_price=d.ask_price,
+                offered_unit_price=(
+                    plain_decimal(d.offered_price) if d.offered_price is not None else None
+                ),
+                target_unit_price=(plain_decimal(d.ask_price) if d.ask_price is not None else None),
                 offered_lead_time_days=d.lead_time_days,
                 required_lead_time_days=d.ask_lead_days,
             )
@@ -811,8 +851,8 @@ def _terms(decision: SupplierDecision, currency: str) -> dict[str, JsonValue]:
         line: dict[str, JsonValue] = {
             "rfq_line_id": str(d.rfq_line_id),
             "decision": d.kind,
-            "offered": str(d.offered_price) if d.offered_price is not None else None,
-            "ask": str(d.ask_price) if d.ask_price is not None else None,
+            "offered": format_decimal(d.offered_price) if d.offered_price is not None else None,
+            "ask": format_decimal(d.ask_price) if d.ask_price is not None else None,
             "ask_lead_days": d.ask_lead_days,
             "offered_lead_days": d.lead_time_days,
         }
@@ -820,15 +860,19 @@ def _terms(decision: SupplierDecision, currency: str) -> dict[str, JsonValue]:
     return {"currency": currency, "lines": lines}
 
 
-async def _sender(session: AsyncSession, invite: Invite) -> UUID | None:
-    """The buyer who requested the RFQ email (its executed approval): their mailbox."""
-    original = await session.scalar(
+async def _rfq_email(session: AsyncSession, invite: Invite) -> Approval | None:
+    """The executed approval of the invite's RFQ email: who sent it, in which language."""
+    return await session.scalar(
         select(Approval).where(
             Approval.tool == SEND_RFQ_EMAIL,
             Approval.tool_call_id == send_proposal_ids(invite.id)[1],
             Approval.status == "executed",
         )
     )
+
+
+def _sender(original: Approval | None) -> UUID | None:
+    """The buyer who requested the RFQ email (its executed approval): their mailbox."""
     if original is None:
         return None
     try:
@@ -853,7 +897,8 @@ async def _due(
     contact_email = await session.scalar(
         select(Contact.email).where(Contact.id == invite.contact_id)
     )
-    sender_user_id = await _sender(session, invite)
+    original = await _rfq_email(session, invite)
+    sender_user_id = _sender(original)
     tenant = await session.get(Tenant, rfq.tenant_id)
     if contact_email is None or sender_user_id is None or tenant is None:
         logger.warning("negotiation: cannot address invite=%s", invite.id)
@@ -887,15 +932,16 @@ async def _due(
             action=action,
             rfq_ref=rfq.ref,
             rfq_title=rfq.title,
-            buyer_company=tenant.name,
-            buyer_name=await buyer_display_name(session, user, tenant.name),
             supplier_name=supplier.name,
-            supplier_language=supplier_email_language(supplier),
+            # The thread's language: the one its RFQ email went out in.
+            supplier_language=thread_language(original.args if original else None, supplier),
             round=round_number,
             reply_by=rfq.negotiation_deadline.date() if rfq.negotiation_deadline else None,
             mention_competition=decision.mention_competition,
             lines=asks,
         ),
+        buyer_name=await buyer_display_name(session, user, tenant.name),
+        buyer_company=tenant.name,
         terms={
             **_terms(decision, rfq.base_currency),
             "correction_revision": correction_revision,
@@ -1042,12 +1088,14 @@ async def evaluate_rfq(
 
     proposed: list[UUID] = []
     skipped = 0
+    held = 0
     sink = PostgresApprovalSink(db)
     for item in due:
         context = ToolContext(tenant_id=tenant_id, user_id=item.sender_user_id, run_id=uuid4())
         try:
             draft = await writer(item.task, context)
         except AgentFailed:
+            # The model is down or answered nothing usable: the next sweep tries again.
             skipped += 1
             continue
         problems = negotiation_email_problems(item.task, draft)
@@ -1059,9 +1107,13 @@ async def evaluate_rfq(
                 item.action,
                 ",".join(problems),
             )
-            skipped += 1
+            if await _hold(db, tenant_id, item, problems):
+                held += 1
+            else:
+                skipped += 1
             continue
-        approval_id = await _propose(db, sink, tenant_id, item, draft.body.strip())
+        body = signed(draft.body.strip(), item.buyer_name, item.buyer_company)
+        approval_id = await _propose(db, sink, tenant_id, item, body)
         if approval_id is not None:
             proposed.append(approval_id)
     if became_ready:
@@ -1071,7 +1123,109 @@ async def evaluate_rfq(
         ready=became_ready,
         skipped=skipped,
         approval_ids=tuple(proposed),
+        held=held,
     )
+
+
+async def _current(session: AsyncSession, item: _Due) -> bool:
+    """Whether what `item` answers still stands, with the RFQ and the offer locked.
+
+    The RFQ is open and negotiating, the offer is the supplier's latest, and
+    neither the comparison policy nor the offer's corrections changed since it
+    was evaluated.
+    """
+    rfq = await session.scalar(select(Rfq).where(Rfq.id == item.rfq_id).with_for_update())
+    current_hash = (
+        args_hash(
+            cast(
+                dict[str, JsonValue],
+                ComparisonPolicy.model_validate(rfq.comparison_policy or {}).model_dump(
+                    mode="json"
+                ),
+            )
+        )
+        if rfq
+        else None
+    )
+    source = await session.scalar(
+        select(Proposal).where(Proposal.id == item.proposal_id).with_for_update()
+    )
+    latest_version = await session.scalar(
+        select(func.max(Proposal.version)).where(
+            Proposal.invite_id == item.invite_id,
+        )
+    )
+    revision = await session.scalar(
+        select(func.count(FieldCorrection.id)).where(
+            FieldCorrection.proposal_id == item.proposal_id,
+        )
+    )
+    return not (
+        rfq is None
+        or rfq.status != "open"
+        or rfq.negotiation_status not in _ACTIVE
+        or source is None
+        or source.version != latest_version
+        or current_hash != item.terms.get("comparison_policy_hash")
+        or revision != item.terms.get("correction_revision")
+    )
+
+
+async def _hold(db: Db, tenant_id: UUID, item: _Due, problems: Sequence[str]) -> bool:
+    """Record a draft the checks refused as a round held for a person, once.
+
+    The round's row ends `canceled` with reason `draft_refused` and the problem
+    codes in its terms (no approval: nothing was proposed), an audit event puts
+    it in the RFQ's activity feed, and the invite counts this offer as
+    evaluated, so later sweeps do not call the writer again for it. Nothing is
+    recorded when what the draft answers changed meanwhile: the next sweep
+    evaluates the new state. True when the hold was recorded now.
+    """
+    row_id = negotiation_message_id(item.invite_id, item.round)
+    refused: list[JsonValue] = [*problems]
+    async with tenant_session(db, tenant_id) as session:
+        if not await _current(session, item):
+            return False
+        inserted = await session.scalar(
+            insert(NegotiationMessage)
+            .values(
+                id=row_id,
+                tenant_id=tenant_id,
+                invite_id=item.invite_id,
+                proposal_id=item.proposal_id,
+                round=item.round,
+                action=item.action,
+                status="canceled",
+                canceled_reason=DRAFT_REFUSED,
+                terms={**item.terms, "refused": refused},
+            )
+            .on_conflict_do_nothing()
+            .returning(NegotiationMessage.id)
+        )
+        await session.execute(
+            update(Invite)
+            .where(Invite.id == item.invite_id)
+            .values(negotiation_evaluated_proposal_id=item.proposal_id)
+        )
+        if inserted is None:
+            return False
+        session.add(
+            AuditEvent(
+                tenant_id=tenant_id,
+                actor_user_id=None,
+                action="rfq.negotiation_draft_held",
+                payload={
+                    "rfq_id": str(item.rfq_id),
+                    "invite_id": str(item.invite_id),
+                    "negotiation_message_id": str(row_id),
+                    "proposal_id": str(item.proposal_id),
+                    "action": item.action,
+                    "round": item.round,
+                    "problems": list(problems),
+                },
+            )
+        )
+    return True
 
 
 async def _propose(
@@ -1115,41 +1269,7 @@ async def _propose(
         )
         if approval_id is None:
             return None
-        rfq = await session.scalar(select(Rfq).where(Rfq.id == item.rfq_id).with_for_update())
-        current_hash = (
-            args_hash(
-                cast(
-                    dict[str, JsonValue],
-                    ComparisonPolicy.model_validate(rfq.comparison_policy or {}).model_dump(
-                        mode="json"
-                    ),
-                )
-            )
-            if rfq
-            else None
-        )
-        source = await session.scalar(
-            select(Proposal).where(Proposal.id == item.proposal_id).with_for_update()
-        )
-        latest_version = await session.scalar(
-            select(func.max(Proposal.version)).where(
-                Proposal.invite_id == item.invite_id,
-            )
-        )
-        revision = await session.scalar(
-            select(func.count(FieldCorrection.id)).where(
-                FieldCorrection.proposal_id == item.proposal_id,
-            )
-        )
-        if (
-            rfq is None
-            or rfq.status != "open"
-            or rfq.negotiation_status not in _ACTIVE
-            or source is None
-            or source.version != latest_version
-            or current_hash != item.terms.get("comparison_policy_hash")
-            or revision != item.terms.get("correction_revision")
-        ):
+        if not await _current(session, item):
             expired = await session.scalar(
                 update(Approval)
                 .where(
@@ -1213,17 +1333,27 @@ async def sweep_tenant(
         )
         result.proposed += evaluation.proposed
         result.skipped += evaluation.skipped
+        result.held += evaluation.held
         result.ready += int(evaluation.ready)
         result.closed += int(evaluation.closed)
         result.rfqs.append(rfq_id)
-    if result.canceled or result.proposed or result.ready or result.closed or result.skipped:
+    if (
+        result.canceled
+        or result.proposed
+        or result.ready
+        or result.closed
+        or result.skipped
+        or result.held
+    ):
         logger.info(
-            "negotiation swept tenant=%s canceled=%d proposed=%d ready=%d closed=%d skipped=%d",
+            "negotiation swept tenant=%s canceled=%d proposed=%d ready=%d closed=%d skipped=%d"
+            " held=%d",
             tenant_id,
             result.canceled,
             result.proposed,
             result.ready,
             result.closed,
             result.skipped,
+            result.held,
         )
     return result

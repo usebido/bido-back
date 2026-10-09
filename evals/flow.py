@@ -89,7 +89,7 @@ from bido_back.settings import get_settings
 from bido_back.templates.render import format_date, format_quantity
 from bido_back.templates.required import REQUIRED_FIELDS, covered_keys
 from bido_back.templates.service import FOOTER_SEPARATOR
-from evals.harness import Env, MemoryStorage, Mode, RunResult, run_timed
+from evals.harness import Env, MemoryStorage, Mode, RunResult, as_drafted, run_timed
 from evals.personas import (
     ABOVE,
     EAGER,
@@ -716,7 +716,7 @@ def _check_negotiation_emails(
             tag = f"{persona.key}:e{index}"
             drafted = [o.body.strip() for t, o in drafts.values() if t.supplier_name ==
                        persona.name and o is not None]  # fmt: skip
-            result.check(f"as_drafted:{tag}", body.strip() in drafted, "sent text differs")
+            result.check(f"as_drafted:{tag}", as_drafted(body, drafted), "sent text differs")
             numbers = written_numbers(body)
             result.check(f"no_max:{tag}", not numbers & maxima, f"{sorted(numbers & maxima)}")
             leaked = written_numbers(body, _DECIMAL) & rivals

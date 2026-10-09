@@ -241,9 +241,7 @@ def followup(task: FollowupEmailInput) -> FollowupEmailOutput:
             for item in task.open_items
         ]
         middle = "\n".join([_t(lang, "clarify", ref=task.rfq_ref), *items])
-    return FollowupEmailOutput(
-        body=f"{_t(lang, 'hello')}\n\n{middle}\n\n{_t(lang, 'bye')}\n{task.buyer_name}"
-    )
+    return FollowupEmailOutput(body=f"{_t(lang, 'hello')}\n\n{middle}\n\n{_t(lang, 'bye')}")
 
 
 def negotiation(task: NegotiationEmailInput) -> NegotiationEmailOutput:
@@ -262,14 +260,10 @@ def negotiation(task: NegotiationEmailInput) -> NegotiationEmailOutput:
     if task.reply_by is not None:
         lines.append(_t(lang, "by", date=written_date(task.reply_by, lang)))
     body = "\n".join(lines)
-    return NegotiationEmailOutput(
-        body=f"{_t(lang, 'hello')}\n\n{body}\n\n{_t(lang, 'bye')}\n{task.buyer_name}"
-    )
+    return NegotiationEmailOutput(body=f"{_t(lang, 'hello')}\n\n{body}\n\n{_t(lang, 'bye')}")
 
 
 def notice(task: AwardNoticeInput) -> AwardNoticeOutput:
     lang = _lang(task.supplier_language)
     middle = _t(lang, "notice", ref=task.rfq_ref, title=task.rfq_title)
-    return AwardNoticeOutput(
-        body=f"{_t(lang, 'hello')}\n\n{middle}\n\n{_t(lang, 'bye')}\n{task.buyer_name}"
-    )
+    return AwardNoticeOutput(body=f"{_t(lang, 'hello')}\n\n{middle}\n\n{_t(lang, 'bye')}")
