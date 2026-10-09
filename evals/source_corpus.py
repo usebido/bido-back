@@ -53,7 +53,7 @@ from bido_back.purchasing.sources.contracts import (
     Issue,
     MappingProposal,
     MappingTask,
-    PlanningScope,
+    ScopeRequest,
     SourceAssessment,
     TableProposal,
 )
@@ -87,18 +87,16 @@ CRITICAL: Final[dict[str, frozenset[str]]] = {
 }
 
 
-def build_scope(variant: Variant) -> PlanningScope:
-    """The buyer's planning boundaries for a run: the one place the harness builds them.
+def build_scope(variant: Variant) -> ScopeRequest:
+    """The buyer's planning boundaries as a buyer states them: the one place they are built.
 
-    Today `analyze_documents` takes a resolved `PlanningScope`. Workstream A adds a
-    partial `ScopeRequest` (product words, location, horizon days, optional as_of)
-    resolved from the evidence; switch this function to it and nothing else changes.
+    Only the buyer's words (product, plant, a horizon in days, no safety stock); code
+    resolves the exact code and the snapshot date from the evidence, as the copilot does.
     """
-    return PlanningScope(
-        product_code=PRODUCT,
+    return ScopeRequest(
+        product=f"Motor {PRODUCT}",
         location=variant.locale.plants["A"],
-        as_of=AS_OF,
-        horizon_end=HORIZON_END,
+        horizon_days=(HORIZON_END - AS_OF).days,
         safety_stock=Decimal(0),
     )
 
