@@ -2672,20 +2672,17 @@ EXPECTED_MOCK_FAILURES: Final[frozenset[tuple[str, str, str]]] = frozenset(
     {
         ("rfq6_replay", "rfq", "email:language"),
         *(
-            ("rfq6_replay", step, check)
-            for step in ("first_reply", "second_reply", "shaft_on_time")
+            ("rfq6_replay", "first_reply", check)
             for check in (*_RFQ6_EVERY_EMAIL, "status_matches_emails")
         ),
-        ("rfq6_replay", "first_reply", "no_validity_asked"),
+        ("rfq6_replay", "second_reply", "email:language"),
+        ("rfq6_replay", "second_reply", "email:single_signature"),
         ("rfq6_replay", "first_reply", "no_quantity_tier_asked"),
-        ("rfq6_replay", "first_reply", "no_answered_lead_time_asked"),
-        ("rfq6_replay", "second_reply", "nothing_asked_twice"),
-        ("rfq6_replay", "second_reply", "late_line_lead_time_asked"),
+        # Reached since prompt v5 reads business days: the shaft's lead-time counter asks
+        # with the limit computed when the mandate was approved.
+        ("rfq6_replay", "second_reply", "lead_ask_meets_need_by"),
         ("rfq6_replay", "second_reply", "visible_waiting_for_supplier"),
-        ("rfq6_replay", "shaft_on_time", "nothing_sent"),
         ("rfq6_replay", "shaft_on_time", "visible_accepted"),
-        ("rfq6_replay", "shaft_on_time", "outcome_every_line"),
-        ("rfq6_replay", "shaft_on_time", "ready_to_close"),
         ("price_above_target_then_concession", "first_quotes", "visible_accepted"),
         ("price_above_target_then_concession", "first_quotes", "visible_waiting_for_supplier"),
         ("price_above_target_then_concession", "final_offer", "visible_final_offer"),

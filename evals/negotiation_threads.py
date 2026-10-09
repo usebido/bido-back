@@ -8,10 +8,12 @@ substituted. Each builder returns the email and the extraction a correct model
 returns for it under the current contract (`QuoteExtractionOutput`), which
 mock mode scripts; live mode reads the same email with the real model.
 
-"Correct" means what the contract can express: a relative validity ("valid for
-15 days") has no ISO date to give, so a correct model leaves `valid_until`
-empty; "7 business days" is written as 7 with its source, and deterministic
-code decides what business days mean.
+"Correct" means what the contract (prompt v5) can express: a relative validity
+("valid for 15 days") is a `validity` period and code computes `valid_until`;
+"7 business days" is a lead time of 7 `business_days` with its source, and
+deterministic code decides what business days mean; a lead time given once for
+every item of a whole offer is the offer-level `lead_time`; questions, a final
+offer and general terms are the supplier's signals and notes.
 
 The mock writers (`followup_writer`, `negotiation_writer`) follow the released
 writer prompts literally, in Portuguese, German or English: they sign "with
@@ -31,12 +33,18 @@ from bido_back.agents.catalog.contracts import (
     ExtraOfferDraft,
     FollowupEmailInput,
     FollowupEmailOutput,
+    LeadTimeBasis,
+    LeadTimeUnit,
+    LeadTimeValue,
     NegotiationEmailInput,
     NegotiationEmailOutput,
     ProposalLineDraft,
     QuoteExtractionInput,
     QuoteExtractionOutput,
     SourceRef,
+    SupplierQuestion,
+    ValidityUnit,
+    ValidityValue,
 )
 from evals.scripted import ScriptedModel
 
@@ -105,13 +113,47 @@ def ev(value: str, quote: str, confidence: float = 0.95) -> ExtractedValue:
     )
 
 
+NO_LEAD: Final = LeadTimeValue(value=None, source=None, confidence=0)
+
+
+def stated_lead(
+    value: int | None,
+    quote: str | None,
+    unit: LeadTimeUnit = "calendar_days",
+    *,
+    basis: LeadTimeBasis | None = None,
+    approximate: bool = False,
+    risk_note: str | None = None,
+) -> LeadTimeValue:
+    """A lead time as written (prompt v5): the number, its unit, what it counts from."""
+    return LeadTimeValue(
+        value=str(value) if value is not None else None,
+        source=SourceRef(kind="email_body", quote=quote) if quote is not None else None,
+        confidence=0.95 if value is not None else 0,
+        unit=unit if value is not None else None,
+        basis=basis,
+        approximate=approximate,
+        risk_note=risk_note,
+    )
+
+
+def validity(value: int, unit: ValidityUnit, quote: str) -> ValidityValue:
+    """A validity given as a duration; code computes the date from the message's."""
+    return ValidityValue(
+        value=str(value),
+        source=SourceRef(kind="email_body", quote=quote),
+        confidence=0.95,
+        unit=unit,
+    )
+
+
 def line_draft(
     position: int,
     *,
     min_quantity: ExtractedValue = NONE,
     unit_price: ExtractedValue = NONE,
     unit: ExtractedValue = NONE,
-    lead_time_days: ExtractedValue = NONE,
+    lead_time: LeadTimeValue = NO_LEAD,
     moq: ExtractedValue = NONE,
     offered_mpn: ExtractedValue = NONE,
     is_alternative: bool = False,
@@ -126,34 +168,43 @@ def line_draft(
         unit=unit,
         tooling_cost=NONE,
         moq=moq,
-        lead_time_days=lead_time_days,
         origin_country=NONE,
         qualification=NONE,
+        lead_time=lead_time,
     )
 
 
 def missing_quotes(email: Email) -> list[str]:
     """Quotes of the truth that are not in the email body (a harness bug when not empty)."""
     body = " ".join(email.body.split()).casefold()
+    truth = email.truth
     values: list[ExtractedValue] = [
-        email.truth.currency,
-        email.truth.valid_until,
-        email.truth.incoterm,
-        email.truth.payment_terms,
-        email.truth.unchanged_terms,
-        email.truth.update_evidence,
+        truth.currency,
+        truth.valid_until,
+        truth.validity,
+        truth.incoterm,
+        truth.payment_terms,
+        truth.lead_time,
+        truth.unchanged_terms,
+        truth.update_evidence,
+        truth.final_offer,
     ]
-    for line in email.truth.lines:
+    notes = [n for n in (truth.lead_time.risk_note, *truth.offer_notes) if n is not None]
+    for line in truth.lines:
         values += [
             line.offered_mpn,
             line.min_quantity,
             line.unit_price,
             line.unit,
             line.moq,
-            line.lead_time_days,
+            line.lead_time,
         ]
+        notes += [line.lead_time.risk_note] if line.lead_time.risk_note is not None else []
     quotes = [v.source.quote for v in values if v.source is not None]
-    quotes += [o.quote for o in email.truth.extra_offers]
+    quotes += [o.quote for o in truth.extra_offers]
+    quotes += [q.quote for q in truth.supplier_questions]
+    quotes += [d.quote for d in truth.declined_lines]
+    quotes += notes
     return [text for text in quotes if " ".join(text.split()).casefold() not in body]
 
 
@@ -207,15 +258,15 @@ def _pt_line(t: Thread, quoted: Quoted, *, with_lead: bool = True) -> tuple[str,
     plural, single = _pt_unit(part)
     qty = f"{pt_quantity(part.quantity)} {plural}"
     price = f"R$ {pt_number(quoted.price)}"
-    lead = f"{quoted.lead} dias"
+    lead_text = f"{quoted.lead} dias"
     text = f"{_pt_label(part)}: {qty} a {price} por {single}"
-    text += f", prazo de entrega de {lead}." if with_lead else "."
+    text += f", prazo de entrega de {lead_text}." if with_lead else "."
     draft = line_draft(
         part.position,
         min_quantity=ev(plain_number(part.quantity), qty),
         unit_price=ev(plain_number(quoted.price), price),
         unit=ev(single, f"por {single}"),
-        lead_time_days=ev(str(quoted.lead), lead) if with_lead else NONE,
+        lead_time=stated_lead(quoted.lead, lead_text) if with_lead else NO_LEAD,
     )
     return text, draft
 
@@ -263,6 +314,7 @@ def pt_offer(
         payment_terms=ev("28 dias após a NF", _PT_PAYMENT),
         lines=drafts,
         extra_offers=list(extras),
+        final_offer=ev(_FINAL_WORDS, _FINAL_WORDS) if opening == FINAL else NONE,
     )
     return Email(body, truth)
 
@@ -272,7 +324,9 @@ def pt_answers(t: Thread, *, valid_days: int, lead: int, positions: Sequence[int
     nothing else. No 'other conditions unchanged': nothing else was asked or changed.
 
     A correct extraction under the current contract reads it as an amendment (it changes
-    no price), without the explicit preservation statement the supplier never wrote."""
+    no price), without the explicit preservation statement the supplier never wrote. An
+    answer to an earlier offer puts a lead time "for all items" on each line (prompt v5),
+    since only lines carry it into the offer."""
     valid_until = t.start + timedelta(days=valid_days)
     valid = f"a proposta é válida até {pt_date(valid_until)}"
     days = f"{lead} dias"
@@ -286,7 +340,7 @@ def pt_answers(t: Thread, *, valid_days: int, lead: int, positions: Sequence[int
         valid_until=ev(valid_until.isoformat(), valid),
         incoterm=NONE,
         payment_terms=NONE,
-        lines=[line_draft(p, lead_time_days=ev(str(lead), days)) for p in positions],
+        lines=[line_draft(p, lead_time=stated_lead(lead, days)) for p in positions],
         reply_kind="amendment",
         update_evidence=ev(answer, answer),
     )
@@ -297,6 +351,7 @@ OFFER: Final = "Obrigado pela solicitação {ref}. Segue nossa proposta:"
 REVISED: Final = "Sobre a {ref}, segue nossa proposta revisada:"
 SAME: Final = "Sobre a {ref}: não conseguimos reduzir os preços. Mantemos a mesma proposta:"
 FINAL: Final = "Sobre a {ref}, segue nossa melhor e última oferta:"
+_FINAL_WORDS: Final = "segue nossa melhor e última oferta"
 PRESERVE_PRICE: Final = "mantendo as demais condições"
 PRESERVE_ALL: Final = "As demais condições permanecem inalteradas"
 
@@ -337,7 +392,7 @@ def pt_lead_change(t: Thread, positions: Sequence[int], lead: int) -> Email:
         valid_until=NONE,
         incoterm=NONE,
         payment_terms=NONE,
-        lines=[line_draft(p, lead_time_days=ev(str(lead), days)) for p in positions],
+        lines=[line_draft(p, lead_time=stated_lead(lead, days)) for p in positions],
         reply_kind="amendment",
         unchanged_terms=ev(PRESERVE_ALL, PRESERVE_ALL),
         update_evidence=ev(change, change),
@@ -363,7 +418,11 @@ def pt_question(t: Thread) -> Email:
         payment_terms=NONE,
         reply_kind="clarification",
         update_evidence=ev(first, first),
-        technical_questions=[first, second],
+        # Code copies the questions into `technical_questions` (they hold the offer).
+        supplier_questions=[
+            SupplierQuestion(quote=first, topic="technical", rfq_line_position=2),
+            SupplierQuestion(quote=second, topic="technical", rfq_line_position=2),
+        ],
     )
     return Email(body, truth)
 
@@ -409,11 +468,11 @@ def pt_alternative(t: Thread, lines: Sequence[Quoted], alternative: Quoted) -> E
     plural, single = _pt_unit(part)
     qty = f"{pt_quantity(part.quantity)} {plural}"
     price = f"R$ {pt_number(alternative.price)}"
-    lead = f"{alternative.lead} dias"
+    days = f"{alternative.lead} dias"
     decline = (
         f"Não fabricamos o {_pt_label(part).lower()} conforme especificado. Como alternativa, "
         f"oferecemos o eixo {ALTERNATIVE_MPN} (fabricante Metalúrgica Delta): {qty} a {price} "
-        f"por {single}, prazo de entrega de {lead}."
+        f"por {single}, prazo de entrega de {days}."
     )
     email = pt_offer(t, lines, opening=OFFER, after=[decline])
     alt = line_draft(
@@ -423,7 +482,7 @@ def pt_alternative(t: Thread, lines: Sequence[Quoted], alternative: Quoted) -> E
         min_quantity=ev(plain_number(part.quantity), qty),
         unit_price=ev(plain_number(alternative.price), price),
         unit=ev(single, f"por {single}"),
-        lead_time_days=ev(str(alternative.lead), lead),
+        lead_time=stated_lead(alternative.lead, days),
     )
     truth = email.truth.model_copy(update={"lines": [*email.truth.lines, alt]})
     return Email(email.body, truth)
@@ -461,6 +520,9 @@ RFQ6_BUSINESS_DAYS: Final = {1: 7, 2: 12, 3: 8}
 # The shafts' lead time after Bido's lead-time ask (business days).
 RFQ6_SHAFT_CONFIRMED: Final = 7
 RFQ6_VALIDITY_DAYS: Final = 15
+RFQ6_SHAFT_RISK: Final = (
+    "We may need a few additional days for the shafts, depending on production availability."
+)
 _RFQ6_SIGNATURE: Final = "Best regards,\nSales Team\nMetalNova Teste"
 
 
@@ -479,8 +541,7 @@ def rfq6_first_reply(t: Thread) -> Email:
         f"{RFQ6_VALIDITY_DAYS} days. The MOQ is {RFQ6_MOQ[1]} pieces for bearings and shafts, "
         f"and {RFQ6_MOQ[3]} kg for copper wire. All items are supplied in standard industrial "
         "packaging.\n\n"
-        f"{lead}. We may need a few additional days for the shafts, depending on production "
-        "availability.\n\n"
+        f"{lead}. {RFQ6_SHAFT_RISK}\n\n"
         f"Let us know if these conditions work for you.\n\n{_RFQ6_SIGNATURE}"
     )
     moq_pieces = f"The MOQ is {RFQ6_MOQ[1]} pieces for bearings and shafts"
@@ -492,8 +553,6 @@ def rfq6_first_reply(t: Thread) -> Email:
             unit_price=ev(plain_number(RFQ6_PRICES[1]), f"{p[1]} per piece"),
             unit=ev("piece", f"{p[1]} per piece"),
             moq=ev(RFQ6_MOQ[1], moq_pieces),
-            # Approximate, and in business days: written as given.
-            lead_time_days=ev(str(RFQ6_APPROX_DAYS), lead, 0.8),
         ),
         line_draft(
             2,
@@ -501,7 +560,8 @@ def rfq6_first_reply(t: Thread) -> Email:
             unit_price=ev(plain_number(RFQ6_PRICES[2]), f"{p[2]} per piece"),
             unit=ev("piece", f"{p[2]} per piece"),
             moq=ev(RFQ6_MOQ[2], moq_pieces),
-            # "a few additional days": no number to give.
+            # "a few additional days": no number of its own, a risk on the offer's lead time.
+            lead_time=stated_lead(None, None, risk_note=RFQ6_SHAFT_RISK),
         ),
         line_draft(
             3,
@@ -509,18 +569,25 @@ def rfq6_first_reply(t: Thread) -> Email:
             unit_price=ev(plain_number(RFQ6_PRICES[3]), f"{p[3]} per kg"),
             unit=ev("kg", f"{p[3]} per kg"),
             moq=ev(RFQ6_MOQ[3], moq_kg),
-            lead_time_days=ev(str(RFQ6_APPROX_DAYS), lead, 0.8),
         ),
     ]
     truth = QuoteExtractionOutput(
         is_quote=True,
         currency=ev("BRL", p[1]),
-        # "valid for 15 days": a duration from a date the model is not given.
         valid_until=NONE,
+        validity=validity(
+            RFQ6_VALIDITY_DAYS,
+            "calendar_days",
+            f"the quotation is valid for {RFQ6_VALIDITY_DAYS} days",
+        ),
         incoterm=NONE,
         payment_terms=ev("Net 30", "Our standard payment terms are Net 30"),
+        # One lead time for all items: approximate, in business days, from the order.
+        lead_time=stated_lead(
+            RFQ6_APPROX_DAYS, lead, "business_days", basis="order", approximate=True
+        ),
         lines=lines,
-        missing_fields=["lead_time"],
+        offer_notes=["All items are supplied in standard industrial packaging."],
     )
     return Email(body, truth)
 
@@ -560,15 +627,24 @@ def rfq6_second_reply(t: Thread) -> Email:
             min_quantity=ev(quantity, f"the requested {qty}"),
             unit_price=ev(plain_number(RFQ6_PRICES[position]), f"{price} per {unit}"),
             unit=ev(unit, f"{price} per {unit}"),
-            lead_time_days=ev(str(days[position]), f"lead time of {days[position]} business days"),
+            lead_time=stated_lead(
+                days[position], f"lead time of {days[position]} business days", "business_days"
+            ),
         )
 
     truth = QuoteExtractionOutput(
         is_quote=True,
         currency=ev("BRL", p[1]),
         valid_until=NONE,
+        validity=validity(
+            RFQ6_VALIDITY_DAYS,
+            "calendar_days",
+            f"valid for {RFQ6_VALIDITY_DAYS} calendar days from the date of our original offer",
+        ),
         incoterm=NONE,
         payment_terms=NONE,
+        # "All lead times are counted from purchase order confirmation": the basis, once.
+        lead_time=LeadTimeValue(value=None, source=None, confidence=0, basis="order"),
         lines=[
             answered(1, "000101", "piece", "70 pieces", "70"),
             answered(2, "000102", "piece", "15 pieces", "15"),
@@ -600,8 +676,12 @@ def rfq6_shaft_lead_time(t: Thread) -> Email:
         lines=[
             line_draft(
                 2,
-                lead_time_days=ev(
-                    str(RFQ6_SHAFT_CONFIRMED), f"within {RFQ6_SHAFT_CONFIRMED} business days"
+                lead_time=stated_lead(
+                    RFQ6_SHAFT_CONFIRMED,
+                    f"within {RFQ6_SHAFT_CONFIRMED} business days after purchase order "
+                    "confirmation",
+                    "business_days",
+                    basis="order",
                 ),
             )
         ],
@@ -637,7 +717,7 @@ def de_offer(t: Thread, lines: Sequence[Quoted], *, opening: str, valid_days: in
                 min_quantity=ev(plain_number(part.quantity), qty),
                 unit_price=ev(plain_number(quoted.price), price),
                 unit=ev("Stück", "pro Stück"),
-                lead_time_days=ev(str(quoted.lead), lead),
+                lead_time=stated_lead(quoted.lead, lead),
             )
         )
     footer = [f"{_DE_TERMS}."]
@@ -662,6 +742,7 @@ def de_offer(t: Thread, lines: Sequence[Quoted], *, opening: str, valid_days: in
         incoterm=NONE,
         payment_terms=ev("30 Tage netto", "Zahlungsziel 30 Tage netto"),
         lines=drafts,
+        final_offer=ev(_DE_FINAL_WORDS, _DE_FINAL_WORDS) if opening == DE_FINAL else NONE,
     )
     return Email(body, truth)
 
@@ -669,6 +750,7 @@ def de_offer(t: Thread, lines: Sequence[Quoted], *, opening: str, valid_days: in
 DE_OFFER: Final = "vielen Dank für Ihre Anfrage {ref}. Gerne bieten wir an:"
 DE_REVISED: Final = "vielen Dank für Ihre Rückmeldung zu {ref}. Unser überarbeitetes Angebot:"
 DE_FINAL: Final = "zu {ref} senden wir Ihnen unser bestes und letztes Angebot:"
+_DE_FINAL_WORDS: Final = "unser bestes und letztes Angebot"
 
 
 # --- Mock writers: the released prompts, followed literally ----------------------------------
