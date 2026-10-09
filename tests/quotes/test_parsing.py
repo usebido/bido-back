@@ -103,6 +103,15 @@ def test_numbers_inside_identifiers_are_not_values() -> None:
     assert find_number(Decimal("10"), "EUR10 each").found
 
 
+def test_ranges_never_span_positions_or_part_codes() -> None:
+    # Live journey: "Item 5 - 000106 ... prazo de 5 dias" became a 5-106 day range.
+    assert ranges_in("Item 5 - 000106: 60 pcs a R$ 2,62, prazo de 5 dias") == []
+    assert ranges_in("entrega em 10-15 dias") == [(Decimal(10), Decimal(15))]
+    assert ranges_in("prazo de 4 a 6 semanas") == [(Decimal(4), Decimal(6))]
+    assert not find_number(Decimal(2), "Pos. 2: 12 dias").found
+    assert find_number(Decimal(12), "Pos. 2: 12 dias").found
+
+
 def test_find_number_in_supplier_text() -> None:
     assert find_number(Decimal("0.45"), "Stückpreis 0,45 € netto").found
     assert find_number(Decimal("100"), "Pos 1 100 pcs").found

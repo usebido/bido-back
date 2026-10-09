@@ -582,3 +582,6 @@ class MappingTask(BaseModel):
     catalog: dict[str, list[str]]
     # Closed canonical terms for value_maps: "<kind>.<field>" keys, and "unit" for units.
     vocabulary: dict[str, list[str]] = Field(default_factory=dict[str, list[str]])
+    # Set on a second attempt for the same page: why parts of the first answer were not
+    # read (code-checked problems, never source content). Empty on a first attempt.
+    retry_feedback: list[str] = Field(default_factory=list[str])

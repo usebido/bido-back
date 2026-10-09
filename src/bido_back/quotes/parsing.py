@@ -128,7 +128,7 @@ class NumberMatch:
 # "Art.-Nr. 4711", "ref: 205", "P/N 3300".
 _CODE_LABEL = re.compile(
     r"(?:\bc[óo]d(?:igo)?|\bcode|\bart(?:ikel|icolo|\.-?nr)?|\bref|\bp/?n|\bmpn|\bsku"
-    r"|\bn[º°]|\bnr)\.?\s*[:#]?\s*$",
+    r"|\bn[º°]|\bnr|\bitem|\bpos(?:i[cç][aã]o|ition|ici[oó]n|izione)?)\.?\s*[:#]?\s*$",
     re.IGNORECASE,
 )
 
@@ -535,7 +535,11 @@ def mentions_stock(text: str) -> bool:
 def ranges_in(text: str) -> list[tuple[Decimal, Decimal]]:
     """Every `low`-`high` range written in `text`, low < high (`2-3`, `4 a 6`, `2 bis 3`)."""
     found: list[tuple[Decimal, Decimal]] = []
-    for first, second in _RANGE.findall(text):
+    for match in _RANGE.finditer(text):
+        first, second = match.group(1), match.group(2)
+        # "Item 5 - 000106" is a position and a part code, not the range 5 to 106.
+        if _is_code(text, match.start(1), first) or _is_code(text, match.start(2), second):
+            continue
         low = Decimal(first.replace(",", "."))
         high = Decimal(second.replace(",", "."))
         if low < high:
