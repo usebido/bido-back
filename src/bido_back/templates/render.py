@@ -206,7 +206,7 @@ _COVER: Final[dict[str, dict[str, str]]] = {
             "quote are in the attached PDF."
         ),
         "reply": (
-            "To reply, answer this email keeping {marker} in the subject and attach your quote."
+            "Please reply to this email keeping {marker} in the subject and attach your quote."
         ),
     },
     "pt": {
@@ -221,8 +221,7 @@ _COVER: Final[dict[str, dict[str, str]]] = {
             "na proposta estão no PDF anexo."
         ),
         "reply": (
-            "Para responder, responda a este e-mail mantendo {marker} no assunto e anexe "
-            "sua proposta."
+            "Por favor, responda a este e-mail mantendo {marker} no assunto e anexe sua proposta."
         ),
     },
     "de": {

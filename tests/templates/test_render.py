@@ -431,8 +431,7 @@ def test_the_cover_note_says_what_is_attached_by_when_and_how_to_reply() -> None
         "A solicitação tem 2 itens; as quantidades, as condições e o que informar na "
         "proposta estão no PDF anexo.\n\n"
         "Por favor, envie sua proposta até 20/10/2026.\n\n"
-        "Para responder, responda a este e-mail mantendo [RFQ-7] no assunto e anexe "
-        "sua proposta.\n\n"
+        "Por favor, responda a este e-mail mantendo [RFQ-7] no assunto e anexe sua proposta.\n\n"
         "Atenciosamente,\nCarla Souza\nVoltwerk Ltda\n"
     )
     # No item table, no questions, no buyer greeting: those are in the PDF.
