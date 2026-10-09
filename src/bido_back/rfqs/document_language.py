@@ -18,7 +18,7 @@ decision depends on the RFQ, not on who looks at it.
 from collections.abc import Iterable, Sequence
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import distinct_on
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -76,12 +76,18 @@ async def conversation_languages(
 
 
 async def recorded_languages(session: AsyncSession, invite_ids: Sequence[UUID]) -> dict[UUID, str]:
-    """The language each invite's latest standing RFQ-email proposal was rendered in."""
+    """The language each invite's latest standing RFQ-email proposal was rendered in: the
+    one its arguments record, else its document's (`bido_back.rfqs.language.sent_language`)."""
     by_call = {send_proposal_ids(invite_id)[1]: invite_id for invite_id in invite_ids}
     if not by_call:
         return {}
     rows = await session.execute(
-        select(Approval.tool_call_id, Approval.args["document"]["language"].astext)
+        select(
+            Approval.tool_call_id,
+            func.coalesce(
+                Approval.args["language"].astext, Approval.args["document"]["language"].astext
+            ),
+        )
         .where(
             Approval.tool == SEND_RFQ_EMAIL,
             Approval.tool_call_id.in_(list(by_call)),

@@ -70,15 +70,18 @@ def rfq_intake(model: str = DEFAULT_MODEL) -> AgentDefinition[RfqIntakeOutput]:
 
 
 def rfq_email_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[RfqEmailLocalizeOutput]:
-    """v2: carries the buyer's template text into the supplier's language.
+    """v3: carries the buyer's template text into the supplier's language.
 
-    The RFQ email is rendered by code (`bido_back.templates.render`); v1 wrote
-    the whole email and is kept only as the released prompt it was.
+    The RFQ is rendered by code: the PDF document (`bido_back.rfqs.document`)
+    carries the buyer's greeting and labels, and the email is a short cover
+    note (`bido_back.templates.render`). v3 tells the model where its text now
+    goes; v2 (text in the email body) and v1 (wrote the whole email) are kept
+    only as the released prompts they were.
     """
     return AgentDefinition(
         name="rfq_email_writer",
-        prompt_file="rfq_email_writer.v2.md",
-        prompt_version=2,
+        prompt_file="rfq_email_writer.v3.md",
+        prompt_version=3,
         model=model,
         output_model=RfqEmailLocalizeOutput,
         max_turns=_MAX_TURNS,
@@ -87,15 +90,18 @@ def rfq_email_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[RfqEmailLoca
 
 
 def quote_extraction(model: str = EXTRACTION_MODEL) -> AgentDefinition[QuoteExtractionOutput]:
-    """v5: lead times as data (amount, unit, basis, approximate, risk note) with an
-    offer-level lead time for every line; a validity given as a duration; a price
+    """v5: always capture a stated delivery time, business days as written; the
+    `delivery_location` header (the named place the supplier delivers to).
+
+    v6: v5 plus lead times as data (amount, unit, basis, approximate, risk note) with
+    an offer-level lead time for every line; a validity given as a duration; a price
     without tiers keeps `min_quantity` empty; `conditional_terms` only for conditions
     on one line's price or availability (general terms go to `offer_notes`); the
     supplier's final-offer statement, declined lines and questions as grounded signals."""
     return AgentDefinition(
         name="quote_extraction",
-        prompt_file="quote_extraction.v5.md",
-        prompt_version=5,
+        prompt_file="quote_extraction.v6.md",
+        prompt_version=6,
         model=model,
         output_model=QuoteExtractionOutput,
         max_turns=_MAX_TURNS,
@@ -221,9 +227,10 @@ _PRICE = re.compile(
 def rfq_email_problems(task: RfqEmailInput, draft: RfqEmailOutput) -> list[str]:
     """What is wrong with an RFQ email draft, as codes. Empty means it may go to approval.
 
-    The model writes the email; code checks the parts that must hold: the RFQ
-    reference in subject and body, every requested MPN listed, the buyer's payment
-    terms when set, no prices.
+    Code checks the parts that must hold: the RFQ reference in subject and body,
+    every requested MPN listed, the buyer's payment terms when set, no prices.
+    `body` is what carries the RFQ: the RFQ document's text when the email goes
+    as a cover note with the PDF, the email body itself when it goes without one.
     """
     problems: list[str] = []
     if task.rfq_ref not in draft.subject:
@@ -237,6 +244,31 @@ def rfq_email_problems(task: RfqEmailInput, draft: RfqEmailOutput) -> list[str]:
         problems.append("payment_terms_missing")
     if _PRICE.search(draft.subject) or _PRICE.search(draft.body):
         problems.append("price_mentioned")
+    return problems
+
+
+_MAX_COVER_CHARS: Final = 2000
+
+
+def rfq_cover_problems(task: RfqEmailInput, draft: RfqEmailOutput) -> list[str]:
+    """What is wrong with the cover note that carries the RFQ document, as codes.
+
+    The PDF carries the items and questions (checked on the document with
+    `rfq_email_problems` and `bido_back.rfqs.document.document_problems`); the
+    cover must carry the reference in the subject and the `[RFQ-<n>]` marker the
+    supplier keeps when replying, list no items, state no prices, and stay short.
+    """
+    problems: list[str] = []
+    if task.rfq_ref not in draft.subject:
+        problems.append("rfq_ref_missing_in_subject")
+    if f"[{task.rfq_ref}]" not in draft.body:
+        problems.append("reply_marker_missing")
+    if any(line.mpn and line.mpn in draft.body for line in task.lines):
+        problems.append("items_listed")
+    if _PRICE.search(draft.subject) or _PRICE.search(draft.body):
+        problems.append("price_mentioned")
+    if len(draft.body) > _MAX_COVER_CHARS:
+        problems.append("too_long")
     return problems
 
 

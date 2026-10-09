@@ -17,6 +17,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.auth import Principal
+from bido_back.awards.lifecycle import rfq_is_complete
 from bido_back.comparison.compute import best_first_tier_total
 from bido_back.comparison.loader import load_comparison
 from bido_back.db import tenant_session
@@ -52,8 +53,8 @@ class RfqFacts:
     invite_statuses: list[str] = field(default_factory=list[str])
     pending_approvals: int = 0
     awarded: bool = False
-    pos_total: int = 0
-    pos_sent: int = 0
+    # Each PO's fulfilment state (not_sent, sent, ..., closed, cancelled), in PO order.
+    po_states: list[str] = field(default_factory=list[str])
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,9 +70,9 @@ def derive_stage(rfq_status: str, negotiation_status: str, facts: RfqFacts) -> R
     if rfq_status == "draft":
         return "draft"
     if facts.awarded:
-        if facts.pos_total and facts.pos_sent == facts.pos_total:
-            return "completed"
-        return "awarded"
+        # Completed once every PO is closed or cancelled (at least one closed), not
+        # when the POs are merely sent: goods are still expected until then.
+        return "completed" if rfq_is_complete(facts.po_states) else "awarded"
     if rfq_status == "closed":
         return "completed"
     statuses = facts.invite_statuses
@@ -92,7 +93,8 @@ def derive_next_step(
     if rfq_status == "draft":
         return "send RFQ"
     if facts.awarded:
-        return "send PO" if facts.pos_sent < facts.pos_total else None
+        # A cancelled draft is not sent; once every PO is out, the goods are on the supplier.
+        return "send PO" if "not_sent" in facts.po_states else None
     if rfq_status != "open":
         return None
     if negotiation_status == "ready_to_close":
@@ -178,6 +180,7 @@ async def list_rfq_overviews(
             base_currency=rfq.base_currency,
             need_by=need_by.get(rfq.id),
             owner=owners.get(rfq.created_by),
+            completed_at=rfq.completed_at,
         )
         for rfq in rfqs
     ]
@@ -222,13 +225,12 @@ async def _facts(session: AsyncSession, rfq_ids: list[UUID]) -> dict[UUID, RfqFa
 
     for (rfq_id,) in await session.execute(select(Award.rfq_id).where(Award.rfq_id.in_(rfq_ids))):
         facts[rfq_id].awarded = True
-    for rfq_id, sent_at in await session.execute(
-        select(IssuedPurchaseOrder.rfq_id, IssuedPurchaseOrder.sent_at).where(
-            IssuedPurchaseOrder.rfq_id.in_(rfq_ids)
-        )
+    for rfq_id, state in await session.execute(
+        select(IssuedPurchaseOrder.rfq_id, IssuedPurchaseOrder.fulfilment_state)
+        .where(IssuedPurchaseOrder.rfq_id.in_(rfq_ids))
+        .order_by(IssuedPurchaseOrder.number)
     ):
-        facts[rfq_id].pos_total += 1
-        facts[rfq_id].pos_sent += sent_at is not None
+        facts[rfq_id].po_states.append(state)
     return facts
 
 

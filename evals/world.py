@@ -18,12 +18,14 @@ supplier replies carry it as their Date header.
 """
 
 import asyncio
+import io
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
+import pdfplumber
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -59,6 +61,7 @@ from bido_back.quotes.extract_job import handle_quote_extract
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs import suppliers
 from bido_back.rfqs.agents import run_email_writer, run_intake
+from bido_back.rfqs.document import PDF_CONTENT_TYPE
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
 from bido_back.rfqs.send import RfqActDeps, register_act_tools
 from bido_back.rfqs.service import NewRfqLine
@@ -90,6 +93,13 @@ class Captured:
     at: datetime
     # The HTML part, when the email has one.
     html: str | None = None
+    # The text of the PDF attachments (the RFQ document), for checks on what it carries.
+    attachment_text: str = ""
+
+
+def _pdf_text(data: bytes) -> str:
+    with pdfplumber.open(io.BytesIO(data)) as pdf:
+        return "\n".join(page.extract_text() or "" for page in pdf.pages)
 
 
 class _Recorder:
@@ -115,6 +125,11 @@ class _Recorder:
                 attachments=tuple(a.filename for a in email.attachments),
                 at=self._outbox.clock(),
                 html=email.html_body,
+                attachment_text="\n".join(
+                    _pdf_text(a.data)
+                    for a in email.attachments
+                    if a.content_type == PDF_CONTENT_TYPE
+                ),
             )
         )
         return SentEmail(message_id=message_id, raw=b"")

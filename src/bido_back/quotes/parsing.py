@@ -388,17 +388,18 @@ _WEEK_WORDS = re.compile(
 )
 _WORKING_DAY_WORDS = re.compile(
     r"\b(working|business|work)\s+days?\b|\barbeitstage?n?\b|\bwerktage?n?\b|jours ouvr"
-    r"|\bdias?\s+(?:úteis|uteis|útil|util)\b|\bd[ií]as?\s+(?:h[aá]biles?|laborables?)\b"
+    r"|\bdias?\s+(?:úteis|uteis|útil|util)\b|\bd[ií]as?\s+(?:h[aá]bil(?:es)?|laborables?)\b"
     r"|\bgiorn[oi]\s+lavorativ[oi]\b|\bgg\.?\s+lavorativ[oi]\b|\bwerkdag(?:en)?\b"
     r"|\bdni\s+robocz\w*",
     re.IGNORECASE,
 )
-# German "Arbeitstage", abbreviated; case-sensitive so English "at" does not match.
-_WORKING_DAYS_ABBREVIATION = re.compile(r"(?:(?<=\d)|\b)AT\b")
+# Abbreviations: German "Arbeitstage" (AT), English "business/working days" (BD, WD).
+# Case-sensitive so English "at" and "wd" inside words do not match.
+_WORKING_DAYS_ABBREVIATION = re.compile(r"(?:(?<=\d)|\b)(?:AT|BD|WD)\b")
 # Any day unit, including business days: "15 days", "15 dias", "15 Tage", "15 gg", "15d".
 _DAY_WORDS = re.compile(
     r"\bdays?\b|\bd[ií]as?\b|\btage?n?\b|kalendertage?n?\b|arbeitstage?n?\b|werktage?n?\b"
-    r"|\bjours?\b|\bgiorn[oi]\b|\bgg\b|\bdni\b|\bdag(?:en|ar)?\b|(?<=\d)\s?(?:d|j|t|gg)\b",
+    r"|\bjours?\b|\bgiorn[oi]\b|\bgg\b|\bdn[ií]\b|\bdag(?:en|ar)?\b|(?<=\d)\s?(?:d|j|t|gg)\b",
     re.IGNORECASE,
 )
 # Days said to be calendar days, even next to a business-day word.
@@ -436,6 +437,12 @@ _STOCK_WORDS = re.compile(
     re.IGNORECASE,
 )
 
+# A business week: 5 business days are one calendar week (7 days). Stored lead times
+# are counted by `bido_back.quotes.lead_time` (business days from the offer date,
+# skipping weekends and the supplier's public holidays); this rough rule only
+# recognizes a number a model converted itself ("25 dias úteis" written as 35).
+BUSINESS_DAYS_PER_WEEK = 5
+
 
 def mentions_weeks(text: str) -> bool:
     return _WEEK_WORDS.search(text) is not None
@@ -449,7 +456,8 @@ def mentions_working_days(text: str) -> bool:
 
 
 def mentions_days(text: str) -> bool:
-    """A day unit of any kind (calendar or business)."""
+    """`42 days`, `25 dias`, `30 Tage`, `42d`: a duration written in days (of any kind,
+    calendar or business)."""
     return _DAY_WORDS.search(text) is not None or mentions_working_days(text)
 
 
@@ -528,6 +536,15 @@ def is_delivery_timing(text: str) -> bool:
         and _PRICE_TERMS_WORDS.search(text) is None
         and not detect_currencies(text)
     )
+
+
+def business_days_to_calendar(business_days: int) -> int:
+    """Whole business weeks, rounded up, no holidays (`BUSINESS_DAYS_PER_WEEK`).
+
+    Never what Bido stores (see `bido_back.quotes.lead_time`): only how a model may
+    have converted business days itself, so its number can be traced to the quote.
+    """
+    return -(-business_days * 7 // BUSINESS_DAYS_PER_WEEK)
 
 
 # "No tooling cost", written as a word instead of 0.

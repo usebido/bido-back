@@ -1,9 +1,12 @@
 """Deterministic validation of extractions: grounding, confidence, mapping, review flags."""
 
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from typing import Literal
 from uuid import uuid4
+
+import pytest
 
 from bido_back.agents.catalog.contracts import (
     ExtractedValue,
@@ -162,6 +165,7 @@ def test_provenance_keeps_value_source_confidence_and_reasons() -> None:
         "currency",
         "valid_until",
         "incoterm",
+        "delivery_location",
         "payment_terms",
         "validity",
         "lead_time",
@@ -254,8 +258,74 @@ def test_lead_time_in_weeks_and_working_days() -> None:
     working = validate(output(line(lead_time_days=ev("30", "Lieferzeit 30 AT"))), body=body)
 
     assert issues_of(weeks, "lead_time_days") == ()
+    assert weeks.lines[0].parsed("lead_time_days") == 42
     assert issues_of(wrong, "lead_time_days") == ("not_grounded",)
-    assert issues_of(working, "lead_time_days") == ("working_days",)
+    # 30 business days from Tuesday 6 October are 6 business weeks: 42 calendar days (a
+    # EUR quote from a supplier without a country has no holiday calendar: weekends only).
+    assert issues_of(working, "lead_time_days") == ()
+    assert working.lines[0].parsed("lead_time_days") == 42
+    conversion = working.lines[0].fields["lead_time_days"].conversion
+    assert conversion is not None
+    assert {k: conversion[k] for k in ("quoted", "unit", "calendar_days", "holiday_calendar")} == {
+        "quoted": 30,
+        "unit": "business_days",
+        "calendar_days": 42,
+        "holiday_calendar": None,
+    }
+    assert conversion["reference_date"] == "2026-10-06"
+    # The number as written stays the field's value; the statement is the line's terms.
+    assert working.lines[0].fields["lead_time_days"].extracted.value == "30"
+    assert working.lines[0].fields["lead_time_terms"].extracted.value == "30 business_days"
+
+
+@pytest.mark.parametrize(
+    ("written", "value", "days", "unit"),
+    [
+        ("Prazo de entrega: 25 dias úteis após pedido", "25", 35, "business_days"),
+        ("Prazo de entrega: 25 dias uteis", "25", 35, "business_days"),
+        ("Lead time: 25 business days", "25", 35, "business_days"),
+        ("Lead time: 25 working days", "25", 35, "business_days"),
+        ("Lead time 25 BD", "25", 35, "business_days"),
+        ("Lieferzeit: 20 Arbeitstage", "20", 28, "business_days"),
+        ("Plazo de entrega: 10 días hábiles", "10", 14, "business_days"),
+        ("Prazo de entrega: 25 dias", "25", 25, None),
+        ("Lead time: 42 days", "42", 42, None),
+        ("Prazo: 4 semanas", "28", 28, "weeks"),
+        ("Prazo: 4 semanas", "4", 28, "weeks"),
+        ("Lieferzeit: 6 Wochen", "6", 42, "weeks"),
+        # The model converted business days itself: the written number still grounds it.
+        ("Prazo de entrega: 25 dias úteis", "35", 35, "business_days"),
+        ("Lead time: 4 weeks (28 days)", "28", 28, None),
+    ],
+)
+def test_lead_times_are_stored_as_calendar_days(
+    written: str, value: str, days: int, unit: str | None
+) -> None:
+    result = validate(output(line(lead_time_days=ev(value, written))), body=BODY + written + "\n")
+
+    [checked] = result.lines
+    assert issues_of(result, "lead_time_days") == ()
+    assert checked.parsed("lead_time_days") == days
+    conversion = checked.fields["lead_time_days"].conversion
+    if unit is None:
+        assert conversion is None
+    else:
+        assert conversion is not None
+        assert conversion["unit"] == unit and conversion["calendar_days"] == days
+        provenance = checked.fields["lead_time_days"].provenance()
+        assert provenance["conversion"] == conversion
+    assert not checked.needs_review
+
+
+def test_a_lead_time_number_not_in_its_quote_is_not_grounded() -> None:
+    body = BODY + "Prazo de entrega: 25 dias úteis.\n"
+    result = validate(
+        output(line(lead_time_days=ev("30", "Prazo de entrega: 25 dias úteis"))), body=body
+    )
+
+    assert issues_of(result, "lead_time_days") == ("not_grounded",)
+    assert result.lines[0].parsed("lead_time_days") == 30
+    assert result.lines[0].fields["lead_time_days"].conversion is None
 
 
 def test_header_values_are_checked_against_their_quotes() -> None:
@@ -503,3 +573,209 @@ def test_a_cost_written_as_none_grounds_zero() -> None:
 
     assert issues_of(none, "tooling_cost") == ()
     assert issues_of(other, "tooling_cost") == ("not_grounded",)
+
+
+# --- The offer against what the RFQ asked ------------------------------------------------------
+
+RFQ3_LINE = RequestedLine(
+    id=uuid4(),
+    position=1,
+    mpn=None,
+    quantities=(Decimal(1500),),
+    incoterm="FOB",
+    delivery_location="Joinville-SC",
+)
+RFQ3_BODY = (
+    "Item 1 - Motor MTR-100\n"
+    "Quantidade: 50 pcs\n"
+    "Preco unitario: R$ 1.284,50\n"
+    "Prazo de entrega: 25 dias uteis apos pedido - entrega CIF Joinville/SC\n"
+    "Condicao de pagamento: 28 DDL\n"
+    "Validade da proposta: 30 dias\n"
+    "Moeda: BRL\n"
+)
+
+
+def rfq3_line(**overrides: object) -> ProposalLineDraft:
+    fields: dict[str, object] = {
+        "rfq_line_position": 1,
+        "offered_mpn": NONE,
+        "min_quantity": ev("50", "Quantidade: 50 pcs"),
+        "unit_price": ev("1284.50", "Preco unitario: R$ 1.284,50"),
+        "unit": ev("pcs", "Quantidade: 50 pcs"),
+        "tooling_cost": NONE,
+        "moq": NONE,
+        "lead_time_days": ev("25", "Prazo de entrega: 25 dias uteis apos pedido"),
+        "origin_country": NONE,
+        "qualification": NONE,
+    }
+    fields.update(overrides)
+    return ProposalLineDraft.model_validate(fields)
+
+
+def rfq3_output(*lines: ProposalLineDraft, **overrides: object) -> QuoteExtractionOutput:
+    fields: dict[str, object] = {
+        "is_quote": True,
+        "currency": ev("BRL", "Moeda: BRL"),
+        "valid_until": NONE,
+        "incoterm": ev("CIF", "entrega CIF Joinville/SC"),
+        "delivery_location": ev("Joinville/SC", "entrega CIF Joinville/SC"),
+        "payment_terms": ev("28 DDL", "Condicao de pagamento: 28 DDL"),
+        "lines": list(lines) if lines else [rfq3_line()],
+    }
+    fields.update(overrides)
+    return QuoteExtractionOutput.model_validate(fields)
+
+
+def validate_rfq3(
+    out: QuoteExtractionOutput,
+    *,
+    requested: list[RequestedLine] | None = None,
+    rfq_currency: str | None = "BRL",
+) -> ValidatedQuote:
+    return validate_quote(
+        out,
+        requested=requested if requested is not None else [RFQ3_LINE],
+        sources=QuoteSources(email_subject="", email_body=RFQ3_BODY),
+        today=TODAY,
+        decimal=",",
+        rfq_currency=rfq_currency,
+    )
+
+
+def test_the_rfq3_quote_differs_from_the_request_in_quantity_and_incoterm() -> None:
+    # 1,500 pcs FOB Joinville-SC requested; 50 pcs CIF Joinville/SC quoted, in 25 business days.
+    result = validate_rfq3(rfq3_output())
+
+    [checked] = result.lines
+    assert checked.issues == ("quantity_mismatch",)
+    assert result.issues == ("incoterm_mismatch",)
+    assert result.needs_review
+    # 25 business days from Tuesday 6 October 2026 in Brazil (a BRL quote), which skip
+    # 12 October and 2 November: 12 November, 37 calendar days.
+    assert checked.parsed("lead_time_days") == 37
+    conversion = checked.fields["lead_time_days"].conversion
+    assert conversion is not None
+    assert (conversion["quoted"], conversion["unit"], conversion["holiday_calendar"]) == (
+        25,
+        "business_days",
+        "BR",
+    )
+    assert issues_of(result, "lead_time_days") == ()
+    assert result.parsed("delivery_location") == "Joinville/SC"
+
+
+def test_a_quote_that_answers_the_request_has_no_mismatch() -> None:
+    answered = RequestedLine(
+        id=RFQ3_LINE.id,
+        position=1,
+        quantities=(Decimal(50), Decimal(1500)),
+        incoterm="CIF",
+        delivery_location="Joinville-SC",
+    )
+
+    result = validate_rfq3(rfq3_output(), requested=[answered])
+
+    assert result.issues == () and result.lines[0].issues == ()
+    assert not result.needs_review
+
+
+def test_a_quoted_quantity_that_is_none_of_the_requested_tiers_is_a_mismatch() -> None:
+    tiers = RequestedLine(id=RFQ3_LINE.id, position=1, quantities=(Decimal(1000), Decimal(5000)))
+    quoted = [
+        rfq3_line(min_quantity=ev(value, f"Quantidade: {value} pcs"))
+        for value in ("1000", "2000", "5000")
+    ]
+    body = RFQ3_BODY + "Quantidade: 1000 pcs\nQuantidade: 2000 pcs\nQuantidade: 5000 pcs\n"
+
+    result = validate_quote(
+        rfq3_output(*quoted, incoterm=NONE, delivery_location=NONE),
+        requested=[tiers],
+        sources=QuoteSources(email_subject="", email_body=body),
+        today=TODAY,
+        decimal=",",
+        rfq_currency="BRL",
+    )
+
+    assert [line.issues for line in result.lines] == [(), ("quantity_mismatch",), ()]
+    # A line without a quantity, or one the RFQ does not have, is not compared.
+    unknown = validate_rfq3(
+        rfq3_output(rfq3_line(min_quantity=NONE), rfq3_line(rfq_line_position=9))
+    )
+    assert [line.issues for line in unknown.lines] == [(), ("unknown_rfq_line",)]
+
+
+def test_an_incoterm_other_than_the_rfqs_is_a_mismatch_only_when_both_are_stated() -> None:
+    same = replace_line(RFQ3_LINE, incoterm="CIF")
+    unstated = replace_line(RFQ3_LINE, incoterm=None)
+
+    assert "incoterm_mismatch" in validate_rfq3(rfq3_output()).issues
+    assert "incoterm_mismatch" not in validate_rfq3(rfq3_output(), requested=[same]).issues
+    assert "incoterm_mismatch" not in validate_rfq3(rfq3_output(), requested=[unstated]).issues
+    assert "incoterm_mismatch" not in validate_rfq3(rfq3_output(incoterm=NONE)).issues
+    # An Incoterm the quote does not back is not compared either.
+    ungrounded = validate_rfq3(rfq3_output(incoterm=ev("DAP", "entrega CIF Joinville/SC")))
+    assert ungrounded.header["incoterm"].issues == ("not_grounded",)
+    assert "incoterm_mismatch" not in ungrounded.issues
+
+
+def test_a_delivery_location_other_than_the_rfqs_is_a_mismatch() -> None:
+    curitiba = replace_line(RFQ3_LINE, delivery_location="Planta Curitiba - PR")
+    sao_paulo = replace_line(RFQ3_LINE, delivery_location="São Paulo")
+    unstated = replace_line(RFQ3_LINE, delivery_location=None)
+
+    # Joinville/SC is Joinville-SC, Joinville, and a full address in Joinville.
+    assert "delivery_location_mismatch" not in validate_rfq3(rfq3_output()).issues
+    for same in ("Joinville", "Rua das Flores, 123 - Joinville, SC, 89200-000", "JOINVILLE SC"):
+        requested = [replace_line(RFQ3_LINE, delivery_location=same)]
+        assert (
+            "delivery_location_mismatch"
+            not in validate_rfq3(rfq3_output(), requested=requested).issues
+        ), same
+    assert "delivery_location_mismatch" in validate_rfq3(rfq3_output(), requested=[curitiba]).issues
+    assert (
+        "delivery_location_mismatch" in validate_rfq3(rfq3_output(), requested=[sao_paulo]).issues
+    )
+    assert (
+        "delivery_location_mismatch"
+        not in validate_rfq3(rfq3_output(), requested=[unstated]).issues
+    )
+    assert (
+        "delivery_location_mismatch"
+        not in validate_rfq3(rfq3_output(delivery_location=NONE), requested=[curitiba]).issues
+    )
+
+
+def test_a_currency_other_than_the_rfqs_is_a_mismatch() -> None:
+    assert "currency_mismatch" not in validate_rfq3(rfq3_output()).issues
+    assert "currency_mismatch" in validate_rfq3(rfq3_output(), rfq_currency="EUR").issues
+    assert "currency_mismatch" not in validate_rfq3(rfq3_output(), rfq_currency=None).issues
+    # The line's own prices in reais agree with the BRL header: no line-level mismatch.
+    result = validate_rfq3(rfq3_output(), rfq_currency="EUR")
+    assert result.issues == ("incoterm_mismatch", "currency_mismatch")
+    assert result.lines[0].issues == ("quantity_mismatch",)
+    assert result.needs_review
+
+
+def test_mismatches_are_compared_with_the_lines_the_quote_answers() -> None:
+    other = RequestedLine(
+        id=uuid4(),
+        position=2,
+        quantities=(Decimal(10),),
+        incoterm="CIF",
+        delivery_location="Joinville",
+    )
+    # Line 1 asks FOB; the quote answers line 2 only, which asks CIF: no mismatch.
+    answers_two = validate_rfq3(
+        rfq3_output(rfq3_line(rfq_line_position=2, min_quantity=NONE)), requested=[RFQ3_LINE, other]
+    )
+    assert answers_two.issues == ()
+    # No line matched at all: every requested line is compared.
+    unmatched = validate_rfq3(
+        rfq3_output(rfq3_line(rfq_line_position=None)), requested=[RFQ3_LINE, other]
+    )
+    assert unmatched.issues == ("incoterm_mismatch",)
+
+
+def replace_line(line: RequestedLine, **changes: object) -> RequestedLine:
+    return replace(line, **changes)

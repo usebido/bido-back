@@ -77,6 +77,63 @@ class ProposedSupplier(BaseModel):
     # and email; or add this email as a contact of the buyer's existing supplier.
     new_supplier: bool = False
     new_contact: bool = False
+    # The language of the RFQ document it would receive (its own, else its country's,
+    # else English), so the buyer sees "Cobre Sul: pt" before confirming. None: not shown.
+    document_language: str | None = Field(
+        default=None,
+        description="The language of the RFQ document this supplier would receive; show it",
+    )
+
+
+class QuotedLinePreview(BaseModel):
+    """One line of a supplier's quote as read from the buyer's file (register_quote)."""
+
+    # The RFQ line it answers, as the file names it; null = the file does not say.
+    rfq_line_position: int | None
+    # The RFQ line's description when the position is one of the RFQ's lines.
+    description: str | None = None
+    offered_mpn: str | None = None
+    is_alternative: bool = False
+    quantity: Decimal | None = None
+    unit: str | None = None
+    unit_price: Decimal | None = None
+    currency: str | None = None
+    lead_time_days: int | None = None
+    # Why the line would need review once stored (missing price, a line the RFQ does
+    # not have, a value the file does not back...); empty when it reads cleanly.
+    issues: list[str] = Field(default_factory=list[str])
+
+
+class ProposedOrderLine(BaseModel):
+    """One PO line in a purchase-order action's preview: ordered vs received vs this time."""
+
+    position: int
+    description: str
+    unit: str
+    ordered: Decimal
+    received_so_far: Decimal
+    # The quantity this receipt would add; null for the other actions.
+    this_receipt: Decimal | None = None
+    remaining_after: Decimal
+
+
+class ProposedOrderAction(BaseModel):
+    """What a purchase-order action (acknowledge, receive, close, cancel) would record."""
+
+    ref: str
+    rfq_ref: str
+    supplier_name: str
+    state: str = Field(description="The order's fulfilment state now")
+    state_after: str = Field(description="What it would become")
+    lines: list[ProposedOrderLine] = Field(default_factory=list[ProposedOrderLine])
+    acknowledged_on: date | None = None
+    supplier_order_ref: str | None = None
+    received_on: date | None = None
+    invoice_number: str | None = None
+    invoice_date: date | None = None
+    short: bool = False
+    reason: str | None = None
+    note: str | None = None
 
 
 class ProposalPreview(BaseModel):
@@ -88,6 +145,13 @@ class ProposalPreview(BaseModel):
     currency: str | None = None
     lines: list[ProposedLine] = Field(default_factory=list[ProposedLine])
     suppliers: list[ProposedSupplier] = Field(default_factory=list[ProposedSupplier])
+    # A quote read from the buyer's file (register_quote): the files, the commercial
+    # terms it states and each line it quotes. The supplier is in `suppliers`.
+    files: list[str] = Field(default_factory=list[str])
+    payment_terms: str | None = None
+    valid_until: date | None = None
+    incoterm: str | None = None
+    quoted: list[QuotedLinePreview] = Field(default_factory=list[QuotedLinePreview])
     skipped: list[str] = Field(
         default_factory=list[str],
         description="Lines left out (a preliminary RFQ: no quantity or unit yet), by part number",
@@ -98,6 +162,8 @@ class ProposalPreview(BaseModel):
     )
     # Positions of the lines that would start without a target and maximum unit price.
     lines_without_limits: list[int] = Field(default_factory=list[int])
+    # A purchase-order action (`copilot.order_tools`): the order and what would change.
+    purchase_order: ProposedOrderAction | None = None
     questions: list[str] = Field(default_factory=list[str])
     issues: list[str] = Field(
         default_factory=list[str], description="What would stop it, if anything"

@@ -87,7 +87,6 @@ from bido_back.quotes.validation import (
     QuoteSources,
     RequestedLine,
     ValidatedQuote,
-    absent_field,
     quantity_bases,
     validate_quote,
 )
@@ -123,8 +122,9 @@ class _Loaded:
     supplier_language: str | None
     supplier_country: str | None
     requested: list[RfqEmailLine]
-    line_ids: dict[int, UUID]
-    line_mpns: dict[int, str | None]
+    # The same lines, as validation compares a quoted line against them.
+    requested_checks: list[RequestedLine]
+    rfq_currency: str | None
     attachments: list[_AttachmentRef]
     prior_supplier_offer: PriorSupplierOffer | None
     # The message's date, and the date of the supplier's first offer in this thread.
@@ -185,18 +185,9 @@ async def handle_quote_extract(
         await _mark_failed(db, tenant_id, message_id)
         return
 
-    quantities = {line.position: tuple(line.quantities) for line in loaded.requested}
     validated = validate_quote(
         result.output,
-        requested=[
-            RequestedLine(
-                id=line_id,
-                position=position,
-                mpn=loaded.line_mpns.get(position),
-                quantities=quantities.get(position, ()),
-            )
-            for position, line_id in loaded.line_ids.items()
-        ],
+        requested=loaded.requested_checks,
         sources=QuoteSources(
             email_subject=loaded.subject,
             email_body=body,
@@ -207,8 +198,9 @@ async def handle_quote_extract(
         offer_date=loaded.offer_date,
         original_offer_date=loaded.original_offer_date,
         country=loaded.supplier_country,
+        rfq_currency=loaded.rfq_currency,
     )
-    meta: _RunMeta = {
+    meta: RunMeta = {
         "agent": agent.name,
         "prompt_version": agent.prompt_version,
         "model": agent.model,
@@ -270,7 +262,14 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
 
         row = (
             await session.execute(
-                select(Invite.id, Rfq.id, Rfq.ref, Supplier.language, Supplier.country)
+                select(
+                    Invite.id,
+                    Rfq.id,
+                    Rfq.ref,
+                    Rfq.base_currency,
+                    Supplier.language,
+                    Supplier.country,
+                )
                 .join(Rfq, Rfq.id == Invite.rfq_id)
                 .join(Supplier, Supplier.id == Invite.supplier_id)
                 .where(Invite.id == message.invite_id)
@@ -279,7 +278,7 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
         if row is None:
             logger.warning("quote.extract: invite not found message=%s", message_id)
             return None
-        invite_id, rfq_id, rfq_ref, language, country = row
+        invite_id, rfq_id, rfq_ref, rfq_currency, language, country = row
 
         lines = (
             await session.scalars(
@@ -295,7 +294,7 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
         ).all()
         prior_events = [
             event
-            for event in await _events(session, invite_id)
+            for event in await offer_events(session, invite_id)
             if event.occurred_at < message.occurred_at and event.received_at <= message.created_at
         ]
         prior_state = reconcile(prior_events) if prior_events else None
@@ -312,9 +311,9 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
             original_offer_date=min(
                 (message_date(e.occurred_at, e.received_at) for e in prior_events), default=None
             ),
-            requested=[_email_line(line) for line in lines],
-            line_ids={line.position: line.id for line in lines},
-            line_mpns={line.position: line.mpn for line in lines},
+            requested=[email_line(line) for line in lines],
+            requested_checks=[requested_line(line) for line in lines],
+            rfq_currency=rfq_currency,
             attachments=[
                 _AttachmentRef(a.filename, a.content_type, a.storage_key) for a in attachments
             ],
@@ -339,7 +338,8 @@ def message_date(occurred_at: datetime, received_at: datetime | None) -> date:
     return moment.astimezone(UTC).date()
 
 
-def _email_line(line: RfqLine) -> RfqEmailLine:
+def email_line(line: RfqLine) -> RfqEmailLine:
+    """An RFQ line as the extraction agent sees it (the request it answers)."""
     return RfqEmailLine(
         position=line.position,
         description=line.description,
@@ -351,6 +351,18 @@ def _email_line(line: RfqLine) -> RfqEmailLine:
         need_by=line.need_by,
         incoterm=line.incoterm,
         qualification=line.qualification,
+    )
+
+
+def requested_line(line: RfqLine) -> RequestedLine:
+    """An RFQ line as validation compares a quoted line against it."""
+    return RequestedLine(
+        id=line.id,
+        position=line.position,
+        mpn=line.mpn,
+        quantities=tuple(Decimal(str(q)) for q in line.quantities),
+        incoterm=line.incoterm,
+        delivery_location=line.delivery_location,
     )
 
 
@@ -460,7 +472,8 @@ def _legacy_quote(
     )
 
 
-async def _events(session: AsyncSession, invite_id: UUID) -> list[OfferEvent]:
+async def offer_events(session: AsyncSession, invite_id: UUID) -> list[OfferEvent]:
+    """Every proposal of the invite as an immutable offer event, in version order."""
     rows = (
         await session.execute(
             select(Proposal, Message)
@@ -490,7 +503,7 @@ async def _events(session: AsyncSession, invite_id: UUID) -> list[OfferEvent]:
     for proposal, message in rows:
         event_record: object = proposal.fields.get("_quote_event")
         quote = (
-            _with_every_field(restore_quote(event_record))
+            restore_quote(event_record)
             if event_record is not None
             else _legacy_quote(proposal, stored_lines[proposal.id], positions)
         )
@@ -571,26 +584,6 @@ async def _events(session: AsyncSession, invite_id: UUID) -> list[OfferEvent]:
     return events
 
 
-def _with_every_field(quote: ValidatedQuote) -> ValidatedQuote:
-    """An event stored before a field existed (e.g. `lead_time`, prompt v5) lacks it:
-    complete it as not stated, so a later reply can update or inherit it."""
-    if set(quote.header) >= HEADER_FIELDS.keys() and all(
-        set(line.fields) >= LINE_FIELDS.keys() for line in quote.lines
-    ):
-        return quote
-    return replace(
-        quote,
-        header={name: quote.header.get(name) or absent_field(name) for name in HEADER_FIELDS},
-        lines=tuple(
-            replace(
-                line,
-                fields={name: line.fields.get(name) or absent_field(name) for name in LINE_FIELDS},
-            )
-            for line in quote.lines
-        ),
-    )
-
-
 async def _has_proposal(session: AsyncSession, message_id: UUID) -> bool:
     found = await session.scalar(
         select(Proposal.id).where(Proposal.message_id == message_id).limit(1)
@@ -630,7 +623,7 @@ def _unique(name: str, seen: set[str]) -> str:
 
 # --- Persist -----------------------------------------------------------------------
 
-type _RunMeta = dict[str, str | int]
+type RunMeta = dict[str, str | int]
 
 
 async def _mark_failed(db: Db, tenant_id: UUID, message_id: UUID) -> None:
@@ -647,7 +640,7 @@ async def _persist(
     tenant_id: UUID,
     loaded: _Loaded,
     validated: ValidatedQuote,
-    meta: _RunMeta,
+    meta: RunMeta,
 ) -> None:
     async with tenant_session(db, tenant_id) as session:
         # Corrections and negotiation preparation lock the RFQ first. Replay
@@ -669,108 +662,139 @@ async def _persist(
         if await _has_proposal(session, loaded.message_id) or message.status == "extracted":
             logger.info("quote.extract: concurrent extraction won message=%s", loaded.message_id)
             return
-
-        previous_events = await _events(session, invite.id)
-        if previous_events and not validated.is_quote and validated.output.declined:
-            # A refusal must not leave a previously usable offer live. Without
-            # explicit withdrawal evidence keep its facts, but hold all decisions.
-            validated = replace(
-                validated, output=validated.output.model_copy(update={"reply_kind": "withdrawal"})
-            )
-            invite.status = "declined"
-        updates_state = validated.output.reply_kind in {"amendment", "withdrawal"} or (
-            validated.output.reply_kind == "clarification" and bool(previous_events)
-        )
-        if not validated.is_quote and not updates_state:
-            message.status = "extracted"
-            if validated.output.declined:
-                invite.status = "declined"
-            logger.info(
-                "quote.extract: not a quote message=%s declined=%s run=%s",
-                loaded.message_id,
-                validated.output.declined,
-                meta["run_id"],
-            )
-            return
-
-        # The invite row lock serializes versions across replies to one invite.
-        latest = await session.scalar(
-            select(func.max(Proposal.version)).where(Proposal.invite_id == invite.id)
-        )
-        event_quote = stamp_quote(validated, message.id)
-        state = reconcile(
-            [
-                *previous_events,
-                OfferEvent(
-                    message_id=message.id,
-                    message_header=message.message_id_header,
-                    in_reply_to=message.in_reply_to,
-                    occurred_at=message.occurred_at,
-                    received_at=message.created_at,
-                    quote=event_quote,
-                    revision=revision_marker(message.subject, message.body_text),
-                ),
-            ]
-        )
-        effective = state.quote
-        fields = effective.provenance()
-        fields["_quote_event"] = store_quote(event_quote)
-        fields["_offer_snapshot"] = store_quote(effective)
-        fields["_offer_state"] = state.provenance()
-        fields["_extraction"] = {key: value for key, value in meta.items()}
-        # Offers for things not requested: kept as written, never compared or priced.
-        fields["extra_offers"] = [
-            offer.model_dump(mode="json") for offer in effective.output.extra_offers[:20]
-        ]
-        # General terms of the offer (packaging, warranty...): shown, never blocking.
-        fields[OFFER_NOTES_KEY] = list(effective.output.offer_notes[:20])
-        # What this message says about the negotiation: final offer, declined lines,
-        # questions (`bido_back.quotes.terms.offer_terms`).
-        fields[SIGNALS_KEY] = validated.signals.model_dump(mode="json")
-        proposal = Proposal(
+        await persist_quote(
+            session,
             tenant_id=tenant_id,
-            invite_id=invite.id,
-            message_id=loaded.message_id,
-            version=(latest or 0) + 1,
-            currency=_str(effective.parsed("currency")),
-            valid_until=_date(effective.parsed("valid_until")),
-            incoterm=_str(effective.parsed("incoterm")),
-            payment_terms=_str(effective.parsed("payment_terms")),
-            fields=fields,
+            message=message,
+            invite=invite,
+            validated=validated,
+            meta=meta,
         )
-        session.add(proposal)
-        await session.flush()
-        bases = quantity_bases(
-            effective.lines,
-            {
-                loaded.line_ids[line.position]: line.quantities
-                for line in loaded.requested
-                if line.position in loaded.line_ids
-            },
+
+
+async def persist_quote(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    message: Message,
+    invite: Invite,
+    validated: ValidatedQuote,
+    meta: RunMeta,
+) -> Proposal | None:
+    """Store `validated` as the invite's next proposal version; the message becomes `extracted`.
+
+    The caller holds the row locks on the RFQ, the message and the invite (they
+    serialize versions across replies to one invite) and has checked that no
+    proposal references the message yet. A reply that is not a quote creates
+    no proposal and returns None (a refusal marks the invite `declined`).
+
+    Besides the per-field provenance, the proposal keeps the message's signals
+    (`_signals`: final offer, declined lines, questions) and the offer's general
+    notes, and each line which quantity its price applies to (`_terms`);
+    `bido_back.quotes.terms` reads them back.
+
+    The email extraction job and the Copilot's `register_quote` (a quote the
+    buyer uploaded, stored as a message of origin `copilot_upload`) both end here,
+    so an uploaded quote is reconciled, versioned and shown exactly like a reply.
+    """
+    previous_events = await offer_events(session, invite.id)
+    if previous_events and not validated.is_quote and validated.output.declined:
+        # A refusal must not leave a previously usable offer live. Without
+        # explicit withdrawal evidence keep its facts, but hold all decisions.
+        validated = replace(
+            validated, output=validated.output.model_copy(update={"reply_kind": "withdrawal"})
         )
-        session.add_all(
-            _proposal_line(tenant_id, proposal.id, line, basis)
-            for line, basis in zip(effective.lines, bases, strict=True)
-        )
+        invite.status = "declined"
+    updates_state = validated.output.reply_kind in {"amendment", "withdrawal"} or (
+        validated.output.reply_kind == "clarification" and bool(previous_events)
+    )
+    if not validated.is_quote and not updates_state:
         message.status = "extracted"
-        # A counter-offer awaiting approval answered an older offer: cancel it.
-        if state.active_message_id == message.id or state.issues:
-            await cancel_on_new_offer(session, invite.id)
-        await session.flush()
-        signals = validated.signals
+        if validated.output.declined:
+            invite.status = "declined"
         logger.info(
-            "quote.extract: proposal stored message=%s proposal=%s version=%s lines=%s "
-            "needs_review=%s final_offer=%s declined_lines=%s questions=%s run=%s",
-            loaded.message_id,
-            proposal.id,
-            proposal.version,
-            len(effective.lines),
-            effective.needs_review,
-            signals.final_offer,
-            len(signals.declined_lines),
-            len(signals.questions),
+            "quote.extract: not a quote message=%s declined=%s run=%s",
+            message.id,
+            validated.output.declined,
             meta["run_id"],
         )
+        return None
+
+    # The invite row lock serializes versions across replies to one invite.
+    latest = await session.scalar(
+        select(func.max(Proposal.version)).where(Proposal.invite_id == invite.id)
+    )
+    event_quote = stamp_quote(validated, message.id)
+    state = reconcile(
+        [
+            *previous_events,
+            OfferEvent(
+                message_id=message.id,
+                message_header=message.message_id_header,
+                in_reply_to=message.in_reply_to,
+                occurred_at=message.occurred_at,
+                received_at=message.created_at,
+                quote=event_quote,
+                revision=revision_marker(message.subject, message.body_text),
+            ),
+        ]
+    )
+    effective = state.quote
+    fields = effective.provenance()
+    fields["_quote_event"] = store_quote(event_quote)
+    fields["_offer_snapshot"] = store_quote(effective)
+    fields["_offer_state"] = state.provenance()
+    fields["_extraction"] = {key: value for key, value in meta.items()}
+    # Offers for things not requested: kept as written, never compared or priced.
+    fields["extra_offers"] = [
+        offer.model_dump(mode="json") for offer in effective.output.extra_offers[:20]
+    ]
+    # General terms of the offer (packaging, warranty...): shown, never blocking.
+    fields[OFFER_NOTES_KEY] = list(effective.output.offer_notes[:20])
+    # What this message says about the negotiation: final offer, declined lines,
+    # questions (`bido_back.quotes.terms.offer_terms`).
+    fields[SIGNALS_KEY] = validated.signals.model_dump(mode="json")
+    proposal = Proposal(
+        tenant_id=tenant_id,
+        invite_id=invite.id,
+        message_id=message.id,
+        version=(latest or 0) + 1,
+        currency=_str(effective.parsed("currency")),
+        valid_until=_date(effective.parsed("valid_until")),
+        incoterm=_str(effective.parsed("incoterm")),
+        payment_terms=_str(effective.parsed("payment_terms")),
+        fields=fields,
+    )
+    session.add(proposal)
+    await session.flush()
+    requested = await session.scalars(select(RfqLine).where(RfqLine.rfq_id == invite.rfq_id))
+    bases = quantity_bases(
+        effective.lines, {line.id: requested_line(line).quantities for line in requested}
+    )
+    session.add_all(
+        _proposal_line(tenant_id, proposal.id, line, basis)
+        for line, basis in zip(effective.lines, bases, strict=True)
+    )
+    message.status = "extracted"
+    # A counter-offer awaiting approval answered an older offer: cancel it.
+    if state.active_message_id == message.id or state.issues:
+        await cancel_on_new_offer(session, invite.id)
+    await session.flush()
+    signals = validated.signals
+    logger.info(
+        "quote.extract: proposal stored message=%s proposal=%s version=%s lines=%s "
+        "needs_review=%s final_offer=%s declined_lines=%s questions=%s run=%s",
+        message.id,
+        proposal.id,
+        proposal.version,
+        len(effective.lines),
+        effective.needs_review,
+        signals.final_offer,
+        len(signals.declined_lines),
+        len(signals.questions),
+        meta["run_id"],
+    )
+    return proposal
 
 
 def _proposal_line(

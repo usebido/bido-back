@@ -31,6 +31,7 @@ from bido_back.db.models import (
     RfqTemplate,
     TemplateUpload,
 )
+from bido_back.quotes.upload import QuoteExtractor
 from bido_back.rfqs import service
 from bido_back.rfqs.schemas import RfqCreated, SupplierView
 from bido_back.storage import BlobStorage
@@ -94,6 +95,7 @@ def make_tools(
     storage: BlobStorage | None = None,
     buyer_messages: tuple[str, ...] | None = None,
     conversation_id: UUID | None = None,
+    quote_extractor: QuoteExtractor | None = None,
 ) -> Tools:
     conversation = conversation_id or uuid4()
     mailboxes = FakeMailboxes()
@@ -110,6 +112,7 @@ def make_tools(
             earlier_attachments_text=_text_of(earlier_attachments_text),
             buyer_messages=_messages_of(buyer_messages),
             storage=storage,
+            quote_extractor=quote_extractor,
             today=lambda: date(2026, 10, 7),
             conversation_id=conversation,
         )

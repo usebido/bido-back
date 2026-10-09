@@ -8,9 +8,11 @@ Scenarios (each case runs in a fresh company, inside `evals.world.World`):
 
 * `intake`: an RFQ from free text, a forwarded email or a pasted sheet (pt, en,
   it) -> lines, quantities, need-by, Incoterm vs the golden lines.
-* `rfq_email`: the buyer's Portuguese template + lines -> the RFQ email per
-  supplier language (de, it, fr, en, pt): required fields asked, numbers
-  unchanged, `rfq_email_problems` clean, test-domain recipients only.
+* `rfq_email`: the buyer's Portuguese template + lines -> the RFQ per supplier
+  language (de, it, fr, en, pt), as a PDF with a short cover note: in the PDF,
+  required fields asked, numbers unchanged, `rfq_email_problems` clean, the
+  supplier's language; in the cover, the reference, reply-by date, reply
+  marker and item count, no items listed; test-domain recipients only.
 * `followups`: no reply -> a chase after N business days in the supplier's
   language; a reply missing fields -> one clarification listing exactly what is
   missing; an out-of-office -> chases paused until the return date; a reply ->
@@ -56,7 +58,7 @@ from bido_back.agents.catalog.contracts import (
     RfqIntakeOutput,
     RfqLineDraft,
 )
-from bido_back.agents.catalog.definitions import rfq_email_problems
+from bido_back.agents.catalog.definitions import rfq_cover_problems, rfq_email_problems
 from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
 from bido_back.approvals import ApprovalRecipientsUnconfirmed
@@ -83,6 +85,7 @@ from bido_back.negotiation import service as negotiation
 from bido_back.negotiation.schemas import LineLimitsUpdate
 from bido_back.outbound.domains import RecipientDomainsNotConfirmed
 from bido_back.rfqs import service as rfq_service
+from bido_back.rfqs.document import document_text
 from bido_back.rfqs.errors import InvalidState
 from bido_back.rfqs.language import country_code
 from bido_back.rfqs.send import SendRfqEmailArgs
@@ -349,12 +352,18 @@ async def scenario_rfq_email(world: World, language: str, result: RunResult) -> 
             for i in ITEMS
         ],
     )  # fmt: skip
-    problems = rfq_email_problems(task, RfqEmailOutput(subject=args.subject, body=body))
+    # The RFQ goes as the PDF; the email is a short cover note.
+    document = args.document
+    result.check("pdf_attached", document is not None, "no document: the full email went")
+    if document is None:
+        return
+    pdf = document_text(document)
+    problems = rfq_email_problems(task, RfqEmailOutput(subject=args.subject, body=pdf))
     result.check("problems_clean", not problems, ", ".join(problems))
-    # Asked: a line of the email (or a table cell) names the field. Bido's own labels and
-    # headings count as synonyms, so this is the same coverage rule the product uses.
-    wanted = {f.key for f in REQUIRED_FIELDS if not f.conditional}
-    covered = covered_keys(re.split(r"[\n|]", body))
+    # Asked: a line of the PDF names the field. Bido's own labels count as synonyms, so this
+    # is the same coverage rule the product uses. The line data is checked by value below.
+    wanted = {f.key for f in REQUIRED_FIELDS if f.kind == "ask" and not f.conditional}
+    covered = covered_keys(pdf.splitlines())
     result.check(
         "required_fields_asked", wanted <= covered, f"not asked: {sorted(wanted - covered)}"
     )
@@ -364,15 +373,37 @@ async def scenario_rfq_email(world: World, language: str, result: RunResult) -> 
         text
         for i in ITEMS
         for text in (i.mpn, display_quantity(i.quantity, locale))
+        # The PDF's text has its spaces normalized (French writes 10 000 with a narrow
+        # no-break space), as the document's own checks read it.
+        if " ".join(text.split()) not in pdf
+    ]
+    for text in (format_date(need_by, language), "DAP"):
+        if text not in pdf:
+            missing.append(text)
+    result.check("numbers_unchanged", not missing, f"not in the PDF: {missing}")
+    guessed = guess_language(pdf)
+    result.check("language", guessed == language, f"PDF reads as {guessed}")
+    if language != "pt":
+        result.check("greeting_localized", GREETING_PT not in pdf, "Portuguese greeting kept")
+    # The cover: the reference, the reply-by date, how to reply; no items, short.
+    cover_problems = rfq_cover_problems(task, RfqEmailOutput(subject=args.subject, body=body))
+    result.check("cover_clean", not cover_problems, ", ".join(cover_problems))
+    reply_by = format_date(document.reply_by, language) if document.reply_by else "?"
+    absent = [
+        what
+        for what, text in (
+            ("reference", f"{rfq.ref} "),
+            ("reply_by", reply_by),
+            ("reply_marker", f"[{rfq.ref}]"),
+            ("item_count", str(len(ITEMS))),
+        )
         if text not in body
     ]
-    if format_date(need_by, language) not in body:
-        missing.append(format_date(need_by, language))
-    result.check("numbers_unchanged", not missing, f"not in the body: {missing}")
-    guessed = guess_language(body)
-    result.check("language", guessed == language, f"reads as {guessed}")
-    if language != "pt":
-        result.check("greeting_localized", GREETING_PT not in body, "Portuguese greeting kept")
+    result.check("cover_says", not absent, f"missing in the cover: {absent}")
+    listed = [i.mpn for i in ITEMS if i.mpn in body]
+    result.check("cover_short", not listed and len(body) < 1200, f"{len(body)} chars, {listed}")
+    cover_language = guess_language(body)
+    result.check("cover_language", cover_language == language, f"cover reads as {cover_language}")
     calls = len(world.email_writer.calls)
     result.check("localized_once", calls == (0 if language == "pt" else 1), f"{calls} writer calls")
     domains = [a.rpartition("@")[2] for a in [*args.to, *args.cc]]

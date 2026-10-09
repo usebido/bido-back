@@ -10,7 +10,7 @@ JSON of the proposal and its lines. Read them only through this module:
 - `line_terms(proposal_line.fields)`: the line's lead time as data, and which
   quantity its price applies to.
 
-Proposals extracted before prompt v5 carry none of this: the readers then
+Proposals extracted before prompt v6 carry none of this: the readers then
 return empty values (no lead time, no signals, an unknown quantity basis).
 """
 
@@ -114,7 +114,7 @@ class LineTerms(BaseModel):
     # `scope == "offer"`). None when there is none, when `lead_time_days` needs
     # review, or when a person corrected `lead_time_days` (the correction wins).
     lead_time: StoredLeadTime | None = None
-    # None for lines extracted before prompt v5.
+    # None for lines extracted before prompt v6.
     quantity: QuantityTerms | None = None
 
 

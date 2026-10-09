@@ -12,6 +12,7 @@ from bido_back.rfqs.language import (
     decide_email_language,
     domain_language,
     email_language,
+    infer_supplier_locale,
     sent_language,
     thread_language,
 )
@@ -149,7 +150,50 @@ def test_later_emails_keep_the_language_the_rfq_email_went_out_in() -> None:
     # The supplier's data changed after the RFQ email: the thread stays in Portuguese.
     assert sent_language(sent) == "pt"
     assert thread_language(sent, supplier) == "pt"
+    # The full email without the PDF (it did not render): the arguments record it.
+    assert sent_language({"invite_id": "x", "document": None, "language": "pt"}) == "pt"
+    assert thread_language({"invite_id": "x", "language": "pt"}, supplier) == "pt"
     # An RFQ email approved before documents existed: the rule of that time.
     assert sent_language({"invite_id": "x", "document": None}) is None
     assert thread_language({"invite_id": "x"}, supplier) == "de"
     assert thread_language(None, Supplier(name="X", language="en", country="BR")) == "pt"
+
+
+@pytest.mark.parametrize(
+    ("name", "email", "expected"),
+    [
+        # The prod case (2026-10-09): saved from the chat with no country, written to in English.
+        ("Cobre Sul Fios Esmaltados S.A.", "vendas@cobresul.com.br", ("BR", "pt")),
+        ("Magnetica Europe GmbH", "sales@magnetica.com", ("DE", "de")),
+        ("MAGNETICA EUROPE GMBH", None, ("DE", "de")),
+        ("Weber GmbH & Co. KG", None, ("DE", "de")),
+        ("Metalúrgica Horizonte Ltda.", "x@gmail.com", ("BR", "pt")),
+        ("Oficina Silva EIRELI", None, ("BR", "pt")),
+        ("Padaria Silva ME", None, ("BR", "pt")),
+        ("Lisboa Metais Lda", None, ("PT", "pt")),
+        ("Rame Italia S.r.l.", None, ("IT", "it")),
+        ("Cuscinetti SpA", None, ("IT", "it")),
+        ("Tornillos del Norte S.L.", None, ("ES", "es")),
+        ("Visserie SARL", None, ("FR", "fr")),
+        ("Aceros S.A. de C.V.", None, ("MX", "es")),
+        ("Acme", "a@acme.at", ("AT", "de")),
+        # The TLD is where the mail goes: it wins over the name.
+        ("Rame Italia S.r.l.", "sales@rame.com.br", ("BR", "pt")),
+        # A country whose language is not in the table: the country only (English by default).
+        ("Acme Corp", "sales@acme.co.uk", ("GB", None)),
+        # Nothing unambiguous: never guessed.
+        ("Cobre Sul Fios Esmaltados S.A.", "vendas@cobresul.com", (None, None)),  # S.A.: many
+        ("Acme Corp", "sales@acme.com", (None, None)),
+        ("Follow me Inc", None, (None, None)),  # "me" is a word; only "ME" is the suffix
+        ("Termas Spa", None, (None, None)),  # a spa, not an S.p.A.
+        ("SAS Institute", None, (None, None)),  # an acronym as often as a French SAS
+        ("Schweizer AG", None, (None, None)),  # AG: Germany or Switzerland
+        ("Acme Consulting", "x@y.co", (None, None)),  # .co is sold as "company"
+        ("", "", (None, None)),
+        (None, None, (None, None)),
+    ],
+)
+def test_locale_inferred_only_from_unambiguous_tlds_and_suffixes(
+    name: str | None, email: str | None, expected: tuple[str | None, str | None]
+) -> None:
+    assert infer_supplier_locale(name, email) == expected

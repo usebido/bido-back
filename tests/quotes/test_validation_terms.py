@@ -1,4 +1,4 @@
-"""Prompt v5 terms: lead times and validity as data, quantity basis, general terms, signals."""
+"""Prompt v6 terms: lead times and validity as data, quantity basis, general terms, signals."""
 
 from datetime import date
 from decimal import Decimal
@@ -428,16 +428,29 @@ def test_ready_from_stock_is_zero_days() -> None:
     assert result.lines[0].fields["lead_time_days"].issues == ()
 
 
-def test_lead_time_days_written_by_older_prompts_still_work() -> None:
+def test_lead_time_days_written_by_older_prompts_are_read_as_the_same_statement() -> None:
     weeks = "Lieferzeit: 6 Wochen"
     business = "Prazo: 15 dias úteis"
+    # Prompts up to v5 wrote `lead_time_days`: v4 converted weeks (42), v5 wrote business
+    # days as written (15). Both become the statement v6 writes, counted the same way.
     in_weeks = check(offer(draft(1, lead_time_days=ev("42", weeks))), body(weeks))
     in_business_days = check(offer(draft(1, lead_time_days=ev("15", business))), body(business))
+    as_v6 = check(
+        offer(draft(1, lead_time=lead("15", business, unit="business_days"))), body(business)
+    )
 
     assert in_weeks.lines[0].parsed("lead_time_days") == 42
-    assert in_weeks.lines[0].fields["lead_time_terms"].parsed is None
-    # A raw business-day number is not calendar days: flagged, as before (now in Portuguese).
-    assert in_business_days.lines[0].fields["lead_time_days"].issues == ("working_days",)
+    weekly = stored_lead(in_weeks.lines[0])
+    assert weekly is not None and (weekly.unit, weekly.amount) == ("weeks", Decimal(6))
+    # Business days are never calendar days: counted from the offer date, skipping the
+    # holidays of the supplier's calendar, exactly as the v6 statement is.
+    checked = in_business_days.lines[0]
+    assert checked.fields["lead_time_days"].issues == ()
+    assert checked.parsed("lead_time_days") == as_v6.lines[0].parsed("lead_time_days")
+    assert checked.parsed("lead_time_days") != 15
+    conversion = checked.fields["lead_time_days"].conversion
+    assert conversion is not None and conversion["unit"] == "business_days"
+    assert conversion == as_v6.lines[0].fields["lead_time_days"].conversion
 
 
 # --- Validity --------------------------------------------------------------------------------
