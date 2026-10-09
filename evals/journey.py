@@ -2022,6 +2022,10 @@ async def step_negotiation(j: Journey, step: Step) -> None:
         s: [rules.describe(r) for r in sorted(n.requests.get(s, ()), key=lambda r: r.sequence)]
         for s in n.suppliers
     }
+    step.notes["final_offers"] = {
+        s: f"written v{sorted(n.finals.get(s, ()))}, stored v{sorted(n.stored_finals.get(s, ()))}"
+        for s in n.suppliers
+    }
     step.notes["buyer_sees"] = [
         f"day {sweep.day} {s}: {view_text(sweep.before.get(s))} -> {view_text(sweep.after.get(s))}"
         for sweep in n.sweeps
