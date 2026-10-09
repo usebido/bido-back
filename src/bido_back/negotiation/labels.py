@@ -221,7 +221,14 @@ def _details(plan: SupplierPlan) -> list[str]:
     if reason == "validity_ends_before_decision" and plan.valid_until is not None:
         parts.append(f"valid until {day(plan.valid_until)}")
     if reason == "email_not_prepared" and plan.detail:
-        parts.append(plan.detail.replace("_", " "))
+        code, _, problems = plan.detail.partition(":")
+        if code == "email_refused":
+            # The send gate refused it (codes only): Bido never sends it as it is.
+            parts.append(
+                "it failed Bido's checks: " + problems.replace("_", " ").replace(",", ", ")
+            )
+        else:
+            parts.append(plan.detail.replace("_", " "))
     return parts
 
 
