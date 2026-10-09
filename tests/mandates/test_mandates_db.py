@@ -536,3 +536,79 @@ async def test_the_recipient_guard_still_applies_while_waiting_for_the_mailbox(
         "sales@rhein.example.test",
         "vendas@lyon-composants.fr",
     ]
+
+
+def test_a_need_by_date_bounds_the_lead_time() -> None:
+    today = date(2026, 10, 8)
+    assert mandates.lead_time_until(date(2026, 10, 19), today) == 11
+    assert mandates.lead_time_until(date(2026, 10, 9), today) == 1
+    # Today or past: no lead time meets it, so no limit (never "0 days").
+    assert mandates.lead_time_until(today, today) is None
+    assert mandates.lead_time_until(date(2026, 10, 1), today) is None
+    assert mandates.lead_time_until(None, today) is None
+
+
+async def test_a_line_with_a_need_by_date_gets_a_lead_time_limit_the_buyer_approves(
+    world: MandateWorld,
+) -> None:
+    now = datetime.now(UTC)
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        await session.execute(
+            update(RfqLine)
+            .where(RfqLine.id == world.lines[0])
+            .values(max_lead_time_days=None, need_by=now.date() + timedelta(days=12))
+        )
+        await session.execute(
+            update(RfqLine)
+            .where(RfqLine.id == world.lines[1])
+            .values(max_lead_time_days=None, need_by=None)
+        )
+    proposed = await mandates.propose_mandate(
+        world.engine,
+        buyer(world.people),
+        world.rfq_id,
+        ProposeMandateRequest(deadline=DEADLINE),
+        writer=FakeWriter(),
+        mailboxes=world.mailboxes,
+        now=now,
+    )
+    terms = ApproveMandateArgs.model_validate((await world.approval(proposed.approval_id)).args)
+    assert [(line.max_lead_time_days, line.lead_time_need_by) for line in terms.lines] == [
+        (12, now.date() + timedelta(days=12)),
+        (None, None),
+    ]
+
+    await world.start(proposed.approval_id)
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        limits = list(
+            await session.scalars(
+                select(RfqLine.max_lead_time_days)
+                .where(RfqLine.rfq_id == world.rfq_id)
+                .order_by(RfqLine.position)
+            )
+        )
+    # Approving applies it like any other limit, so later sends see the limits unchanged.
+    assert limits == [12, None]
+    assert {s.outcome for s in await world.sends()} == {"auto_approved"}
+
+
+async def test_a_buyers_lead_time_limit_is_never_replaced_by_the_need_by_date(
+    world: MandateWorld,
+) -> None:
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        await session.execute(
+            update(RfqLine)
+            .where(RfqLine.rfq_id == world.rfq_id)
+            .values(need_by=datetime.now(UTC).date() + timedelta(days=12))
+        )
+    no_limit = {
+        "rfq_line_id": world.lines[1],
+        "target_unit_price": "1.00",
+        "max_unit_price": "1.50",
+        "max_lead_time_days": None,
+    }
+    approval_id = await world.propose(lines=[no_limit])
+    terms = ApproveMandateArgs.model_validate((await world.approval(approval_id)).args)
+    # The RFQ's own limit (42 days) stays; an explicit "no limit" override stays empty.
+    assert [line.max_lead_time_days for line in terms.lines] == [42, None]
+    assert {line.lead_time_need_by for line in terms.lines} == {None}
