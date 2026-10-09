@@ -85,6 +85,25 @@ class ProposedSupplier(BaseModel):
     )
 
 
+class QuotedLinePreview(BaseModel):
+    """One line of a supplier's quote as read from the buyer's file (register_quote)."""
+
+    # The RFQ line it answers, as the file names it; null = the file does not say.
+    rfq_line_position: int | None
+    # The RFQ line's description when the position is one of the RFQ's lines.
+    description: str | None = None
+    offered_mpn: str | None = None
+    is_alternative: bool = False
+    quantity: Decimal | None = None
+    unit: str | None = None
+    unit_price: Decimal | None = None
+    currency: str | None = None
+    lead_time_days: int | None = None
+    # Why the line would need review once stored (missing price, a line the RFQ does
+    # not have, a value the file does not back...); empty when it reads cleanly.
+    issues: list[str] = Field(default_factory=list[str])
+
+
 class ProposalPreview(BaseModel):
     """Exactly what the action would do: show all of it to the buyer and ask."""
 
@@ -94,6 +113,13 @@ class ProposalPreview(BaseModel):
     currency: str | None = None
     lines: list[ProposedLine] = Field(default_factory=list[ProposedLine])
     suppliers: list[ProposedSupplier] = Field(default_factory=list[ProposedSupplier])
+    # A quote read from the buyer's file (register_quote): the files, the commercial
+    # terms it states and each line it quotes. The supplier is in `suppliers`.
+    files: list[str] = Field(default_factory=list[str])
+    payment_terms: str | None = None
+    valid_until: date | None = None
+    incoterm: str | None = None
+    quoted: list[QuotedLinePreview] = Field(default_factory=list[QuotedLinePreview])
     skipped: list[str] = Field(
         default_factory=list[str],
         description="Lines left out (a preliminary RFQ: no quantity or unit yet), by part number",

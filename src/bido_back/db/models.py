@@ -402,6 +402,9 @@ class Invite(Base):
     )
 
 
+MESSAGE_ORIGINS = ("email", "copilot_upload")
+
+
 class Message(Base):
     __tablename__ = "messages"
 
@@ -409,6 +412,9 @@ class Message(Base):
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
     invite_id: Mapped[UUID | None] = mapped_column(ForeignKey("invites.id"))
     direction: Mapped[str] = mapped_column(Text)
+    # How it reached Bido: the supplier's email ('email', the default) or a quote the
+    # buyer attached in the Copilot ('copilot_upload'). See migration 0034.
+    origin: Mapped[str] = mapped_column(Text, server_default=text("'email'"))
     message_id_header: Mapped[str | None] = mapped_column(Text)
     in_reply_to: Mapped[str | None] = mapped_column(Text)
     from_contact_id: Mapped[UUID | None] = mapped_column(ForeignKey("contacts.id"))
