@@ -269,7 +269,7 @@ class Rfq(Base):
     negotiation_ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     negotiation_closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     negotiation_outcome: Mapped[list[Any] | None] = mapped_column(JSONB)
-    # Every PO of the RFQ closed or cancelled, at least one closed (migration 0034).
+    # Every PO of the RFQ closed or cancelled, at least one closed (migration 0035).
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     comparison_policy: Mapped[dict[str, JsonValue]] = mapped_column(
         JSONB, server_default=text("'{}'::jsonb")
@@ -1148,7 +1148,7 @@ class IssuedPurchaseOrder(Base):
     message_id_header: Mapped[str | None] = mapped_column(Text)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    # The order after the send (migration 0034): not_sent, sent, acknowledged,
+    # The order after the send (migration 0035): not_sent, sent, acknowledged,
     # partially_received, received, closed, cancelled. `status` stays the send's.
     fulfilment_state: Mapped[str] = mapped_column(Text, server_default=text("'not_sent'"))
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -1165,7 +1165,7 @@ class IssuedPurchaseOrder(Base):
 
 
 class PurchaseOrderReceipt(Base):
-    """One delivery against an issued PO (migration 0034); its lines say how much per PO line."""
+    """One delivery against an issued PO (migration 0035); its lines say how much per PO line."""
 
     __tablename__ = "purchase_order_receipts"
 
