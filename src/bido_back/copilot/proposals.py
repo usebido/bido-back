@@ -50,7 +50,9 @@ PROPOSAL_ARG: Final = (
 class ProposedLine(BaseModel):
     position: int
     description: str
+    # The buyer's own code: show it as the line's reference. `mpn` is the manufacturer's.
     part_number: str | None = None
+    mpn: str | None = None
     quantities: list[Decimal]
     unit: str
     need_by: date | None = None

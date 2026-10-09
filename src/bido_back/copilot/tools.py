@@ -495,7 +495,9 @@ class CreateRfqIn(BaseModel):
         max_length=8_000,
         description=(
             "What to quote: items, quantities, dates, Incoterm and delivery location. Copy the "
-            "buyer's part numbers exactly as they wrote them; never turn them into MPNs"
+            "buyer's part numbers exactly as they wrote them; never turn them into MPNs. When "
+            "the buyer gives a manufacturer part number as such, say so ('MPN MT-120-ASM'): "
+            "the preview's lines show it as `mpn`, apart from `part_number`"
         ),
     )
     pending_validation: str | None = Field(
@@ -1449,6 +1451,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                     position=position,
                     description=line.description,
                     part_number=line.part_number,
+                    mpn=line.mpn,
                     quantities=list(line.quantities),
                     unit=line.unit,
                     need_by=line.need_by,
