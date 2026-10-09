@@ -1750,7 +1750,6 @@ def last_key(supplier_key: str) -> str:
 
 # --- Step 5: negotiation ----------------------------------------------------------------------
 
-Asks = dict[str, Decimal]
 # A negotiation e-mail not sent yet (being written or awaiting approval).
 _UNSENT: Final = frozenset({"decided", "proposed"})
 
@@ -2037,9 +2036,6 @@ async def step_negotiation(j: Journey, step: Step) -> None:
         for sweep in j.sweeps
         for e in sweep.sent
     ]
-
-
-MULTIPECAS_KEY: Final = "multipecas"
 
 
 # --- Step 6: comparison -----------------------------------------------------------------------
