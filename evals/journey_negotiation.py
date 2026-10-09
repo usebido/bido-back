@@ -25,26 +25,25 @@ for, or a shorter lead time on a line it asked a date for.
    at that moment with the prices stored for it; the last allowed round is the
    BAFO; at most one BAFO, and nothing after it; a revised-offer request after the
    first carries a new ask (an unchanged one is the BAFO instead); a reminder
-   repeats a sent request, once. A supplier quoting a line above target got at
-   least one request.
+   repeats a sent request, once.
 2. `bafo_common_cutoff`: every BAFO of the RFQ carries the same cut-off, the one
    the RFQ shows, no later than the negotiation deadline, with the cut-off's date
    as its reply-by date.
 3. `final_round_only_bafo`: once the first BAFO is decided, every later request to
    any supplier is a BAFO: the final round is common.
 4. `no_bafo_after_final_offer`: nothing is asked in answer to an offer the supplier
-   declared its best and final.
-5. `asks_within_limits`: every price asked is above zero, below the line's maximum
-   and below the supplier's own price at that moment, in cents (BRL, quoted in
-   cents: at most 2 decimals).
+   declared its best and final (as the e-mail says, or as stored).
+5. `asks_within_limits`: every price asked is above zero, at or below the line's
+   maximum and below the supplier's own price at that moment, in cents (BRL,
+   quoted in cents: at most 2 decimals).
 6. `no_ask_in_target`: no price is asked on a line already at or below its target,
    or at or below our last ask on it.
 7. `no_concession_without_move`: the first ask on a line is its target rounded down
    to cents; an ask never goes down; it goes up only on a line whose price the
    supplier lowered since our previous ask, strictly between that ask and the new
-   price, by at most a quarter of the gap in a revised-offer request and half in
-   the BAFO (concede late, in labelled steps). A supplier that never moved gets no
-   concession.
+   price and below the maximum, by at most a quarter of the gap in a revised-offer
+   request and half in the BAFO (concede late, in labelled steps). A supplier that
+   never moved gets no concession.
 8. `late_line_date_ask`: a priced line whose delivery misses its need-by date
    (its lead time counted in calendar days from the request's order date: late
    under any reading), never asked for a date before, is asked "deliver by
@@ -53,11 +52,13 @@ for, or a shorter lead time on a line it asked a date for.
 9. `stops_without_progress`: a request after the first needs the supplier to have
    moved on what the previous one asked. A supplier that answered a request
    without moving gets nothing in that sweep, and the buyer sees "Needs your
-   decision" (or "Needs your answer", "Closed", a clarification).
-10. `moved_gets_next_request`: a supplier that moved on our request, with a price
-    still above target and above our last ask, rounds left and the final round
-    still open, gets its next request in that sweep, or the buyer sees why not (a
-    question, a review, a clarification).
+   decision" (or "Needs your answer" to its question, a clarification, or
+   "Closed" because it declined, withdrew or the negotiation closed).
+10. `request_when_due`: an offer to negotiate (a supplier's first offer, or one
+    that moved on our last request; not declared final, as written or as stored)
+    with a price above target and above our last ask, rounds left and the final
+    round still open, gets its request in the sweep that sees it, or the buyer sees
+    why not (a question, a review, a clarification, an e-mail on its way).
 11. `visible_state`: what the buyer sees matches what was sent. Before a sweep, the
     view's next action is what the sweep decides (the same kind and asks); after
     it, "Waiting for the supplier's ..." names the last request sent (until its
@@ -106,8 +107,14 @@ PHASE_WORDS: Final[Mapping[str, str]] = {
     "needs_answer": "Needs your answer",
     "closed": "Closed",
 }
-# The buyer is told why Bido does not ask.
-STOPPED: Final = frozenset({"needs_decision", "needs_answer", "closed"})
+# A request on its way or sent (`negotiation.service._live_cutoff`).
+LIVE: Final = frozenset({"decided", "proposed", "sent"})
+# After an answer that improved nothing we asked: the buyer decides, or answers the
+# supplier's question; or the negotiation ended for another reason the buyer sees.
+STOPPED: Final = frozenset({"needs_decision", "needs_answer"})
+ENDED: Final = frozenset({"supplier_declined", "offer_withdrawn", "negotiation_closed"})
+# A request already decided and on its way (being written, the daily cap, the mailbox).
+EMAIL_WAIT: Final = frozenset({"preparing_email", "daily_limit", "mailbox_not_connected"})
 
 
 # --- The record -------------------------------------------------------------------------------
@@ -243,8 +250,16 @@ class Negotiation:
     offers: Mapping[str, Mapping[int, Offer]]
     sweeps: tuple[Sweep, ...]
     emails: Mapping[str, tuple[Email, ...]] = field(default_factory=dict[str, tuple[Email, ...]])
-    # Per supplier, the offer versions it declared its best and final offer.
+    # Per supplier, the offer versions it declared its best and final offer (the e-mails).
     finals: Mapping[str, frozenset[int]] = field(default_factory=dict[str, frozenset[int]])
+    # Per supplier, the offer versions stored as declared final (what the planner read).
+    stored_finals: Mapping[str, frozenset[int]] = field(default_factory=dict[str, frozenset[int]])
+
+    def final_versions(self, supplier: str) -> frozenset[int]:
+        """The offer versions declared final, as written or as stored."""
+        return self.finals.get(supplier, frozenset()) | self.stored_finals.get(
+            supplier, frozenset()
+        )
 
     def sent(self, supplier: str) -> list[Request]:
         """The requests sent to the supplier (reminders apart), in order."""
@@ -396,14 +411,6 @@ def check_requests(n: Negotiation, supplier: str) -> list[str]:
                     f"round {request.round} {ask.part}: decided on {ask.offered}, the offer "
                     f"v{request.offer_version} says {quote.price}"
                 )
-    targets = n.limits.targets
-    above = any(
-        quote.price is not None and part in targets and quote.price > targets[part]
-        for offer in n.offers.get(supplier, {}).values()
-        for part, quote in offer.items()
-    )
-    if above and not sent:
-        problems.append("quoted above target, but never got a request")
     return problems
 
 
@@ -438,11 +445,12 @@ def check_cutoff(n: Negotiation) -> list[str]:
 
 def check_final_round(n: Negotiation) -> list[str]:
     """Rule 3: once the first BAFO is decided, every later request is a BAFO."""
+    # A BAFO that never reached a supplier (canceled, rejected, held) binds nobody.
     started = [
         r.sweep
         for s in n.suppliers
         for r in n.requests.get(s, ())
-        if r.kind == "bafo" and r.state != "canceled" and r.sweep is not None
+        if r.kind == "bafo" and r.state in LIVE and r.sweep is not None
     ]
     if not started:
         return []
@@ -459,12 +467,12 @@ def check_final_round(n: Negotiation) -> list[str]:
 
 
 def check_final_offers(n: Negotiation) -> list[str]:
-    """Rule 4: nothing is asked in answer to a final offer."""
+    """Rule 4: nothing is asked in answer to a final offer (as written or as stored)."""
     return [
         f"{s}: a {r.kind} ({r.state}) answers v{r.offer_version}, its declared final offer"
         for s in n.suppliers
         for r in n.requests.get(s, ())
-        if not r.reminder and r.offer_version in n.finals.get(s, frozenset())
+        if not r.reminder and r.offer_version in n.final_versions(s)
     ]
 
 
@@ -483,8 +491,8 @@ def check_limits(n: Negotiation) -> list[str]:
                     problems.append(f"{where}: not positive")
                 if ask.price != ask.price.quantize(CENT):
                     problems.append(f"{where}: more than 2 decimals")
-                if maximum is not None and ask.price >= maximum:
-                    problems.append(f"{where}: not below the maximum")
+                if maximum is not None and ask.price > maximum:
+                    problems.append(f"{where}: above the maximum {maximum}")
                 if offered is not None and ask.price >= offered:
                     problems.append(f"{where}: not below its own price {offered}")
     return problems
@@ -524,6 +532,7 @@ def check_concessions(n: Negotiation) -> list[str]:
                 now = n.price(s, request, ask)
                 where = f"{s} r{request.round} {ask.part} ask {ask.price}"
                 target = n.limits.targets.get(ask.part)
+                maximum = n.limits.maxima.get(ask.part)
                 if ask.part not in previous:
                     if target is not None and ask.price != floor_cents(target):
                         problems.append(f"{where}: the first ask is not the target {target}")
@@ -539,6 +548,8 @@ def check_concessions(n: Negotiation) -> list[str]:
                             )
                         elif not ask.price < now:
                             problems.append(f"{where}: conceded up to its price {now}")
+                        elif maximum is not None and not ask.price < maximum:
+                            problems.append(f"{where}: conceded up to the maximum {maximum}")
                         elif ask.price > last + (now - last) * share:
                             problems.append(
                                 f"{where}: conceded more than {share} of the gap {last}..{now}"
@@ -626,7 +637,9 @@ def check_progress(n: Negotiation) -> list[str]:
                 )
             after = sweep.after.get(s)
             if after is not None and not (
-                after.phase in STOPPED or after.reason.startswith("clarification")
+                after.phase in STOPPED
+                or after.reason in ENDED
+                or after.reason.startswith("clarification")
             ):
                 problems.append(
                     f"{s} day {sweep.day}: answered round {answer.request.round} without "
@@ -656,26 +669,58 @@ def _answer(n: Negotiation, supplier: str, sweep: int) -> Answer | None:
     if last.kind == "bafo" or version <= last.offer_version:
         return None
     offer = n.offers.get(supplier, {}).get(version)
-    if offer is None or version in n.finals.get(supplier, frozenset()):
+    if offer is None or version in n.final_versions(supplier):
         return None
     return Answer(last, offer, moved(last, offer))
 
 
-def check_next_request(n: Negotiation) -> list[str]:
-    """Rule 10: a supplier that moved gets its next request (or the buyer sees why not)."""
+def _to_negotiate(n: Negotiation, supplier: str, sweep: int) -> tuple[Offer, Request | None] | None:
+    """The supplier's newest offer the sweep sees, when it is one to negotiate: its first
+    offer, or a newer one that moved on our last request (not after a BAFO, not final).
+    With the last request sent before the sweep (None: the first offer)."""
+    view = n.sweeps[sweep].before.get(supplier)
+    if view is None or view.offer_version is None:
+        return None
+    version = view.offer_version
+    offer = n.offers.get(supplier, {}).get(version)
+    if offer is None or version in n.final_versions(supplier):
+        return None
+    sent = n.sent_before(supplier, sweep)
+    if not sent:
+        return offer, None
+    last = sent[-1]
+    if last.kind == "bafo" or version <= last.offer_version or not moved(last, offer):
+        return None
+    return offer, last
+
+
+def _why_not(view: SupplierView | None) -> bool:
+    """The buyer sees why no request goes out: a question, a review, a clarification, an
+    e-mail already on its way."""
+    return view is not None and (
+        view.phase in ("needs_answer", "held_for_approval")
+        or (view.phase == "needs_decision" and view.reason != "no_progress")
+        or view.reason.startswith("clarification")
+        or view.reason in EMAIL_WAIT
+    )
+
+
+def check_request_due(n: Negotiation) -> list[str]:
+    """Rule 10: an offer to negotiate gets its request (or the buyer sees why not)."""
     problems: list[str] = []
     deadline = n.limits.deadline
     targets = n.limits.targets
     for s in n.suppliers:
         for index, sweep in enumerate(n.sweeps):
-            answer = _answer(n, s, index)
-            if answer is None or not answer.moved:
+            found = _to_negotiate(n, s, index)
+            if found is None:
                 continue
+            offer, last = found
             before = n.sent_before(s, index)
             asked = last_asks(before)
             due = sorted(
                 part
-                for part, quote in answer.offer.items()
+                for part, quote in offer.items()
                 if quote.price is not None
                 and not quote.review
                 and part in targets
@@ -691,16 +736,13 @@ def check_next_request(n: Negotiation) -> list[str]:
             if any(not r.reminder for r in n.decided_in(s, index)):
                 continue
             after = sweep.after.get(s)
-            if after is not None and (
-                after.phase in ("needs_answer", "held_for_approval")
-                or (after.phase == "needs_decision" and after.reason != "no_progress")
-                or after.reason.startswith("clarification")
-            ):
+            if _why_not(after):
                 continue
+            what = f"moved on round {last.round}" if last is not None else "quoted"
             shown = after.label if after is not None else None
             problems.append(
-                f"{s} day {sweep.day}: moved on round {answer.request.round} with {due} still "
-                f"above target, but got no request; the buyer sees {shown!r}"
+                f"{s} day {sweep.day}: {what} with {due} above target, but got no request; "
+                f"the buyer sees {shown!r}"
             )
     return problems
 
@@ -862,7 +904,7 @@ RULES: Final[tuple[tuple[str, Rule], ...]] = (
     ("no_concession_without_move", check_concessions),
     ("late_line_date_ask", check_late_lines),
     ("stops_without_progress", check_progress),
-    ("moved_gets_next_request", check_next_request),
+    ("request_when_due", check_request_due),
     ("visible_state", check_visible),
     ("email_matches_decision", check_emails),
 )

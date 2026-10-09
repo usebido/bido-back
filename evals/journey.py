@@ -115,6 +115,7 @@ from bido_back.mandates.schemas import ApproveMandateArgs, ProposeMandateRequest
 from bido_back.negotiation.decision import decision_of
 from bido_back.negotiation.schemas import LineLimitsUpdate, RfqNegotiation
 from bido_back.negotiation.service import get_negotiation
+from bido_back.negotiation.signals import offer_signals
 from bido_back.onboarding.service import store_upload
 from bido_back.purchasing.sources.contracts import PlanningScope, SourceAssessment
 from bido_back.purchasing.sources.mapping import default_mapper
@@ -1881,6 +1882,16 @@ async def negotiation_record(j: Journey) -> rules.Negotiation:
             offers[suppliers[invite_id]].setdefault(version, {})[part or str(line.rfq_line_id)] = (
                 rules.Quote(line.unit_price, line.lead_time_days, line.needs_review)
             )
+        stored_finals: dict[str, set[int]] = defaultdict(set)
+        for invite_id, version, fields in (
+            await session.execute(
+                select(Proposal.invite_id, Proposal.version, Proposal.fields).where(
+                    Proposal.invite_id.in_(list(suppliers))
+                )
+            )
+        ).all():
+            if offer_signals(fields).final_offer:
+                stored_finals[suppliers[invite_id]].add(version)
         followups = set(
             await session.scalars(
                 select(FollowupMessage.message_id_header).where(
@@ -1923,6 +1934,7 @@ async def negotiation_record(j: Journey) -> rules.Negotiation:
             for s in SUPPLIERS
         },
         finals=declared_finals(j),
+        stored_finals={k: frozenset(v) for k, v in stored_finals.items()},
     )
 
 
