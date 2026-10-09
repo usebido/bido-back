@@ -38,6 +38,7 @@ from bido_back.branding import service
 from bido_back.branding.schemas import (
     BrandingView,
     CompleteLogoUploadRequest,
+    LogoBackgroundRequest,
     LogoFileLink,
     LogoList,
     LogoUploadForm,
@@ -156,6 +157,27 @@ def branding_router() -> APIRouter:
         except service.BrandingError as exc:
             raise branding_http_error(exc) from None
 
+    @router.post(
+        "/logos/{logo_id}/background",
+        responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_422_UNPROCESSABLE_CONTENT),
+    )
+    async def set_logo_background(  # pyright: ignore[reportUnusedFunction]
+        logo_id: UUID,
+        body: LogoBackgroundRequest,
+        principal: CurrentPrincipal,
+        db: Db,
+        storage: Storage,
+    ) -> LogoView:
+        """Remove the detected plain or checkerboard background (`remove: true`), or keep
+        or restore it (`remove: false`). Rebuilt from the original upload each time; 422
+        when there is no background to remove or the logo is an SVG."""
+        try:
+            return await service.set_logo_background(
+                db, storage, principal, logo_id, remove=body.remove
+            )
+        except service.BrandingError as exc:
+            raise branding_http_error(exc) from None
+
     @router.post("/logos/{logo_id}/default", responses=error_responses(status.HTTP_404_NOT_FOUND))
     async def make_default_logo(  # pyright: ignore[reportUnusedFunction]
         logo_id: UUID, principal: CurrentPrincipal, db: Db
@@ -186,10 +208,13 @@ def branding_router() -> APIRouter:
         principal: CurrentPrincipal,
         db: Db,
         links: Annotated[DownloadLinks, Depends(get_download_links)],
+        variant: service.LogoVariant = "current",
     ) -> LogoFileLink:
-        """A short-lived link serving the image inline, for an `<img>` tag."""
+        """A short-lived link serving the image inline, for an `<img>` tag. `variant`
+        `with_background` / `without_background` shows both versions of a logo whose
+        background can be removed (404 otherwise), to compare before choosing."""
         try:
-            return await service.logo_link(db, links, principal, logo_id)
+            return await service.logo_link(db, links, principal, logo_id, variant)
         except service.BrandingError as exc:
             raise branding_http_error(exc) from None
 

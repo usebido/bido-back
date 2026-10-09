@@ -1,7 +1,7 @@
 """API shapes for `/v1/company`: branding details and the logo library."""
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
@@ -13,6 +13,23 @@ LongText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=20
 AccentColor = Annotated[str, StringConstraints(pattern=r"^#[0-9A-Fa-f]{6}$")]
 
 
+LogoAlign = Literal["left", "center", "right"]
+
+
+class LogoPlacement(BaseModel):
+    """Where the logo sits in its reserved box at the top of the RFQ document."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    scale: float = Field(
+        default=1.0, ge=0.5, le=2.0, description="1 = the standard logo height; 0.5 to 2"
+    )
+    align: LogoAlign = "left"
+    offset_y: int = Field(
+        default=0, ge=-20, le=20, description="Vertical nudge in document points (−20 to 20)"
+    )
+
+
 class LogoView(BaseModel):
     id: UUID
     name: str
@@ -22,6 +39,20 @@ class LogoView(BaseModel):
     height: int | None
     created_at: datetime
     is_default: bool = Field(description="The company's default logo for RFQ documents")
+    background_removable: bool = Field(
+        default=False,
+        description="An opaque plain or checkerboard background was detected and can be removed",
+    )
+    background_removed: bool = Field(
+        default=False, description="The background was removed; restore brings it back"
+    )
+    prepared: bool = Field(
+        default=True,
+        description=(
+            "False for a raster logo uploaded before preparation existed: "
+            "POST its /background with remove=false once to trim it and detect a background"
+        ),
+    )
 
 
 class BrandingView(BaseModel):
@@ -38,6 +69,7 @@ class BrandingView(BaseModel):
     )
     accent_color: str | None = Field(default=None, description="#RRGGBB")
     default_logo: LogoView | None = None
+    logo_placement: LogoPlacement = Field(default_factory=LogoPlacement)
     updated_at: datetime | None = None
 
 
@@ -55,6 +87,8 @@ class UpdateBrandingRequest(BaseModel):
     default_footer: LongText | None = None
     accent_color: AccentColor | None = None
     default_logo_id: UUID | None = None
+    # Missing or null = the standard placement (scale 1, left, no offset).
+    logo_placement: LogoPlacement | None = None
 
 
 class LogoList(BaseModel):
@@ -96,6 +130,14 @@ class RenameLogoRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)]
+
+
+class LogoBackgroundRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    remove: bool = Field(
+        description="true: make the detected background transparent; false: keep or restore it"
+    )
 
 
 class LogoFileLink(BaseModel):

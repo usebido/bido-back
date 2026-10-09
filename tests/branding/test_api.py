@@ -10,7 +10,7 @@ import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from PIL import Image
+from PIL import Image, ImageDraw
 from sqlalchemy import delete, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -281,7 +281,9 @@ async def test_an_rfq_picks_its_logo_and_footer_while_draft(
             api.sessionmaker, api.storage, api.people.tenant, rfq_id
         )
         assert branding.company_name == "Acme" and branding.footer_text == "Padrão"
-        assert branding.logo_bytes == _png() and branding.logo_content_type == "image/png"
+        # The prepared logo: a PNG of the same mark (a solid block has no margins to trim).
+        assert branding.logo_bytes is not None and branding.logo_content_type == "image/png"
+        assert Image.open(io.BytesIO(branding.logo_bytes)).size == (300, 100)
 
         patched = await http.patch(
             f"/v1/rfqs/{rfq_id}",
@@ -308,3 +310,141 @@ async def test_an_rfq_picks_its_logo_and_footer_while_draft(
     async with api.client() as http:
         frozen = await http.patch(f"/v1/rfqs/{rfq_id}", json={"logo_asset_id": special["id"]})
         assert frozen.status_code == 409
+
+
+def _logo_on_white() -> bytes:
+    """A mark with wide white margins, as many logos found online are."""
+    image = Image.new("RGB", (400, 200), (255, 255, 255))
+    ImageDraw.Draw(image).ellipse((150, 50, 250, 150), fill=(220, 30, 30))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+@pytest.mark.db
+async def test_uploads_are_prepared_and_the_background_can_be_removed_and_restored(
+    api: Api,
+) -> None:
+    async with api.client() as http:
+        logo = await api.upload(http, "acme.png", _logo_on_white())
+        original_key = f"branding/{api.people.tenant}/{logo['id']}.png"
+        assert api.storage.blobs[original_key] == _logo_on_white()  # the upload, untouched
+        assert (logo["width"], logo["height"]) == (109, 109)  # margins trimmed
+        assert logo["background_removable"] is True and logo["background_removed"] is False
+        assert logo["prepared"] is True
+
+        # Both versions exist from the upload on, to compare before choosing.
+        for variant, suffix in (
+            ("with_background", ".prepared.png"),
+            ("without_background", ".nobg.png"),
+        ):
+            shown = await http.get(
+                f"/v1/company/logos/{logo['id']}/file", params={"variant": variant}
+            )
+            assert shown.status_code == 200, shown.text
+            assert api.links.calls[-1][0].endswith(suffix)
+            assert api.links.calls[-1][0] in api.storage.blobs
+
+        removed = await http.post(
+            f"/v1/company/logos/{logo['id']}/background", json={"remove": True}
+        )
+        assert removed.status_code == 200, removed.text
+        assert removed.json()["background_removed"] is True
+        nobg = api.storage.blobs[f"branding/{api.people.tenant}/{logo['id']}.nobg.png"]
+        corner = Image.open(io.BytesIO(nobg)).convert("RGBA").getpixel((0, 0))
+        assert isinstance(corner, tuple) and corner[3] == 0
+
+        await http.get(f"/v1/company/logos/{logo['id']}/file")
+        assert api.links.calls[-1][0].endswith(".nobg.png")  # what is shown and printed
+
+        restored = await http.post(
+            f"/v1/company/logos/{logo['id']}/background", json={"remove": False}
+        )
+        assert restored.json()["background_removed"] is False
+        await http.get(f"/v1/company/logos/{logo['id']}/file")
+        assert api.links.calls[-1][0].endswith(".prepared.png")
+
+
+@pytest.mark.db
+async def test_background_removal_is_refused_when_there_is_none(api: Api) -> None:
+    async with api.client() as http:
+        transparent = Image.new("RGBA", (200, 100), (0, 0, 0, 0))
+        ImageDraw.Draw(transparent).rectangle((50, 25, 150, 75), fill=(10, 10, 10, 255))
+        buffer = io.BytesIO()
+        transparent.save(buffer, format="PNG")
+        logo = await api.upload(http, "clean.png", buffer.getvalue())
+        assert logo["background_removable"] is False
+        no_variant = await http.get(
+            f"/v1/company/logos/{logo['id']}/file", params={"variant": "without_background"}
+        )
+        assert no_variant.status_code == 404
+        refused = await http.post(
+            f"/v1/company/logos/{logo['id']}/background", json={"remove": True}
+        )
+        assert refused.status_code == 422
+
+
+@pytest.mark.db
+async def test_a_logo_from_before_preparation_is_prepared_on_request(
+    api: Api, app_engine: AsyncEngine
+) -> None:
+    logo_id = uuid4()
+    key = f"branding/{api.people.tenant}/{logo_id}.png"
+    api.storage.blobs[key] = _logo_on_white()
+    async with tenant_session(app_engine, api.people.tenant) as session:
+        session.add(
+            CompanyLogo(
+                id=logo_id,
+                tenant_id=api.people.tenant,
+                name="old",
+                content_type="image/png",
+                size_bytes=len(_logo_on_white()),
+                width=400,
+                height=200,
+                storage_key=key,
+            )
+        )
+    async with api.client() as http:
+        listed = (await http.get("/v1/company/logos")).json()["logos"]
+        assert [each["prepared"] for each in listed] == [False]
+        prepared = await http.post(
+            f"/v1/company/logos/{logo_id}/background", json={"remove": False}
+        )
+        assert prepared.status_code == 200, prepared.text
+        body = prepared.json()
+        assert body["prepared"] is True and body["background_removable"] is True
+        assert (body["width"], body["height"]) == (109, 109)
+        assert api.storage.blobs[key] == _logo_on_white()  # the original stays
+
+
+@pytest.mark.db
+async def test_logo_placement_defaults_bounds_and_rfq_override(
+    api: Api, app_engine: AsyncEngine
+) -> None:
+    rfq_id = await _draft_rfq(app_engine, api.people)
+    async with api.client() as http:
+        assert (await http.get("/v1/company/branding")).json()["logo_placement"] == {
+            "scale": 1.0,
+            "align": "left",
+            "offset_y": 0,
+        }
+        for bad in ({"scale": 3}, {"scale": 0.2}, {"align": "top"}, {"offset_y": 40}):
+            refused = await http.put("/v1/company/branding", json={"logo_placement": bad})
+            assert refused.status_code == 422, bad
+        saved = await http.put(
+            "/v1/company/branding",
+            json={"logo_placement": {"scale": 1.5, "align": "center", "offset_y": -6}},
+        )
+        assert saved.json()["logo_placement"] == {"scale": 1.5, "align": "center", "offset_y": -6}
+
+        rfq = (await http.get(f"/v1/rfqs/{rfq_id}")).json()
+        assert rfq["logo_placement"] is None  # the company default
+        patched = await http.patch(
+            f"/v1/rfqs/{rfq_id}", json={"logo_placement": {"scale": 0.75, "align": "right"}}
+        )
+        assert patched.status_code == 200, patched.text
+        assert patched.json()["logo_placement"] == {"scale": 0.75, "align": "right", "offset_y": 0}
+        cleared = await http.patch(f"/v1/rfqs/{rfq_id}", json={"logo_placement": None})
+        assert cleared.json()["logo_placement"] is None
+        bad = await http.patch(f"/v1/rfqs/{rfq_id}", json={"logo_placement": {"scale": 9}})
+        assert bad.status_code == 422

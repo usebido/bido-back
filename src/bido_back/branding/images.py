@@ -16,10 +16,11 @@ need a native renderer (cairo/resvg) in the image; sanitizing needs nothing new.
 import io
 import re
 import xml.etree.ElementTree as ET  # noqa: S405  # input is checked for DTD/entities first
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Final, Literal
+from typing import Final, Literal, cast
 
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageOps, UnidentifiedImageError
 
 MAX_LOGO_BYTES: Final = 2 * 1024 * 1024
 # Pillow refuses anything larger (decompression bombs); logos are far smaller.
@@ -229,6 +230,240 @@ def _namespace(tag: str) -> str:
     return tag[1:].split("}", 1)[0] if tag.startswith("{") else ""
 
 
+# --- Preparing a raster logo: orientation, transparency, margins, background -------------
+#
+# Logos found online are often PNGs with no transparency at all: a white or a baked-in
+# grey-and-white checkerboard "transparent" background, and wide blank margins that make
+# the mark tiny in the RFQ header. Preparing a logo:
+#
+# * applies the EXIF orientation and turns every mode into RGB or RGBA (palette PNGs
+#   with a tRNS chunk, LA, 16-bit and CMYK images keep their transparency or colours);
+# * detects an opaque, near-uniform background from the border pixels: at most three
+#   colours (a plain fill, or a checkerboard) covering almost the whole border;
+# * trims the blank margins around the mark (always, a few pixels of padding kept);
+# * on request, removes that background: a flood fill from the edges over pixels close
+#   to the background colours, so enclosed areas of the same colour (the white inside a
+#   letter) stay; the edge is feathered by one pixel.
+#
+# Everything is deterministic Pillow code, no model. The result is a PNG (RGBA when it
+# has transparency), never a JPEG, so transparency is never lost.
+
+_PREPARE_MAX_SIDE: Final = 1600
+_BG_TOLERANCE: Final = 30
+_BG_COVERAGE: Final = 0.92
+_BG_MAX_COLOURS: Final = 3
+_TRIM_PADDING: Final = 4
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedLogo:
+    data: bytes
+    content_type: LogoType
+    width: int
+    height: int
+    background_removable: bool
+    background_removed: bool
+
+
+def prepare_raster_logo(
+    data: bytes, content_type: LogoType, *, remove_background: bool = False
+) -> PreparedLogo | None:
+    """The logo as stored for display and documents; None for an SVG (kept as a vector).
+
+    Raises `InvalidLogo` when the image cannot be read.
+    """
+    if content_type == "image/svg+xml":
+        return None
+    image = _open_normalized(data)
+    background = _background_colours(image)
+    removed = False
+    flooded = _flood_background(image, background) if background is not None else None
+    if flooded is not None and _content_box(flooded) is None:
+        background = flooded = None  # all background, no mark: nothing to separate
+    if background is not None and flooded is not None:
+        if remove_background:
+            image = _without(image, flooded)
+            removed = True
+        image = _trim(image, content_box=_content_box(flooded))
+    elif _has_alpha(image):
+        image = _trim(image, content_box=_apply(image.getchannel("A"), _over(8)).getbbox())
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG", optimize=True)
+    return PreparedLogo(
+        data=buffer.getvalue(),
+        content_type="image/png",
+        width=image.width,
+        height=image.height,
+        background_removable=background is not None,
+        background_removed=removed,
+    )
+
+
+def _open_normalized(data: bytes) -> Image.Image:
+    previous = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = MAX_LOGO_PIXELS
+    try:
+        with Image.open(io.BytesIO(data)) as opened:
+            opened.load()
+            image = ImageOps.exif_transpose(opened) or opened.copy()
+    except (UnidentifiedImageError, OSError, SyntaxError, Image.DecompressionBombError):
+        raise InvalidLogo("the image cannot be read") from None
+    finally:
+        Image.MAX_IMAGE_PIXELS = previous
+    image = _to_rgb_or_rgba(image)
+    if max(image.size) > _PREPARE_MAX_SIDE:
+        image.thumbnail((_PREPARE_MAX_SIDE, _PREPARE_MAX_SIDE), Image.Resampling.LANCZOS)
+    return image
+
+
+def _to_rgb_or_rgba(image: Image.Image) -> Image.Image:
+    mode = image.mode
+    if mode in ("RGB", "RGBA"):
+        return image
+    if mode in ("P", "PA", "LA", "La", "RGBa"):
+        converted = image.convert("RGBA")
+    elif mode in ("I;16", "I;16B", "I;16L", "I;16N", "I"):
+        # 16/32-bit greyscale: scale to 8 bits before converting.
+        extrema = image.getextrema()
+        top = extrema[1] if isinstance(extrema[1], (int, float)) else 255
+        scale = 255 / top if top > 255 else 1.0
+        converted = image.point(lambda value: value * scale).convert("L").convert("RGB")  # pyright: ignore[reportUnknownLambdaType, reportOperatorIssue, reportUnknownMemberType]
+    elif mode == "F":
+        converted = image.convert("L").convert("RGB")
+    else:  # "1", "L", "CMYK", "YCbCr", "LAB", "HSV"
+        converted = image.convert("RGB")
+    if converted.mode == "RGBA" and _min_alpha(converted) == 255:
+        return converted.convert("RGB")
+    return converted
+
+
+def _has_alpha(image: Image.Image) -> bool:
+    return image.mode == "RGBA" and _min_alpha(image) < 250
+
+
+def _lut(test: Callable[[int], bool]) -> list[int]:
+    """A Pillow `point()` table for an L image: 255 where `test` holds, else 0."""
+    return [255 if test(value) else 0 for value in range(256)]
+
+
+def _over(threshold: int) -> list[int]:
+    return _lut(lambda value: value > threshold)
+
+
+_NOT_FLOODED: Final = _lut(lambda value: value != 128)
+
+
+def _apply(image: Image.Image, table: list[int]) -> Image.Image:
+    """`image.point(table)`, typed (Pillow's stub leaves the argument partly unknown)."""
+    return image.point(table)  # pyright: ignore[reportUnknownMemberType]
+
+
+def _min_alpha(image: Image.Image) -> int:
+    low = image.getchannel("A").getextrema()[0]
+    return int(low) if isinstance(low, (int, float)) else 255
+
+
+def _border_pixels(image: Image.Image) -> list[tuple[int, ...]]:
+    width, height = image.size
+    rgba = image.convert("RGBA")
+    points = [(x, 0) for x in range(width)] + [(x, height - 1) for x in range(width)]
+    inner = range(1, height - 1)
+    points += [(0, y) for y in inner] + [(width - 1, y) for y in inner]
+    return [cast(tuple[int, ...], rgba.getpixel(point)) for point in points]
+
+
+def _background_colours(image: Image.Image) -> list[tuple[int, int, int]] | None:
+    """The opaque border's few colours (a plain fill or a checkerboard), or None."""
+    if image.width < 8 or image.height < 8:
+        return None
+    border = _border_pixels(image)
+    if sum(1 for pixel in border if pixel[3] < 250) > len(border) * 0.05:
+        return None  # already transparent at the edges
+    buckets: dict[tuple[int, int, int], list[tuple[int, int, int]]] = {}
+    for red, green, blue, _alpha in border:
+        buckets.setdefault((red // 24, green // 24, blue // 24), []).append((red, green, blue))
+    ranked = sorted(buckets.values(), key=len, reverse=True)
+    covered = 0
+    colours: list[tuple[int, int, int]] = []
+    for group in ranked[:_BG_MAX_COLOURS]:
+        covered += len(group)
+        count = len(group)
+        colours.append(
+            (
+                sum(pixel[0] for pixel in group) // count,
+                sum(pixel[1] for pixel in group) // count,
+                sum(pixel[2] for pixel in group) // count,
+            )
+        )
+        if covered >= len(border) * _BG_COVERAGE:
+            return colours
+    return None
+
+
+def _near_background(image: Image.Image, colours: list[tuple[int, int, int]]) -> Image.Image:
+    """An L mask: 255 where the pixel is within the tolerance of a background colour."""
+    rgb = image.convert("RGB")
+    mask: Image.Image | None = None
+    for colour in colours:
+        diff = ImageChops.difference(rgb, Image.new("RGB", rgb.size, colour))
+        red, green, blue = diff.split()
+        distance = ImageChops.lighter(ImageChops.lighter(red, green), blue)
+        near = _apply(distance, _lut(lambda value: value <= _BG_TOLERANCE))
+        mask = near if mask is None else ImageChops.lighter(mask, near)
+    assert mask is not None
+    return mask
+
+
+def _flood_background(image: Image.Image, colours: list[tuple[int, int, int]]) -> Image.Image:
+    """An L mask: 128 on background pixels connected to the image's edge, else 0 or 255."""
+    mask = _near_background(image, colours)
+    width, height = mask.size
+    edge = [(x, 0) for x in range(width)] + [(x, height - 1) for x in range(width)]
+    edge += [(0, y) for y in range(height)] + [(width - 1, y) for y in range(height)]
+    for point in edge:
+        if mask.getpixel(point) == 255:
+            ImageDraw.floodfill(mask, point, 128, thresh=0)
+    return mask
+
+
+def _content_box(flooded: Image.Image) -> tuple[int, int, int, int] | None:
+    """Where the mark is: everything but the edge-connected background, ignoring specks
+    of a few pixels (JPEG noise, faint watermarks) that would keep the margins wide."""
+    content = _apply(flooded, _NOT_FLOODED)
+    core = content.filter(ImageFilter.MinFilter(5)).getbbox()  # erodes 2px on every side
+    if core is None:
+        return content.getbbox()
+    left, top, right, bottom = core
+    return (
+        max(0, left - 2),
+        max(0, top - 2),
+        min(content.width, right + 2),
+        min(content.height, bottom + 2),
+    )
+
+
+def _without(image: Image.Image, flooded: Image.Image) -> Image.Image:
+    """The image with the flooded background made transparent, the edge feathered 1px."""
+    keep = _apply(flooded, _NOT_FLOODED)
+    soft = ImageChops.darker(keep, keep.filter(ImageFilter.GaussianBlur(0.75)))
+    rgba = image.convert("RGBA")
+    rgba.putalpha(ImageChops.darker(rgba.getchannel("A"), soft))
+    return rgba
+
+
+def _trim(image: Image.Image, *, content_box: tuple[int, int, int, int] | None) -> Image.Image:
+    if content_box is None:
+        return image
+    left, top, right, bottom = content_box
+    box = (
+        max(0, left - _TRIM_PADDING),
+        max(0, top - _TRIM_PADDING),
+        min(image.width, right + _TRIM_PADDING),
+        min(image.height, bottom + _TRIM_PADDING),
+    )
+    return image if box == (0, 0, image.width, image.height) else image.crop(box)
+
+
 # --- For the RFQ document -----------------------------------------------------------------
 
 # The RFQ document carries the logo inside the approved arguments (base64), so it is kept
@@ -264,9 +499,14 @@ def logo_for_document(data: bytes, content_type: str) -> tuple[bytes, DocumentLo
         converted.convert("RGB").save(buffer, format="JPEG", quality=85, optimize=True)
         media: DocumentLogoType = "image/jpeg"
     else:
-        if converted.mode not in ("RGB", "RGBA", "L", "LA", "P"):
-            converted = converted.convert("RGBA")
+        converted = _to_rgb_or_rgba(converted)
         converted.save(buffer, format="PNG", optimize=True)
         media = "image/png"
+        if len(buffer.getvalue()) > MAX_DOCUMENT_LOGO_BYTES and converted.mode == "RGB":
+            # A photo-like opaque image: JPEG fits where PNG does not, and loses nothing
+            # of a transparency it does not have.
+            buffer = io.BytesIO()
+            converted.save(buffer, format="JPEG", quality=85, optimize=True)
+            media = "image/jpeg"
     out = buffer.getvalue()
     return (out, media) if len(out) <= MAX_DOCUMENT_LOGO_BYTES else None
