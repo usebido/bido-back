@@ -4,7 +4,9 @@
   `POST /v1/onboarding/uploads`, or both (files alone mean "import and analyse
   them"; neither is a 422); the response is a Server-Sent Events
   stream (`text/event-stream`). Every event is `event: <type>` plus one JSON
-  `data:` line with a `type` field:
+  `data:` line with a `type` field. While no event comes for 15 s (a long
+  tool), the stream sends a `: keep-alive` comment line, which SSE clients
+  ignore, so proxies do not close it as idle:
 
   - `conversation` `{conversation_id, run_id}`: always first. Send the
     conversation id back with the next message to continue the conversation.
@@ -45,10 +47,12 @@
   conversation (1-120 characters); it is never renamed automatically after that.
 """
 
+import asyncio
+import contextlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Final
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -69,14 +73,18 @@ from bido_back.api.rfqs import error_responses
 from bido_back.auth import Principal
 from bido_back.copilot import service
 from bido_back.copilot.contracts import (
+    MAX_ATTACHMENTS,
+    MAX_MESSAGE_CHARS,
     ConversationList,
     ConversationSummary,
     ConversationView,
+    CopilotLimits,
     CopilotMessageRequest,
     RenameConversationRequest,
     StreamItem,
 )
 from bido_back.copilot.titles import Titler, default_titler
+from bido_back.onboarding.service import MAX_DIRECT_UPLOAD_BYTES, UPLOAD_EXTENSIONS
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.storage import BlobStorage
@@ -127,9 +135,52 @@ def _sse(item: StreamItem) -> str:
     return f"event: {kind}\ndata: {json.dumps(data, ensure_ascii=False, separators=(',', ':'))}\n\n"
 
 
-async def _stream(items: AsyncIterator[StreamItem]) -> AsyncIterator[str]:
-    async for item in items:
-        yield _sse(item)
+# A comment line, which SSE clients ignore. Sent while nothing else is: a load balancer
+# closes a connection that carries no bytes for its idle timeout (300 s on the dev ALB),
+# and one tool (a long source analysis) can run longer than that.
+KEEP_ALIVE: Final = ": keep-alive\n\n"
+KEEP_ALIVE_SECONDS: Final = 15.0
+
+
+class _Done:
+    """The end of the copilot's events, on the queue."""
+
+
+async def _stream(
+    items: AsyncIterator[StreamItem], keep_alive: float = KEEP_ALIVE_SECONDS
+) -> AsyncGenerator[str]:
+    """The copilot's events as SSE, with a keep-alive comment when none came for a while.
+
+    One task drains `items` into a queue, so the turn runs in a single task as before
+    (its log context and its cancellation when the client goes away are unchanged);
+    this generator only waits on the queue, which is safe to time out.
+    """
+    queue: asyncio.Queue[StreamItem | _Done] = asyncio.Queue()
+
+    async def drain() -> None:
+        try:
+            async for item in items:
+                queue.put_nowait(item)
+        finally:
+            queue.put_nowait(_Done())
+
+    task = asyncio.create_task(drain())
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=keep_alive)
+            except TimeoutError:
+                yield KEEP_ALIVE
+                continue
+            if isinstance(item, _Done):
+                break
+            yield _sse(item)
+        await task  # re-raises what the turn raised
+    finally:
+        if not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
 
 def copilot_router() -> APIRouter:
@@ -158,6 +209,19 @@ def copilot_router() -> APIRouter:
             _stream(service.stream_message(deps, prepared)),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    @router.get("/limits")
+    async def limits(  # pyright: ignore[reportUnusedFunction]
+        principal: CurrentPrincipal,
+    ) -> CopilotLimits:
+        """What one message may carry: files, text and upload size. The front reads it."""
+        del principal  # signed-in callers only, like the rest of the copilot
+        return CopilotLimits(
+            max_attachments=MAX_ATTACHMENTS,
+            max_message_chars=MAX_MESSAGE_CHARS,
+            max_upload_bytes=MAX_DIRECT_UPLOAD_BYTES,
+            accepted_extensions=sorted(UPLOAD_EXTENSIONS),
         )
 
     @router.get("/conversations")

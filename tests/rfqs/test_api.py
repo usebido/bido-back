@@ -75,6 +75,7 @@ async def test_routes_require_authentication() -> None:
             ),
             await http.delete(f"/v1/rfqs/{uuid4()}/lines/{uuid4()}"),
             await http.delete(f"/v1/rfqs/{uuid4()}/invites/{uuid4()}"),
+            await http.get(f"/v1/rfqs/{uuid4()}/invites/{uuid4()}/document.pdf"),
         ]
     assert [r.status_code for r in responses] == [401] * len(responses)
 
@@ -202,6 +203,10 @@ async def test_rfq_flow_over_http(api: Api, rfq_rows: People) -> None:
     assert email["to"] == ["jonas@rhein.example.test"]
     assert email["subject"].startswith("[RFQ-1] ")
     assert email["sender_user_id"] == str(rfq_rows.owner)
+    # The approver previews the HTML version and the attached RFQ document.
+    assert "<table" in (email["html_body"] or "")
+    attachment = email["attachment_name"]
+    assert attachment.startswith("RFQ-1-") and attachment.endswith(".pdf")
 
     comparison = await http.get(f"/v1/rfqs/{rfq['id']}/comparison")
     assert comparison.status_code == 200, comparison.text
@@ -412,3 +417,24 @@ async def test_draft_rfq_is_editable_over_http_until_an_email_is_prepared(
         await http.post(f"/v1/rfqs/{rfq_id}/lines", json={"description": "x", "quantities": [1]})
     ).status_code == 404
     assert (await http.delete(f"/v1/rfqs/{rfq_id}/invites/{kept['id']}")).status_code == 404
+
+
+@pytest.mark.db
+async def test_invite_document_pdf_over_http(api: Api, rfq_rows: People) -> None:
+    http = api.http
+    rfq = (
+        await http.post("/v1/rfqs", json={"text": "Need MLCC and connectors", "currency": "EUR"})
+    ).json()
+    invite = await _invite(http, rfq["id"], "Elbe", "sales@elbe.example.test")
+    response = await http.get(f"/v1/rfqs/{rfq['id']}/invites/{invite['id']}/document.pdf")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["content-disposition"].startswith('inline; filename="RFQ-')
+    assert response.headers["cache-control"] == "no-store"
+    assert response.content.startswith(b"%PDF")
+
+    missing = await http.get(f"/v1/rfqs/{rfq['id']}/invites/{uuid4()}/document.pdf")
+    assert missing.status_code == 404
+    api.principal = Principal(tenant_id=rfq_rows.other_tenant, user_id=rfq_rows.other_approver)
+    other = await http.get(f"/v1/rfqs/{rfq['id']}/invites/{invite['id']}/document.pdf")
+    assert other.status_code == 404

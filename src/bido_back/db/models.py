@@ -18,6 +18,7 @@ from pydantic import JsonValue
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    Computed,
     Date,
     DateTime,
     ForeignKey,
@@ -25,6 +26,7 @@ from sqlalchemy import (
     Integer,
     LargeBinary,
     Numeric,
+    SmallInteger,
     Text,
     UniqueConstraint,
     Uuid,
@@ -33,7 +35,7 @@ from sqlalchemy import (
     text,
     true,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, JSONB
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 MEMBERSHIP_ROLES = ("member", "approver", "owner")
@@ -270,6 +272,72 @@ class Rfq(Base):
     comparison_policy: Mapped[dict[str, JsonValue]] = mapped_column(
         JSONB, server_default=text("'{}'::jsonb")
     )
+    # The buyer's branding on this RFQ's document (migration 0031): a logo from the
+    # company's library (None = the company default) and terms that replace the
+    # company's default footer (None = the default).
+    logo_asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("company_logos.id", ondelete="SET NULL")
+    )
+    footer_override: Mapped[str | None] = mapped_column(Text)
+    # Where this RFQ's logo sits in its box (migration 0033); None = the company default.
+    logo_scale: Mapped[Decimal | None] = mapped_column(Numeric(3, 2))
+    logo_align: Mapped[str | None] = mapped_column(Text)
+    logo_offset_y: Mapped[int | None] = mapped_column(SmallInteger)
+
+
+class CompanyBranding(Base):
+    """How the buyer's company presents itself on RFQ documents (migration 0031).
+
+    One row per tenant, created on first save; every field is optional.
+    """
+
+    __tablename__ = "company_branding"
+
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    legal_name: Mapped[str | None] = mapped_column(Text)
+    trade_name: Mapped[str | None] = mapped_column(Text)
+    tax_id: Mapped[str | None] = mapped_column(Text)
+    address: Mapped[str | None] = mapped_column(Text)
+    phone: Mapped[str | None] = mapped_column(Text)
+    website: Mapped[str | None] = mapped_column(Text)
+    default_footer: Mapped[str | None] = mapped_column(Text)
+    accent_color: Mapped[str | None] = mapped_column(Text)
+    default_logo_asset_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("company_logos.id", ondelete="SET NULL")
+    )
+    # Where the logo sits in its reserved box on documents (migration 0033).
+    logo_scale: Mapped[Decimal] = mapped_column(Numeric(3, 2), server_default=text("1.00"))
+    logo_align: Mapped[str] = mapped_column(Text, server_default=text("'left'"))
+    logo_offset_y: Mapped[int] = mapped_column(SmallInteger, server_default=text("0"))
+    updated_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CompanyLogo(Base):
+    """One image in the company's logo library (migration 0031).
+
+    The bytes live in blob storage under `branding/<tenant>/<id>.<ext>`; an SVG is
+    stored sanitized (no scripts, event handlers or external references).
+    """
+
+    __tablename__ = "company_logos"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True)
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    name: Mapped[str] = mapped_column(Text)
+    content_type: Mapped[str] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(Integer)
+    width: Mapped[int | None] = mapped_column(Integer)
+    height: Mapped[int | None] = mapped_column(Integer)
+    # The prepared image documents use (migration 0033: trimmed, maybe without its
+    # background); `original_*` is the file as uploaded (None for 0031 rows: the same).
+    storage_key: Mapped[str] = mapped_column(Text)
+    original_storage_key: Mapped[str | None] = mapped_column(Text)
+    original_content_type: Mapped[str | None] = mapped_column(Text)
+    background_removable: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    background_removed: Mapped[bool] = mapped_column(Boolean, server_default=text("false"))
+    created_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class RfqLine(Base):
@@ -627,6 +695,30 @@ class TemplateUpload(Base):
     size_bytes: Mapped[int] = mapped_column(Integer)
     storage_key: Mapped[str] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # A reference to a library file (migration 0032): set when a buyer attaches a
+    # colleague's upload or a supplier attachment; same storage key, no copy.
+    source_kind: Mapped[str | None] = mapped_column(Text)
+    source_id: Mapped[UUID | None] = mapped_column()
+
+
+class FileText(Base):
+    """The text read from one library file, for content search (migration 0032).
+
+    `tsv` is computed by Postgres (`to_tsvector('simple', text)`), never written.
+    """
+
+    __tablename__ = "file_texts"
+
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"), primary_key=True)
+    file_kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    file_id: Mapped[UUID] = mapped_column(primary_key=True)
+    status: Mapped[str] = mapped_column(Text)
+    reason: Mapped[str | None] = mapped_column(Text)
+    text: Mapped[str] = mapped_column(Text, server_default=text("''"))
+    tsv: Mapped[str | None] = mapped_column(
+        TSVECTOR, Computed("to_tsvector('simple'::regconfig, text)", persisted=True)
+    )
+    indexed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class FollowupMessage(Base):

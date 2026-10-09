@@ -23,6 +23,10 @@ first message's conversation, which is where supplier replies to the RFQ go.
 If the send step fails after the draft was created, the draft is deleted
 (best effort) so nothing half-sent lingers in the buyer's Drafts.
 
+Before RESENDING a message an earlier attempt may have sent (`find_sent`):
+`GET /me/mailFolders/sentitems/messages?$filter=internetMessageId eq '<id>'`
+with `$select` of id, conversationId and internetMessageId, at most one.
+
 Reading: `GET /me/messages?$filter=conversationId eq '<id>'` (one thread only,
 `$select` of id, isDraft and from; `@odata.nextLink` followed only on
 graph.microsoft.com, bounded), then `GET /me/messages/{id}/$value` (the MIME)
@@ -86,6 +90,14 @@ def conversation_filter(conversation_id: str) -> str:
     return f"conversationId eq '{escaped}'"
 
 
+def message_id_filter(message_id: str) -> str:
+    """The OData filter for one Message-ID header (single quotes doubled)."""
+    if not message_id or len(message_id) > 512:
+        raise ValueError("not a Message-ID")
+    escaped = message_id.strip().replace("'", "''")
+    return f"internetMessageId eq '{escaped}'"
+
+
 class GraphMailbox(MailboxSender):
     provider: Provider = "microsoft"
 
@@ -128,6 +140,28 @@ class GraphMailbox(MailboxSender):
             thread_id=conversation_id,
             internet_message_id=str_field(draft, "internetMessageId"),
         )
+
+    async def find_sent(self, message_id: str) -> ProviderSent | None:
+        response = await self._http.request(
+            "GET",
+            f"{GRAPH_API}/mailFolders/sentitems/messages",
+            operation="find sent",
+            params={
+                "$filter": message_id_filter(message_id),
+                "$select": "id,conversationId,internetMessageId",
+                "$top": "1",
+            },
+        )
+        for meta in list_field(json_object(response), "value"):
+            found_id = str_field(meta, "id")
+            conversation_id = str_field(meta, "conversationId")
+            if found_id is not None and conversation_id is not None:
+                return ProviderSent(
+                    provider_message_id=found_id,
+                    thread_id=conversation_id,
+                    internet_message_id=str_field(meta, "internetMessageId") or message_id,
+                )
+        return None
 
     async def _delete_draft(self, draft_id: str) -> None:
         try:

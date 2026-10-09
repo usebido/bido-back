@@ -14,7 +14,10 @@ the requester recorded on the approval for this invite. The approver is the
 
 What is sent is exactly `to`, `cc`, `subject` (carrying the `[RFQ-<n>]`
 marker) and `body` from the approved arguments. The handler adds only the
-From name/address (the buyer) and our own Message-ID.
+From name/address (the buyer) and our own Message-ID, plus the RFQ document as
+a PDF when the approved arguments carry one (`document`): it is rendered from
+those approved arguments, never from the live RFQ, and the send is refused when
+the RFQ no longer says what was approved (`bido_back.rfqs.document`).
 
 Idempotency (the executor may retry after a crash):
 
@@ -28,9 +31,13 @@ Idempotency (the executor may retry after a crash):
    a retry adds nothing), the invite becomes `sent`, a draft RFQ becomes
    `open`, and the audit event is written.
 
-A crash after the send and before that commit resends on retry with the SAME
-Message-ID, so mail clients and reply matching see one thread. Removing that
-window needs the transactional outbox, which does not exist yet.
+A crash after the send and before that commit leaves the invite
+`pending_approval` with its Message-ID stored. The retry reuses that
+Message-ID and marks the email `possibly_sent`; the mailbox sender then looks
+for it in the buyer's Sent folder and, when it is there, records it without
+sending a second copy. Only a provider that has not indexed the message yet
+by the time of the retry (seconds; the retry comes after the queue's
+visibility timeout) could still send twice, with the same Message-ID.
 
 Rejection: `release_rejected_send` (a `RejectHook`, see `REJECT_HOOKS`) puts
 the invite back from `pending_approval` to `draft` in the decision's
@@ -40,6 +47,7 @@ of earlier rejected proposals, so a new proposal does not collide with the
 rejected one while concurrent prepares of the same attempt still do.
 """
 
+import asyncio
 import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -56,9 +64,27 @@ from bido_back.agents.tools import Tool
 from bido_back.approvals.executor import ActToolRegistry
 from bido_back.approvals.guard import RejectHook
 from bido_back.db import tenant_session
-from bido_back.db.models import Approval, AuditEvent, Contact, Invite, Message, Rfq, Tenant, User
+from bido_back.db.models import (
+    Approval,
+    AuditEvent,
+    Contact,
+    Invite,
+    Message,
+    Rfq,
+    RfqLine,
+    Tenant,
+    User,
+)
 from bido_back.email.addresses import make_message_id
-from bido_back.email.types import OutboundEmail
+from bido_back.email.types import OutboundAttachment, OutboundEmail
+from bido_back.rfqs.document import (
+    PDF_CONTENT_TYPE,
+    RfqDocument,
+    document_filename,
+    render_pdf,
+    stale_reasons,
+    with_current_facts,
+)
 from bido_back.rfqs.errors import InvalidState, NotFound
 from bido_back.rfqs.mailbox import MailboxSenderFactory, default_mailbox_sender
 from bido_back.rfqs.schemas import EmailAddress
@@ -105,6 +131,9 @@ class SendRfqEmailArgs(BaseModel):
     # The same email as HTML (the item table as a real table). Optional: older
     # proposals have none and go out as text only.
     html_body: str | None = Field(default=None, max_length=200_000)
+    # The supplier's RFQ document, attached as a PDF rendered from exactly this.
+    # Optional: older proposals have none and go out without an attachment.
+    document: RfqDocument | None = None
 
 
 class SendRfqEmailResult(BaseModel):
@@ -125,6 +154,8 @@ class RfqActDeps:
 class _Claim:
     message_id: str
     rfq_id: UUID
+    # The Message-ID was claimed by an earlier attempt, which may have sent it.
+    possibly_sent: bool = False
 
 
 class _SendRfqEmail:
@@ -135,7 +166,17 @@ class _SendRfqEmail:
         claim = await self._claim(ctx, args)
         if isinstance(claim, SendRfqEmailResult):
             return claim
-        message_id = await self._send_and_record(ctx, args, claim)
+        attachments: tuple[OutboundAttachment, ...] = ()
+        if args.document is not None:
+            # Rendered outside any transaction (it takes a moment), from the approved data.
+            attachments = (
+                OutboundAttachment(
+                    filename=document_filename(args.document),
+                    content_type=PDF_CONTENT_TYPE,
+                    data=await asyncio.to_thread(render_pdf, args.document),
+                ),
+            )
+        message_id = await self._send_and_record(ctx, args, claim, attachments)
         logger.info(
             "sent rfq email tenant=%s invite=%s run=%s", ctx.tenant_id, args.invite_id, ctx.run_id
         )
@@ -179,13 +220,22 @@ class _SendRfqEmail:
                 )
             if invite.status != "pending_approval":
                 raise InvalidState(f"invite {invite.id} is {invite.status}, not pending_approval")
+            if args.document is not None:
+                await _refuse_stale(session, invite.rfq_id, args.document, invite.id)
+            reused = invite.thread_message_id is not None
             if invite.thread_message_id is None:
                 invite.thread_message_id = make_message_id(self._deps.email_domain)
                 await session.flush()
-            return _Claim(message_id=invite.thread_message_id, rfq_id=invite.rfq_id)
+            return _Claim(
+                message_id=invite.thread_message_id, rfq_id=invite.rfq_id, possibly_sent=reused
+            )
 
     async def _send_and_record(
-        self, ctx: ToolContext, args: SendRfqEmailArgs, claim: _Claim
+        self,
+        ctx: ToolContext,
+        args: SendRfqEmailArgs,
+        claim: _Claim,
+        attachments: tuple[OutboundAttachment, ...] = (),
     ) -> str:
         now = datetime.now(UTC)
         async with tenant_session(self._deps.db, ctx.tenant_id) as session:
@@ -229,6 +279,8 @@ class _SendRfqEmail:
                     text_body=args.body,
                     html_body=args.html_body,
                     message_id=claim.message_id,
+                    attachments=attachments,
+                    possibly_sent=claim.possibly_sent,
                 )
             )
             # A provider that rewrites the Message-ID wins: replies reference
@@ -277,6 +329,26 @@ class _SendRfqEmail:
             )
             await session.flush()
             return message_id
+
+
+async def _refuse_stale(
+    session: AsyncSession, rfq_id: UUID, approved: RfqDocument, invite_id: UUID
+) -> None:
+    """Refuse to send a document the RFQ no longer matches (edited after approval)."""
+    rfq = await session.get(Rfq, rfq_id)
+    if rfq is None:
+        raise NotFound(f"rfq {rfq_id} not found")
+    lines = list(
+        await session.scalars(
+            select(RfqLine).where(RfqLine.rfq_id == rfq_id).order_by(RfqLine.position)
+        )
+    )
+    reasons = stale_reasons(approved, with_current_facts(approved, rfq, lines))
+    if reasons:
+        raise InvalidState(
+            f"invite {invite_id}: the RFQ changed after approval ({', '.join(reasons)}); "
+            "prepare the email again"
+        )
 
 
 def send_rfq_email_tool(deps: RfqActDeps) -> Tool[SendRfqEmailArgs, SendRfqEmailResult]:

@@ -46,7 +46,6 @@ from bido_back.quotes.parsing import (
     find_number,
     incoterms_in,
     mentions_none,
-    mentions_per_unit,
     mentions_weeks,
     mentions_working_days,
     normalize_text,
@@ -362,13 +361,14 @@ def check_field(
             issues.append(located)
 
     parsed, value_issues = _parse(kind, raw, decimal)
+    if name == "price_basis_quantity" and parsed == 1 and not value_issues:
+        # A basis of one unit is the default ("0,039 EUR pro Stück", "each"): it cannot
+        # change a price and the "1" is rarely written, so it never puts an offer on review.
+        return FieldCheck(name=name, extracted=extracted, parsed=parsed)
     issues.extend(value_issues)
     if parsed is not None and source is not None and source.quote.strip():
         header = _column_header(source, sources) if kind == "days" else None
         grounding = _grounding(kind, parsed, source.quote, decimal, header=header)
-        if name == "price_basis_quantity" and parsed == 1 and mentions_per_unit(source.quote):
-            # "R$ 46,90 por pcs": a basis of one unit is stated in words, not as a number.
-            grounding = [issue for issue in grounding if issue != "not_grounded"]
         issues.extend(grounding)
     return FieldCheck(name=name, extracted=extracted, parsed=parsed, issues=tuple(issues))
 

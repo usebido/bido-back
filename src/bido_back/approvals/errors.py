@@ -46,13 +46,15 @@ class ApprovalConflict(ApprovalError):
 
 
 class ApprovalRecipientsUnconfirmed(ApprovalError):
-    """Approving would send email to domains nobody confirmed (outbound guard).
+    """Approving would send email to recipients nobody confirmed (outbound guard).
 
-    Carries the domains only: the caller confirms them with the decision.
+    Carries their confirmation keys only (domains, or exact addresses at free
+    mailbox providers): the caller confirms them with the decision.
     """
 
     def __init__(self, domains: list[str]) -> None:
         self.domains = domains
         super().__init__(
-            "confirm these recipient domains to approve (confirmed_domains): " + ", ".join(domains)
+            "confirm these recipient domains or addresses to approve (confirmed_domains): "
+            + ", ".join(domains)
         )

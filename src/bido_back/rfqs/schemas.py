@@ -14,6 +14,7 @@ from pydantic import AfterValidator, BaseModel, ConfigDict, Field, JsonValue, St
 
 from bido_back.agents.catalog.contracts import LineCategory
 from bido_back.awards.views import AwardApprovalView, ThreadEmailApprovalView
+from bido_back.branding.schemas import LogoPlacement
 from bido_back.fx import REFERENCE_CURRENCIES
 from bido_back.outbound.domains import RecipientCheck
 
@@ -133,6 +134,18 @@ class RfqHeader(BaseModel):
     quote_validity_days: int | None = Field(
         default=None, description="How many days a quote must stay valid, at least"
     )
+    logo_asset_id: UUID | None = Field(
+        default=None,
+        description="The company logo this RFQ's document shows; null = the company default",
+    )
+    footer_override: str | None = Field(
+        default=None,
+        description="Terms printed on this RFQ's document; null = the company default footer",
+    )
+    logo_placement: LogoPlacement | None = Field(
+        default=None,
+        description="Where this RFQ's logo sits in its box; null = the company default",
+    )
 
 
 RfqStage = Literal["draft", "bidding", "review", "awarded", "completed", "cancelled"]
@@ -236,6 +249,14 @@ class UpdateRfqRequest(BaseModel):
     need_by: date | None = None
     # The RFQ's base currency; its negotiation limits are converted along with it.
     currency: CurrencyCode | None = None
+    # The document's branding: a logo from the company library (`/v1/company/logos`)
+    # and terms replacing the company's default footer; null = back to the default.
+    logo_asset_id: UUID | None = None
+    footer_override: (
+        Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] | None
+    ) = None
+    # Where the logo sits in its box on this RFQ's document; null = the company default.
+    logo_placement: LogoPlacement | None = None
 
 
 # --- Suppliers and contacts ---------------------------------------------------------
@@ -324,6 +345,12 @@ class RfqEmailDraft(BaseModel):
     cc: list[str]
     subject: str
     body: str
+    # The same email as HTML (the item table as a real table), when the proposal
+    # has one: the approver previews what the supplier's mail client shows.
+    html_body: str | None = None
+    # File name of the RFQ document PDF attached to this email, when there is
+    # one (`GET /v1/rfqs/{rfq_id}/invites/{invite_id}/document.pdf` renders it).
+    attachment_name: str | None = None
 
 
 class NegotiationEmailDraft(BaseModel):

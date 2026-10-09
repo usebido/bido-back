@@ -19,12 +19,17 @@ Per job, inside one transaction in the job's tenant:
 5. The row becomes `executed` and an audit event is written; both commit
    together.
 
-Known gap until the outbox exists: the handler runs while the row lock is
-held, so concurrent duplicates cannot both run it, but a crash after the
-handler's external effect and before the commit leaves the row `approved`
-and the job is retried. Act handlers must therefore be idempotent on their
-own (keyed by the approval) or, better, write an outbox row instead of
-calling a provider directly.
+Retries: the handler runs while the row lock is held, so concurrent
+duplicates cannot both run it, but a crash after the handler's external
+effect and before the commit leaves the row `approved` and the job is
+retried. Act handlers must therefore be idempotent on their own. The email
+handlers claim and commit a Message-ID before sending; a retry reuses it and
+marks the email `possibly_sent`, and the mailbox sender looks for that
+Message-ID in the buyer's Sent folder before sending, so the supplier gets
+one copy (`MailboxSender.send`).
+
+A lost job (approved, never enqueued) is re-enqueued by the scheduled
+follow-ups sweep (`approvals/reconcile.py`).
 
 The paused agent run is not continued here: the guard never calls Agno's
 continue flow.

@@ -49,6 +49,13 @@ RUN groupadd --system --gid 10001 bido \
     && useradd --system --uid 10001 --gid bido --no-create-home \
        --home-dir /nonexistent --shell /usr/sbin/nologin bido
 
+# WeasyPrint (the RFQ document PDF, bido_back.rfqs.document) needs Pango,
+# HarfBuzz and fontconfig, plus one font family.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       libpango-1.0-0 libpangoft2-1.0-0 libharfbuzz0b libfontconfig1 fonts-dejavu-core \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 # Everything stays root-owned and read-only for the runtime user.

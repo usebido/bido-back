@@ -172,6 +172,23 @@ def test_number_not_in_its_quote_needs_review() -> None:
     assert result.needs_review
 
 
+def test_unit_price_basis_of_one_never_needs_review() -> None:
+    # The model reads "je Stück" as a basis of 1; the "1" is not written anywhere.
+    result = validate(output(line(price_basis_quantity=ev("1", "0,45 € je Stück"))))
+
+    assert issues_of(result, "price_basis_quantity") == ()
+    assert result.lines[0].parsed("price_basis_quantity") == Decimal(1)
+    assert not result.lines[0].needs_review
+    assert not result.needs_review
+
+
+def test_price_basis_above_one_must_be_grounded() -> None:
+    result = validate(output(line(price_basis_quantity=ev("100", "0,45 € je Stück"))))
+
+    assert issues_of(result, "price_basis_quantity") == ("not_grounded",)
+    assert result.lines[0].needs_review
+
+
 def test_quote_not_in_the_source_needs_review() -> None:
     invented = ev("0.39", "Sonderpreis 0,39 €")
 
@@ -416,12 +433,7 @@ def test_a_basis_of_one_unit_stated_in_words_is_grounded() -> None:
     assert issues_of(per_unit, "price_basis_quantity") == ()
     assert per_unit.lines[0].fields["price_basis_quantity"].parsed == Decimal(1)
 
-    # A basis of one is never inferred where the supplier wrote another basis.
-    other_basis = validate(
-        output(line(price_basis_quantity=ev("1", "40,00 € per 100 pcs"))), body=body
-    )
-    assert "not_grounded" in issues_of(other_basis, "price_basis_quantity")
-    # Nor any other number from a per-unit sentence.
+    # A per-unit sentence never grounds any other number.
     wrong = validate(output(line(price_basis_quantity=ev("10", "0,45 € je Stück"))), body=body)
     assert "not_grounded" in issues_of(wrong, "price_basis_quantity")
 

@@ -19,10 +19,11 @@ principal's tenant, checking, in order:
    request changes nothing -> 409;
 5. its stored args still hash to the proposed `args_hash` -> 409, nothing is
    decided, and an `approval.integrity_failed` audit event is kept;
-6. approving an act that sends email: every recipient domain is a reserved
-   test domain or confirmed for the tenant (`bido_back.outbound`). The decision
-   may confirm domains of this email (`confirmed_domains`); anything still
-   unconfirmed -> 409 listing the domains, and nothing is decided.
+6. approving an act that sends email: every recipient is at a reserved test
+   domain or confirmed for the tenant (`bido_back.outbound`): its domain, or
+   its exact address at a free mailbox provider such as gmail.com. The
+   decision may confirm those keys of this email (`confirmed_domains`);
+   anything still unconfirmed -> 409 listing them, and nothing is decided.
 
 Then the status, `decided_by`, `decided_at` and `self_approved` are set and an
 audit event is written (ids, hash and the self-approval mark only, never the
@@ -33,11 +34,10 @@ held (e.g. an RFQ invite goes back to `draft`).
 
 Approving does not execute anything. After the commit, an `approval.execute`
 job is enqueued (idempotency key `approval:<id>`); the worker runs the tool
-(`executor.py`). Until the transactional outbox exists, the enqueue happens
-after the commit: if it fails, the approval stays `approved` with no job, the
-error propagates (the caller sees a 5xx and it reaches Sentry), and the job
-must be re-enqueued (a sweeper over approved-but-unexecuted rows, or the
-outbox, closes this gap).
+(`executor.py`). The enqueue happens after the commit: if it fails, the
+approval stays `approved` with no job and the error propagates (the caller
+sees a 5xx and it reaches Sentry). The scheduled follow-ups sweep re-enqueues
+approvals left like that (`reconcile.py`).
 """
 
 import logging
@@ -63,10 +63,10 @@ from bido_back.approvals.integrity import payload_matches
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import Approval, Membership, Tenant
-from bido_back.email.recipients import domain_of
+from bido_back.email.recipients import confirmation_key
 from bido_back.outbound.domains import (
     confirm_domains,
-    normalize_domain,
+    normalize_confirmation,
     recipients_in_args,
     unconfirmed_domains,
 )
@@ -189,8 +189,9 @@ async def _check_recipients(
     addresses = recipients_in_args(approval.args)
     if not addresses:
         return
-    in_email = {d for d in (domain_of(a) for a in addresses) if d is not None}
-    wanted = {d for d in (normalize_domain(x) for x in confirmed) if d in in_email}
+    # Keys this email writes to: domains, or exact addresses at free providers.
+    in_email = {k for k in (confirmation_key(a) for a in addresses) if k is not None}
+    wanted = {k for k in (normalize_confirmation(x) for x in confirmed) if k in in_email}
     if wanted:
         await confirm_domains(
             session, principal.tenant_id, principal.user_id, wanted, approval_id=approval.id
