@@ -104,7 +104,7 @@ analysis, returning only cell locators. It does not generate join code, quantiti
 normalized statuses or SQL. Manifest samples now include late headers and separate
 table blocks with original row numbers rather than only introductory rows.
 
-### Any export layout (`source_mapper.v3.md`)
+### Any export layout (`source_mapper.v4.md`)
 
 The mapper still returns locators only; code checks and copies everything:
 
@@ -244,6 +244,39 @@ UOM conversion evidence, multilevel make/buy planning, connector adapters,
 native numeric type preservation, and durable checkpointed mapping for large sources. These are not implemented
 by claiming all formats are understood. Live-model semantic accuracy requires
 evaluations before rollout; deterministic fixture tests alone cannot establish it.
+
+### Known ERP reports (report packs)
+
+Tables whose header row is a known ERP report are read by code before the mapper and
+never sent to a model (`purchasing/sources/packs/`). The SAP pack recognizes MB52, MD04
+(and MD05), MM60, ME1M, ME2N/ME2M, ME80FN, ME6H and BP/XK03 exports in Portuguese,
+English, German or Spanish, and applies their conventions: MRP requirements are negative
+and read as positive gross demand, the stock line is plant stock (MB52 per storage
+location wins when both exist), the safety-stock line and MM60 give the policy, prices
+are per price unit (`price_basis_quantity`), info-record conversions ("18 L") convert
+order units to the base unit (`units.py`), expired info records stay price history, a
+purchasing block keeps a supplier from being invited. Another ERP is one more pack.
+
+An MRP list without production plans (a material with several dated requirements at a
+plant) is planned for every required material of each plant, through the list's last
+requirement, netted by date; the material master's minimum lot and rounding value then
+give the order quantity (`net_requirement` keeps the need before them).
+
+### Best estimate, disclosed (no blockers at analysis)
+
+Analysis never holds a quantity. Every line with demand gets a best estimate and lists
+what it rests on (`AssessmentLine.assumptions`, each with its `alternative`) and a
+`confidence`: high (stated evidence only), medium (conventions or defaults), low (an
+inconsistency or ambiguity settled by the most plausible reading). What is missing is not
+netted and says so (never a placeholder number); stock in another unit than the demand is
+never netted; open orders that do not reconcile are listed as not subtracted; an overdue
+open order counts as arriving now, as MRP does. When a production request leaves the
+product, plant or horizon open, each candidate is planned separately (at most five) and
+the choice is an assumption. RFQ drafts carry each line's assumptions and confidence
+(`RfqLineView.assumptions`/`confidence`, and `RfqEmailDraft.line_assumptions` in the send
+approval). Strictness stays at the commitment points: send approval, recipient guard,
+payload hash, mandate limits. Mapping safeguards (invalid or inadmissible locators,
+header mismatches, source limits) still reject invented data.
 
 ## Research informing the design
 

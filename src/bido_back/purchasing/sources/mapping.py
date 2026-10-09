@@ -76,6 +76,9 @@ CATALOG: dict[str, list[str]] = {
         "blocked",
         "reserved",
         "total",
+        # Stock in quality inspection and in transit: kept apart, never available.
+        "quality_inspection",
+        "in_transit",
         "unit_price",
         "currency",
         "as_of",
@@ -94,8 +97,12 @@ CATALOG: dict[str, list[str]] = {
         "demand_basis",
         "area",
         "product_code",
+        # An MRP list's element (requirement, receipt, stock, safety stock, proposal) and
+        # how it signs requirements (negative or positive quantities).
+        "element_type",
+        "sign_convention",
     ],
-    "supplier": ["supplier_code", "name", "email", "country"],
+    "supplier": ["supplier_code", "name", "email", "country", "purchase_block"],
     "purchase": [
         "part_number",
         "supplier_code",
@@ -103,6 +110,9 @@ CATALOG: dict[str, list[str]] = {
         "quantity",
         "unit_price",
         "currency",
+        # The quantity unit_price is quoted for ("Por"/"Unidade de preço" 1000) and its unit.
+        "price_basis_quantity",
+        "price_unit",
         "ordered_at",
         "unit",
         "po_number",
@@ -124,6 +134,13 @@ CATALOG: dict[str, list[str]] = {
         "quality_pct",
         "rating",
         "lead_time_days",
+        # A vendor evaluation's own scores, as reported, and its date.
+        "score_overall",
+        "score_price",
+        "score_quality",
+        "score_delivery",
+        "score_service",
+        "as_of",
     ],
     "purchase_summary": [
         "part_number",
@@ -141,7 +158,23 @@ CATALOG: dict[str, list[str]] = {
         "reported_estimated_cost",
         "currency",
     ],
-    "item": ["part_number", "description", "unit", "area"],
+    "item": [
+        "part_number",
+        "description",
+        "unit",
+        "area",
+        "location",
+        # An alternative unit and how many base units one of it holds ("1 BD = 18 L":
+        # alt_unit BD, alt_unit_factor 18), and MRP planning parameters.
+        "alt_unit",
+        "alt_unit_factor",
+        "planned_delivery_days",
+        "lot_size",
+        "min_lot_size",
+        "rounding",
+        "mrp_type",
+        "safety_stock",
+    ],
     "bom": [
         "product_code",
         "part_number",
@@ -185,7 +218,22 @@ CATALOG: dict[str, list[str]] = {
         "expected_at",
         "status",
     ],
-    "supplier_item": ["part_number", "supplier_code", "status", "valid_from"],
+    "supplier_item": [
+        "part_number",
+        "supplier_code",
+        "status",
+        "valid_from",
+        "valid_to",
+        # A purchasing info record's price agreement and terms.
+        "unit_price",
+        "currency",
+        "price_basis_quantity",
+        "unit",
+        "alt_unit",
+        "alt_unit_factor",
+        "lead_time_days",
+        "min_order_quantity",
+    ],
 }
 Mapper = Callable[[MappingTask, ToolContext], Awaitable[MappingProposal]]
 PAGE_ROWS = 60
@@ -215,8 +263,8 @@ _TOTAL_MARKS = frozenset({"*", "**", "***"})
 _EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
 # Share of a mapped column's values that must read as its field's type.
 ADMISSIBLE_SHARE = 0.8
-PROMPT_FILE = "source_mapper.v3.md"
-PROMPT_VERSION = 3
+PROMPT_FILE = "source_mapper.v4.md"
+PROMPT_VERSION = 4
 
 
 def _anchors(table: EvidenceTable) -> list[int]:
@@ -907,7 +955,14 @@ async def map_sources(
     objective: str,
     context: ToolContext,
     mapper: Mapper,
+    *,
+    known: Sequence[Record] = (),
 ) -> tuple[list[Record], list[Issue], list[Coverage]]:
+    """Interpret every table with the mapper, pages in parallel.
+
+    `known` are records already read without the mapper (report packs): they take part
+    in the cross-source identifier checks but are not returned.
+    """
     if len(tables) > MAX_TABLES:
         return (
             [],
@@ -1041,6 +1096,9 @@ async def map_sources(
     records = [r for found, _, _ in results for r in found]
     return (
         records,
-        [*(i for _, issues, _ in results for i in issues), *identifier_variants(records)],
+        [
+            *(i for _, issues, _ in results for i in issues),
+            *identifier_variants([*known, *records]),
+        ],
         [c for _, _, c in results],
     )

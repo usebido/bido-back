@@ -6,10 +6,16 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from bido_back.purchasing.importers import norm
-from bido_back.purchasing.sources.analysis import supplier_country, supplier_evidence
+from bido_back.purchasing.sources.analysis import (
+    confidence,
+    master_facts,
+    supplier_country,
+    supplier_evidence,
+)
 from bido_back.purchasing.sources.contracts import (
     Assessment,
     AssessmentLine,
+    Assumption,
     DemandContribution,
     Issue,
     NettingStep,
@@ -29,18 +35,21 @@ from bido_back.purchasing.sources.evidence import (
     source_refs,
     source_text,
     unit_key,
+    unit_price,
 )
 from bido_back.purchasing.sources.joins import (
     CANCELLED,
     CLOSED,
     OPEN,
     ZERO,
+    Stock,
     coalesce,
     incoming_for,
     inventory_at,
     state,
 )
 from bido_back.purchasing.sources.pricing import ORDER_KEY, OrderFacts, measure, reconcile_order
+from bido_back.purchasing.sources.vocabulary import built_in
 
 # Canonical production-order states (see `vocabulary`) that still consume components.
 _ACTIVE_PLANS = frozenset({"planned", "released"})
@@ -340,8 +349,15 @@ def _direct_demand(
     contributions: dict[str, list[DemandContribution]],
     units: dict[str, str],
     issues: list[Issue],
+    assumptions: list[Assumption] | None = None,
 ) -> None:
+    """Dated material requirements of the scope. With `assumptions`, an MRP list's
+    conventions are read instead of stopping: its requirement elements are gross demand,
+    negative requirement quantities are their size, a requirement without a stated basis
+    is gross, and one already past due is due at the snapshot (each disclosed)."""
     exploded_parts = set(contributions)
+    lenient = assumptions is not None
+    notes: dict[str, list[Record]] = defaultdict(list)
 
     def exploded(part: str) -> bool:
         return any(same_key(part, name) for name in exploded_parts)
@@ -355,6 +371,8 @@ def _direct_demand(
         part = source_text(row, "part_number")
         if part is None:
             continue
+        if categorical(row, "element_type") not in (None, "requirement"):
+            continue  # An MRP list's stock, receipts and proposals are not demand.
         product = source_text(row, "product_code")
         if (
             scope.product_code is not None
@@ -362,13 +380,13 @@ def _direct_demand(
             and not exploded(part)
         ):
             continue
-        if scope.product_code is None:
+        if scope.product_code is None and not scope.all_materials:
             master = _master(records, part, issues)
             area = source_text(row, "area") or source_text(master, "area")
             if area is None or norm(area) != norm(scope.area or ""):
                 continue
         need = source_date(row, "need_by", issues)
-        if need is not None and not scope.as_of <= need <= scope.horizon_end:
+        if need is not None and not _in_horizon(need, scope, lenient=lenient):
             continue
         if scope.product_code is not None:
             if not same_key(product, scope.product_code):
@@ -394,8 +412,11 @@ def _direct_demand(
         if need is None:
             add_issue(issues, "missing_need_date", "A material requirement has no date.", [row])
             continue
-        if not scope.as_of <= need <= scope.horizon_end:
+        if not _in_horizon(need, scope, lenient=lenient):
             continue
+        if need < scope.as_of:
+            notes["past_due"].append(row)
+            need = scope.as_of
         part = source_text(row, "part_number") or ""
         if exploded(part):
             add_issue(
@@ -406,9 +427,19 @@ def _direct_demand(
                 [row],
             )
             continue
-        quantity = source_number(row, "quantity", issues)
+        quantity = source_number(row, "quantity", issues, negative=lenient)
         unit = source_text(row, "unit")
-        if quantity is None or unit is None or categorical(row, "demand_basis") != "gross":
+        basis = categorical(row, "demand_basis")
+        if lenient and quantity is not None and quantity < 0:
+            # MRP lists sign requirements negative: the demand is the quantity's size.
+            if categorical(row, "sign_convention") != "negative":
+                notes["negative"].append(row)
+            quantity = -quantity
+        if lenient and basis is None and quantity is not None and unit is not None:
+            if categorical(row, "element_type") != "requirement":
+                notes["basis"].append(row)
+            basis = "gross"
+        if quantity is None or unit is None or basis != "gross":
             add_issue(
                 issues,
                 "unresolved_direct_demand",
@@ -431,24 +462,79 @@ def _direct_demand(
                 evidence=source_refs([row]),
             )
         )
+    if assumptions is not None:
+        assumptions.extend(_demand_notes(notes, scope))
+
+
+def _in_horizon(need: date, scope: PlanningScope, *, lenient: bool) -> bool:
+    """Inside the horizon; leniently, a requirement already past due counts too."""
+    return need <= scope.horizon_end and (need >= scope.as_of or lenient)
+
+
+def _demand_notes(notes: dict[str, list[Record]], scope: PlanningScope) -> list[Assumption]:
+    texts = {
+        "past_due": (
+            "past_due_requirement",
+            "requirement(s) dated before {as_of} are still open and counted as due on {as_of}.",
+            "If they were already met, the quantities to buy drop by their size.",
+            "medium",
+        ),
+        "negative": (
+            "negative_requirement",
+            "requirement(s) are written as negative quantities; their size was read as the demand.",
+            "If a negative quantity meant a return or a receipt, the demand is lower.",
+            "low",
+        ),
+        "basis": (
+            "requirement_basis_assumed_gross",
+            "requirement(s) do not say whether they are gross or already netted; they were "
+            "read as gross demand and netted against stock and open orders.",
+            "If they are already net purchase requirements, buy exactly the listed "
+            "quantities instead.",
+            "medium",
+        ),
+    }
+    result: list[Assumption] = []
+    for key, rows in notes.items():
+        code, message, alternative, confidence = texts[key]
+        parts = list(dict.fromkeys(p for r in rows if (p := source_text(r, "part_number"))))
+        result.append(
+            Assumption(
+                code=code,
+                message=f"{len(rows)} " + message.format(as_of=scope.as_of.isoformat()),
+                alternative=alternative,
+                confidence="low" if confidence == "low" else "medium",
+                part_numbers=parts,
+                evidence=source_refs(rows)[:10],
+            )
+        )
+    return result
 
 
 def _listed_supplier(
-    code: str | None, masters: Sequence[Record], issues: list[Issue], code_on_gap: str, gap: str
+    code: str | None,
+    masters: Sequence[Record],
+    issues: list[Issue],
+    code_on_gap: str,
+    gap: str,
+    performance: Sequence[Record] = (),
 ) -> SupplierEvidence:
     """A supplier without a completed purchase of the item: identity from the masters."""
     matching = [r for r in masters if same_key(source_text(r, "supplier_code"), code)]
+    metrics = [r for r in performance if same_key(source_text(r, "supplier_code"), code)]
     names = {source_text(r, "name") for r in matching} - {None}
     emails = {source_text(r, "email") for r in matching} - {None}
     if len(names) != 1 or len(emails) > 1:
         add_issue(issues, code_on_gap, gap, matching, warning=True)
-    return SupplierEvidence(
+    supplier = SupplierEvidence(
         supplier_code=code,
         name=next(iter(names)) if len(names) == 1 else None,
         email=next(iter(emails)) if len(emails) == 1 and len(names) == 1 else None,
         country=supplier_country(matching),
         evidence=source_refs(matching),
     )
+    master_facts(supplier, matching, metrics)
+    return supplier
 
 
 def _history(
@@ -481,7 +567,7 @@ def _history(
         if ordered_at is None or ordered_at > scope.as_of:
             continue
         code = source_text(order, "supplier_code")
-        if code is None or normalize_unit(source_text(order, "unit")) != normalize_unit(unit):
+        if code is None or unit_key(order) != normalize_unit(unit):
             add_issue(
                 issues,
                 "unusable_price_reference",
@@ -564,6 +650,7 @@ def _history(
                     issues,
                     "unresolved_supplier_code",
                     "A supplier's name or contact is not uniquely established.",
+                    performance,
                 )
             )
     qualifications = coalesce(
@@ -589,19 +676,41 @@ def _history(
                 issues,
                 "unresolved_qualified_supplier",
                 "A qualified supplier's name or contact is not uniquely established.",
+                performance,
             )
             suppliers.append(existing)
-        existing.qualification_status = source_text(qualification, "status")
+        # The source's own spelling when it is a status word, else what it implies (an
+        # ERP info record's number implies an approved source).
+        raw = source_text(qualification, "status")
+        existing.qualification_status = (
+            raw
+            if built_in("supplier_item", "status", raw) is not None
+            else categorical(qualification, "status") or raw
+        )
+        _agreement(existing, qualification, scope.as_of)
         existing.evidence.extend(
             r for r in source_refs([qualification]) if r not in existing.evidence
         )
     return suppliers, orders
 
 
-def _net(line: AssessmentLine) -> None:
-    if line.available is None or line.safety_stock is None:
-        return
-    balance, purchased = line.available, ZERO
+def _agreement(supplier: SupplierEvidence, link: Record, as_of: date) -> None:
+    """An info record's price per base unit, validity, lead time and minimum quantity."""
+    price = unit_price(link, [])
+    if price is not None and price > 0:
+        supplier.contract_price = price
+        supplier.contract_currency = (source_text(link, "currency") or "").upper() or None
+    until = source_date(link, "valid_to", [])
+    if until is not None:
+        supplier.contract_valid_to = until
+        supplier.contract_expired = until < as_of
+    supplier.contract_lead_time_days = source_number(link, "lead_time_days", [])
+    supplier.min_order_quantity = source_number(link, "min_order_quantity", [])
+
+
+def _net(line: AssessmentLine, available: Decimal, safety: Decimal) -> None:
+    """Date-ordered netting: each need date's shortfall below safety stock is bought."""
+    balance, purchased = available, ZERO
     dates = sorted({c.need_by for c in line.demand_contributions})
     previous: date | None = None
     for day in dates:
@@ -618,7 +727,7 @@ def _net(line: AssessmentLine) -> None:
             ZERO,
         )
         balance += incoming - demand
-        buy = max(ZERO, line.safety_stock - balance)
+        buy = max(ZERO, safety - balance)
         balance += buy
         purchased += buy
         line.netting.append(
@@ -634,19 +743,79 @@ def _net(line: AssessmentLine) -> None:
     line.calculated_to_buy = purchased
 
 
+def lot_size(line: AssessmentLine, master: Record | None) -> Assumption | None:
+    """The material master's minimum lot and rounding value applied to a positive need."""
+    need = line.calculated_to_buy
+    if master is None or need is None or need <= 0:
+        return None
+    minimum = source_number(master, "min_lot_size", [])
+    rounding = source_number(master, "rounding", [])
+    quantity = need
+    if minimum is not None and minimum > quantity:
+        quantity = minimum
+    if rounding is not None and rounding > 0 and quantity % rounding:
+        quantity = (quantity // rounding + 1) * rounding
+    if quantity == need:
+        return None
+    line.net_requirement, line.calculated_to_buy = need, quantity
+    unit = line.unit or ""
+    rules = [
+        f"minimum lot {_plain(minimum)}" if minimum is not None and minimum > 0 else "",
+        f"rounding value {_plain(rounding)}" if rounding is not None and rounding > 0 else "",
+    ]
+    return Assumption(
+        code="lot_size_applied",
+        message=f"The net need of {_plain(need)} {unit} was raised to {_plain(quantity)} {unit} "
+        f"by the material master's {' and '.join(r for r in rules if r)}.",
+        alternative=f"Without the lot-sizing rule, buy {_plain(need)} {unit}.",
+        part_numbers=[line.part_number],
+        evidence=source_refs([master], "min_lot_size", "rounding"),
+    )
+
+
+def _plain(number: Decimal | None) -> str:
+    if number is None:
+        return ""
+    text = format(number.normalize(), "f")
+    return "0" if text in ("-0", "") else text
+
+
 def assess_plan(records: Sequence[Record], scope: PlanningScope) -> Assessment:
-    """Read-only, tenant-independent pure computation over already-authorized evidence."""
+    """Read-only, tenant-independent pure computation over already-authorized evidence.
+
+    Every material with demand gets a best-estimate quantity: a missing stock balance or
+    safety-stock policy is not netted (and says so), problems lower the line's
+    confidence instead of holding it, and every assumption is listed on the line.
+    """
     result = Assessment(record_counts=dict(Counter(r.kind for r in records)))
+    found: list[Assumption] = []
     demands, units = _production_demand(records, scope, result.issues)
-    _direct_demand(records, scope, demands, units, result.issues)
+    _direct_demand(records, scope, demands, units, result.issues, found)
     for part, contributions in sorted(demands.items()):
         issues: list[Issue] = []
+        assumptions: list[Assumption] = [a for a in found if _concerns(a, part)]
         master = _master(records, part, issues)
-        stock = inventory_at(records, part, scope, issues)
+        master_safety = source_number(master, "safety_stock", [])
+        stock = inventory_at(records, part, scope, issues, master_safety=master_safety)
+        if any(i.code == "stale_inventory_snapshot" for i in issues):
+            days = sorted({d for r in stock.records if (d := source_date(r, "as_of", []))})
+            assumptions.append(
+                Assumption(
+                    code="older_stock_snapshot_used",
+                    message=f"The latest usable stock snapshot is from "
+                    f"{', '.join(d.isoformat() for d in days)}, before the reference date "
+                    f"{scope.as_of.isoformat()}: its balance was used.",
+                    alternative="Stock movements since then are not reflected.",
+                    confidence="low",
+                    part_numbers=[part],
+                    evidence=source_refs(stock.records, "as_of")[:6],
+                )
+            )
         unit = units[part]
         if normalize_unit(stock.unit) != normalize_unit(unit) or (
             master is not None
-            and normalize_unit(source_text(master, "unit")) != normalize_unit(unit)
+            and source_text(master, "unit") is not None
+            and unit_key(master) != normalize_unit(unit)
         ):
             add_issue(
                 issues,
@@ -654,12 +823,15 @@ def assess_plan(records: Sequence[Record], scope: PlanningScope) -> Assessment:
                 "Demand, stock and material master units disagree.",
                 [*stock.records, *([master] if master else [])],
             )
+            if stock.unit is not None and normalize_unit(stock.unit) != normalize_unit(unit):
+                # No conversion: stock in another unit is never netted against the demand.
+                stock = Stock(None, stock.unit, stock.safety_stock, stock.records)
         first_need = min(c.need_by for c in contributions)
         last_need = max(c.need_by for c in contributions)
-        inbound = incoming_for(records, part, unit, last_need, scope, issues)
+        inbound = incoming_for(records, part, unit, last_need, scope, issues, assumptions)
         line = AssessmentLine(
             part_number=part,
-            description=source_text(master, "description"),
+            description=source_text(master, "description") or _described(records, part),
             location=scope.location,
             unit=unit,
             demand_unit=unit,
@@ -673,6 +845,7 @@ def assess_plan(records: Sequence[Record], scope: PlanningScope) -> Assessment:
             inbound=inbound,
             evidence=source_refs([*stock.records, *([master] if master else [])]),
             issues=issues,
+            assumptions=assumptions,
         )
         for contribution in contributions:
             line.evidence.extend(r for r in contribution.evidence if r not in line.evidence)
@@ -685,10 +858,21 @@ def assess_plan(records: Sequence[Record], scope: PlanningScope) -> Assessment:
                 "missing_order_register",
                 "No order register was mapped; zero outstanding purchases cannot be established.",
                 [],
+                warning=True,
+            )
+            line.assumptions.append(
+                Assumption(
+                    code="no_open_orders_known",
+                    message="No purchase order list was given: no open order was subtracted.",
+                    alternative="Open orders arriving in time reduce the quantity to buy.",
+                    confidence="low",
+                    part_numbers=[part],
+                )
             )
         line.suppliers, orders = _history(records, part, unit, scope, line.issues)
-        if not any(i.severity == "blocker" for i in [*result.issues, *line.issues]):
-            _net(line)
+        _best_estimate(line, stock)
+        if (sized := lot_size(line, master)) is not None:
+            line.assumptions.append(sized)
         line.ready = line.calculated_to_buy is not None
         # Supplier performance and the internal price benchmark (an internal reference only).
         measure(
@@ -697,7 +881,9 @@ def assess_plan(records: Sequence[Record], scope: PlanningScope) -> Assessment:
             orders,
             scope.as_of,
         )
+        confidence(line, blocked=any(i.severity == "blocker" for i in result.issues))
         result.lines.append(line)
+    result.assumptions.extend(a for a in found if not a.part_numbers)
     if not demands:
         add_issue(
             result.issues,
@@ -707,3 +893,53 @@ def assess_plan(records: Sequence[Record], scope: PlanningScope) -> Assessment:
             [],
         )
     return result
+
+
+def _described(records: Sequence[Record], part: str) -> str | None:
+    """A requirement's own description of the item, when no item master names it."""
+    for record in records:
+        if record.kind == "material_requirement" and same_key(
+            source_text(record, "part_number"), part
+        ):
+            text = source_text(record, "description")
+            if text is not None:
+                return text
+    return None
+
+
+def _concerns(assumption: Assumption, part: str) -> bool:
+    return any(same_key(p, part) for p in assumption.part_numbers)
+
+
+def _best_estimate(line: AssessmentLine, stock: Stock) -> None:
+    """Net with what is established; what is not is left out and said so."""
+    available, safety = line.available, line.safety_stock
+    part = line.part_number
+    if available is None:
+        available = ZERO
+        line.assumptions.append(
+            Assumption(
+                code="stock_not_netted",
+                message=(
+                    f"Stock is in {stock.unit} and the demand in {line.unit}, with no "
+                    "conversion: stock was not subtracted."
+                    if stock.unit is not None
+                    and normalize_unit(stock.unit) != normalize_unit(line.unit)
+                    else "No usable free-stock balance was found: stock was not subtracted."
+                ),
+                alternative="Any free stock on hand reduces the quantity to buy by its size.",
+                confidence="low",
+                part_numbers=[part],
+            )
+        )
+    if safety is None:
+        safety = ZERO
+        line.assumptions.append(
+            Assumption(
+                code="no_safety_stock",
+                message="No safety-stock policy was found or agreed: none was kept (0).",
+                alternative="A safety stock raises the quantity to buy by its size.",
+                part_numbers=[part],
+            )
+        )
+    _net(line, available, safety)

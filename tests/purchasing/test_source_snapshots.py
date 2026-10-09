@@ -351,7 +351,7 @@ class TwoRowMapper(SourceMapper):
         )
 
 
-async def test_a_preliminary_draft_keeps_the_assessed_units_and_skips_unready_lines(
+async def test_a_draft_keeps_the_assessed_units_and_skips_lines_without_one(
     app_engine: AsyncEngine,
     purchasing_rows: People,
 ) -> None:
@@ -379,27 +379,11 @@ async def test_a_preliminary_draft_keeps_the_assessed_units_and_skips_unready_li
         ),
     )
     source = await _assess(app_engine, who, storage, TwoRowMapper(), upload.id)
-    assert source.assessment_id is not None and source.status == "needs_review"
+    assert source.assessment_id is not None
+    # Open issues never hold a draft: the line without a unit is left out and named.
+    result = await draft_from_snapshot(app_engine, who, source.assessment_id, _draft_request())
 
-    # Open issues still block a normal draft...
-    with pytest.raises(InvalidRequest):
-        await draft_from_snapshot(app_engine, who, source.assessment_id, _draft_request())
-    # ...and a preliminary one carries them, with the units the assessment found.
-    result = await draft_from_snapshot(
-        app_engine,
-        who,
-        source.assessment_id,
-        AssessmentRfqRequest(
-            title="Motor component enquiry",
-            base_currency="EUR",
-            pending_validation="engineering validation of the BOM",
-        ),
-    )
-
-    assert result.preliminary and result.skipped == ["IM-N48H-40"]
-    assert result.title == (
-        "PRELIMINARY (pending engineering validation of the BOM): Motor component enquiry"
-    )
+    assert not result.preliminary and result.skipped == ["IM-N48H-40"]
     async with tenant_session(app_engine, who.tenant_id) as session:
         lines = list(await session.scalars(select(RfqLine).where(RfqLine.rfq_id == result.rfq_id)))
         for model in (Approval, Message, Invite):

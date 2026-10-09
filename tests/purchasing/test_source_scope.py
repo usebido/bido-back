@@ -356,25 +356,28 @@ async def _analyze(scope: ScopeRequest | None, data: bytes, mapper: Mapper) -> S
     )
 
 
-async def test_unscoped_production_sources_return_candidates_and_questions_not_lines() -> None:
+async def test_unscoped_production_sources_plan_each_candidate_separately() -> None:
     data, mapper = motor_workbook()
     result = await _analyze(None, data, mapper)
-    assert result.lines == []
-    assert result.status == "needs_review" and result.scope is None
-    blockers = {i.code for i in result.issues if i.severity == "blocker"}
-    assert blockers == {"missing_planning_scope"}
+    assert result.status == "assessed"
+    assert not [i for i in result.issues if i.code == "missing_planning_scope"]
     assert {(c.product_code, c.location) for c in result.planning_candidates} == {
         ("MTR-100", "Plant A"),
         ("MTR-100", "Plant B"),
     }
+    # Each plant's plan stays separate and says so; no question holds the plan.
+    plants = {line.location for line in result.lines}
+    assert plants == {"Plant A", "Plant B"}
+    # Plant A is planned on assumptions; Plant B also has no stock in the demand's unit.
+    assert {line.confidence for line in result.lines if line.location == "Plant A"} == {"medium"}
+    assert {line.confidence for line in result.lines if line.location == "Plant B"} == {"low"}
+    for line in result.lines:
+        codes = {a.code for a in line.assumptions}
+        assert {"candidate_plan", "planned_each_candidate", "horizon_all_orders"} <= codes
+        # Each plant's settled values stay with its own lines.
+        assert ("as_of_today" in codes) == (line.location == "Plant B")
+    assert result.scope_resolution is not None and result.scope_resolution.questions == []
     assert result.snapshot_dates == [date(2026, 9, 19), date(2026, 10, 8)]
-    assert result.scope_resolution is not None
-    assert result.scope_resolution.request == ScopeRequest()
-    assert {q.field for q in result.scope_resolution.questions} == {
-        "product_code",
-        "location",
-        "horizon_end",
-    }
     assert result.record_counts["production_plan"] == 3
 
 
@@ -397,13 +400,13 @@ async def test_the_buyers_words_are_resolved_and_planned_in_the_same_call() -> N
     assert mapper.calls == unscoped.calls
 
 
-async def test_a_missing_horizon_blocks_without_lines_and_offers_dates() -> None:
+async def test_a_missing_horizon_plans_every_order_and_says_so() -> None:
     data, mapper = motor_workbook()
     result = await _analyze(BUYER.model_copy(update={"horizon_days": None}), data, mapper)
-    assert result.lines == [] and result.scope is None
-    assert result.scope_resolution is not None
-    assert [q.field for q in result.scope_resolution.questions] == ["horizon_end"]
-    assert "missing_planning_scope" in {i.code for i in result.issues}
+    assert result.lines and result.scope is not None
+    assert result.scope.horizon_end == date(2026, 11, 1)
+    assert "horizon_all_orders" in {a.code for a in result.lines[0].assumptions}
+    assert "missing_planning_scope" not in {i.code for i in result.issues}
     assert "no_material_demand" not in {i.code for i in result.issues}
 
 
@@ -509,9 +512,11 @@ async def test_assessment_api_resolves_partial_scopes_and_keeps_complete_ones(
             json={**request, "scope": {"product_code": "MTR-100", "location": "Plant A"}},
         )
         pending = SourceAssessment.model_validate(open_scope.json())
-        assert pending.status == "needs_review" and pending.lines == []
+        # An open horizon is an assumption: every order of the product is planned.
+        assert pending.status == "assessed" and pending.lines
         assert pending.scope_resolution is not None
-        assert [q.field for q in pending.scope_resolution.questions] == ["horizon_end"]
+        assert pending.scope_resolution.questions == []
+        assert "horizon_all_orders" in {a.code for a in pending.lines[0].assumptions}
 
         reversed_horizon = {"as_of": "2026-10-22", "horizon_end": "2026-10-08"}
         invalid = await http.post(

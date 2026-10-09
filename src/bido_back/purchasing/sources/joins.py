@@ -18,6 +18,7 @@ from datetime import date
 from decimal import Decimal
 
 from bido_back.purchasing.sources.contracts import (
+    Assumption,
     CanonicalValue,
     InboundEvidence,
     Issue,
@@ -132,7 +133,14 @@ def inventory_at(
     part: str,
     scope: PlanningScope,
     issues: list[Issue],
+    *,
+    master_safety: Decimal | None = None,
 ) -> Stock:
+    """The free stock at the scope's plant and date, and the safety-stock policy.
+
+    The policy is the buyer's, else the stock list's own, else the material master's
+    (`master_safety`, e.g. an MRP view's safety stock).
+    """
     candidates = [
         r
         for r in records
@@ -228,9 +236,25 @@ def inventory_at(
     if safety is None:
         if len(safety_values) == 1:
             safety = next(iter(safety_values))
+        elif not safety_values and master_safety is not None:
+            safety = master_safety
+        elif safety_values:
+            # Disagreeing policies: the highest is kept, the conflict stays visible.
+            safety = max(safety_values)
+            add_issue(
+                issues,
+                "conflicting_safety_stock",
+                "The stock lines state different safety stocks; the highest was used.",
+                chosen,
+                "safety_stock",
+            )
         else:
             add_issue(
-                issues, "missing_safety_stock", "An explicit safety-stock policy is needed.", chosen
+                issues,
+                "missing_safety_stock",
+                "No safety-stock policy is stated.",
+                chosen,
+                warning=True,
             )
     return Stock(
         total_free if valid else None,
@@ -463,7 +487,14 @@ def incoming_for(
     need_by: date,
     scope: PlanningScope,
     issues: list[Issue],
+    assumptions: list[Assumption] | None = None,
 ) -> list[InboundEvidence]:
+    """Open order lines' pending balances, eligible when they arrive by `need_by`.
+
+    An open line already past its date is counted as arriving at the snapshot, as MRP
+    does, and the assumption says so (`assumptions`, when the caller collects them);
+    without that collector it stays excluded.
+    """
     candidates = [
         r
         for r in records
@@ -560,6 +591,24 @@ def incoming_for(
             continue
         quantity, expected = pending
         eligible = expected is not None and scope.as_of <= expected <= need_by
+        if assumptions is not None and expected is not None and expected < scope.as_of:
+            eligible = True
+            number = (
+                f"{source_text(order, 'po_number') or ''}/{source_text(order, 'po_line') or ''}"
+            )
+            amount = format(quantity.normalize(), "f")
+            assumptions.append(
+                Assumption(
+                    code="overdue_order_counted",
+                    message=f"Order {number} ({amount} {unit or ''}) was due "
+                    f"{expected.isoformat()} and is still open: it is counted as arriving "
+                    "now, as MRP does.",
+                    alternative=f"If it does not arrive, {amount} more must be bought.",
+                    confidence="low",
+                    part_numbers=[part],
+                    evidence=source_refs(related)[:6],
+                )
+            )
         if not eligible:
             add_issue(
                 issues,
@@ -578,4 +627,67 @@ def incoming_for(
                 evidence=source_refs(related),
             )
         )
+    if assumptions is not None:
+        _not_counted(records, candidates, inbound, part, scope, assumptions)
     return inbound
+
+
+def _not_counted(
+    records: Sequence[Record],
+    candidates: Sequence[Record],
+    inbound: Sequence[InboundEvidence],
+    part: str,
+    scope: PlanningScope,
+    assumptions: list[Assumption],
+) -> None:
+    """Open orders and pending deliveries the reconciliation could not count, said so."""
+    # Counted, or dated after the horizon's needs (rightly no coverage); undated is missed.
+    counted = {
+        (join_key(r.po_number), join_key(r.po_line))
+        for r in inbound
+        if r.eligible or r.expected_at is not None
+    }
+    pending = [
+        r
+        for r in records
+        if r.kind == "delivery_schedule"
+        and same_key(source_text(r, "part_number"), part)
+        and _at_location(r, scope.location)
+        and state(r) in PENDING
+    ]
+    missed: dict[tuple[str | None, str | None], tuple[Decimal | None, list[Record]]] = {}
+    for record in [*candidates, *pending]:
+        if record.kind == "purchase" and state(record) in CLOSED | CANCELLED:
+            continue
+        key = (join_key(source_text(record, "po_number")), join_key(source_text(record, "po_line")))
+        if key in counted:
+            continue
+        amount = source_number(record, "open_quantity", [])
+        if amount is None:
+            amount = source_number(record, "quantity", [])
+        known = missed.get(key)
+        missed[key] = (
+            known[0] if known is not None and known[0] is not None else amount,
+            [*(known[1] if known else []), record],
+        )
+    if not missed:
+        return
+    names = [
+        f"{rows[0].values.get('po_number', '?')}/{rows[0].values.get('po_line', '?')}"
+        for _, rows in missed.values()
+    ]
+    total = sum((q for q, _ in missed.values() if q is not None), ZERO)
+    assumptions.append(
+        Assumption(
+            code="open_orders_not_counted",
+            message=f"Open order(s) {', '.join(names[:6])} could not be reconciled or have no "
+            "delivery date (see the issues) and were not subtracted.",
+            alternative=f"If they arrive in time, up to {format(total.normalize(), 'f')} less "
+            "is needed."
+            if total
+            else "If they arrive in time, less is needed.",
+            confidence="low",
+            part_numbers=[part],
+            evidence=source_refs([r for _, rows in missed.values() for r in rows])[:10],
+        )
+    )

@@ -8,8 +8,8 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
-from bido_back.agents.tools import ToolError
 from bido_back.copilot.journey_tools import AssessmentRfqOut
+from bido_back.purchasing.sources.contracts import Assumption
 from tests.approvals.conftest import People
 from tests.purchasing.test_source_handoff import (
     assessment,
@@ -112,14 +112,27 @@ async def test_the_preview_shows_invites_and_limits_and_the_confirmation_runs_th
 
 
 @pytest.mark.db
-async def test_an_unresolved_assessment_cannot_be_confirmed_without_a_preliminary_mark(
+async def test_an_assessment_with_assumptions_drafts_and_shows_them_per_line(
     app_engine: AsyncEngine, copilot_rows: People
 ) -> None:
     principal = buyer_of(copilot_rows)
     ctx = context_of(principal)
     tools = make_tools(app_engine)
+    estimated = line("000102").model_copy(
+        update={
+            "confidence": "low",
+            "assumptions": [
+                Assumption(
+                    code="stock_not_netted",
+                    message="Stock is in UN and the demand in KG: stock was not subtracted.",
+                    confidence="low",
+                    part_numbers=["000102"],
+                )
+            ],
+        }
+    )
     assessment_id = await saved(
-        app_engine, principal, assessment(line("000101"), line("000102", ready=False))
+        app_engine, principal, assessment(line("000101"), estimated), key="estimated"
     )
     args: dict[str, object] = {
         "assessment_id": str(assessment_id),
@@ -129,12 +142,18 @@ async def test_an_unresolved_assessment_cannot_be_confirmed_without_a_preliminar
     proposed = AssessmentRfqOut.model_validate(
         await tools.call(ctx, "create_rfq_from_assessment", **args)
     )
-    assert proposed.preview is not None and proposed.preview.issues
+    assert proposed.preview is not None and proposed.preview.issues == []
+    shown = {line.part_number: line for line in proposed.preview.lines}
+    assert shown["000102"].confidence == "low"
+    assert shown["000102"].assumptions == [estimated.assumptions[0].message]
+    assert shown["000101"].assumptions == []
 
-    with pytest.raises(ToolError, match="evidence issues"):
+    confirmed = AssessmentRfqOut.model_validate(
         await tools.call(
             replace(ctx, run_id=uuid4()),
             "create_rfq_from_assessment",
             **args,
             proposal_id=str(proposed.proposal_id),
         )
+    )
+    assert confirmed.rfq_id is not None and confirmed.lines == 2 and not confirmed.preliminary

@@ -88,6 +88,8 @@ from bido_back.purchasing.sources.evidence import (
     source_number,
     source_refs,
     source_text,
+    unit_key,
+    unit_price,
 )
 from bido_back.purchasing.sources.joins import CLOSED, OPEN, receipts_for, state
 
@@ -267,9 +269,9 @@ def reconcile_order(
         status="closed" if status in CLOSED else "open" if status in OPEN else "unknown",
         ordered_at=ordered_at,
         quantity=quantity,
-        unit_price=source_number(order, "unit_price", []),
+        unit_price=unit_price(order, []),
         currency=_currency_code(source_text(order, "currency")),
-        same_unit=normalize_unit(source_text(order, "unit")) == normalize_unit(unit),
+        same_unit=unit_key(order) == normalize_unit(unit),
         promised_at=source_date(order, "promised_at", []),
         receipts=tuple(receipts),
         received=received,
@@ -430,7 +432,13 @@ def measure(
             )
     line.suppliers.sort(key=_rank_key)
     # Identity, not equality: two suppliers may carry identical evidence.
-    chosen = {id(s) for s in [s for s in line.suppliers if s.orders > 0][:MAX_SUGGESTED]}
+    # A supplier the buyer's master blocks for purchasing is never suggested.
+    chosen = {
+        id(s)
+        for s in [s for s in line.suppliers if s.orders > 0 and not s.purchase_blocked][
+            :MAX_SUGGESTED
+        ]
+    }
     for supplier in line.suppliers:
         supplier.suggested = id(supplier) in chosen
 
