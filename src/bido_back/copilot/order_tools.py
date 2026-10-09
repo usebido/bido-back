@@ -5,9 +5,10 @@
   "what did we receive?" have an answer.
 - `acknowledge_purchase_order`, `receive_purchase_order`,
   `close_purchase_order`, `cancel_purchase_order` (draft, gated): they change
-  the buyer's records only (nothing is sent), but never on the model's own
-  initiative. Each works in two calls (`copilot.proposals`): the first stores
-  exactly what it would record and answers a preview (for a receipt: ordered,
+  the buyer's records (cancelling a sent order also proposes the cancellation
+  email, sent only after approval), but never on the model's own initiative.
+  Each works in two calls (`copilot.proposals`): the first stores exactly what
+  it would record and answers a preview (for a receipt: ordered,
   received so far, this delivery, per line); the second, from a later run with
   the proposal's id, runs the STORED request, whatever the model passes then.
 
@@ -32,6 +33,7 @@ from bido_back.agents.tools import AnyTool, Tool, ToolError
 from bido_back.auth import Principal
 from bido_back.awards import lifecycle
 from bido_back.awards import service as award_service
+from bido_back.awards.cancellation import request_cancellation_notice
 from bido_back.awards.orders import po_lines
 from bido_back.awards.schemas import (
     OPEN_FULFILMENT_STATES,
@@ -113,6 +115,11 @@ class PurchaseOrderItem(BaseModel):
     closed_at: date | None
     closed_short: bool
     cancelled_at: date | None
+    needs_review: bool = Field(
+        default=False,
+        description="The supplier replied with a change or a question (another date, price or "
+        "quantity, a refusal): tell the buyer; nothing was changed on the order",
+    )
 
 
 class ListPurchaseOrdersOut(BaseModel):
@@ -175,6 +182,11 @@ class OrderActionOut(AwaitingConfirmation):
     receipt_id: UUID | None = None
     rfq_completed: bool = Field(
         default=False, description="This action completed the RFQ (all its orders are done)"
+    )
+    cancellation_approval_id: UUID | None = Field(
+        default=None,
+        description="Cancelling a sent order: the cancellation email to the supplier, waiting "
+        "for approval in the approvals queue (nothing is sent before)",
     )
 
 
@@ -260,6 +272,7 @@ def _item(po: PurchaseOrderSummary) -> PurchaseOrderItem:
         closed_at=f.closed_at.date() if f.closed_at else None,
         closed_short=f.closed_short,
         cancelled_at=f.cancelled_at.date() if f.cancelled_at else None,
+        needs_review=po.needs_review,
     )
 
 
@@ -630,7 +643,16 @@ def order_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:
         except RfqError as exc:
             await proposals.release(db, _principal(ctx), args.proposal_id)
             raise _service_error(exc) from None
-        return await _done(ctx, po_id, args.proposal_id)
+        try:
+            notice = await request_cancellation_notice(db, _principal(ctx), po_id, deps.mailboxes)
+        except RfqError:
+            notice = None
+        return await _done(
+            ctx,
+            po_id,
+            args.proposal_id,
+            cancellation_approval_id=notice.approval_id if notice else None,
+        )
 
     return (
         Tool(
@@ -677,8 +699,9 @@ def order_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:
         Tool(
             "cancel_purchase_order",
             "Cancel a purchase order with the buyer's reason, before it is fully received. "
-            "This records the cancellation in Bido only; telling the supplier is the buyer's "
-            "own email." + _CONFIRM_FIRST,
+            "It takes effect in Bido at once; when the order was sent, a cancellation email to "
+            "the supplier is proposed for approval (cancellation_approval_id): say it waits in "
+            "the approvals queue." + _CONFIRM_FIRST,
             CancelIn,
             OrderActionOut,
             "draft",

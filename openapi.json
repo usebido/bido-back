@@ -1686,6 +1686,20 @@
         "additionalProperties": false,
         "description": "One awarded line, exactly as the approver saw it.",
         "properties": {
+          "buyer_limit_issues": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Buyer Limit Issues"
+          },
           "currency": {
             "title": "Currency",
             "type": "string"
@@ -8816,6 +8830,12 @@
             "title": "Id",
             "type": "string"
           },
+          "needs_review": {
+            "default": false,
+            "description": "A supplier reply to the order waits for the buyer",
+            "title": "Needs Review",
+            "type": "boolean"
+          },
           "ref": {
             "title": "Ref",
             "type": "string"
@@ -8878,6 +8898,23 @@
       },
       "PurchaseOrderView": {
         "properties": {
+          "cancellation_approval_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancellation Approval Id"
+          },
+          "cancellation_sent": {
+            "default": false,
+            "title": "Cancellation Sent",
+            "type": "boolean"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -8886,6 +8923,14 @@
           "currency": {
             "title": "Currency",
             "type": "string"
+          },
+          "document_gaps": {
+            "description": "What the PO document leaves blank (e.g. payment_terms, incoterm, line 2 delivery_date): fill it on the RFQ before sending, or send it as is",
+            "items": {
+              "type": "string"
+            },
+            "title": "Document Gaps",
+            "type": "array"
           },
           "fulfilment": {
             "$ref": "#/components/schemas/PurchaseOrderFulfilment",
@@ -8918,6 +8963,12 @@
             },
             "title": "Lines",
             "type": "array"
+          },
+          "needs_review": {
+            "default": false,
+            "description": "A supplier reply changes or questions the order: the buyer decides (acknowledge, cancel, or answer the supplier)",
+            "title": "Needs Review",
+            "type": "boolean"
           },
           "payment_terms": {
             "anyOf": [
@@ -8984,6 +9035,14 @@
           "supplier_name": {
             "title": "Supplier Name",
             "type": "string"
+          },
+          "supplier_responses": {
+            "description": "The supplier's replies to the order, newest first",
+            "items": {
+              "$ref": "#/components/schemas/SupplierResponseView"
+            },
+            "title": "Supplier Responses",
+            "type": "array"
           },
           "total": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -9834,6 +9893,35 @@
           "requirements"
         ],
         "title": "RequirementsView",
+        "type": "object"
+      },
+      "ReviewRequest": {
+        "additionalProperties": false,
+        "description": "The buyer's decision on a supplier reply that changed or questioned the order.",
+        "properties": {
+          "accepted": {
+            "description": "True: the buyer accepts what the supplier wrote (e.g. the new date); false: they do not, and answer the supplier themselves",
+            "title": "Accepted",
+            "type": "boolean"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "required": [
+          "accepted"
+        ],
+        "title": "ReviewRequest",
         "type": "object"
       },
       "RfqActivityItem": {
@@ -13102,6 +13190,133 @@
           }
         },
         "title": "SupplierPerformance",
+        "type": "object"
+      },
+      "SupplierResponseChange": {
+        "properties": {
+          "field": {
+            "description": "delivery_date, unit_price or quantity",
+            "title": "Field",
+            "type": "string"
+          },
+          "ordered": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the order says",
+            "title": "Ordered"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "stated": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the supplier wrote (a date or a number)",
+            "title": "Stated"
+          },
+          "unverified": {
+            "default": false,
+            "description": "Not readable as a date or number, or not found in the email",
+            "title": "Unverified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "position",
+          "field",
+          "ordered",
+          "stated"
+        ],
+        "title": "SupplierResponseChange",
+        "type": "object"
+      },
+      "SupplierResponseView": {
+        "description": "A supplier's reply to the order, as Bido read it (`awards.responses`).",
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/SupplierResponseChange"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "kind": {
+            "description": "confirmation, confirmation_with_changes, rejection, question, delivery_update, other, or unread (Bido could not read it)",
+            "title": "Kind",
+            "type": "string"
+          },
+          "message_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Id"
+          },
+          "needs_review": {
+            "title": "Needs Review",
+            "type": "boolean"
+          },
+          "other_dates": {
+            "items": {
+              "format": "date",
+              "type": "string"
+            },
+            "title": "Other Dates",
+            "type": "array"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "supplier_order_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Order Ref"
+          }
+        },
+        "required": [
+          "at",
+          "message_id",
+          "kind",
+          "needs_review"
+        ],
+        "title": "SupplierResponseView",
         "type": "object"
       },
       "SupplierStatView": {
@@ -21074,7 +21289,7 @@
     },
     "/v1/purchase-orders/{po_id}.{fmt}": {
       "get": {
-        "description": "The PO as .xlsx, or as printable HTML (print it to PDF from the browser).",
+        "description": "The PO as the supplier receives it (.pdf, .xlsx), or as printable HTML.",
         "operationId": "purchase_order_document_v1_purchase_orders__po_id___fmt__get",
         "parameters": [
           {
@@ -21094,7 +21309,8 @@
             "schema": {
               "enum": [
                 "xlsx",
-                "html"
+                "html",
+                "pdf"
               ],
               "title": "Fmt",
               "type": "string"
@@ -21122,6 +21338,12 @@
         "responses": {
           "200": {
             "content": {
+              "application/pdf": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {
                 "schema": {
                   "format": "binary",
@@ -21327,7 +21549,7 @@
     },
     "/v1/purchase-orders/{po_id}/cancel": {
       "post": {
-        "description": "Cancel the order with a reason, at any point before it is fully received.",
+        "description": "Cancel the order with a reason, at any point before it is fully received.\n\nA sent order also gets a cancellation email to the supplier, proposed for\napproval (`cancellation_approval_id` on the order).",
         "operationId": "cancel_purchase_order_v1_purchase_orders__po_id__cancel_post",
         "parameters": [
           {
@@ -21809,6 +22031,133 @@
           }
         ],
         "summary": "Record Receipt",
+        "tags": [
+          "awards"
+        ]
+      }
+    },
+    "/v1/purchase-orders/{po_id}/review": {
+      "post": {
+        "description": "Decide on the supplier's reply that changed or questioned the order\n(`needs_review`): accept it, or not (then answer the supplier).",
+        "operationId": "review_supplier_response_v1_purchase_orders__po_id__review_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "po_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Po Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurchaseOrderView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Review Supplier Response",
         "tags": [
           "awards"
         ]

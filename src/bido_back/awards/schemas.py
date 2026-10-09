@@ -39,6 +39,11 @@ FulfilmentState = Literal[
 OPEN_FULFILMENT_STATES: frozenset[str] = frozenset(
     {"sent", "acknowledged", "partially_received", "received"}
 )
+# A sent order a supplier reply can still change: such a reply is read as an answer to
+# the order (`awards.responses`), not as a new offer.
+RESPONDING_FULFILMENT_STATES: frozenset[str] = frozenset(
+    {"sent", "acknowledged", "partially_received"}
+)
 AwardState = Literal["none", "pending_approval", "awarded"]
 Reason = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
 ShortRef = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
@@ -112,6 +117,17 @@ class CloseRequest(BaseModel):
         description="Close although not everything was received (the rest is given up)",
     )
     reason: Reason | None = Field(default=None, description="Required when closing short")
+
+
+class ReviewRequest(BaseModel):
+    """The buyer's decision on a supplier reply that changed or questioned the order."""
+
+    model_config = ConfigDict(extra="forbid")
+    accepted: bool = Field(
+        description="True: the buyer accepts what the supplier wrote (e.g. the new date); "
+        "false: they do not, and answer the supplier themselves"
+    )
+    note: Note | None = None
 
 
 class CancelRequest(BaseModel):
@@ -237,6 +253,33 @@ class IssuedPurchaseOrderLineView(BaseModel):
     )
 
 
+class SupplierResponseChange(BaseModel):
+    position: int
+    field: str = Field(description="delivery_date, unit_price or quantity")
+    ordered: str | None = Field(description="What the order says")
+    stated: str | None = Field(description="What the supplier wrote (a date or a number)")
+    unverified: bool = Field(
+        default=False, description="Not readable as a date or number, or not found in the email"
+    )
+
+
+class SupplierResponseView(BaseModel):
+    """A supplier's reply to the order, as Bido read it (`awards.responses`)."""
+
+    at: datetime
+    message_id: UUID | None
+    kind: str = Field(
+        description="confirmation, confirmation_with_changes, rejection, question, "
+        "delivery_update, other, or unread (Bido could not read it)"
+    )
+    needs_review: bool
+    supplier_order_ref: str | None = None
+    changes: list[SupplierResponseChange] = Field(default_factory=list[SupplierResponseChange])
+    # Dates in the supplier's own words that match nothing on the order.
+    other_dates: list[date] = Field(default_factory=list[date])
+    summary: str | None = None
+
+
 class PurchaseOrderView(BaseModel):
     id: UUID
     ref: str
@@ -258,6 +301,23 @@ class PurchaseOrderView(BaseModel):
         description="The order after the send; see `fulfilment.state`"
     )
     lines: list[IssuedPurchaseOrderLineView]
+    needs_review: bool = Field(
+        default=False,
+        description="A supplier reply changes or questions the order: the buyer decides "
+        "(acknowledge, cancel, or answer the supplier)",
+    )
+    supplier_responses: list[SupplierResponseView] = Field(
+        default_factory=list[SupplierResponseView],
+        description="The supplier's replies to the order, newest first",
+    )
+    # The cancellation email to the supplier: the approval while it waits or after it ran.
+    cancellation_approval_id: UUID | None = None
+    cancellation_sent: bool = False
+    document_gaps: list[str] = Field(
+        default_factory=list[str],
+        description="What the PO document leaves blank (e.g. payment_terms, incoterm, "
+        "line 2 delivery_date): fill it on the RFQ before sending, or send it as is",
+    )
 
 
 class PurchaseOrderSummary(BaseModel):
@@ -273,6 +333,9 @@ class PurchaseOrderSummary(BaseModel):
     sent_at: datetime | None
     fulfilment: PurchaseOrderFulfilment = Field(
         description="The order after the send; see `fulfilment.state`"
+    )
+    needs_review: bool = Field(
+        default=False, description="A supplier reply to the order waits for the buyer"
     )
 
 

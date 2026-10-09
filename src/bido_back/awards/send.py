@@ -13,7 +13,8 @@ buyer asks again. An RFQ is awarded once.
 
 `send_purchase_order` and `send_award_notice` are emails in the invite's
 thread, from the mailbox of the buyer who sent the RFQ email. The PO email
-carries the PO as an .xlsx rendered from the stored rows at send time; the
+carries the PO as a PDF in the supplier's language and as an .xlsx, both
+rendered from the stored rows at send time (`awards.document`); the
 approval holds the hash of those rows, and a PO whose rows changed is not
 sent (it goes back to `draft`). Idempotency follows `send_followup_email`:
 the Message-ID is claimed and committed before sending and reused on a retry;
@@ -38,8 +39,16 @@ from bido_back.agents.context import ToolContext
 from bido_back.agents.tools import Tool
 from bido_back.approvals.executor import ActToolRegistry
 from bido_back.approvals.guard import RejectHook
+from bido_back.awards.cancellation import register_cancellation_act_tool
+from bido_back.awards.document import PDF_MEDIA_TYPE, po_pdf, po_pdf_filename
 from bido_back.awards.orders import next_po_number, po_document, po_ref
-from bido_back.awards.render import XLSX_MEDIA_TYPE, content_hash, line_total, to_xlsx
+from bido_back.awards.render import (
+    XLSX_MEDIA_TYPE,
+    PoDocument,
+    content_hash,
+    line_total,
+    to_xlsx,
+)
 from bido_back.awards.schemas import (
     AwardLine,
     AwardRfqArgs,
@@ -233,6 +242,26 @@ class _AwardRfq:
 # --- send_purchase_order ---------------------------------------------------------------
 
 
+def _po_attachments(doc: PoDocument) -> tuple[OutboundAttachment, ...]:
+    """The PO as a PDF (what the supplier reads) and as .xlsx (for their ERP import).
+
+    A PDF that cannot be rendered is left out, logged, rather than holding the order:
+    the .xlsx carries the same approved content.
+    """
+    sheet = OutboundAttachment(
+        filename=f"{doc.ref}.xlsx", content_type=XLSX_MEDIA_TYPE, data=to_xlsx(doc)
+    )
+    try:
+        pdf = po_pdf(doc)
+    except Exception:
+        logger.exception("purchase order %s: the PDF could not be rendered; sent as .xlsx", doc.ref)
+        return (sheet,)
+    return (
+        OutboundAttachment(filename=po_pdf_filename(doc), content_type=PDF_MEDIA_TYPE, data=pdf),
+        sheet,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _Claim:
     message_id: str
@@ -274,13 +303,7 @@ class _SendPurchaseOrder:
                     message_id=claim.message_id,
                     thread_message_id=claim.thread_message_id,
                     possibly_sent=claim.possibly_sent,
-                    attachments=(
-                        OutboundAttachment(
-                            filename=f"{po.ref}.xlsx",
-                            content_type=XLSX_MEDIA_TYPE,
-                            data=to_xlsx(doc),
-                        ),
-                    ),
+                    attachments=_po_attachments(doc),
                 ),
             )
             po.status = "sent"
@@ -468,6 +491,7 @@ def award_tools(
 def register_award_act_tools(registry: ActToolRegistry, deps: RfqActDeps) -> None:
     for tool in award_tools(deps):
         registry.register(tool)
+    register_cancellation_act_tool(registry, deps)
 
 
 async def release_rejected_po_send(session: AsyncSession, approval: Approval) -> None:

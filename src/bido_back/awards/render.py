@@ -8,6 +8,7 @@ browser can print it to PDF; there is no PDF library on purpose.
 carries it, and the worker refuses to send a PO whose rows changed since.
 """
 
+import hashlib
 import html
 import io
 from dataclasses import dataclass
@@ -19,6 +20,7 @@ from pydantic import JsonValue
 
 from bido_back.agents.events import args_hash
 from bido_back.exports.render import safe_text
+from bido_back.rfqs.document import DocumentBranding
 
 XLSX_MEDIA_TYPE: Final = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 HTML_MEDIA_TYPE: Final = "text/html; charset=utf-8"
@@ -35,6 +37,9 @@ class PoLine:
     line_total: Decimal
     need_by: date | None
     lead_time_days: int | None
+    # The buyer's own code for the part (the RFQ line's), and where this line is delivered.
+    part_number: str | None = None
+    delivery_location: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +54,41 @@ class PoDocument:
     payment_terms: str | None
     total: Decimal
     lines: tuple[PoLine, ...]
+    # The supplier's language: the PDF's labels and the email text.
+    language: str = "en"
+    # Who orders: the company's legal name, tax id and address, and its logo.
+    branding: DocumentBranding | None = None
+    # The supplier's contact the order is addressed to.
+    supplier_contact: str | None = None
+    # The offer this order accepts: the supplier's proposal version and when it arrived.
+    quote_version: int | None = None
+    quote_date: date | None = None
+    # The person who approved the award (the release of the purchase).
+    approved_by: str | None = None
+
+
+def deliver_to(doc: PoDocument) -> str | None:
+    """The delivery location(s) of the lines, in order, each once."""
+    places = list(
+        dict.fromkeys(line.delivery_location for line in doc.lines if line.delivery_location)
+    )
+    return " · ".join(places) or None
+
+
+def document_gaps(doc: PoDocument) -> list[str]:
+    """What a purchase order should state and this one leaves blank, for the buyer to see
+    before sending: the terms, and per line a delivery date (or lead time) and place."""
+    gaps = [
+        name
+        for name, value in (("incoterm", doc.incoterm), ("payment_terms", doc.payment_terms))
+        if not value
+    ]
+    for line in doc.lines:
+        if line.need_by is None and line.lead_time_days is None:
+            gaps.append(f"line {line.position} delivery_date")
+    if not any(line.delivery_location for line in doc.lines) and doc.incoterm is None:
+        gaps.append("delivery_location")
+    return gaps
 
 
 def line_total(quantity: Decimal, unit_price: Decimal) -> Decimal:
@@ -62,6 +102,7 @@ def _num(value: Decimal) -> str:
 
 def content_hash(doc: PoDocument) -> str:
     """sha256 of the document's canonical JSON: what the supplier will receive."""
+    brand = doc.branding
     payload: dict[str, JsonValue] = {
         "ref": doc.ref,
         "rfq_ref": doc.rfq_ref,
@@ -80,9 +121,28 @@ def content_hash(doc: PoDocument) -> str:
                 "unit_price": _num(line.unit_price),
                 "line_total": _num(line.line_total),
                 "need_by": line.need_by.isoformat() if line.need_by else None,
+                "part_number": line.part_number,
+                "delivery_location": line.delivery_location,
             }
             for line in doc.lines
         ],
+        "language": doc.language,
+        "supplier_contact": doc.supplier_contact,
+        "quote_version": doc.quote_version,
+        "quote_date": doc.quote_date.isoformat() if doc.quote_date else None,
+        "approved_by": doc.approved_by,
+        "buyer": None
+        if brand is None
+        else {
+            "company_name": brand.company_name,
+            "legal_name": brand.legal_name,
+            "tax_id": brand.tax_id,
+            "address": brand.address,
+            "footer_text": brand.footer_text,
+            "logo": hashlib.sha256(brand.logo_base64.encode()).hexdigest()
+            if brand.logo_base64
+            else None,
+        },
     }
     return args_hash(payload)
 
@@ -98,6 +158,7 @@ _HEADER: Final = (
     "Line total",
     "Need by",
     "Lead time (days)",
+    "Part number",
 )
 
 
@@ -107,6 +168,7 @@ def to_xlsx(doc: PoDocument) -> bytes:
     workbook = cast(Any, Workbook())
     sheet = workbook.active
     sheet.title = doc.ref[:31]
+    places = deliver_to(doc)
     meta: list[tuple[str, str | Decimal | date | None]] = [
         ("Purchase order", doc.ref),
         ("Issued on", doc.issued_on),
@@ -116,6 +178,8 @@ def to_xlsx(doc: PoDocument) -> bytes:
         ("Currency", doc.currency),
         ("Incoterm", safe_text(doc.incoterm) if doc.incoterm else None),
         ("Payment terms", safe_text(doc.payment_terms) if doc.payment_terms else None),
+        ("Deliver to", safe_text(places) if places else None),
+        ("Approved by", safe_text(doc.approved_by) if doc.approved_by else None),
     ]
     for label, value in meta:
         sheet.append([label, value])
@@ -134,6 +198,7 @@ def to_xlsx(doc: PoDocument) -> bytes:
                 line.line_total,
                 line.need_by,
                 line.lead_time_days,
+                safe_text(line.part_number) if line.part_number else None,
             ]
         )
     sheet.append([])

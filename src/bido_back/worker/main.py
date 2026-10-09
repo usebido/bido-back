@@ -48,6 +48,7 @@ from bido_back.worker.job_types import (
     FX_REFRESH,
     MAILBOX_SYNC,
     NEGOTIATION_SWEEP,
+    PO_RESPONSE,
     QUOTE_EXTRACT,
     TEMPLATE_BUILD,
     TEMPLATE_SCAN,
@@ -104,6 +105,7 @@ def build_worker_registry(
 ) -> HandlerRegistry:
     """Every job handler of the RFQ flow, wired from settings (the production registry)."""
     from bido_back.agents.config import RunnerConfig
+    from bido_back.awards.responses import po_response_handler
     from bido_back.awards.send import register_award_act_tools
     from bido_back.followups.agents import default_followup_writer
     from bido_back.followups.jobs import FollowupSweepHandler
@@ -168,6 +170,10 @@ def build_worker_registry(
     registry.register(
         QUOTE_EXTRACT,
         quote_extract_handler(db=engine, storage=storage, runner_config=runner_config),
+    )
+    registry.register(
+        PO_RESPONSE,
+        po_response_handler(db=engine, storage=storage, runner_config=runner_config),
     )
     registry.register(FX_REFRESH, FxRefreshHandler(engine))
     inbound = build_inbound_service(settings, engine, sqs=sqs)

@@ -389,6 +389,75 @@ class AwardNoticeOutput(BaseModel):
     body: str = Field(description="Plain text. The subject is set by code (Re: the RFQ email).")
 
 
+# --- po_response_reader: a supplier's reply to a purchase order -> what it says ---------
+
+
+class PoResponseOrderedLine(BaseModel):
+    """One line of the purchase order as it was sent."""
+
+    position: int
+    description: str
+    part_number: str | None = None
+    mpn: str | None = None
+    quantity: str
+    unit: str
+    unit_price: str
+    currency: str
+    delivery_date: str | None = Field(default=None, description="ISO date, or None")
+
+
+class PoResponseInput(BaseModel):
+    po_ref: str
+    rfq_ref: str
+    supplier_name: str
+    supplier_language: str = Field(description="ISO 639-1, e.g. de, en, fr, it, pt")
+    lines: list[PoResponseOrderedLine]
+    email_subject: str
+    email_body: str
+    attachments_text: str = ""
+
+
+class Quoted(BaseModel):
+    """A value the supplier wrote, with the exact words it was read from."""
+
+    value: str | None = Field(description="The value as written, e.g. '2026-11-20', '1,05'")
+    quote: str | None = Field(
+        description="The supplier's words, copied exactly from the email or an attachment"
+    )
+
+
+class PoResponseLine(BaseModel):
+    """What the supplier states for one ordered line; absent fields mean 'not stated'."""
+
+    position: int = Field(description="The ordered line's position")
+    delivery_date: Quoted | None = None
+    unit_price: Quoted | None = None
+    quantity: Quoted | None = None
+
+
+PoResponseKind = Literal[
+    "confirmation",
+    "confirmation_with_changes",
+    "rejection",
+    "question",
+    "delivery_update",
+    "other",
+]
+
+
+class PoResponseOutput(BaseModel):
+    kind: PoResponseKind
+    # The sentence that confirms the order, copied exactly (None when it does not confirm).
+    confirmation: Quoted | None = None
+    supplier_order_ref: Quoted | None = Field(
+        default=None, description="The supplier's own order or confirmation number"
+    )
+    lines: list[PoResponseLine] = Field(default_factory=list[PoResponseLine])
+    summary: str = Field(
+        max_length=400, description="One short English sentence for the buyer: what they say"
+    )
+
+
 # --- sheet_mapper: an arbitrary workbook -> import sections ------------------------------
 
 SheetImportType = Literal[

@@ -7,14 +7,18 @@ is the order's life after it:
       \\__________________/______________________/     (cancelled: before received)
                  receipts; close short with a reason from any open state
 
-- `acknowledge`: the supplier confirmed the order. Recorded by the buyer; the
-  mailbox pipeline can call the same function when it parses a confirmation
-  (not wired yet: `source="email"` is the seam).
+- `acknowledge`: the supplier confirmed the order. Recorded by the buyer, or
+  read from the supplier's reply in the thread (`bido_back.awards.responses`,
+  `source="email"`) when it is a plain confirmation; a reply that changes a
+  date, price or quantity is flagged for the buyer instead.
 - `receive`: one delivery, a quantity per PO line. The total received per line
   never exceeds the ordered quantity (`OverReceipt`); the state follows the sum.
 - `close`: everything arrived, or the rest is given up (`short`, with a reason;
   the shortfall per line goes into the event).
 - `cancel`: with a reason, while nothing or only part of it arrived.
+- `review_response`: the buyer's decision on a supplier reply that changed or
+  questioned the order (flagged by `awards.responses`); acknowledging by hand,
+  closing or cancelling settles it too (`awaiting_review`).
 
 Every transition takes the PO's row lock, writes its audit event in the same
 transaction (`purchase_order.*`, keyed by `rfq_id` for the activity feed), and
@@ -47,9 +51,13 @@ from bido_back.awards.schemas import (
     ReceiptLineView,
     ReceiptRequest,
     ReceiptView,
+    ReviewRequest,
+    SupplierResponseChange,
+    SupplierResponseView,
 )
 from bido_back.db import tenant_session
 from bido_back.db.models import (
+    AuditEvent,
     IssuedPurchaseOrder,
     IssuedPurchaseOrderLine,
     PurchaseOrderReceipt,
@@ -252,9 +260,14 @@ async def acknowledge(
     request: AcknowledgeRequest,
     *,
     source: AcknowledgementSource = "manual",
+    message_id: UUID | None = None,
     now: datetime | None = None,
 ) -> None:
-    """The supplier confirmed the order: `sent` -> `acknowledged`."""
+    """The supplier confirmed the order: `sent` -> `acknowledged`.
+
+    `source="email"`: read from the supplier's reply (`awards.responses`), whose
+    message is `message_id`; `actor_user_id` is then None.
+    """
     if po.fulfilment_state != "sent":
         raise InvalidState(
             f"purchase order {po.id} is {po.fulfilment_state}; only a sent order is acknowledged"
@@ -278,6 +291,7 @@ async def acknowledge(
             acknowledged_on=acknowledged_at.date(),
             supplier_order_ref=request.supplier_order_ref,
             source=source,
+            message_id=message_id,
         )
     )
     await session.flush()
@@ -507,6 +521,111 @@ async def _complete_rfq_if_done(
     await session.flush()
 
 
+# --- The supplier's replies (read by `awards.responses`) -----------------------------------------
+
+PO_SUPPLIER_RESPONSE: Final = "purchase_order.supplier_response"
+PO_RESPONSE_REVIEWED: Final = "purchase_order.response_reviewed"
+# A buyer's decision on the order settles the replies before it.
+_SETTLING: Final = (PO_ACKNOWLEDGED, PO_CLOSED, PO_CANCELLED, PO_RESPONSE_REVIEWED)
+
+
+def _items(value: object) -> list[object]:
+    return list(cast(list[object], value)) if isinstance(value, list) else []
+
+
+def _response_view(event: AuditEvent) -> SupplierResponseView:
+    data = event.payload or {}
+    message = data.get("message_id")
+    return SupplierResponseView(
+        at=event.created_at,
+        message_id=UUID(str(message)) if message else None,
+        kind=str(data.get("kind") or "other"),
+        needs_review=bool(data.get("needs_review")),
+        supplier_order_ref=data.get("supplier_order_ref") or None,
+        changes=[
+            SupplierResponseChange.model_validate(c)
+            for c in _items(data.get("changes"))
+            if isinstance(c, dict)
+        ],
+        other_dates=[date.fromisoformat(str(d)) for d in _items(data.get("other_dates"))],
+        summary=data.get("summary") or None,
+    )
+
+
+async def _po_events(
+    session: AsyncSession, po_ids: Sequence[UUID], actions: Sequence[str]
+) -> list[AuditEvent]:
+    if not po_ids:
+        return []
+    return list(
+        await session.scalars(
+            select(AuditEvent)
+            .where(
+                AuditEvent.action.in_(list(actions)),
+                AuditEvent.payload["purchase_order_id"].astext.in_([str(i) for i in po_ids]),
+            )
+            .order_by(AuditEvent.created_at.desc(), AuditEvent.id)
+        )
+    )
+
+
+async def supplier_responses(session: AsyncSession, po_id: UUID) -> list[SupplierResponseView]:
+    """The supplier's replies to the order, newest first."""
+    return [_response_view(e) for e in await _po_events(session, [po_id], [PO_SUPPLIER_RESPONSE])]
+
+
+async def awaiting_review(session: AsyncSession, po_ids: Sequence[UUID]) -> set[UUID]:
+    """The orders with a supplier reply to review: flagged, and not settled since.
+
+    The buyer settles it by deciding on the order after the reply: acknowledging it
+    (by hand), closing or cancelling it.
+    """
+    latest_flag: dict[UUID, datetime] = {}
+    latest_decision: dict[UUID, datetime] = {}
+    for event in await _po_events(session, po_ids, [PO_SUPPLIER_RESPONSE, *_SETTLING]):
+        data = event.payload or {}
+        po_id = UUID(str(data.get("purchase_order_id")))
+        if event.action == PO_SUPPLIER_RESPONSE:
+            if data.get("needs_review"):
+                latest_flag.setdefault(po_id, event.created_at)
+        elif not (event.action == PO_ACKNOWLEDGED and data.get("source") == "email"):
+            latest_decision.setdefault(po_id, event.created_at)
+    return {
+        po_id
+        for po_id, flagged in latest_flag.items()
+        if po_id not in latest_decision or latest_decision[po_id] < flagged
+    }
+
+
+async def review_response(
+    session: AsyncSession,
+    po: IssuedPurchaseOrder,
+    actor_user_id: UUID,
+    request: ReviewRequest,
+) -> None:
+    """The buyer decided on the supplier's flagged reply. The order's lines stay as sent:
+    a new price or quantity needs a new order; an accepted date is recorded here."""
+    if po.id not in await awaiting_review(session, [po.id]):
+        raise InvalidState(f"purchase order {po.ref} has no supplier reply to review")
+    latest = (await supplier_responses(session, po.id))[0]
+    session.add(
+        rfq_event(
+            po.tenant_id,
+            actor_user_id,
+            PO_RESPONSE_REVIEWED,
+            po.rfq_id,
+            purchase_order_id=po.id,
+            purchase_order_ref=po.ref,
+            invite_id=po.invite_id,
+            accepted=request.accepted,
+            note=request.note,
+            message_id=latest.message_id,
+            changes=[c.model_dump(mode="json") for c in latest.changes],
+        )
+    )
+    await session.flush()
+
+
 # --- Entry points for the API and the Copilot (their own tenant session) -------------------------
 
 
@@ -536,6 +655,13 @@ async def cancel_purchase_order(
 ) -> None:
     async with tenant_session(db, principal.tenant_id) as session:
         await cancel(session, await locked_po(session, po_id), principal.user_id, request)
+
+
+async def review_purchase_order_response(
+    db: Db, principal: Principal, po_id: UUID, request: ReviewRequest
+) -> None:
+    async with tenant_session(db, principal.tenant_id) as session:
+        await review_response(session, await locked_po(session, po_id), principal.user_id, request)
 
 
 async def list_receipts(db: Db, principal: Principal, po_id: UUID) -> list[ReceiptView]:

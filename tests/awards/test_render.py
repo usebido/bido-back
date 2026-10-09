@@ -79,6 +79,7 @@ def test_xlsx_keeps_numbers_and_neutralizes_formulas() -> None:
             "Line total",
             "Need by",
             "Lead time (days)",
+            "Part number",
         ]
     )
     line = rows[header + 1]

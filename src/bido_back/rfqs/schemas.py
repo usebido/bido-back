@@ -467,7 +467,8 @@ class ApprovalQueueItem(BaseModel):
     negotiation_email: NegotiationEmailDraft | None = None
     # Set for `award_rfq`: the exact lines, suppliers and prices to award.
     award: AwardApprovalView | None = None
-    # Set for `send_purchase_order` and `send_award_notice`: the exact email.
+    # Set for `send_purchase_order`, `send_po_cancellation` and `send_award_notice`: the
+    # exact email.
     thread_email: ThreadEmailApprovalView | None = None
     # For pending acts that send email (including a mandate's suppliers): each
     # recipient, whether its domain receives mail (a real company), whether it
