@@ -279,7 +279,7 @@ class Rfq(Base):
         ForeignKey("company_logos.id", ondelete="SET NULL")
     )
     footer_override: Mapped[str | None] = mapped_column(Text)
-    # Where this RFQ's logo sits in its box (migration 0032); None = the company default.
+    # Where this RFQ's logo sits in its box (migration 0033); None = the company default.
     logo_scale: Mapped[Decimal | None] = mapped_column(Numeric(3, 2))
     logo_align: Mapped[str | None] = mapped_column(Text)
     logo_offset_y: Mapped[int | None] = mapped_column(SmallInteger)
@@ -305,7 +305,7 @@ class CompanyBranding(Base):
     default_logo_asset_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("company_logos.id", ondelete="SET NULL")
     )
-    # Where the logo sits in its reserved box on documents (migration 0032).
+    # Where the logo sits in its reserved box on documents (migration 0033).
     logo_scale: Mapped[Decimal] = mapped_column(Numeric(3, 2), server_default=text("1.00"))
     logo_align: Mapped[str] = mapped_column(Text, server_default=text("'left'"))
     logo_offset_y: Mapped[int] = mapped_column(SmallInteger, server_default=text("0"))
@@ -329,7 +329,7 @@ class CompanyLogo(Base):
     size_bytes: Mapped[int] = mapped_column(Integer)
     width: Mapped[int | None] = mapped_column(Integer)
     height: Mapped[int | None] = mapped_column(Integer)
-    # The prepared image documents use (migration 0032: trimmed, maybe without its
+    # The prepared image documents use (migration 0033: trimmed, maybe without its
     # background); `original_*` is the file as uploaded (None for 0031 rows: the same).
     storage_key: Mapped[str] = mapped_column(Text)
     original_storage_key: Mapped[str | None] = mapped_column(Text)
