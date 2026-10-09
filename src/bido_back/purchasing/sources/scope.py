@@ -186,10 +186,10 @@ def mrp_scopes(
     if not any(count > 1 for count in counts.values()):
         return []
     spellings = _plant_spellings(records)
-    wanted = norm(request.location) if request.location is not None else None
+    wanted = _wanted_plants(request.location, list(dated))
     result: list[ResolvedScope] = []
     for plant, needs in sorted(dated.items()):
-        if wanted is not None and plant != wanted:
+        if wanted and plant not in wanted:
             continue
         stock = [
             (day, record)
@@ -357,6 +357,18 @@ def candidate_scopes(
         )
         planned.append(ResolvedScope(resolved.scope, resolution))
     return planned, left
+
+
+def _wanted_plants(location: str | None, plants: Sequence[str]) -> set[str]:
+    """The plants the buyer's words name ("planta 1000" names 1000); none named: all."""
+    if location is None:
+        return set()
+    words = norm(location)
+    exact = {plant for plant in plants if plant == words}
+    if exact:
+        return exact
+    tokens = set(words.split())
+    return {plant for plant in plants if set(plant.split()) <= tokens}
 
 
 def scope_issues(resolved: ResolvedScope, *, planned: bool) -> list[Issue]:
