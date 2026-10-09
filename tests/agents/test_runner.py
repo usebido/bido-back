@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -428,6 +429,34 @@ async def test_read_tool_runs_and_its_result_is_fed_back(script: Script) -> None
     assert artifact.data == {"sku": "SKU-1", "price_cents": 1250}
 
 
+def _sku_only(output: LookupOut) -> JsonValue:
+    return {"sku": output.sku}
+
+
+async def test_the_model_reads_a_tools_view_and_the_events_keep_the_whole_output(
+    script: Script,
+) -> None:
+    viewed = replace(LOOKUP, model_view=_sku_only)
+    stub = script(
+        reply(tool_use("fc_1", "lookup_price", sku="SKU-1")),
+        final(answer="12.50", confidence=0.9),
+    )
+
+    result = await run_to_completion(
+        replace(agent(), tools=(viewed, SEND)), TASK, ctx(), config=CONFIG
+    )
+
+    assert isinstance(result, Completed)
+    [fed_back] = tool_results(stub.calls[1])
+    assert '{"sku":"SKU-1"}' in result_text(fed_back)
+    assert "price_cents" not in result_text(fed_back)
+    # The buyer's screen (events, the card) still gets the whole output.
+    [tool_result] = [e for e in result.events if isinstance(e, ToolResult)]
+    assert tool_result.output == {"sku": "SKU-1", "price_cents": 1250}
+    [artifact] = [e for e in result.events if isinstance(e, Artifact)]
+    assert artifact.data == {"sku": "SKU-1", "price_cents": 1250}
+
+
 async def test_prompt_tools_and_model_options_are_sent(script: Script) -> None:
     stub = script(final(answer="x", confidence=1))
 
@@ -751,14 +780,26 @@ def test_no_storage_without_a_database_url() -> None:
     assert built.db is None
 
 
+STORED = RunnerConfig(
+    openai_api_key="test-not-a-real-key",
+    agno_database_url="postgresql+asyncpg://bido_agno:pw@localhost:54320/bido",
+)
+
+
+def test_an_agent_without_history_keeps_no_run_storage() -> None:
+    # Its input (spreadsheet rows, a supplier's email) is not copied into Agno's
+    # tables, which have no row-level security.
+    context = ctx()
+    built = agno_adapter.build_agent(agent(), context, agno_adapter.agno_ids(context), STORED)
+    assert built.db is None
+
+
 def test_storage_is_agno_postgres_in_schema_agno() -> None:
     # Building the engine does not connect, so no database is needed here.
-    config = RunnerConfig(
-        openai_api_key="test-not-a-real-key",
-        agno_database_url="postgresql+asyncpg://bido_agno:pw@localhost:54320/bido",
-    )
     context = ctx()
-    built = agno_adapter.build_agent(agent(), context, agno_adapter.agno_ids(context), config)
+    built = agno_adapter.build_agent(
+        replace(agent(), history_runs=2), context, agno_adapter.agno_ids(context), STORED
+    )
     assert isinstance(built.db, AsyncPostgresDb)
     assert built.db.db_schema == "agno"
     assert built.db.create_schema is False

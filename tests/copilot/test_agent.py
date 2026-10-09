@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from bido_back.agents.catalog.definitions import DEFAULT_MODEL
 from bido_back.copilot.agent import copilot_agent
+from bido_back.copilot.model_views import assessment_view, cell_free_view
 from bido_back.copilot.tools import CopilotToolDeps, copilot_tools
 from tests.rfqs.conftest import FakeMailboxes, fake_agents
 
@@ -103,3 +104,20 @@ def test_definition_and_tools() -> None:
     assert "(?" not in json.dumps(agent.output_model.model_json_schema())
     for tool in agent.tools:
         assert "(?" not in json.dumps(tool.input_schema()), tool.name
+
+
+def test_the_model_reads_tool_outputs_without_cell_references() -> None:
+    engine = create_async_engine("postgresql+asyncpg://app@localhost:5432/unused")
+    agent = copilot_agent(
+        copilot_tools(CopilotToolDeps(db=engine, agents=fake_agents(), mailboxes=FakeMailboxes()))
+    )
+
+    views = {tool.name: tool.model_view for tool in agent.tools}
+    for name in (
+        "analyze_procurement_sources",
+        "save_procurement_assessment",
+        "get_procurement_assessment",
+    ):
+        assert views[name] is assessment_view, name
+    assert views["get_comparison"] is cell_free_view
+    assert all(view is not None for view in views.values())
