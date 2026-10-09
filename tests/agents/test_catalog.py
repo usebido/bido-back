@@ -151,6 +151,16 @@ def test_model_is_configurable() -> None:
     assert quote_extraction("gpt-6-luna").model == "gpt-6-luna"
 
 
+def test_intake_prompt_writes_the_title_in_the_buyers_language() -> None:
+    # RFQ-3 (2026-10-08): a Portuguese conversation got "Three-Phase Motor RFQ". The title
+    # goes on the RFQ and in supplier emails, so v4 follows the buyer's language.
+    prompt = RFQ_INTAKE.load_prompt()
+
+    assert RFQ_INTAKE.prompt_version >= 4
+    assert "in the buyer's language" in prompt
+    assert "in English" not in prompt
+
+
 def test_extraction_prompt_treats_supplier_content_as_data() -> None:
     prompt = QUOTE_EXTRACTION.load_prompt()
 

@@ -168,8 +168,21 @@ class RfqRef(BaseModel):
 # --- list_rfqs ---------------------------------------------------------------------------
 
 
+RFQ_STATUS_HINT: Final = (
+    "The RFQ lifecycle: `draft` = being prepared, not sent to any supplier yet; "
+    "`open` = sent to suppliers, quotes pending or under negotiation; "
+    "`closed` = awarded or otherwise finished; `cancelled`. "
+    "When the buyer says open, active, ongoing, in progress or pending, they mean "
+    "everything not finished (draft AND open), so leave `status` empty and report drafts "
+    "and sent RFQs separately; only filter by `open` when they clearly mean RFQs already "
+    "sent to suppliers."
+)
+
+
 class ListRfqsIn(BaseModel):
-    status: RfqStatus | None = Field(default=None, description="Only RFQs in this status")
+    status: RfqStatus | None = Field(
+        default=None, description="Only RFQs in this status. " + RFQ_STATUS_HINT
+    )
     limit: int = Field(default=10, ge=1, le=MAX_LIST)
 
 
@@ -184,6 +197,13 @@ class RfqItem(BaseModel):
 
 class ListRfqsOut(BaseModel):
     rfqs: list[RfqItem]
+    by_status: dict[str, int] = Field(
+        description=(
+            "How many RFQs the company has in each status, counted over ALL its RFQs "
+            "(ignoring `status` and `limit`). An empty `rfqs` with drafts counted here "
+            "means the filter excluded them, not that the buyer has nothing in progress."
+        )
+    )
 
 
 # --- get_rfq_status / who_responded -------------------------------------------------------
@@ -494,10 +514,11 @@ class CreateRfqIn(BaseModel):
         min_length=1,
         max_length=8_000,
         description=(
-            "What to quote: items, quantities, dates, Incoterm and delivery location. Copy the "
-            "buyer's part numbers exactly as they wrote them; never turn them into MPNs. When "
-            "the buyer gives a manufacturer part number as such, say so ('MPN MT-120-ASM'): "
-            "the preview's lines show it as `mpn`, apart from `part_number`"
+            "What to quote: items, quantities, dates, Incoterm and delivery location, in the "
+            "buyer's language (the RFQ's title is written from it). Copy the buyer's part "
+            "numbers exactly as they wrote them; never turn them into MPNs. When the buyer "
+            "gives a manufacturer part number as such, say so ('MPN MT-120-ASM'): the "
+            "preview's lines show it as `mpn`, apart from `part_number`"
         ),
     )
     pending_validation: str | None = Field(
@@ -623,7 +644,12 @@ class SetRfqTermsIn(BaseModel):
     delivery_location: str | None = Field(default=None, description="For every line")
     need_by: date | None = Field(default=None, description="For every line")
     response_due: date | None = Field(default=None, description="When suppliers must answer")
-    title: str | None = Field(default=None, min_length=1, max_length=500)
+    title: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        description="The RFQ's title, in the buyer's language (the conversation's)",
+    )
     payment_terms: str | None = Field(
         default=None,
         min_length=1,
@@ -1065,6 +1091,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
     async def list_rfqs(ctx: ToolContext, args: ListRfqsIn) -> ListRfqsOut:
         async with tenant_session(db, ctx.tenant_id) as session:
             rows = await queries.rfqs(session, args.status, args.limit)
+            by_status = await queries.rfq_counts(session)
         return ListRfqsOut(
             rfqs=[
                 RfqItem(
@@ -1076,7 +1103,8 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                     response_due=r.response_due,
                 )
                 for r in rows
-            ]
+            ],
+            by_status=by_status,
         )
 
     async def get_rfq_status(ctx: ToolContext, args: RfqRef) -> RfqStatusOut:
@@ -2003,7 +2031,8 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
     return (
         Tool(
             "list_rfqs",
-            "List the company's RFQs, newest first.",
+            "List the company's RFQs, newest first, with a count per status over all of "
+            "them. " + RFQ_STATUS_HINT,
             ListRfqsIn,
             ListRfqsOut,
             "read",

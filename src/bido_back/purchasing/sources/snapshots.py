@@ -56,7 +56,11 @@ class AssessmentRequest(BaseModel):
 class AssessmentRfqRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    title: str = Field(min_length=1, max_length=300)
+    title: str = Field(
+        min_length=1,
+        max_length=300,
+        description="The RFQ's title, in the buyer's language (the conversation's)",
+    )
     base_currency: CurrencyCode
     response_due: date | None = None
     pending_validation: str | None = Field(
