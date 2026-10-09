@@ -70,6 +70,7 @@ async def test_tools_only_see_the_callers_tenant(
     status = await tools.call(ctx, "get_rfq_status", rfq="RFQ-1")
 
     assert [r.id for r in listed.rfqs] == [my_rfq.id]
+    assert listed.by_status == {"draft": 1}  # the other tenant's RFQ is not counted either
     assert [(p.supplier_name, p.unit_price) for p in history.points] == [
         ("Rhein", Decimal("0.100000"))
     ]
@@ -77,6 +78,41 @@ async def test_tools_only_see_the_callers_tenant(
     assert status.id == my_rfq.id  # both tenants have an RFQ-1; ours is resolved
     with pytest.raises(ToolError):
         await tools.call(ctx, "get_rfq_status", rfq=str(their_rfq.id))
+
+
+async def test_list_rfqs_counts_every_status_even_when_the_filter_matches_nothing(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    """A buyer's "open RFQs" are drafts and sent RFQs. The model is told so, and even
+    when it filters by `open` it still sees that drafts are waiting."""
+    principal = buyer_of(copilot_rows)
+    draft, sent, done = [await make_rfq(app_engine, principal) for _ in range(3)]
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        for rfq, status in ((sent, "open"), (done, "closed")):
+            await session.execute(update(Rfq).where(Rfq.id == rfq.id).values(status=status))
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+    counts = {"draft": 1, "open": 1, "closed": 1}
+
+    everything = await tools.call(ctx, "list_rfqs")
+    only_sent = await tools.call(ctx, "list_rfqs", status="open")
+    nothing = await tools.call(ctx, "list_rfqs", status="cancelled")
+    one = await tools.call(ctx, "list_rfqs", limit=1)
+
+    assert [r.ref for r in everything.rfqs] == [done.ref, sent.ref, draft.ref]
+    assert everything.by_status == counts
+    assert [(r.ref, r.status) for r in only_sent.rfqs] == [(sent.ref, "open")]
+    assert only_sent.by_status == counts  # the counts ignore the filter...
+    assert nothing.rfqs == [] and nothing.by_status == counts
+    assert [r.ref for r in one.rfqs] == [done.ref] and one.by_status == counts  # ...and the limit
+
+    tool = tools.tools["list_rfqs"]
+    status_hint = tool.input_model.model_fields["status"].description
+    for text in (tool.description, status_hint):
+        assert text is not None
+        assert "`draft` = being prepared, not sent" in text
+        assert "`open` = sent to suppliers" in text
+        assert "draft AND open" in text and "leave `status` empty" in text
 
 
 async def test_price_history_is_newest_first(app_engine: AsyncEngine, copilot_rows: People) -> None:
