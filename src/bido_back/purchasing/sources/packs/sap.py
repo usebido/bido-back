@@ -150,6 +150,19 @@ _PLANNED_DELIVERY = Column(
         "Plazo de entrega previsto",
     ),
 )
+_GROUP = Column(
+    "material_group",
+    (
+        "Grupo de mercadorias",
+        "Grupo mercadorias",
+        "Material group",
+        "Material Group",
+        "Matl group",
+        "Matl Group",
+        "Warengruppe",
+        "Grupo de artículos",
+    ),
+)
 _SAFETY = Column(
     "safety_stock",
     (
@@ -171,6 +184,7 @@ MB52 = ReportSpec(
         _SLOC,
         _BASE_UNIT,
         _CURRENCY,
+        _GROUP,
         Column(
             "unrestricted",
             (
@@ -307,6 +321,7 @@ MM60 = ReportSpec(
         _BASE_UNIT,
         _SAFETY,
         _PLANNED_DELIVERY,
+        _GROUP,
         Column(
             "mrp_type",
             (
@@ -722,6 +737,7 @@ def _mb52(row: Row, reading: Reading) -> None:
             "quality_inspection": "quality",
             "blocked": "blocked",
             "in_transit": "in_transit",
+            "material_group": "material_group",
         },
     )
     reading.records.append(found)
@@ -790,6 +806,9 @@ def _md04(row: Row, reading: Reading) -> None:
             plain(abs(quantity)),
         )
         put(found, "status", raw, row.ref("element"), "open")
+        if row.text("exception") is not None and row.text("reschedule"):
+            # The date MRP asks to bring the order forward to: an expedite request.
+            put(found, "reschedule_to", row.text("reschedule") or "", row.ref("reschedule"))
         reading.records.append(found)
     if element == "receipt" and row.text("exception") is not None and row.text("reschedule"):
         data = row.text("element_data") or ""
@@ -799,7 +818,8 @@ def _md04(row: Row, reading: Reading) -> None:
                 code="mrp_reschedule_in",
                 message=f"The MRP list asks to bring {raw} {data} forward from "
                 f"{row.text('date')} to {row.text('reschedule')} (exception "
-                f"{row.text('exception')}); it is counted on its current date.",
+                f"{row.text('exception')}); it is counted on its current date and listed "
+                "as an expedite action.",
                 alternative="Expediting it to the earlier date would avoid part of the "
                 "purchase calculated before it arrives.",
                 part_numbers=[material],
@@ -843,6 +863,7 @@ def _mm60(row: Row, reading: Reading) -> None:
             "rounding": "rounding",
             "safety_stock": "safety_stock",
             "planned_delivery_days": "planned_delivery",
+            "material_group": "material_group",
         },
     )
     reading.records.append(found)
@@ -1123,11 +1144,15 @@ def _one_stock(
 def _one_order_list(
     mrp_readings: Sequence[Reading], orders: list[Record], issues: list[Issue]
 ) -> None:
-    """With an order list, MD04's purchase order lines are the same orders: not twice."""
+    """With an order list, MD04's purchase order lines are the same orders: not twice.
+
+    The date MD04 asks to move an order to is carried onto the listed order line.
+    """
     if not orders:
         return
-    listed = {
-        (join_key(source_text(r, "po_number")), join_key(source_text(r, "po_line"))) for r in orders
+    listed: dict[tuple[str | None, str | None], Record] = {
+        (join_key(source_text(r, "po_number")), join_key(source_text(r, "po_line"))): r
+        for r in orders
     }
     missing = 0
     for reading in mrp_readings:
@@ -1140,8 +1165,11 @@ def _one_order_list(
                 join_key(source_text(found, "po_number")),
                 join_key(source_text(found, "po_line")),
             )
-            if key not in listed:
+            order = listed.get(key)
+            if order is None:
                 missing += 1
+            elif (moved := source_text(found, "reschedule_to")) is not None:
+                put(order, "reschedule_to", moved, found.evidence.get("reschedule_to"))
         reading.records[:] = kept
     if missing:
         issues.append(

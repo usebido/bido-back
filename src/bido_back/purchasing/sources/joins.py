@@ -624,6 +624,8 @@ def incoming_for(
                 quantity=quantity,
                 expected_at=expected,
                 eligible=eligible,
+                supplier_code=source_text(order, "supplier_code"),
+                reschedule_to=source_date(order, "reschedule_to", []),
                 evidence=source_refs(related),
             )
         )

@@ -45,6 +45,7 @@ from bido_back.purchasing.sources.scope import (
     scope_issues,
 )
 from bido_back.purchasing.sources.snapshots import find_snapshot, save_snapshot
+from bido_back.purchasing.sources.timing import timing_alerts
 from bido_back.purchasing.sources.units import convert_units
 from bido_back.storage import BlobStorage
 
@@ -244,6 +245,7 @@ def _settle(
         if result.lines and all(line.calculated_to_buy is not None for line in result.lines)
         else "needs_review",
         totals=spend_totals(result.lines),
+        timing_alerts=timing_alerts(result.lines),
     )
 
 

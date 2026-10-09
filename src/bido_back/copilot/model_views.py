@@ -44,7 +44,11 @@ SUMMARY_FIELDS: Final = (
     "need_by",
     "calculated_to_buy",
     "confidence",
+    # The dated demand, so a line read in summary is never one total on one date.
+    "demand_schedule",
 )
+# Dates of a summarized line's demand schedule the model reads.
+SUMMARY_SCHEDULE_ITEMS: Final = 8
 # Items the model reads of each list inside a line, and of the assessment's lists.
 LINE_LIST_ITEMS: Final[Mapping[str, int]] = {
     "suppliers": 6,
@@ -53,7 +57,12 @@ LINE_LIST_ITEMS: Final[Mapping[str, int]] = {
     "netting": 16,
     "issues": 10,
     "assumptions": 16,
+    "need_schedule": 16,
+    "demand_schedule": 16,
+    "expedite": 8,
 }
+# Items the model reads of each list inside a line's timing check.
+TIMING_LIST_ITEMS: Final[Mapping[str, int]] = {"projected": 16, "affected_demand": 12}
 ASSESSMENT_LIST_ITEMS: Final[Mapping[str, int]] = {
     "issues": 40,
     "assumptions": 40,
@@ -61,6 +70,7 @@ ASSESSMENT_LIST_ITEMS: Final[Mapping[str, int]] = {
     "coverage": 40,
     "snapshot_dates": 12,
     "reports": 40,
+    "timing_alerts": 40,
 }
 CANDIDATE_NEED_DATES: Final = 6
 
@@ -132,13 +142,20 @@ def assessment_view(assessment: SourceAssessment) -> JsonValue:
     summarized = _within(
         rest, [_size(summaries.get(i, {})) for i in range(len(lines))], SUMMARY_LINES_CHARS
     )
-    view: dict[str, JsonValue] = {"lines": [lines[i] for i in sorted(full)]}
+    view: dict[str, JsonValue] = {}
+    alerts = data.get("timing_alerts")
+    if isinstance(alerts, list):
+        # What runs short before a new order arrives is read before the lines.
+        view["timing_alerts"] = alerts[: ASSESSMENT_LIST_ITEMS["timing_alerts"]]
+        if len(alerts) > ASSESSMENT_LIST_ITEMS["timing_alerts"]:
+            view["timing_alerts_left_out"] = len(alerts) - ASSESSMENT_LIST_ITEMS["timing_alerts"]
+    view["lines"] = [lines[i] for i in sorted(full)]
     if summarized:
         view["more_lines"] = [summaries[i] for i in sorted(summarized)]
     if len(lines) > len(full) + len(summarized):
         view["lines_left_out"] = len(lines) - len(full) - len(summarized)
     for key, item in _capped(data, ASSESSMENT_LIST_ITEMS).items():
-        if key == "lines":
+        if key in ("lines", "timing_alerts", "timing_alerts_left_out"):
             continue
         if key == "planning_candidates" and isinstance(item, list):
             item = [
@@ -197,15 +214,20 @@ def _line(line: Mapping[str, JsonValue], general: set[tuple[str, str]]) -> dict[
     suppliers = view.get("suppliers")
     limit = LINE_LIST_ITEMS["suppliers"]
     if isinstance(suppliers, list) and len(suppliers) > limit:
-        # A cut list keeps the suggested supplier, and its own order.
+        # A cut list keeps the recommended and suggested suppliers, and its own order.
         kept = sorted(range(len(suppliers)), key=lambda i: not _suggested(suppliers[i]))[:limit]
         view["suppliers"] = [suppliers[i] for i in sorted(kept)]
         view["suppliers_left_out"] = len(suppliers) - limit
+    timing = view.get("timing")
+    if isinstance(timing, dict):
+        view["timing"] = _capped(timing, TIMING_LIST_ITEMS)
     return _capped(view, LINE_LIST_ITEMS)
 
 
 def _suggested(supplier: JsonValue) -> bool:
-    return isinstance(supplier, dict) and supplier.get("suggested") is True
+    return isinstance(supplier, dict) and (
+        supplier.get("suggested") is True or supplier.get("recommended") is True
+    )
 
 
 def _to_buy(line: Mapping[str, JsonValue]) -> bool:
@@ -219,7 +241,8 @@ def _to_buy(line: Mapping[str, JsonValue]) -> bool:
 
 
 def _summary(line: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
-    return {name: line[name] for name in SUMMARY_FIELDS if name in line}
+    summary = {name: line[name] for name in SUMMARY_FIELDS if name in line}
+    return _capped(summary, {"demand_schedule": SUMMARY_SCHEDULE_ITEMS})
 
 
 def _capped(value: Mapping[str, JsonValue], limits: Mapping[str, int]) -> dict[str, JsonValue]:

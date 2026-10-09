@@ -180,6 +180,61 @@
         "title": "AddLineRequest",
         "type": "object"
       },
+      "AffectedDemand": {
+        "description": "A demand the earliest new order cannot cover in time.",
+        "properties": {
+          "need_by": {
+            "format": "date",
+            "title": "Need By",
+            "type": "string"
+          },
+          "product_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Code"
+          },
+          "product_components": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Product Components",
+            "type": "array"
+          },
+          "product_description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Description"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "reference": {
+            "title": "Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "need_by",
+          "quantity"
+        ],
+        "title": "AffectedDemand",
+        "type": "object"
+      },
       "AnalysisLineView": {
         "properties": {
           "avg_price": {
@@ -1018,6 +1073,13 @@
             "title": "Demand Contributions",
             "type": "array"
           },
+          "demand_schedule": {
+            "items": {
+              "$ref": "#/components/schemas/DatedQuantity"
+            },
+            "title": "Demand Schedule",
+            "type": "array"
+          },
           "demand_unit": {
             "anyOf": [
               {
@@ -1045,6 +1107,13 @@
               "$ref": "#/components/schemas/SourceRef"
             },
             "title": "Evidence",
+            "type": "array"
+          },
+          "expedite": {
+            "items": {
+              "$ref": "#/components/schemas/ExpediteAction"
+            },
+            "title": "Expedite",
             "type": "array"
           },
           "flags": {
@@ -1101,6 +1170,13 @@
               }
             ],
             "title": "Need By"
+          },
+          "need_schedule": {
+            "items": {
+              "$ref": "#/components/schemas/DatedQuantity"
+            },
+            "title": "Need Schedule",
+            "type": "array"
           },
           "net_requirement": {
             "anyOf": [
@@ -1199,12 +1275,32 @@
             ],
             "title": "Safety Stock"
           },
+          "sourcing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourcingProposal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "suppliers": {
             "items": {
               "$ref": "#/components/schemas/SupplierEvidence"
             },
             "title": "Suppliers",
             "type": "array"
+          },
+          "timing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TimingCheck"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "unit": {
             "anyOf": [
@@ -3884,6 +3980,26 @@
         "title": "CurrencyTotalView",
         "type": "object"
       },
+      "DatedQuantity": {
+        "properties": {
+          "need_by": {
+            "format": "date",
+            "title": "Need By",
+            "type": "string"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "need_by",
+          "quantity"
+        ],
+        "title": "DatedQuantity",
+        "type": "object"
+      },
       "DecisionOffer": {
         "properties": {
           "evidence_message_ids": {
@@ -4413,6 +4529,89 @@
           "reasons"
         ],
         "title": "ExcludedOffer",
+        "type": "object"
+      },
+      "ExpediteAction": {
+        "description": "Ask a supplier to bring an open order forward: before buying more, a late open\norder may cover the earliest needs.",
+        "properties": {
+          "current_date": {
+            "format": "date",
+            "title": "Current Date",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "po_line": {
+            "title": "Po Line",
+            "type": "string"
+          },
+          "po_number": {
+            "title": "Po Number",
+            "type": "string"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "reason": {
+            "enum": [
+              "mrp_reschedule_in",
+              "mrp_reschedule_out",
+              "due_after_shortage",
+              "overdue"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "requested_date": {
+            "format": "date",
+            "title": "Requested Date",
+            "type": "string"
+          },
+          "supplier_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Code"
+          },
+          "supplier_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Name"
+          },
+          "would_cover": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Would Cover",
+            "type": "string"
+          }
+        },
+        "required": [
+          "po_number",
+          "po_line",
+          "quantity",
+          "current_date",
+          "requested_date",
+          "reason"
+        ],
+        "title": "ExpediteAction",
         "type": "object"
       },
       "FieldCorrectionView": {
@@ -5317,6 +5516,29 @@
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Quantity",
             "type": "string"
+          },
+          "reschedule_to": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reschedule To"
+          },
+          "supplier_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Code"
           }
         },
         "required": [
@@ -8117,6 +8339,13 @@
             "title": "Observations",
             "type": "integer"
           },
+          "outliers": {
+            "items": {
+              "$ref": "#/components/schemas/PriceOutlier"
+            },
+            "title": "Outliers",
+            "type": "array"
+          },
           "target_price": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Target Price",
@@ -8151,6 +8380,113 @@
           "max_price"
         ],
         "title": "PriceBenchmark",
+        "type": "object"
+      },
+      "PriceOutlier": {
+        "properties": {
+          "deviation_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Deviation Pct",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "in_benchmark": {
+            "title": "In Benchmark",
+            "type": "boolean"
+          },
+          "lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lead Time Days"
+          },
+          "max_without": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Without"
+          },
+          "ordered_at": {
+            "format": "date",
+            "title": "Ordered At",
+            "type": "string"
+          },
+          "possible_emergency": {
+            "default": false,
+            "title": "Possible Emergency",
+            "type": "boolean"
+          },
+          "reference_lead_time_days": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference Lead Time Days"
+          },
+          "reference_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Reference Price",
+            "type": "string"
+          },
+          "supplier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier"
+          },
+          "target_without": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Without"
+          },
+          "unit_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Unit Price",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ordered_at",
+          "unit_price",
+          "reference_price",
+          "deviation_pct",
+          "in_benchmark"
+        ],
+        "title": "PriceOutlier",
         "type": "object"
       },
       "ProductView": {
@@ -8195,6 +8531,26 @@
           "next_need_by"
         ],
         "title": "ProductView",
+        "type": "object"
+      },
+      "ProjectedBalance": {
+        "properties": {
+          "balance": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Balance",
+            "type": "string"
+          },
+          "on": {
+            "format": "date",
+            "title": "On",
+            "type": "string"
+          }
+        },
+        "required": [
+          "on",
+          "balance"
+        ],
+        "title": "ProjectedBalance",
         "type": "object"
       },
       "ProposalLineView": {
@@ -12195,6 +12551,13 @@
             "title": "Status",
             "type": "string"
           },
+          "timing_alerts": {
+            "items": {
+              "$ref": "#/components/schemas/TimingAlert"
+            },
+            "title": "Timing Alerts",
+            "type": "array"
+          },
           "totals": {
             "items": {
               "$ref": "#/components/schemas/SpendTotal"
@@ -12258,6 +12621,50 @@
           "column"
         ],
         "title": "SourceRef",
+        "type": "object"
+      },
+      "SourcingProposal": {
+        "description": "No known supplier can be used: find one before buying.",
+        "properties": {
+          "action": {
+            "const": "rfq_new_suppliers",
+            "default": "rfq_new_suppliers",
+            "title": "Action",
+            "type": "string"
+          },
+          "candidates": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "excluded": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Excluded",
+            "type": "array"
+          },
+          "material_group": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Material Group"
+          },
+          "reason": {
+            "const": "no_usable_supplier",
+            "default": "no_usable_supplier",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "title": "SourcingProposal",
         "type": "object"
       },
       "SpendTotal": {
@@ -12614,6 +13021,22 @@
       },
       "SupplierEvidence": {
         "properties": {
+          "arrival_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "meets",
+                  "meets_consuming_safety_stock",
+                  "does_not_meet"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arrival Status"
+          },
           "avg_lead_time_days": {
             "anyOf": [
               {
@@ -12707,6 +13130,18 @@
             ],
             "title": "Country"
           },
+          "coverable_quantity": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverable Quantity"
+          },
           "currency": {
             "anyOf": [
               {
@@ -12717,6 +13152,17 @@
               }
             ],
             "title": "Currency"
+          },
+          "days_late": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Days Late"
           },
           "delivery_observations": {
             "default": 0,
@@ -12733,6 +13179,18 @@
               }
             ],
             "title": "Email"
+          },
+          "estimated_arrival": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Arrival"
           },
           "evidence": {
             "items": {
@@ -12785,6 +13243,23 @@
               }
             ],
             "title": "Lead Time Days"
+          },
+          "lead_time_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "agreement",
+                  "history",
+                  "reported",
+                  "material_master"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lead Time Source"
           },
           "min_order_quantity": {
             "anyOf": [
@@ -12862,6 +13337,17 @@
             ],
             "title": "Otif Pct"
           },
+          "planned_lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planned Lead Time Days"
+          },
           "purchase_blocked": {
             "default": false,
             "title": "Purchase Blocked",
@@ -12918,6 +13404,11 @@
               }
             ],
             "title": "Quantity"
+          },
+          "recommended": {
+            "default": false,
+            "title": "Recommended",
+            "type": "boolean"
           },
           "score_delivery": {
             "anyOf": [
@@ -13796,6 +14287,183 @@
           "complete"
         ],
         "title": "TierTotal",
+        "type": "object"
+      },
+      "TimingAlert": {
+        "description": "A line that runs short before a new order can arrive, worded by code (the model\nonly translates it), with what to do in order: expedites first.",
+        "properties": {
+          "actions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "outcome": {
+            "enum": [
+              "unavoidable_stockout",
+              "meets_consuming_safety_stock",
+              "unknown"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "part_number": {
+            "title": "Part Number",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "part_number",
+          "outcome",
+          "summary"
+        ],
+        "title": "TimingAlert",
+        "type": "object"
+      },
+      "TimingCheck": {
+        "description": "Whether a new order can arrive before the line runs short, from lead times.\n\nComputed by code over the projected balance without new orders (stock plus open\norders as counted, minus dated demand); the quantity to buy is unchanged by it.",
+        "properties": {
+          "affected_demand": {
+            "items": {
+              "$ref": "#/components/schemas/AffectedDemand"
+            },
+            "title": "Affected Demand",
+            "type": "array"
+          },
+          "first_shortage_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Shortage Date"
+          },
+          "first_stockout_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Stockout Date"
+          },
+          "involve": {
+            "items": {
+              "const": "production_planning",
+              "type": "string"
+            },
+            "title": "Involve",
+            "type": "array"
+          },
+          "order_date": {
+            "format": "date",
+            "title": "Order Date",
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "meets",
+              "meets_consuming_safety_stock",
+              "unavoidable_stockout",
+              "unknown"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "projected": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectedBalance"
+            },
+            "title": "Projected",
+            "type": "array"
+          },
+          "recommended_arrival": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommended Arrival"
+          },
+          "recommended_supplier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommended Supplier"
+          },
+          "safety_stock": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Safety Stock",
+            "type": "string"
+          },
+          "switched_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Switched From"
+          },
+          "uncovered_after_expedite": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uncovered After Expedite"
+          },
+          "uncovered_quantity": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Uncovered Quantity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "order_date",
+          "outcome"
+        ],
+        "title": "TimingCheck",
         "type": "object"
       },
       "UpdateBrandingRequest": {

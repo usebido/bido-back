@@ -382,9 +382,9 @@ def test_row_order_and_repeated_reports_do_not_change_prices_or_measures() -> No
     Random(7).shuffle(rows)  # noqa: S311 - reproducible layout permutation, not a secret.
     line = line_of(rows)
     assert line.price is not None and baseline.price is not None
-    assert line.price.model_dump(exclude={"evidence"}) == baseline.price.model_dump(
-        exclude={"evidence"}
-    )
+    # Evidence cells differ between the copies; the facts must not.
+    cells = {"evidence": True, "outliers": {"__all__": {"evidence"}}}
+    assert line.price.model_dump(exclude=cells) == baseline.price.model_dump(exclude=cells)
     assert [s.model_dump(exclude={"evidence"}) for s in line.suppliers] == [
         s.model_dump(exclude={"evidence"}) for s in baseline.suppliers
     ]
