@@ -300,8 +300,9 @@ class RfqDocument(BaseModel):
     issued_on: date
     buyer_company: str
     buyer_name: str
-    # The addressee: this supplier only.
-    supplier_name: str
+    # The addressee: this supplier only. Empty for the RFQ's own document (the one
+    # the buyer downloads from the RFQ page), which names no supplier at all.
+    supplier_name: str = ""
     reply_by: date | None = None
     currency: str | None = None
     payment_terms: str | None = None
@@ -439,8 +440,10 @@ def _slug(value: str) -> str:
 
 
 def document_filename(document: RfqDocument) -> str:
-    """E.g. `RFQ-3-metalurgica-horizonte-ltda.pdf`."""
+    """E.g. `RFQ-3-metalurgica-horizonte-ltda.pdf`; `RFQ-3.pdf` when it names no supplier."""
     ref = re.sub(r"[^A-Za-z0-9-]+", "-", document.rfq_ref).strip("-") or "RFQ"
+    if not document.supplier_name:
+        return f"{ref}.pdf"
     return f"{ref}-{_slug(document.supplier_name)}.pdf"
 
 
@@ -609,13 +612,16 @@ def document_html(document: RfqDocument) -> str:
         f'<tr><td>{_e(label)}</td><td class="v">{_e(value)}</td></tr>' for label, value in meta_rows
     )
 
-    parties = [
-        f'<div class="rfq-title">{_e(document.title)}</div>',
-        f'<div class="pair"><div class="eyebrow">{_e(words["to"])}</div>'
-        f'<div class="value">{_e(document.supplier_name)}</div></div>',
+    parties = [f'<div class="rfq-title">{_e(document.title)}</div>']
+    if document.supplier_name:
+        parties.append(
+            f'<div class="pair"><div class="eyebrow">{_e(words["to"])}</div>'
+            f'<div class="value">{_e(document.supplier_name)}</div></div>'
+        )
+    parties.append(
         f'<div class="pair"><div class="eyebrow">{_e(words["from"])}</div>'
-        f'<div class="value">{_e(_from_line(document))}</div></div>',
-    ]
+        f'<div class="value">{_e(_from_line(document))}</div></div>'
+    )
     if deliver_to:
         parties.append(
             f'<div class="pair"><div class="eyebrow">{_e(words["deliver_to"])}</div>'
