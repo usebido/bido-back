@@ -1,326 +1,247 @@
-"""The negotiation strategy: pure code, no model, no database.
+"""The negotiation strategy: per-line rules, pure code (no model, no database).
 
-Given one supplier's latest offer (per line, in the RFQ's base currency), the
-buyer's limits, the competing offers and where the negotiation stands, decide
-what Bido proposes to that supplier next. The model only puts the decision
-into words (`bido_back.negotiation.agents`); every number comes from here.
+Every number and date Bido asks a supplier for comes from here; the model (or
+the email renderer) only puts it into words. The supplier-level stages (what
+to send next, when to stop) are in `bido_back.negotiation.planner`.
 
-Per line (`decide_line`):
+Price (`price_position`), against the buyer's target `T` and private maximum `M`:
 
-- `no_offer`: the supplier did not price the line.
-- `blocked`: the offer cannot be considered as is (an alternative part, an
-  unauthorized source on an automotive line, an expired or untrustworthy
-  quote; see `bido_back.comparison.rules.blockers`). Price is not negotiated
-  on it.
-- `accept`: price at or below the target and lead time acceptable.
-- `above_max`: price above the buyer's maximum.
-- `counter`: anything else. We ask for the target; without a target, for the
-  5% off its own offer, never a competitor-derived amount.
-  If only the lead time is the problem, we ask for the lead time and no price.
+- `in_target`: the offer is at or below `T` (without a target: at or below the
+  internal price-history reference, which is never disclosed). Nothing to ask.
+- `ask_met`: the offer meets the last price we asked (a concession the supplier
+  accepted). Nothing more to ask on it.
+- `in_range`: `T` < offer <= `M`. We ask.
+- `above_max`: offer > `M`. We ask, never conceding on it.
+- `no_target`: no target and no usable reference: we ask for a better price
+  WITHOUT a number (never an arbitrary "5% off").
 
-The disclosed target is the buyer's (`rfq_lines.target_unit_price`). Without
-one, price history (`bido_back.negotiation.history`) is only an internal
-attainment reference; asks use this supplier's own offer as their basis.
+The first ask is `T`. A later ask concedes only on a line where the supplier
+moved since our last ask, and only within `M`: a quarter of the gap between
+our last ask and the supplier's current price in a revised-offer round, half
+of it in the best-and-final round (concede late; a labeled step, never `M`
+itself, never at or above the offer). A line where the supplier did not move,
+or that is above `M`, keeps its ask. Asks are quantized DOWN when decided: to
+the currency's minor unit, or to the supplier's own finer precision (at most 4
+decimals). The email shows exactly the stored value.
 
-Per supplier (`decide_supplier`), with `rounds_used` = counter/BAFO emails
-already proposed or sent to that supplier:
+Delivery (`delivery_position`) is a DATE question, recomputed at every
+evaluation: the expected delivery (the supplier's lead time from the order
+date, `bido_back.negotiation.signals.ExpectedDelivery`) against the date the
+line is required by (the approved need-by date, or the buyer's own lead-time
+limit counted from the order date, whichever is earlier).
 
-- every priced line `accept` -> `accept` (hold: no email; awarding is a
-  separate, human step);
-- the supplier already received a best-and-final request, or the round cap is
-  reached -> `final` (no more emails): `rejected` when every priced line is
-  still above the maximum, else `closed` (its last offer stands);
-- something to negotiate and this is the last allowed round, or the deadline
-  is less than `BAFO_WINDOW` away -> `bafo` (best and final offer);
-- something to negotiate -> `counter`;
-- nothing priced -> `none`.
+- `on_time`, or `no_need_by` (known, nothing required);
+- `unknown`: no usable lead time (a question for the clarification ledger);
+- `late`: we ask once to deliver by the required date;
+- `still_late`: it was asked already; the buyer decides (never asked twice);
+- `need_by_unreachable`: the required date is not after the order date: no
+  supplier can meet it; the buyer decides, shown the earliest feasible date.
 
-What we may tell a supplier (enforced by the email checks, documented here):
-our target price per line, the lead time we need, the deadline, and THAT a
-more competitive offer exists. Never a competitor's name, price or terms, and
-never the buyer's maximum. A counter-offer never accepts or commits to buy.
+What a supplier may be told: our target per line, the date we need, the
+reply-by date and cut-off, and THAT a lower offer exists for a line. Never a
+competitor's name, price or terms, and never the buyer's maximum. A request
+never accepts or commits to buy.
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta
-from decimal import ROUND_HALF_UP, Decimal
+from datetime import date, timedelta
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from typing import Final, Literal
-from uuid import UUID
 
-BAFO_WINDOW: Final = timedelta(hours=24)
-NO_TARGET_DISCOUNT: Final = Decimal("0.95")
-PRICE_STEP: Final = Decimal("0.0001")
+# ISO 4217 minor units that differ from 2.
+_MINOR_UNITS: Final[Mapping[str, int]] = {
+    "BHD": 3,
+    "BIF": 0,
+    "CLP": 0,
+    "DJF": 0,
+    "GNF": 0,
+    "IQD": 3,
+    "ISK": 0,
+    "JOD": 3,
+    "JPY": 0,
+    "KMF": 0,
+    "KRW": 0,
+    "KWD": 3,
+    "LYD": 3,
+    "OMR": 3,
+    "PYG": 0,
+    "RWF": 0,
+    "TND": 3,
+    "UGX": 0,
+    "VND": 0,
+    "VUV": 0,
+    "XAF": 0,
+    "XOF": 0,
+    "XPF": 0,
+}
+DEFAULT_MINOR_UNIT: Final = 2
+# Never ask with more decimals than this, even when the supplier quoted more.
+MAX_PLACES: Final = 4
+# The storage precision of prices (rfq_lines / proposal_lines are numeric(18, 6)).
+STORED_PLACES: Final = 6
 
-LineDecisionKind = Literal["no_offer", "blocked", "accept", "above_max", "counter"]
-SupplierActionKind = Literal["none", "accept", "counter", "bafo", "final"]
-InviteNegotiationStatus = Literal[
-    "open", "countered", "bafo_requested", "accepted", "rejected", "closed"
+PriceStatus = Literal["in_target", "ask_met", "in_range", "above_max", "no_target"]
+DeliveryStatus = Literal[
+    "on_time", "no_need_by", "unknown", "late", "still_late", "need_by_unreachable"
 ]
 
 
+# --- Numbers ------------------------------------------------------------------------------
+
+
+def minor_unit(currency: str) -> int:
+    return _MINOR_UNITS.get(currency.strip().upper(), DEFAULT_MINOR_UNIT)
+
+
+def decimals(value: Decimal) -> int:
+    """Significant decimals of a value: 46.90 -> 1, 0.055 -> 3, 90 -> 0."""
+    exponent = value.normalize().as_tuple().exponent
+    return -exponent if isinstance(exponent, int) and exponent < 0 else 0
+
+
+def ask_places(currency: str, quoted: Decimal | None) -> int:
+    """Decimals an ask may use: the currency's minor unit, or the supplier's finer precision."""
+    places = minor_unit(currency)
+    if quoted is not None:
+        places = max(places, min(decimals(quoted), MAX_PLACES))
+    return places
+
+
+def _step(places: int) -> Decimal:
+    return Decimal(1).scaleb(-places)
+
+
+def floor_to(value: Decimal, places: int) -> Decimal:
+    """Rounded down to `places` decimals, written with exactly that many (never `9E+1`)."""
+    return value.quantize(_step(places), rounding=ROUND_FLOOR)
+
+
+def round_to(value: Decimal, places: int) -> Decimal:
+    return value.quantize(_step(places), rounding=ROUND_HALF_UP)
+
+
+def quantize_ask(value: Decimal, places: int) -> Decimal:
+    """An ask rounded down to `places`; a sub-unit price keeps its stored precision."""
+    ask = floor_to(value, places)
+    return ask if ask > 0 else floor_to(value, STORED_PLACES)
+
+
+def plain(value: Decimal) -> Decimal:
+    """The value without trailing zeros and never in exponent notation (90 -> 90, not 9E+1)."""
+    normalized = value.normalize()
+    exponent = normalized.as_tuple().exponent
+    if isinstance(exponent, int) and exponent > 0:
+        return normalized.quantize(Decimal(1))
+    return normalized
+
+
+# --- Price --------------------------------------------------------------------------------
+
+
 @dataclass(frozen=True, slots=True)
-class LineLimits:
-    rfq_line_id: UUID
-    target: Decimal | None
-    max_price: Decimal | None
-    max_lead_days: int | None
-    history_price: Decimal | None = None
+class PriceAsk:
+    status: PriceStatus
+    # The price we ask for (disclosed); None when nothing is asked or when we ask
+    # for a better price without a number (`best_price`).
+    ask: Decimal | None = None
+    best_price: bool = False
+    # The ask moved up from our previous one (the supplier moved first).
+    conceded: bool = False
 
     @property
-    def effective_target(self) -> Decimal | None:
-        return self.target if self.target is not None else self.history_price
+    def asks(self) -> bool:
+        return self.ask is not None or self.best_price
 
 
-@dataclass(frozen=True, slots=True)
-class LineOffer:
-    rfq_line_id: UUID
-    unit_price: Decimal | None
-    lead_time_days: int | None
-    blockers: tuple[str, ...] = ()
+# Share of the gap between our last ask and the supplier's price conceded when it moved.
+COUNTER_CONCESSION: Final = Decimal("0.25")
+FINAL_CONCESSION: Final = Decimal("0.5")
 
 
-@dataclass(frozen=True, slots=True)
-class LineDecision:
-    rfq_line_id: UUID
-    kind: LineDecisionKind
-    offered_price: Decimal | None
-    ask_price: Decimal | None
-    lead_time_days: int | None
-    ask_lead_days: int | None
-    better_offer_exists: bool
+def price_position(
+    *,
+    offered: Decimal,
+    target: Decimal | None,
+    max_price: Decimal | None,
+    places: int,
+    history: Decimal | None = None,
+    previous_ask: Decimal | None = None,
+    previous_offer: Decimal | None = None,
+    final_round: bool = False,
+) -> PriceAsk:
+    """Where one line's price stands and what we ask for it (see the module docstring).
 
-
-@dataclass(frozen=True, slots=True)
-class SupplierDecision:
-    action: SupplierActionKind
-    status: InviteNegotiationStatus
-    lines: tuple[LineDecision, ...]
-    mention_competition: bool
-    reasons: tuple[str, ...] = ()
-    stalled_rounds: int = 0
-
-    @property
-    def sends_email(self) -> bool:
-        return self.action in ("counter", "bafo")
-
-
-@dataclass(frozen=True, slots=True)
-class PreviousRound:
-    """Supplier terms preceding a counter actually sent, never a pending draft."""
-
-    offers: Mapping[UUID, LineOffer]
-
-
-def stagnant_rounds(current: Mapping[UUID, LineOffer], previous: Sequence[PreviousRound]) -> int:
-    """Count consecutive sent rounds without an evidenced price/delivery improvement.
-
-    Only comparable unblocked line snapshots count. New lines, missing history
-    or a changed scope reset the observation rather than inventing a refusal.
+    `previous_ask` / `previous_offer`: our last disclosed ask on this line and
+    the supplier's price when we made it (from emails actually sent).
+    `final_round`: the ask is for the best-and-final request.
     """
-    count = 0
-    recent = {
-        line: offer
-        for line, offer in current.items()
-        if offer.unit_price is not None and not offer.blockers
-    }
-    for prior in reversed(previous):
-        earlier = {
-            line: offer
-            for line, offer in prior.offers.items()
-            if offer.unit_price is not None and not offer.blockers
-        }
-        common = set(recent) & set(earlier)
-        if not common or set(recent) != set(earlier):
-            break
-        comparable = [(recent[line], earlier[line]) for line in common]
-        improved = any(
-            (
-                new.unit_price is not None
-                and old.unit_price is not None
-                and new.unit_price < old.unit_price
-            )
-            or (
-                new.lead_time_days is not None
-                and old.lead_time_days is not None
-                and new.lead_time_days < old.lead_time_days
-            )
-            for new, old in comparable
-        )
-        if improved:
-            break
-        count += 1
-        recent = earlier
-    return count
+    if target is not None and max_price is not None and target > max_price:
+        target = None  # never disclose more than the ceiling (the schema forbids it)
+    if target is not None and offered <= target:
+        return PriceAsk("in_target")
+    if previous_ask is not None and offered <= previous_ask:
+        return PriceAsk("ask_met")
+    above = max_price is not None and offered > max_price
+    if target is None:
+        usable = history is not None and (max_price is None or history <= max_price)
+        if usable and history is not None and offered <= history:
+            return PriceAsk("in_target")
+        return PriceAsk("above_max" if above else "no_target", best_price=True)
+    anchor = previous_ask if previous_ask is not None else quantize_ask(target, places)
+    moved = previous_ask is not None and previous_offer is not None and offered < previous_offer
+    if moved and not above:
+        share = FINAL_CONCESSION if final_round else COUNTER_CONCESSION
+        step = quantize_ask(anchor + (offered - anchor) * share, places)
+        if anchor < step < offered and (max_price is None or step < max_price):
+            return PriceAsk("in_range", ask=step, conceded=True)
+    return PriceAsk("above_max" if above else "in_range", ask=anchor)
 
 
-def _round(value: Decimal) -> Decimal:
-    return value.quantize(PRICE_STEP, rounding=ROUND_HALF_UP).normalize()
+# --- Delivery -----------------------------------------------------------------------------
 
 
-def _lead_ok(lead: int | None, max_lead: int | None) -> bool:
-    return max_lead is None or (lead is not None and lead <= max_lead)
+@dataclass(frozen=True, slots=True)
+class DeliveryAsk:
+    status: DeliveryStatus
+    # The date the line is required by (None: nothing required).
+    required_by: date | None = None
+    # Our ask: deliver by this date (late lines, once).
+    deliver_by: date | None = None
+    # The supplier's expected delivery when ordered on the order date: the earliest
+    # feasible date on its own quote.
+    expected: date | None = None
+
+    @property
+    def acceptable(self) -> bool:
+        return self.status in ("on_time", "no_need_by")
 
 
-def decide_line(
-    limits: LineLimits, offer: LineOffer | None, best_competing: Decimal | None
-) -> LineDecision:
-    """What to do about one line of one supplier's offer (see the module docstring)."""
-    if offer is None or offer.unit_price is None:
-        return LineDecision(
-            rfq_line_id=limits.rfq_line_id,
-            kind="no_offer",
-            offered_price=None,
-            ask_price=None,
-            lead_time_days=offer.lead_time_days if offer else None,
-            ask_lead_days=None,
-            better_offer_exists=False,
-        )
-    price = offer.unit_price
-    better = best_competing is not None and best_competing < price
-    lead_ok = _lead_ok(offer.lead_time_days, limits.max_lead_days)
-
-    def decision(
-        kind: LineDecisionKind, ask: Decimal | None = None, ask_lead: int | None = None
-    ) -> LineDecision:
-        return LineDecision(
-            rfq_line_id=limits.rfq_line_id,
-            kind=kind,
-            offered_price=price,
-            ask_price=ask,
-            lead_time_days=offer.lead_time_days,
-            ask_lead_days=ask_lead,
-            better_offer_exists=better,
-        )
-
-    if offer.blockers:
-        return decision("blocked")
-    target = limits.effective_target
-    if target is not None and limits.max_price is not None and target > limits.max_price:
-        # Historical reference is not permission to disclose or raise the private ceiling.
-        target = None
-    if limits.max_price is not None and price > limits.max_price:
-        return decision(
-            "above_max",
-            ask=_round(limits.target) if limits.target is not None else None,
-            ask_lead=None if lead_ok else limits.max_lead_days,
-        )
-    if target is not None and price <= target:
-        if lead_ok:
-            return decision("accept")
-        return decision("counter", ask_lead=limits.max_lead_days)
-    # Historical and competing prices stay internal. Only a buyer-adopted
-    # target or a reduction of this supplier's own offer reaches the writer.
-    if limits.target is not None:
-        ask = limits.target
-    else:
-        ask = price * NO_TARGET_DISCOUNT
-    ask = _round(min(ask, price))
-    if ask >= price and lead_ok:
-        # Nothing to ask for: treat as acceptable (no target, best on the table).
-        return decision("accept")
-    return decision(
-        "counter",
-        ask=ask if ask < price else None,
-        ask_lead=None if lead_ok else limits.max_lead_days,
-    )
+def required_by(need_by: date | None, max_lead_days: int | None, order_date: date) -> date | None:
+    """The date a line must arrive by: the need-by date, or the buyer's lead-time
+    limit counted from the order date, whichever is earlier (moves with time)."""
+    candidates = [d for d in (need_by,) if d is not None]
+    if max_lead_days is not None:
+        candidates.append(order_date + timedelta(days=max_lead_days))
+    return min(candidates) if candidates else None
 
 
-def decide_supplier(
+def delivery_position(
     *,
-    lines: Sequence[LineLimits],
-    offers: Mapping[UUID, LineOffer],
-    best_competing: Mapping[UUID, Decimal],
-    rounds_used: int,
-    bafo_already_requested: bool,
-    max_rounds: int,
-    deadline: datetime | None,
-    now: datetime,
-    previous_rounds: Sequence[PreviousRound] = (),
-    holds: Sequence[str] = (),
-) -> SupplierDecision:
-    """What Bido proposes to one supplier next (see the module docstring)."""
-    decisions = tuple(
-        decide_line(limits, offers.get(limits.rfq_line_id), best_competing.get(limits.rfq_line_id))
-        for limits in lines
-    )
-    if holds:
-        return SupplierDecision("none", "open", decisions, False, tuple(holds))
-    priced = [d for d in decisions if d.kind not in ("no_offer", "blocked")]
-    mention = any(d.better_offer_exists for d in priced if d.kind != "accept")
-    if not priced:
-        return SupplierDecision("none", "open", decisions, False)
-    if all(d.kind == "accept" for d in priced):
-        incomplete = any(d.kind in ("no_offer", "blocked") for d in decisions)
-        return SupplierDecision(
-            "none" if incomplete else "accept",
-            "open" if incomplete else "accepted",
-            decisions,
-            False,
-            ("partial_coverage_requires_review",) if incomplete else (),
-        )
-    stagnant = stagnant_rounds(offers, previous_rounds)
-    if stagnant >= 2:
-        status: InviteNegotiationStatus = (
-            "rejected" if all(d.kind == "above_max" for d in priced) else "closed"
-        )
-        return SupplierDecision(
-            "final", status, decisions, False, ("stalled_negotiation_requires_buyer",), stagnant
-        )
-    if bafo_already_requested or rounds_used >= max_rounds:
-        status = "rejected" if all(d.kind == "above_max" for d in priced) else "closed"
-        return SupplierDecision("final", status, decisions, False, ("round_limit_reached",))
-    if not any(d.ask_price is not None or d.ask_lead_days is not None for d in priced):
-        return SupplierDecision("none", "open", decisions, False, ("buyer_target_required",))
-    last_round = rounds_used + 1 >= max_rounds
-    near_deadline = deadline is not None and deadline - now <= BAFO_WINDOW
-    if last_round or near_deadline:
-        return SupplierDecision("bafo", "bafo_requested", decisions, mention)
-    return SupplierDecision("counter", "countered", decisions, mention)
-
-
-def best_competing_prices(
-    offers_by_supplier: Mapping[UUID, Mapping[UUID, LineOffer]],
-) -> dict[UUID, dict[UUID, Decimal]]:
-    """Per supplier, per line: the lowest price any OTHER supplier offered (unblocked)."""
-    result: dict[UUID, dict[UUID, Decimal]] = {}
-    for supplier, _ in offers_by_supplier.items():
-        best: dict[UUID, Decimal] = {}
-        for other, other_offers in offers_by_supplier.items():
-            if other == supplier:
-                continue
-            for line_id, offer in other_offers.items():
-                if offer.unit_price is None or offer.blockers:
-                    continue
-                current = best.get(line_id)
-                if current is None or offer.unit_price < current:
-                    best[line_id] = offer.unit_price
-        result[supplier] = best
-    return result
-
-
-def ready_to_close(
-    *,
-    line_ids: Sequence[UUID],
-    waiting_suppliers: int,
-    decisions: Sequence[SupplierDecision],
-) -> bool:
-    """Every invited supplier answered and every line has an offer within target."""
-    if waiting_suppliers > 0 or not line_ids:
-        return False
-    accepted = {
-        d.rfq_line_id
-        for supplier in decisions
-        if not any(
-            reason
-            in (
-                "supplier_clarification_requires_buyer",
-                "offer_state_requires_review",
-                "offer_withdrawn",
-            )
-            for reason in supplier.reasons
-        )
-        for d in supplier.lines
-        if d.kind == "accept"
-    }
-    return all(line_id in accepted for line_id in line_ids)
+    required: date | None,
+    expected: date | None,
+    order_date: date,
+    asked_before: bool,
+) -> DeliveryAsk:
+    """Where one line's delivery stands and what we ask (see the module docstring)."""
+    if expected is None:
+        return DeliveryAsk("unknown", required_by=required)
+    if required is None:
+        return DeliveryAsk("no_need_by", expected=expected)
+    if expected <= required:
+        return DeliveryAsk("on_time", required_by=required, expected=expected)
+    if required <= order_date:
+        return DeliveryAsk("need_by_unreachable", required_by=required, expected=expected)
+    if asked_before:
+        return DeliveryAsk("still_late", required_by=required, expected=expected)
+    return DeliveryAsk("late", required_by=required, deliver_by=required, expected=expected)

@@ -1,6 +1,6 @@
 """API shapes of the negotiation: settings, per-supplier state, messages, outcome."""
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Literal
 from uuid import UUID
@@ -17,6 +17,28 @@ InviteNegotiationStatus = Literal[
 NegotiationActionName = Literal["counter", "bafo"]
 NegotiationMessageStatus = Literal["proposed", "sent", "canceled", "rejected"]
 LineDecisionName = Literal["no_offer", "blocked", "accept", "above_max", "counter"]
+# Where one supplier stands, as the buyer reads it (`bido_back.negotiation.planner`).
+SupplierPhase = Literal[
+    "not_started",
+    "waiting_for_supplier",
+    "waiting",
+    "held_for_approval",
+    "accepted_internally",
+    "needs_decision",
+    "needs_answer",
+    "closed",
+]
+NextActionName = Literal[
+    "wait", "clarify", "revised_offer", "delivery_date", "bafo", "accept", "hold", "close"
+]
+EmailKindName = Literal["revised_offer", "delivery_date", "bafo"]
+# A negotiation email's exact state (`status` keeps the older, coarser values).
+EmailStateName = Literal["decided", "proposed", "sent", "canceled", "rejected", "held"]
+LinePriceStatus = Literal["in_target", "ask_met", "in_range", "above_max", "no_target"]
+LineDeliveryStatus = Literal[
+    "on_time", "no_need_by", "unknown", "late", "still_late", "need_by_unreachable"
+]
+LinePlanStatus = Literal["not_quoted", "declined", "blocked", "question_open", "priced"]
 
 
 class LineLimitsView(BaseModel):
@@ -65,22 +87,47 @@ class NegotiationSettingsUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     deadline: datetime | None = None
-    max_rounds: int = Field(default=3, ge=1, le=10)
+    # One revised-offer round, then one best-and-final request, by default.
+    max_rounds: int = Field(default=2, ge=1, le=10)
     early_close: bool = True
     lines: list[LineLimitsUpdate] = Field(default_factory=list[LineLimitsUpdate], max_length=500)
     comparison_policy: ComparisonPolicy | None = None
 
 
+class MessageAskView(BaseModel):
+    """What one negotiation email asks for one position (decided by code)."""
+
+    position: int
+    ask_unit_price: Decimal | None
+    # A better price is asked for without a number (no target was set).
+    best_price: bool = False
+    # Delivery by this date is asked for.
+    deliver_by: date | None = None
+
+
 class NegotiationMessageView(BaseModel):
     id: UUID
+    # The negotiation round: emails sent before it, plus one (a replacement repeats it).
     round: int
     action: NegotiationActionName
+    # `decided` and `held` read as `proposed` here; `state` has the exact value.
     status: NegotiationMessageStatus
     approval_id: UUID | None
     proposal_id: UUID
     canceled_reason: str | None
     created_at: datetime
     sent_at: datetime | None
+    # The email's number for this supplier, counting every email ever decided.
+    sequence: int = 0
+    kind: EmailKindName | None = None
+    state: EmailStateName = "proposed"
+    reply_by: date | None = None
+    # A best-and-final request's cut-off (the same for every supplier of the RFQ).
+    cutoff_at: datetime | None = None
+    # Drafts tried; `held_reason` says why it waits for the buyer after the last one.
+    attempts: int = 0
+    held_reason: str | None = None
+    asks: list[MessageAskView] = Field(default_factory=list[MessageAskView])
 
 
 class LineDecisionView(BaseModel):
@@ -90,6 +137,55 @@ class LineDecisionView(BaseModel):
     ask_unit_price: Decimal | None
     lead_time_days: int | None
     ask_lead_time_days: int | None
+
+
+class LinePlanView(BaseModel):
+    """One line of the supplier's current offer: price, delivery, and what Bido asks."""
+
+    rfq_line_id: UUID
+    position: int
+    status: LinePlanStatus
+    price: LinePriceStatus | None = None
+    delivery: LineDeliveryStatus | None = None
+    offered_unit_price_base: Decimal | None = None
+    ask_unit_price: Decimal | None = None
+    asks_best_price: bool = False
+    # The date asked for, the date needed, and the supplier's expected delivery when
+    # ordered today (the earliest feasible on its quote).
+    deliver_by: date | None = None
+    required_by: date | None = None
+    expected_delivery: date | None = None
+    latest_order_date: date | None = None
+    # In target, on time, nothing open: acceptable as it is.
+    acceptable: bool = False
+    reasons: list[str] = Field(default_factory=list[str])
+
+
+class SupplierStateView(BaseModel):
+    """Where the supplier stands now, computed in code, and what Bido does next."""
+
+    phase: SupplierPhase
+    # One English sentence written by code from codes and dates (never supplier text).
+    label: str
+    # Stable code of the reason (e.g. no_progress, supplier_question, daily_limit).
+    reason: str
+    # Waiting until this moment (a reply-by date, the cut-off, the daily limit).
+    until: datetime | None = None
+    next_action: NextActionName
+    # Accepted internally: order by this date to meet the need-by dates.
+    order_by: date | None = None
+    valid_until: date | None = None
+    warnings: list[str] = Field(default_factory=list[str])
+
+
+class NegotiationDecisionView(BaseModel):
+    """The planner's last recorded decision for the supplier (by the sweep)."""
+
+    action: NextActionName
+    phase: SupplierPhase
+    reason: str
+    proposal_version: int | None = None
+    decided_at: datetime
 
 
 class InviteNegotiation(BaseModel):
@@ -105,6 +201,10 @@ class InviteNegotiation(BaseModel):
     messages: list[NegotiationMessageView]
     strategy_reasons: list[str] = Field(default_factory=list[str])
     stalled_rounds: int = 0
+    # What the buyer reads about this supplier now, and the planner's line view.
+    state: SupplierStateView | None = None
+    line_plans: list[LinePlanView] = Field(default_factory=list[LinePlanView])
+    last_decision: NegotiationDecisionView | None = None
 
 
 class OutcomeLine(BaseModel):
@@ -135,6 +235,16 @@ class OutcomeLine(BaseModel):
     landed_total_base: Decimal | None = None
 
 
+class NegotiationWarningView(BaseModel):
+    """Something the buyer should know before deciding (e.g. a need-by date at risk)."""
+
+    code: str
+    supplier_name: str | None = None
+    position: int | None = None
+    on: date | None = None
+    text: str
+
+
 class RfqNegotiation(BaseModel):
     rfq_id: UUID
     status: NegotiationStatus
@@ -144,3 +254,6 @@ class RfqNegotiation(BaseModel):
     invites: list[InviteNegotiation]
     # Set when the negotiation is closed: the best eligible offer per line and tier.
     outcome: list[OutcomeLine] | None
+    # The one best-and-final cut-off for every supplier, once the final round started.
+    cutoff_at: datetime | None = None
+    warnings: list[NegotiationWarningView] = Field(default_factory=list[NegotiationWarningView])

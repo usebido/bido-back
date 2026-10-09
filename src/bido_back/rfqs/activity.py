@@ -24,6 +24,7 @@ from bido_back.db.models import (
     Rfq,
     Supplier,
 )
+from bido_back.negotiation.labels import reason_text
 from bido_back.rfqs.errors import NotFound
 from bido_back.rfqs.overview import owner_names
 from bido_back.rfqs.schemas import ActivityKind, RfqActivityItem
@@ -48,6 +49,12 @@ _NEGOTIATION_ACTIONS: Final[Mapping[str, str]] = {
     "counteroffer": "Counter-offer",
     "bafo": "Best-and-final request",
     "accept": "Acceptance",
+}
+# What a negotiation email decided by Bido asks for.
+_EMAIL_KINDS: Final[Mapping[str, str]] = {
+    "revised_offer": "a request for a revised offer",
+    "delivery_date": "a delivery-date request",
+    "bafo": "the best-and-final request",
 }
 _ORIGINS: Final[Mapping[str, str]] = {
     "copilot": " from the Copilot",
@@ -249,7 +256,9 @@ def _event_item(
             summary = f"Negotiation closed ({data.get('reason', 'closed')})"
             actor = actor or BIDO
         case "mandate.started":
-            count = len(data.get("suppliers") or [])
+            # The payload stores the number of suppliers (a list in older events).
+            raw = data.get("suppliers")
+            count = raw if isinstance(raw, int) else len(cast(list[object], raw or []))
             kind = "user"
             plural = "s" if count != 1 else ""
             summary = f"Negotiation mandate approved for {count} supplier{plural}"
@@ -258,7 +267,41 @@ def _event_item(
             paused = event.action.endswith("paused")
             summary = "Negotiation paused" if paused else "Negotiation resumed"
         case "mandate.held":
-            kind, summary, actor = "agent", "An email was held for review", BIDO
+            tool = _TOOLS.get(str(data.get("tool")), "email")
+            why = _words(data.get("reason"))
+            summary = f"{tool.capitalize()}{to} held for your approval" + (
+                f": {why}" if why else ""
+            )
+            kind, actor = "agent", BIDO
+        case "mandate.waiting":
+            tool = _TOOLS.get(str(data.get("tool")), "email")
+            until = _moment(data.get("until"))
+            if data.get("reason") == "daily_cap":
+                summary = f"{tool.capitalize()}{to} waits for the daily email limit" + (
+                    f" until {until}" if until else ""
+                )
+            else:
+                summary = f"{tool.capitalize()}{to} waits for your mailbox to be connected"
+            kind, actor = "agent", BIDO
+        case "rfq.negotiation_decided":
+            what = _EMAIL_KINDS.get(str(data.get("kind")), "a negotiation email")
+            summary = f"Bido prepared {what} (round {data.get('round', '?')}){_for(supplier)}"
+            kind, actor = "agent", BIDO
+        case "rfq.negotiation_accepted":
+            summary = f"Accepted internally – nothing to ask{_for(supplier)}"
+            kind, actor = "agent", BIDO
+        case "rfq.negotiation_final":
+            summary = reason_text(str(data.get("reason", ""))) + _for(supplier)
+            kind, actor = "agent", BIDO
+        case "rfq.negotiation_needs_decision" | "rfq.negotiation_needs_answer":
+            summary = reason_text(str(data.get("reason", ""))) + _for(supplier)
+            kind, actor = "agent", BIDO
+        case "rfq.negotiation_held":
+            why = _words(data.get("reason"))
+            summary = f"Needs your decision: the email{to} could not be prepared" + (
+                f" ({why})" if why else ""
+            )
+            kind, actor = "agent", BIDO
         case action if action.startswith("approval."):
             tool = _TOOLS.get(str(data.get("tool")), "action")
             verb = action.removeprefix("approval.").replace("_", " ")
@@ -274,6 +317,24 @@ def _event_item(
         supplier_name=supplier,
         summary=summary,
     )
+
+
+def _for(supplier: str | None) -> str:
+    return f" ({supplier})" if supplier else ""
+
+
+def _words(value: object) -> str:
+    """A reason code as words (codes only; never content)."""
+    return value.replace("_", " ") if isinstance(value, str) and value else ""
+
+
+def _moment(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    try:
+        return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        return ""
 
 
 def _count(value: object, noun: str, prefix: str) -> str:

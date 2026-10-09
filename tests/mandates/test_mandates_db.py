@@ -24,10 +24,12 @@ from bido_back.approvals import (
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
+    AuditEvent,
     Invite,
     MailboxConnection,
     MandateSend,
     NegotiationMandate,
+    NegotiationMessage,
     Rfq,
     RfqLine,
 )
@@ -43,7 +45,9 @@ from bido_back.negotiation.schemas import LineLimitsUpdate, NegotiationSettingsU
 from bido_back.negotiation.send import SEND_NEGOTIATION_EMAIL
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs import suppliers
+from bido_back.rfqs.activity import rfq_activity
 from bido_back.rfqs.errors import InvalidState, ReplyByRequired
+from bido_back.rfqs.overview import list_rfq_overviews
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
 from bido_back.rfqs.send import SEND_RFQ_EMAIL
 from tests.approvals.conftest import People
@@ -181,6 +185,9 @@ class MandateWorld(World):
         async with tenant_session(self.engine, self.people.tenant) as session:
             return list(await session.scalars(select(MandateSend).order_by(MandateSend.created_at)))
 
+    async def sends_for(self, tool: str) -> list[MandateSend]:
+        return [s for s in await self.sends() if s.tool == tool]
+
 
 @pytest.fixture
 async def world(app_engine: AsyncEngine, rfq_rows: People) -> MandateWorld:
@@ -262,17 +269,171 @@ async def test_a_draft_outside_the_mandate_is_held_for_a_person(world: MandateWo
     assert (await world.auto()).held == 0
 
 
-async def test_the_daily_cap_defers_without_holding(world: MandateWorld) -> None:
-    await world.start(max_messages_per_supplier_per_day=1)
+async def _audit(world: MandateWorld, action: str) -> list[AuditEvent]:
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        return list(
+            await session.scalars(
+                select(AuditEvent)
+                .where(AuditEvent.action == action)
+                .order_by(AuditEvent.created_at)
+            )
+        )
+
+
+async def test_the_daily_cap_defers_without_holding_and_says_until_when(
+    world: MandateWorld,
+) -> None:
+    await world.start(max_messages_per_supplier_per_day=1, max_rounds=3)
     await world.offer("rhein", ("0.050", "1.20"))
     await world.sweep(FakeNegotiationWriter())
+    # The RFQ email does not count: today's one automatic email is this counter.
+    first = await world.auto()
+    assert len(first.approved) == 1
+    [sent] = await world.sends_for(SEND_NEGOTIATION_EMAIL)
 
+    # The supplier moves at once: the next email waits for the cap; it is not held.
+    await world.offer("rhein", ("0.045", "1.10"))
+    await world.sweep(FakeNegotiationWriter())
     result = await world.auto()
+    assert result.approved == [] and result.held == 0 and result.waiting == 1
+    rows = await world.messages("rhein")
+    assert [(r.round, r.status) for r in rows] == [(1, "sent"), (2, "proposed")]
+    # Recorded once, with when it can go.
+    [waiting] = await _audit(world, "mandate.waiting")
+    until = sent.created_at + timedelta(hours=24)
+    assert waiting.payload["reason"] == "daily_cap"
+    assert waiting.payload["until"] == until.isoformat()
+    assert waiting.payload["invite_id"] == str(world.invites["rhein"])
+    assert (await world.auto()).waiting == 0
+    activity = await mandates.get_activity(world.engine, buyer(world.people), world.rfq_id)
+    [wait] = activity.waits
+    assert (wait.reason, wait.supplier_name, wait.until) == ("daily_cap", "Rhein", until)
+    view = await negotiation_service.get_negotiation(
+        world.engine, buyer(world.people), world.rfq_id
+    )
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.state is not None
+    assert (rhein.state.phase, rhein.state.reason, rhein.state.until) == (
+        "waiting",
+        "daily_limit",
+        until,
+    )
+    # The feed says so, and the RFQ list does not ask the buyer to approve it.
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    assert any(
+        i.action == "mandate.waiting" and i.supplier_name == "Rhein" and "daily" in i.summary
+        for i in feed
+    )
+    page = await list_rfq_overviews(world.engine, buyer(world.people), today=date.today())
+    [row] = [r for r in page.items if r.id == world.rfq_id]
+    assert row.next_step != "approve"
 
-    # The RFQ email already used today's message: the counter waits, it is not held.
-    assert result.approved == [] and result.held == 0
-    [counter] = await world.messages("rhein")
-    assert counter.status == "proposed"
+
+async def test_a_canceled_email_uses_no_round_so_the_last_round_still_goes_out(
+    world: MandateWorld,
+) -> None:
+    await world.start(max_messages_per_supplier_per_day=1)
+    rfq = await world.rfq()
+    assert rfq.negotiation_max_rounds == 2
+    writer = FakeNegotiationWriter()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.sweep(writer)
+    await world.auto()
+    # The supplier moves: round 2 is the best-and-final request; it waits for the cap.
+    await world.offer("rhein", ("0.045", "1.10"))
+    await world.sweep(writer)
+    assert (await world.auto()).waiting == 1
+    # It moves again before the request can go: the waiting one is replaced, same round.
+    await world.offer("rhein", ("0.044", "1.08"))
+    await world.sweep(writer)
+    later = datetime.now(UTC) + timedelta(hours=25)
+    result = await mandates.auto_approve_pending(
+        world.engine, world.people.tenant, jobs=world.jobs, now=later
+    )
+    await world.run_jobs()
+    assert result.held == 0 and len(result.approved) == 1
+    rows = await world.messages("rhein")
+    assert [(r.sequence, r.round, r.action, r.status) for r in rows] == [
+        (1, 1, "counter", "sent"),
+        (2, 2, "bafo", "canceled"),
+        (3, 2, "bafo", "sent"),
+    ]
+    # Both best-and-final requests carried the RFQ's one cut-off.
+    cutoffs = {r.terms["decision"]["cutoff_at"] for r in rows if r.action == "bafo"}
+    assert len(cutoffs) == 1
+    assert not [s for s in await world.sends() if s.outcome == "held"]
+
+
+async def test_the_mandate_never_approves_a_second_best_and_final_request(
+    world: MandateWorld,
+) -> None:
+    await world.start()
+    writer = FakeNegotiationWriter()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.sweep(writer)
+    await world.auto()
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        # The sent email was a best-and-final request as far as the mandate can read
+        # (an older Bido wrote no typed decision): the guard reads what was sent.
+        await session.execute(
+            update(NegotiationMessage)
+            .where(NegotiationMessage.invite_id == world.invites["rhein"])
+            .values(action="bafo")
+        )
+    await world.offer("rhein", ("0.045", "1.10"))
+    await world.sweep(writer)
+    [_, last] = await world.messages("rhein")
+    assert (last.action, last.round, last.status) == ("bafo", 2, "proposed")
+    result = await world.auto()
+    assert result.approved == [] and result.held == 1
+    [held] = [s for s in await world.sends() if s.outcome == "held"]
+    assert held.reason == "bafo_already_sent"
+
+
+async def test_the_activity_feed_of_a_mandated_negotiation_reads_every_decision(
+    world: MandateWorld,
+) -> None:
+    await world.start()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.offer("lyon", ("0.039", "0.99"))
+    await world.sweep(FakeNegotiationWriter())
+    await world.auto()
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    summaries = [i.summary for i in feed]
+    assert "Negotiation mandate approved for 2 suppliers" in summaries
+    accepted = next(i for i in feed if i.action == "rfq.negotiation_accepted")
+    assert accepted.supplier_name == "Lyon" and accepted.actor == "Bido"
+    assert "nothing to ask" in accepted.summary
+    decided = next(i for i in feed if i.action == "rfq.negotiation_decided")
+    assert decided.supplier_name == "Rhein" and "revised offer" in decided.summary
+    sent = next(i for i in feed if i.action == "rfq.negotiation_sent")
+    assert sent.supplier_name == "Rhein" and "round 1" in sent.summary
+    # The same sweep again records nothing new.
+    await world.sweep(FakeNegotiationWriter())
+    again = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    assert len(again) == len(feed)
+
+
+async def test_a_held_email_names_its_supplier_and_reason_in_the_feed(
+    world: MandateWorld,
+) -> None:
+    await world.start()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.sweep(CommittingWriter())
+    await world.auto()
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    held = next(i for i in feed if i.action == "mandate.held")
+    assert held.supplier_name == "Rhein"
+    assert "commitment language" in held.summary
+    view = await negotiation_service.get_negotiation(
+        world.engine, buyer(world.people), world.rfq_id
+    )
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.state is not None and rhein.state.phase == "held_for_approval"
+    assert rhein.state.reason == "held_by_mandate:commitment_language"
+    page = await list_rfq_overviews(world.engine, buyer(world.people), today=date.today())
+    [row] = [r for r in page.items if r.id == world.rfq_id]
+    assert row.next_step == "approve"
 
 
 async def test_pause_stops_automatic_sends_and_resume_restarts_them(

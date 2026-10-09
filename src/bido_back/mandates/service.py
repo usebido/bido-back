@@ -19,10 +19,16 @@ Flow:
    counter/BAFO emails on the buyer's behalf, but only when code finds each one
    inside the mandate (`bido_back.mandates.policy`): a mandated invite and
    address, no copies, the buyer's mailbox, no commitment language, prices
-   within the approved maximum, rounds and daily cap respected, limits
-   unchanged. Anything else is HELD: left pending for a person, with the
-   reason recorded. Approval still happens per email, by the mandate's
-   approver of record, through the same executor (once, hash-checked).
+   within the approved maximum, limits unchanged, and the rounds counted as
+   emails actually SENT to that supplier (a canceled or rejected email never
+   uses one; a second best-and-final request is never approved). Anything else
+   is HELD: left pending for a person, with the reason recorded. Approval
+   still happens per email, by the mandate's approver of record, through the
+   same executor (once, hash-checked).
+   The daily cap (follow-up and negotiation emails per supplier per 24 hours;
+   the initial RFQ email does not count) and a missing mailbox are not reasons
+   to hold: the email waits, and the wait is recorded once per email with
+   when it can go (`mandate.waiting`), so the buyer sees "waiting until".
 4. Pausing stops step 3 at once; closing the negotiation ends the mandate.
 
 A mandate can be proposed and approved before the buyer connects a mailbox:
@@ -39,7 +45,7 @@ Logs carry ids, counts and reasons only.
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from typing import Final, cast
 from uuid import UUID, uuid5
 
@@ -64,7 +70,6 @@ from bido_back.db.models import (
     AuditEvent,
     Contact,
     Invite,
-    MailboxConnection,
     MandateSend,
     NegotiationMandate,
     NegotiationMessage,
@@ -89,11 +94,20 @@ from bido_back.mandates.schemas import (
     MandateStatus,
     MandateSupplier,
     MandateView,
+    MandateWaitItem,
     ProposedMandate,
     ProposeMandateRequest,
 )
+from bido_back.mandates.waits import (
+    AUTO_TOOLS,
+    MandateWait,
+    approval_invite,
+    approval_waits,
+    daily_cap_until,
+    mailbox_connected,
+)
 from bido_back.negotiation.schemas import LineLimitsUpdate, NegotiationSettingsUpdate
-from bido_back.negotiation.send import SEND_NEGOTIATION_EMAIL, SendNegotiationEmailArgs
+from bido_back.negotiation.send import SendNegotiationEmailArgs
 from bido_back.negotiation.service import apply_settings
 from bido_back.outbound.domains import check_recipients, unconfirmed_domains
 from bido_back.rfqs.agents import EmailWriterAgent
@@ -108,11 +122,8 @@ logger = logging.getLogger(__name__)
 Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
 APPROVE_NEGOTIATION_MANDATE: Final = "approve_negotiation_mandate"
-# The emails a mandate may approve. Awards and purchase orders are never among them.
-AUTO_TOOLS: Final = frozenset({SEND_RFQ_EMAIL, SEND_FOLLOWUP_EMAIL, SEND_NEGOTIATION_EMAIL})
 
 _NAMESPACE: Final = UUID("7a1c3e5f-9b2d-4f60-8e17-3c5a9d2b4e81")
-_DAY: Final = timedelta(hours=24)
 
 
 def mandate_proposal_ids(rfq_id: UUID, attempt: int) -> tuple[UUID, str]:
@@ -328,20 +339,6 @@ async def propose_mandate(
     )
 
 
-async def mailbox_connected(session: AsyncSession, tenant_id: UUID, user_id: UUID) -> bool:
-    """Whether `user_id` has an active mailbox connection (sends go out from it)."""
-    found = await session.scalar(
-        select(MailboxConnection.id)
-        .where(
-            MailboxConnection.tenant_id == tenant_id,
-            MailboxConnection.user_id == user_id,
-            MailboxConnection.status == "active",
-        )
-        .limit(1)
-    )
-    return found is not None
-
-
 # --- Executing the approved mandate ------------------------------------------------------
 
 
@@ -419,6 +416,7 @@ def _hold(
             payload={
                 "mandate_id": str(mandate.id),
                 "approval_id": str(approval.id),
+                "invite_id": str(invite_id) if invite_id is not None else None,
                 "tool": approval.tool,
                 "reason": reason,
             },
@@ -620,6 +618,8 @@ class AutoApproveResult:
     approved: list[UUID] = field(default_factory=list[UUID])
     held: int = 0
     re_enqueued: int = 0
+    # Emails newly recorded as waiting (daily cap, mailbox).
+    waiting: int = 0
 
 
 def _limits_unchanged(rfq: Rfq, lines: Sequence[RfqLine], terms: ApproveMandateArgs) -> bool:
@@ -638,6 +638,36 @@ def _limits_unchanged(rfq: Rfq, lines: Sequence[RfqLine], terms: ApproveMandateA
     return True
 
 
+@dataclass(frozen=True, slots=True)
+class _Verdict:
+    invite_id: UUID | None
+    # Why it is held for a person; None: in bounds.
+    hold: str | None = None
+    # In bounds but not now (no mailbox yet, the daily cap): what it waits for.
+    wait: MandateWait | None = None
+
+
+async def _rounds_problem(
+    session: AsyncSession, args: SendNegotiationEmailArgs, terms: ApproveMandateArgs
+) -> str | None:
+    """Rounds are the negotiation emails SENT to the supplier: never more than the cap,
+    and one best-and-final request at most. Canceled and rejected emails do not count."""
+    sent = list(
+        await session.scalars(
+            select(NegotiationMessage.action).where(
+                NegotiationMessage.invite_id == args.invite_id,
+                NegotiationMessage.status == "sent",
+                NegotiationMessage.id != args.negotiation_message_id,
+            )
+        )
+    )
+    if len(sent) + 1 > terms.max_rounds or args.round > terms.max_rounds:
+        return "rounds_exceeded"
+    if args.action == "bafo" and "bafo" in sent:
+        return "bafo_already_sent"
+    return None
+
+
 async def _check(
     session: AsyncSession,
     approval: Approval,
@@ -646,17 +676,19 @@ async def _check(
     now: datetime,
     *,
     mailbox_ready: bool = True,
-) -> tuple[UUID | None, str | None, bool]:
-    """(invite_id, reason to hold or None, retry later). Pure reads."""
+) -> _Verdict:
+    """Whether one pending email is inside the mandate, and if so whether it can go now.
+
+    Pure reads."""
     if not payload_matches(approval):
-        return None, "integrity_failed", False
+        return _Verdict(None, "integrity_failed")
     try:
         if approval.tool == SEND_RFQ_EMAIL:
             rfq_args = SendRfqEmailArgs.model_validate(approval.args)
             initial = {e.approval_id: e for e in terms.initial_emails}
             email = initial.get(approval.id)
             if email is None or email.args_hash != approval.args_hash:
-                return rfq_args.invite_id, "rfq_email_not_in_mandate", False
+                return _Verdict(rfq_args.invite_id, "rfq_email_not_in_mandate")
             invite_id, sender = rfq_args.invite_id, rfq_args.sender_user_id
             to, cc, texts = rfq_args.to, rfq_args.cc, ()
         elif approval.tool == SEND_FOLLOWUP_EMAIL:
@@ -667,44 +699,79 @@ async def _check(
             n_args = SendNegotiationEmailArgs.model_validate(approval.args)
             invite_id, sender = n_args.invite_id, n_args.sender_user_id
             to, cc, texts = n_args.to, n_args.cc, (n_args.subject, n_args.body)
-            if n_args.round > terms.max_rounds:
-                return invite_id, "rounds_exceeded", False
             row = await session.get(NegotiationMessage, n_args.negotiation_message_id)
             if row is None:
-                return invite_id, "terms_unreadable", False
+                return _Verdict(invite_id, "terms_unreadable")
+            rounds = await _rounds_problem(session, n_args, terms)
+            if rounds is not None:
+                return _Verdict(invite_id, rounds)
             problem = negotiation_terms_problem(cast(dict[str, JsonValue], row.terms), terms)
             if problem is not None:
-                return invite_id, problem, False
+                return _Verdict(invite_id, problem)
     except ValidationError:
-        return None, "args_unreadable", False
+        return _Verdict(None, "args_unreadable")
 
     supplier = next((s for s in terms.suppliers if s.invite_id == invite_id), None)
     if supplier is None:
-        return invite_id, "supplier_not_in_mandate", False
+        return _Verdict(invite_id, "supplier_not_in_mandate")
     if sender != terms.sender_user_id or approval.requested_by != terms.sender_user_id:
-        return invite_id, "sender_not_in_mandate", False
+        return _Verdict(invite_id, "sender_not_in_mandate")
     problem = recipients_problem(to, cc, supplier.to)
     if problem is not None:
-        return invite_id, problem, False
+        return _Verdict(invite_id, problem)
     if await unconfirmed_domains(session, mandate.tenant_id, [*to, *cc]):
-        return invite_id, "recipient_domain_unconfirmed", False
+        return _Verdict(invite_id, "recipient_domain_unconfirmed")
     if texts and commitment_language(*texts):
-        return invite_id, "commitment_language", False
+        return _Verdict(invite_id, "commitment_language")
     # No mailbox yet: not a reason to hold; the email waits for the connection.
     if not mailbox_ready:
-        return invite_id, None, True
+        return _Verdict(invite_id, wait=MandateWait("mailbox"))
     # Daily cap: not a reason to hold; the email waits for the next window.
-    sent_today = await session.scalar(
-        select(func.count()).where(
-            MandateSend.mandate_id == mandate.id,
-            MandateSend.invite_id == invite_id,
-            MandateSend.outcome == "auto_approved",
-            MandateSend.created_at > now - _DAY,
+    if approval.tool != SEND_RFQ_EMAIL:
+        until = await daily_cap_until(
+            session, mandate.id, invite_id, terms.max_messages_per_supplier_per_day, now
+        )
+        if until is not None:
+            return _Verdict(invite_id, wait=MandateWait("daily_cap", until))
+    return _Verdict(invite_id)
+
+
+async def _record_wait(
+    session: AsyncSession,
+    approval: Approval,
+    mandate: NegotiationMandate,
+    invite_id: UUID | None,
+    wait: MandateWait,
+) -> bool:
+    """Record once per email and reason that it waits (and until when); True when new."""
+    seen = await session.scalar(
+        select(AuditEvent.id)
+        .where(
+            AuditEvent.action == "mandate.waiting",
+            AuditEvent.payload["approval_id"].astext == str(approval.id),
+            AuditEvent.payload["reason"].astext == wait.reason,
+        )
+        .limit(1)
+    )
+    if seen is not None:
+        return False
+    session.add(
+        AuditEvent(
+            tenant_id=mandate.tenant_id,
+            actor_user_id=None,
+            action="mandate.waiting",
+            payload={
+                "mandate_id": str(mandate.id),
+                "rfq_id": str(mandate.rfq_id),
+                "approval_id": str(approval.id),
+                "invite_id": str(invite_id) if invite_id is not None else None,
+                "tool": approval.tool,
+                "reason": wait.reason,
+                "until": wait.until.isoformat() if wait.until is not None else None,
+            },
         )
     )
-    if (sent_today or 0) >= terms.max_messages_per_supplier_per_day:
-        return invite_id, None, True
-    return invite_id, None, False
+    return True
 
 
 async def auto_approve_pending(
@@ -759,16 +826,18 @@ async def auto_approve_pending(
                     _hold(session, approval, mandate, None, "limits_changed")
                     result.held += 1
                     continue
-                invite_id, reason, retry = await _check(
-                    session, approval, mandate, terms, at, mailbox_ready=ready
-                )
-                if retry:
+                verdict = await _check(session, approval, mandate, terms, at, mailbox_ready=ready)
+                if verdict.wait is not None:
+                    if await _record_wait(
+                        session, approval, mandate, verdict.invite_id, verdict.wait
+                    ):
+                        result.waiting += 1
                     continue
-                if reason is not None:
-                    _hold(session, approval, mandate, invite_id, reason)
+                if verdict.hold is not None:
+                    _hold(session, approval, mandate, verdict.invite_id, verdict.hold)
                     result.held += 1
                     continue
-                await _mark_auto_approved(session, approval, mandate, invite_id, at)
+                await _mark_auto_approved(session, approval, mandate, verdict.invite_id, at)
                 await session.flush()
                 result.approved.append(approval.id)
                 to_enqueue.append(approval.id)
@@ -789,12 +858,13 @@ async def auto_approve_pending(
             result.re_enqueued += len(stuck)
         await session.flush()
     await _enqueue(jobs, tenant_id, to_enqueue)
-    if result.approved or result.held:
+    if result.approved or result.held or result.waiting:
         logger.info(
-            "mandates swept tenant=%s approved=%d held=%d re_enqueued=%d",
+            "mandates swept tenant=%s approved=%d held=%d waiting=%d re_enqueued=%d",
             tenant_id,
             len(result.approved),
             result.held,
+            result.waiting,
             result.re_enqueued,
         )
     return result
@@ -900,6 +970,8 @@ async def get_activity(db: Db, principal: Principal, rfq_id: UUID) -> MandateAct
         ]
         terms = ApproveMandateArgs.model_validate(mandate.terms)
         activity = MandateActivity(rfq_id=rfq_id, mandate=_view(mandate), items=items)
+        if mandate.status != "ended":
+            activity.waits = await _waits(session, rfq_id, names, datetime.now(UTC))
         if mandate.status != "ended" and not await mailbox_connected(
             session, principal.tenant_id, terms.sender_user_id
         ):
@@ -917,6 +989,41 @@ async def get_activity(db: Db, principal: Principal, rfq_id: UUID) -> MandateAct
                 or 0
             )
         return activity
+
+
+async def _waits(
+    session: AsyncSession, rfq_id: UUID, names: dict[UUID, str], now: datetime
+) -> list[MandateWaitItem]:
+    """The in-bounds emails waiting for the daily cap or a mailbox, and until when."""
+    pending = list(
+        await session.scalars(
+            select(Approval)
+            .where(
+                Approval.session_id == f"rfq:{rfq_id}",
+                Approval.tool.in_(AUTO_TOOLS),
+                Approval.status == "pending",
+            )
+            .order_by(Approval.created_at)
+        )
+    )
+    waits = await approval_waits(session, rfq_id, pending, now)
+    items: list[MandateWaitItem] = []
+    for approval in pending:
+        wait = waits.get(approval.id)
+        if wait is None or wait.reason not in ("daily_cap", "mailbox"):
+            continue
+        invite_id = approval_invite(approval)
+        items.append(
+            MandateWaitItem(
+                approval_id=approval.id,
+                tool=approval.tool,
+                invite_id=invite_id,
+                supplier_name=names.get(invite_id) if invite_id is not None else None,
+                reason="daily_cap" if wait.reason == "daily_cap" else "mailbox_not_connected",
+                until=wait.until,
+            )
+        )
+    return items
 
 
 def _subject(approval: Approval) -> str | None:

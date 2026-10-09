@@ -264,11 +264,14 @@ class Rfq(Base):
     # ready_to_close, closed.
     negotiation_status: Mapped[str] = mapped_column(Text, server_default=text("'not_started'"))
     negotiation_deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    negotiation_max_rounds: Mapped[int] = mapped_column(Integer, server_default=text("3"))
+    negotiation_max_rounds: Mapped[int] = mapped_column(Integer, server_default=text("2"))
     negotiation_early_close: Mapped[bool] = mapped_column(Boolean, server_default=true())
     negotiation_ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     negotiation_closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     negotiation_outcome: Mapped[list[Any] | None] = mapped_column(JSONB)
+    # The one best-and-final cut-off for every supplier, set by the first
+    # best-and-final request (migration 0034).
+    negotiation_cutoff_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     comparison_policy: Mapped[dict[str, JsonValue]] = mapped_column(
         JSONB, server_default=text("'{}'::jsonb")
     )
@@ -400,6 +403,9 @@ class Invite(Base):
     negotiation_evaluated_proposal_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("proposals.id", ondelete="SET NULL")
     )
+    # The negotiation planner's last recorded decision for this supplier: action,
+    # buyer-visible phase, reason code, offer version and when (migration 0034).
+    negotiation_decision: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
 
 
 class Message(Base):
@@ -745,11 +751,15 @@ class FollowupMessage(Base):
 
 
 class NegotiationMessage(Base):
-    """A counter-offer or best-and-final request Bido proposed (migration 0013).
+    """A supplier email the negotiation planner decided (migrations 0013, 0034).
 
-    The id is derived from (invite, round). `terms` holds the numbers asked
-    for; the approved text lives in the approval's args and, once sent, in
-    `messages`.
+    The id is derived from (invite, sequence). The row is written when the
+    email is decided (`decided`), before any draft exists; then `proposed`
+    (awaiting approval), `sent`, `canceled`, `rejected` or `held` (its draft
+    kept failing: the buyer decides). `round` counts SENT emails only (a
+    replacement repeats the round). `terms` holds the decision (the numbers and
+    dates asked for); the approved text lives in the approval's args and, once
+    sent, in `messages`.
     """
 
     __tablename__ = "negotiation_messages"
@@ -758,13 +768,17 @@ class NegotiationMessage(Base):
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
     invite_id: Mapped[UUID] = mapped_column(ForeignKey("invites.id", ondelete="CASCADE"))
     proposal_id: Mapped[UUID] = mapped_column(ForeignKey("proposals.id", ondelete="CASCADE"))
+    sequence: Mapped[int] = mapped_column(Integer)
     round: Mapped[int] = mapped_column(Integer)
     action: Mapped[str] = mapped_column(Text)
+    kind: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text, server_default=text("'proposed'"))
     approval_id: Mapped[UUID | None] = mapped_column(ForeignKey("approvals.id"))
     terms: Mapped[dict[str, Any]] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
     message_id_header: Mapped[str | None] = mapped_column(Text)
     canceled_reason: Mapped[str | None] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, server_default=text("0"))
+    held_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

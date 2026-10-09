@@ -26,12 +26,15 @@ from bido_back.db.models import (
     Contact,
     Invite,
     IssuedPurchaseOrder,
+    MandateSend,
+    NegotiationMandate,
     Proposal,
     Rfq,
     RfqLine,
     Supplier,
     User,
 )
+from bido_back.mandates.waits import AUTO_TOOLS
 from bido_back.rfqs.readiness import send_blockers
 from bido_back.rfqs.schemas import RfqNextStep, RfqStage, RfqStatus, RfqSummary
 
@@ -210,12 +213,35 @@ async def _facts(session: AsyncSession, rfq_ids: list[UUID]) -> dict[UUID, RfqFa
     conditions = [rfq_arg.in_(rfq_keys)]
     if invite_keys:
         conditions.append(invite_arg.in_(invite_keys))
-    for rfq_key, invite_key in await session.execute(
-        select(rfq_arg, invite_arg).where(Approval.status == "pending", or_(*conditions))
+    # Emails an active mandate sends on its own (in bounds, maybe waiting for its daily
+    # cap or a mailbox) are not the buyer's to approve; the ones it held are.
+    mandated = set(
+        await session.scalars(
+            select(NegotiationMandate.rfq_id).where(
+                NegotiationMandate.rfq_id.in_(rfq_ids), NegotiationMandate.status == "active"
+            )
+        )
+    )
+    held: set[UUID] = set()
+    if mandated:
+        held = set(
+            await session.scalars(
+                select(MandateSend.approval_id)
+                .join(NegotiationMandate, NegotiationMandate.id == MandateSend.mandate_id)
+                .where(NegotiationMandate.rfq_id.in_(mandated), MandateSend.outcome == "held")
+            )
+        )
+    for approval_id, tool, rfq_key, invite_key in await session.execute(
+        select(Approval.id, Approval.tool, rfq_arg, invite_arg).where(
+            Approval.status == "pending", or_(*conditions)
+        )
     ):
         rfq_id = _rfq_for(rfq_key, invite_key, invite_rfq, facts)
-        if rfq_id is not None:
-            facts[rfq_id].pending_approvals += 1
+        if rfq_id is None:
+            continue
+        if rfq_id in mandated and tool in AUTO_TOOLS and approval_id not in held:
+            continue
+        facts[rfq_id].pending_approvals += 1
 
     for (rfq_id,) in await session.execute(select(Award.rfq_id).where(Award.rfq_id.in_(rfq_ids))):
         facts[rfq_id].awarded = True

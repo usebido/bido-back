@@ -2597,6 +2597,17 @@ GAPS: Final[dict[str, Gap]] = {
         "proposal date; asked days later, 'at most N days' lands after the need-by date. "
         "Ask from the days left (or for the date itself) when the email is written.",
     ),
+    "questions_before_counter": Gap(
+        "email rendering/followups",
+        "negotiation/planner.py (one request per supplier); negotiation/decision.py; "
+        "followups/service.py",
+        "One request per supplier: when an answer leaves open questions (the validity) and a "
+        "price above target, the planner asks the questions first and the revised-offer "
+        "request follows the answer, never two emails for one answer. Asking both in ONE "
+        "email needs the clarification items in the negotiation email: the code renderer of "
+        "the email standard (N3) rendering the planner's decision with the ledger's items "
+        "(N2b), instead of today's two writers.",
+    ),
 }
 
 # A check that means the same thing in every scenario -> its gaps.
@@ -2653,6 +2664,7 @@ SCENARIO_GAPS: Final[dict[tuple[str, str], tuple[str, ...]]] = {
         "asked_again",
     ),
     ("clarification_answered", "ready_to_close"): ("answers_need_preservation",),
+    ("multi_language", "asks_above_target_only"): ("questions_before_counter",),
     ("clarification_answered", "visible_accepted"): (
         "answers_need_preservation",
         "copilot_status",
@@ -2674,50 +2686,30 @@ EXPECTED_MOCK_FAILURES: Final[frozenset[tuple[str, str, str]]] = frozenset(
         *(
             ("rfq6_replay", step, check)
             for step in ("first_reply", "second_reply", "shaft_on_time")
-            for check in (*_RFQ6_EVERY_EMAIL, "status_matches_emails")
+            for check in _RFQ6_EVERY_EMAIL
         ),
         ("rfq6_replay", "first_reply", "no_validity_asked"),
         ("rfq6_replay", "first_reply", "no_quantity_tier_asked"),
         ("rfq6_replay", "first_reply", "no_answered_lead_time_asked"),
         ("rfq6_replay", "second_reply", "nothing_asked_twice"),
         ("rfq6_replay", "second_reply", "late_line_lead_time_asked"),
-        ("rfq6_replay", "second_reply", "visible_waiting_for_supplier"),
         ("rfq6_replay", "shaft_on_time", "nothing_sent"),
         ("rfq6_replay", "shaft_on_time", "visible_accepted"),
         ("rfq6_replay", "shaft_on_time", "outcome_every_line"),
         ("rfq6_replay", "shaft_on_time", "ready_to_close"),
-        ("price_above_target_then_concession", "first_quotes", "visible_accepted"),
-        ("price_above_target_then_concession", "first_quotes", "visible_waiting_for_supplier"),
-        ("price_above_target_then_concession", "final_offer", "visible_final_offer"),
-        ("supplier_asks_question", "question", "visible_supplier_question"),
-        ("supplier_asks_question", "question", "visible_needs_buyer"),
-        ("supplier_asks_question", "quote", "visible_accepted"),
         ("partial_quote", "two_of_three", "email:reply_by_date"),
-        ("partial_quote", "two_of_three", "visible_waiting_for_supplier"),
         ("partial_quote", "third_line", "email:reply_by_date"),
         ("partial_quote", "third_line", "offer_completed"),
         ("partial_quote", "third_line", "offer_usable"),
         ("partial_quote", "third_line", "nothing_to_ask"),
         ("partial_quote", "third_line", "ready_to_close"),
         ("partial_quote", "third_line", "visible_accepted"),
-        ("decline_then_alternative", "alternative", "visible_needs_buyer"),
-        ("decline_then_alternative", "days_later", "visible_needs_buyer"),
-        ("no_reply", "silence", "visible_chases_exhausted"),
-        ("stubborn_supplier", "same_twice", "visible_needs_buyer"),
-        ("lead_time_only", "late_offer", "visible_waiting_for_supplier"),
-        ("lead_time_only", "faster", "visible_accepted"),
         ("multi_language", "first_offer", "email:reply_by_date"),
-        ("multi_language", "first_offer", "one_email_per_reply"),
-        ("multi_language", "final", "visible_accepted"),
-        ("reply_while_pending", "next_concession", "status_matches_emails"),
-        ("reply_while_pending", "next_concession", "last_round_sent"),
-        ("reply_while_pending", "next_concession", "nothing_held"),
-        ("reply_while_pending", "next_concession", "visible_held"),
-        ("above_maximum", "same_twice", "visible_needs_buyer"),
+        # One request per supplier: the validity question first, the counter after it.
+        ("multi_language", "first_offer", "asks_above_target_only"),
         *(
-            ("clarification_answered", step, check)
+            ("clarification_answered", step, "email:reply_by_date")
             for step in ("incomplete_offer", "answers")
-            for check in ("email:reply_by_date", "status_matches_emails")
         ),
         *(
             ("clarification_answered", "answers", check)

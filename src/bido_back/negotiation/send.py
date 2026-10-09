@@ -65,9 +65,12 @@ _MESSAGES_UNIQUE = "messages_tenant_id_message_id_header_key"
 _NAMESPACE: Final = UUID("5b0d8e3c-2a7f-4c61-9e84-7d1f3a6c2b95")
 
 
-def negotiation_message_id(invite_id: UUID, round_number: int) -> UUID:
-    """The row id of the `round`-th negotiation email to an invite (stable)."""
-    return uuid5(_NAMESPACE, f"{invite_id}:{round_number}")
+def negotiation_message_id(invite_id: UUID, sequence: int) -> UUID:
+    """The row id of the `sequence`-th negotiation email decided for an invite (stable).
+
+    Rows written before migration 0034 used their round number, equal to their sequence.
+    """
+    return uuid5(_NAMESPACE, f"{invite_id}:{sequence}")
 
 
 def negotiation_proposal_ids(row_id: UUID) -> tuple[UUID, str]:
@@ -84,6 +87,7 @@ class SendNegotiationEmailArgs(BaseModel):
     negotiation_message_id: UUID
     invite_id: UUID
     action: NegotiationActionName
+    # The negotiation round: emails already sent to the supplier, plus one.
     round: int = Field(ge=1)
     sender_user_id: UUID
     to: list[EmailAddress] = Field(min_length=1, max_length=10)
@@ -349,7 +353,8 @@ def send_negotiation_email_tool(
 
 
 async def release_rejected_negotiation(session: AsyncSession, approval: Approval) -> None:
-    """A rejected negotiation email is not sent; it still counts as a round."""
+    """A rejected negotiation email is not sent and uses no round; the offer it answered
+    gets no other email (the buyer decides, `bido_back.negotiation.planner`)."""
     args = SendNegotiationEmailArgs.model_validate(approval.args)
     await session.execute(
         update(NegotiationMessage)
