@@ -26,6 +26,8 @@ from bido_back.db.models import (
     ProposalLine,
     Rfq,
     RfqLine,
+    Supplier,
+    Tenant,
 )
 from bido_back.followups import service as followup_service
 from bido_back.followups.calendar import add_business_days
@@ -41,6 +43,7 @@ from bido_back.negotiation.send import (
 )
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs import suppliers
+from bido_back.rfqs.activity import rfq_activity
 from bido_back.rfqs.errors import AgentFailed, InvalidState, NotFound
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
 from bido_back.rfqs.send import RfqActDeps, register_act_tools
@@ -48,7 +51,7 @@ from bido_back.worker.envelope import Envelope
 from bido_back.worker.job_types import NEGOTIATION_SWEEP
 from tests.approvals.conftest import FakeJobQueue, People
 from tests.db.conftest import TwoTenants
-from tests.followups.test_followups_db import FakeFollowupWriter
+from tests.followups.test_followups_db import FakeFollowupWriter, gate_refuses
 from tests.rfqs.conftest import FakeIntake, FakeMailboxes, FakeWriter
 
 pytestmark = pytest.mark.db
@@ -265,6 +268,14 @@ async def world(app_engine: AsyncEngine, rfq_rows: People) -> World:
     return await World(app_engine, rfq_rows).setup()
 
 
+async def tenant_name(world: World) -> str:
+    """Who signs: no buyer contact exists, so the company (as in production)."""
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        tenant = await session.get(Tenant, world.people.tenant)
+    assert tenant is not None
+    return tenant.name
+
+
 async def test_nothing_is_negotiated_before_the_buyer_sets_it_up(world: World) -> None:
     await world.offer("rhein", ("0.050", "1.20"))
     writer = FakeNegotiationWriter()
@@ -388,49 +399,6 @@ async def test_rounds_advance_on_new_offers_and_end_with_best_and_final(world: W
     assert rhein.status == "closed" and rhein.rounds_used == 3
     assert rhein.state is not None and rhein.state.reason == "bafo_answered"
     assert len([m for m in await world.messages("rhein") if m.action == "bafo"]) == 1
-
-
-async def test_a_decision_is_stored_before_rendering_and_a_refused_email_is_held(
-    world: World, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from bido_back.supplier_email.checks import GateContext
-    from bido_back.supplier_email.compose import Composed, NoteSource, Refused, compose
-    from bido_back.supplier_email.model import SupplierEmail
-
-    await world.configure()
-    await world.offer("rhein", ("0.050", "1.20"))
-    seen: list[SupplierEmail] = []
-
-    async def refusing(
-        email: SupplierEmail, context: GateContext, note: NoteSource | None = None
-    ) -> Composed | Refused:
-        seen.append(email)
-        return Refused(("number_not_decided",))
-
-    monkeypatch.setattr(service, "compose", refusing)
-    writer = FakeNegotiationWriter()
-    result = await world.sweep(writer)
-    assert (result.proposed, result.skipped, result.held) == (0, 1, 1)
-    # A refusal by the send gate is code-level: held at once, the writer never asked.
-    assert writer.calls == []
-    [email] = seen
-    assert (email.type, email.round) == ("revised_offer", 1)
-    [row] = await world.messages("rhein")
-    assert (row.status, row.attempts, row.approval_id) == ("held", 1, None)
-    assert row.held_reason == "email_refused:number_not_decided"
-    assert row.terms["decision"]["kind"] == "revised_offer"
-    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
-    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
-    assert rhein.state is not None
-    assert (rhein.state.phase, rhein.state.reason) == ("needs_decision", "email_not_prepared")
-    assert rhein.messages[0].state == "held"
-    # Never a second decision for the same offer.
-    monkeypatch.setattr(service, "compose", compose)
-    assert (await world.sweep(writer)).proposed == 0
-    assert writer.calls == [] and len(await world.messages("rhein")) == 1
-    # A newer offer is decided again.
-    await world.offer("rhein", ("0.049", "1.19"))
-    assert (await world.sweep(writer)).proposed == 1
 
 
 async def test_a_writer_outage_only_leaves_the_note_out(world: World) -> None:
@@ -559,6 +527,119 @@ async def test_forcing_counter_offers_never_doubles_an_offers_email(world: World
     )
     assert after.proposed == 0 and len(writer.calls) == 1
     assert len(await world.messages("rhein")) == 1
+
+
+async def test_a_refused_email_is_held_once_for_a_person(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Email audit F3: a refused counter was written again every 15-minute sweep, unseen.
+    The decision is stored before the email is rendered; code renders it, so only the send
+    gate refuses one (a rendering bug): it is held at once, with its codes, for a person."""
+    await world.configure()
+    await world.offer("rhein", ("0.050", "1.20"))
+    gate_refuses(monkeypatch)
+    writer = FakeNegotiationWriter()
+    result = await world.sweep(writer)
+    assert (result.held, result.proposed, result.skipped) == (1, 0, 0)
+    [held] = await world.messages("rhein")
+    assert (held.sequence, held.round, held.status, held.attempts, held.approval_id) == (
+        1,
+        1,
+        "held",
+        1,
+        None,
+    )
+    assert held.held_reason == "email_refused:number_not_decided"
+    assert held.terms["decision"]["kind"] == "revised_offer"
+    # Later sweeps (every 15 minutes) never decide or render it again; the model is never
+    # asked for a note on an email the gate refused.
+    for _ in range(3):
+        assert (await world.sweep(writer)).held == 0
+    assert writer.calls == [] and len(await world.messages("rhein")) == 1
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.strategy_reasons == ["draft_refused_requires_buyer"]
+    assert rhein.state is not None
+    assert (rhein.state.phase, rhein.state.reason) == ("needs_decision", "email_not_prepared")
+    assert rhein.messages[0].state == "held"
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    [entry] = [a for a in feed if a.action == "rfq.negotiation_draft_held"]
+    assert (entry.supplier_name, entry.actor) == ("Rhein", "Bido")
+    assert entry.summary.endswith("Needs your decision")
+
+    # Once fixed, a person asks for counter-offers now (the copilot's `propose_counteroffers`):
+    # decided again, the same round (nothing went out).
+    monkeypatch.undo()
+    result = await service.evaluate_rfq(
+        world.engine, world.people.tenant, world.rfq_id, writer=FakeNegotiationWriter(), force=True
+    )
+    assert result.proposed == 1
+    rows = await world.messages("rhein")
+    assert [(m.sequence, m.round, m.status) for m in rows] == [
+        (1, 1, "canceled"),
+        (2, 1, "proposed"),
+    ]
+    assert rows[0].canceled_reason == "retried_by_buyer"
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.state is not None and rhein.state.phase == "held_for_approval"
+
+
+async def test_a_round_target_is_asked_in_plain_digits_and_the_counter_is_signed_once(
+    world: World,
+) -> None:
+    """Email audit F1 and F4: a target of 100.00 reached the writer as 1E+2 (the draft was
+    refused), and the company signed twice. No buyer contact exists, as in production."""
+    await world.configure(
+        lines=[
+            LineLimitsUpdate(
+                rfq_line_id=world.lines[0],
+                target_unit_price=Decimal("0.040"),
+                max_unit_price=Decimal("0.060"),
+                max_lead_time_days=42,
+            ),
+            LineLimitsUpdate(
+                rfq_line_id=world.lines[1],
+                target_unit_price=Decimal("100.00"),
+                max_unit_price=Decimal("150.00"),
+                max_lead_time_days=42,
+            ),
+        ]
+    )
+    await world.offer("rhein", ("0.039", "120.00"))
+    writer = FakeNegotiationWriter()
+    assert (await world.sweep(writer)).proposed == 1
+    [task] = writer.calls
+    [ask] = task.lines
+    assert (str(ask.target_unit_price), str(ask.offered_unit_price)) == ("100", "120")
+    assert '"target_unit_price":"100"' in task.model_dump_json()
+    [counter] = await world.messages("rhein")
+    assert counter.terms["lines"][1]["ask"] == "100"
+    approval = await world.approval(counter.approval_id)
+    tenant = await tenant_name(world)
+    body = str(approval.args["body"])
+    # Rendered by code in German: the target exactly as decided, never in exponent form.
+    assert "   Zielpreis: 100,00\u00a0€/Stk.\n" in body and "E+" not in body
+    assert body.endswith(f"\n\nMit freundlichen Grüßen\n{tenant}\n")
+    assert body.count("Mit freundlichen Grüßen") == 1
+
+
+async def test_counters_keep_the_language_the_rfq_email_went_out_in(world: World) -> None:
+    await world.configure()
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        invite = await session.get(Invite, world.invites["rhein"])
+        assert invite is not None
+        # The supplier's language is edited after its RFQ email went out in German.
+        await session.execute(
+            update(Supplier).where(Supplier.id == invite.supplier_id).values(language="fr")
+        )
+    await world.offer("rhein", ("0.050", "1.20"))
+    writer = FakeNegotiationWriter()
+    await world.sweep(writer)
+    assert [t.supplier_language for t in writer.calls] == ["de"]
+    [counter] = await world.messages("rhein")
+    body = str((await world.approval(counter.approval_id)).args["body"])
+    assert body.startswith("Sehr geehrte Damen und Herren,\n")
 
 
 async def test_the_deadline_closes_with_the_best_offers_and_stops_follow_ups(

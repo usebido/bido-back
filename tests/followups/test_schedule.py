@@ -91,6 +91,17 @@ def test_the_chase_plan() -> None:
     # Canceled ones do not count.
     assert plan(ChaseRow("canceled", MONDAY, None), now=MONDAY).used == 0
 
+
+def test_a_chase_whose_draft_was_refused_is_used_not_retried_every_sweep() -> None:
+    refused_wed = ChaseRow(
+        "canceled", datetime(2026, 10, 7, 9, 5, tzinfo=UTC), None, "draft_refused"
+    )
+    after = plan(refused_wed, now=datetime(2026, 10, 7, 9, 20, tzinfo=UTC))
+    # Not due again at the next sweep: the next chase follows the schedule from it.
+    assert after.used == 1
+    assert (after.state, after.due_at) == ("scheduled", datetime(2026, 10, 9, 9, 5, tzinfo=UTC))
+    assert plan(refused_wed, refused_wed, refused_wed, now=MONDAY).state == "done"
+
     paused = plan(now=MONDAY, paused=datetime(2026, 10, 20, tzinfo=UTC))
     assert paused.state == "paused" and paused.due_at == datetime(2026, 10, 20, tzinfo=UTC)
 
@@ -162,13 +173,19 @@ def test_followup_drafts_are_checked() -> None:
         kind="chase",
         rfq_ref="RFQ-7",
         rfq_title="Caps",
-        buyer_company="Voltwerk",
-        buyer_name="Anna",
         supplier_name="Elektron",
         supplier_language="de",
         chase_number=1,
     )
-    ok = FollowupEmailOutput(body="Guten Tag, gibt es Neuigkeiten zu RFQ-7? Anna")
+    ok = FollowupEmailOutput(body="Guten Tag, gibt es Neuigkeiten zu RFQ-7?")
     assert followup_email_problems(task, ok) == []
     bad = FollowupEmailOutput(body="Other offers are at 0,40 EUR.")
     assert followup_email_problems(task, bad) == ["rfq_ref_missing_in_body", "price_mentioned"]
+    # A currency code ending one line and a numbered item on the next is no price.
+    listed = FollowupEmailOutput(
+        body="Zu RFQ-7 bitte noch:\n1. die Währung, z. B. EUR\n2. die Lieferzeit"
+    )
+    assert followup_email_problems(task, listed) == []
+    assert followup_email_problems(task, FollowupEmailOutput(body="RFQ-7: 18,00 R$")) == [
+        "price_mentioned"
+    ]

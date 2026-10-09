@@ -38,6 +38,18 @@ does, per tenant, per RFQ whose negotiation is open:
 The view (`get_negotiation`) runs the same planner read-only, so what the buyer
 sees per supplier is what the next sweep does.
 
+An email the send gate refuses (a code bug or an inconsistent decision) is
+never rendered again by the sweep: its row is `held` for a person (the problem
+codes in `held_reason`, an `rfq.negotiation_draft_held` audit event the activity
+feed shows), and the view says `draft_refused_requires_buyer`. A new offer, new
+limits, or a person asking for counter-offers (`evaluate_rfq(force=True)`)
+decide it again. The writer's note never holds an email: a note that fails or
+breaks a rule is left out.
+
+The writer does not sign: code renders the buyer's signature, once
+(`bido_back.templates.signature`). The email is in the language of the
+invite's RFQ email (`bido_back.rfqs.language.thread_language`).
+
 Logs carry ids and counts only.
 """
 
@@ -161,12 +173,13 @@ from bido_back.negotiation.signals import (
 )
 from bido_back.negotiation.strategy import ask_places, plain
 from bido_back.rfqs.errors import AgentFailed, InvalidState, NotFound
+from bido_back.rfqs.language import country_code, thread_language
 from bido_back.rfqs.send import SEND_RFQ_EMAIL, send_proposal_ids
 from bido_back.rfqs.service import buyer_display_name
 from bido_back.supplier_email.builders import Header, email_line
 from bido_back.supplier_email.checks import GateContext, problems_text
 from bido_back.supplier_email.compose import Refused, compose
-from bido_back.supplier_email.language import thread_language, thread_locale
+from bido_back.supplier_email.locale import Locale
 from bido_back.supplier_email.model import Signature, SupplierEmail
 from bido_back.supplier_email.render import RenderedEmail
 from bido_back.supplier_email.subject import reply_subject
@@ -191,6 +204,9 @@ _PLANNED: Final = frozenset(
         "delivery_date_unconfirmed",
     }
 )
+# A decided email the send gate refused: held for a person, with the problem codes.
+_REFUSED: Final = "email_refused"
+DRAFT_REFUSED_REASON: Final = "draft_refused_requires_buyer"
 # Until the clarification ledger gives one: a clarification's nominal reply-by.
 _CLARIFICATION_REPLY_DAYS: Final = 2
 _DAYS: Final = re.compile(r"\d{1,3}")
@@ -222,6 +238,7 @@ class SweepResult:
     skipped: int = 0
     held: int = 0
     rfqs: list[UUID] = field(default_factory=list[UUID])
+    held: int = 0
 
 
 # --- Loading what the planner needs ------------------------------------------------------
@@ -974,6 +991,13 @@ def _line_plan_views(plan: SupplierPlan) -> list[LinePlanView]:
     ]
 
 
+def _strategy_reasons(plan: SupplierPlan) -> list[str]:
+    """The planner's reason code; an email the send gate refused reads as before."""
+    if plan.reason == "email_not_prepared" and (plan.detail or "").startswith(_REFUSED):
+        return [DRAFT_REFUSED_REASON]
+    return [plan.reason] if plan.reason else []
+
+
 def state_view(plan: SupplierPlan, *, chases_sent: int = 0) -> SupplierStateView:
     """What the buyer reads about one supplier (API, Copilot)."""
     return SupplierStateView(
@@ -1127,7 +1151,7 @@ async def _view(
                 lines=_line_views(plan, quotes.get(item.invite.id, {}), now.date())
                 if column is not None
                 else [],
-                strategy_reasons=[plan.reason] if plan.reason else [],
+                strategy_reasons=_strategy_reasons(plan),
                 stalled_rounds=1 if plan.reason == "no_progress" else 0,
                 messages=_message_views(item.rows, loaded.lines),
                 state=state_view(plan, chases_sent=chases_sent),
@@ -1203,6 +1227,8 @@ async def apply_settings(
     rfq.negotiation_early_close = changes.early_close
     rfq.negotiation_status = "open"
     rfq.negotiation_ready_at = None
+    # New limits: an email the gate held is decided again with them.
+    await _release_held(session, rfq_id, "settings_changed")
     # New limits: the current offers are evaluated again on the next sweep
     # (suppliers with an email awaiting approval keep it; it is reconciled).
     await session.execute(
@@ -1568,22 +1594,23 @@ async def _reconcile(session: AsyncSession) -> int:
     return count
 
 
-async def _rfq_email(
-    session: AsyncSession, invite: Invite
-) -> tuple[UUID, dict[str, JsonValue]] | None:
-    """The buyer who requested the RFQ email (its executed approval; their mailbox sends),
-    and that approval's arguments (the email as it went out)."""
-    original = await session.scalar(
+async def _rfq_email(session: AsyncSession, invite: Invite) -> Approval | None:
+    """The executed approval of the invite's RFQ email: who sent it, in which language."""
+    return await session.scalar(
         select(Approval).where(
             Approval.tool == SEND_RFQ_EMAIL,
             Approval.tool_call_id == send_proposal_ids(invite.id)[1],
             Approval.status == "executed",
         )
     )
+
+
+def _sender(original: Approval | None) -> UUID | None:
+    """The buyer who requested the RFQ email (its executed approval): their mailbox."""
     if original is None:
         return None
     try:
-        return UUID(str(original.args.get("sender_user_id"))), original.args
+        return UUID(str(original.args.get("sender_user_id")))
     except ValueError:
         return None
 
@@ -1733,12 +1760,16 @@ async def evaluate_rfq(
 ) -> EvaluationResult:
     """Plan every supplier, store what is decided, write the decided emails, check early close.
 
-    `force` (the buyer asked for counter-offers now) plans right away; it never
-    creates a second email for an offer that already has one (decided, waiting,
-    sent, held or rejected): the planner waits, or hands it to the buyer.
+    `force` (a person asked for counter-offers now) plans right away and decides
+    again an email the send gate held; it never creates a second email for an
+    offer that already has one (decided, waiting, sent or rejected): the planner
+    waits, or hands it to the buyer.
     """
-    del force  # Every sweep plans every supplier; kept for the Copilot's call.
     at = now or datetime.now(UTC)
+    if force:
+        # A person asks for counter-offers now: an email the gate held is decided again.
+        async with tenant_session(db, tenant_id) as session:
+            await _release_held(session, rfq_id, "retried_by_buyer")
     async with tenant_session(db, tenant_id) as session:
         rfq = await session.get(Rfq, rfq_id)
         if rfq is None or rfq.status != "open" or rfq.negotiation_status not in _ACTIVE:
@@ -1861,9 +1892,9 @@ class _Thread:
 
 async def _thread(session: AsyncSession, invite: Invite, supplier: Supplier) -> _Thread | None:
     original = await _rfq_email(session, invite)
-    if original is None:
+    sender_user_id = _sender(original)
+    if original is None or sender_user_id is None:
         return None
-    sender_user_id, rfq_email_args = original
     first_subject = await session.scalar(
         select(Message.subject).where(
             Message.invite_id == invite.id,
@@ -1871,13 +1902,8 @@ async def _thread(session: AsyncSession, invite: Invite, supplier: Supplier) -> 
             Message.message_id_header == invite.thread_message_id,
         )
     )
-    language = thread_language(
-        rfq_email_args=rfq_email_args,
-        first_subject=first_subject,
-        supplier_language=supplier.language,
-        supplier_country=supplier.country,
-    )
-    return _Thread(sender_user_id, first_subject, language)
+    # The language its RFQ email went out in (`rfqs.language.thread_language`).
+    return _Thread(sender_user_id, first_subject, thread_language(original.args, supplier))
 
 
 async def _due(session: AsyncSession, rfq: Rfq, row: NegotiationMessage) -> _Due | str:
@@ -1919,7 +1945,8 @@ async def _due(session: AsyncSession, rfq: Rfq, row: NegotiationMessage) -> _Due
         header=Header(
             rfq_ref=rfq.ref,
             subject=reply_subject(thread.first_subject, rfq.ref, rfq.title),
-            locale=thread_locale(thread.language, supplier.country),
+            # The thread's language with the supplier's number format (es-MX, de-CH).
+            locale=Locale.of(thread.language, country_code(supplier.country)),
             supplier_name=supplier.name,
             buyer_company=tenant.name,
             signature=Signature(name=buyer_name, company=tenant.name),
@@ -1946,8 +1973,6 @@ async def _due(session: AsyncSession, rfq: Rfq, row: NegotiationMessage) -> _Due
             decision,
             rfq_ref=rfq.ref,
             rfq_title=rfq.title,
-            buyer_company=tenant.name,
-            buyer_name=buyer_name,
             supplier_name=supplier.name,
             language=email.language,
         ),
@@ -2010,7 +2035,6 @@ async def _write_decided(
                 item.decision.kind,
                 problems_text(composed.problems),
             )
-            result.refused += 1
             async with tenant_session(db, tenant_id) as session:
                 row = await session.scalar(
                     select(NegotiationMessage)
@@ -2019,9 +2043,12 @@ async def _write_decided(
                 )
                 if row is not None and row.status == "decided":
                     row.attempts = item.attempts + 1
-                    reason = f"email_refused:{problems_text(composed.problems)}"
+                    reason = f"{_REFUSED}:{problems_text(composed.problems)}"
                     await _hold_row(session, row, reason[:300])
                     result.held += 1
+                else:
+                    # Canceled meanwhile (a newer offer): nothing to hold.
+                    result.refused += 1
             continue
         if composed.note_dropped:
             logger.info(
@@ -2037,25 +2064,52 @@ async def _write_decided(
 
 
 async def _hold_row(session: AsyncSession, row: NegotiationMessage, reason: str) -> None:
-    """The decided email cannot be proposed: it waits for the buyer, with the reason."""
+    """The decided email cannot be proposed: it waits for the buyer, with the reason.
+
+    A send-gate refusal is audited as `rfq.negotiation_draft_held` (with its problem
+    codes), anything else (no thread, no sender) as `rfq.negotiation_held`."""
     row.status = "held"
     row.held_reason = reason
     invite = await session.get(Invite, row.invite_id)
+    code, _, problems = reason.partition(":")
+    payload: dict[str, JsonValue] = {
+        "rfq_id": str(invite.rfq_id) if invite is not None else None,
+        "invite_id": str(row.invite_id),
+        "negotiation_message_id": str(row.id),
+        "proposal_id": str(row.proposal_id),
+        "action": row.action,
+        "round": row.round,
+        "reason": code,
+        "attempts": row.attempts,
+    }
+    if code == _REFUSED:
+        payload["problems"] = [p for p in problems.split(",") if p]
     session.add(
         AuditEvent(
             tenant_id=row.tenant_id,
             actor_user_id=None,
-            action="rfq.negotiation_held",
-            payload={
-                "rfq_id": str(invite.rfq_id) if invite is not None else None,
-                "invite_id": str(row.invite_id),
-                "negotiation_message_id": str(row.id),
-                "reason": reason.split(":", 1)[0],
-                "attempts": row.attempts,
-            },
+            action="rfq.negotiation_draft_held" if code == _REFUSED else "rfq.negotiation_held",
+            payload=payload,
         )
     )
     await session.flush()
+
+
+async def _release_held(session: AsyncSession, rfq_id: UUID, reason: str) -> int:
+    """Held emails of the RFQ end `canceled` (`reason`): the planner decides again."""
+    rows = list(
+        await session.scalars(
+            select(NegotiationMessage)
+            .join(Invite, Invite.id == NegotiationMessage.invite_id)
+            .where(Invite.rfq_id == rfq_id, NegotiationMessage.status == "held")
+            .with_for_update(of=NegotiationMessage)
+        )
+    )
+    for row in rows:
+        row.status = "canceled"
+        row.canceled_reason = reason
+    await session.flush()
+    return len(rows)
 
 
 async def _propose(
@@ -2183,7 +2237,14 @@ async def sweep_tenant(
         result.ready += int(evaluation.ready)
         result.closed += int(evaluation.closed)
         result.rfqs.append(rfq_id)
-    if result.canceled or result.proposed or result.ready or result.closed or result.skipped:
+    if (
+        result.canceled
+        or result.proposed
+        or result.ready
+        or result.closed
+        or result.skipped
+        or result.held
+    ):
         logger.info(
             "negotiation swept tenant=%s canceled=%d proposed=%d ready=%d closed=%d "
             "skipped=%d held=%d",

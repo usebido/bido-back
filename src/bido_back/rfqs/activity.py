@@ -210,6 +210,17 @@ def _event_item(
             action = _NEGOTIATION_ACTIONS.get(str(data.get("action")), "Negotiation email")
             kind, summary = "email", f"{action} (round {data.get('round', '?')}) sent{to}"
             actor = actor or BIDO
+        case "rfq.negotiation_draft_held":
+            action = _NEGOTIATION_ACTIONS.get(str(data.get("action")), "Negotiation email")
+            kind, actor = "agent", BIDO
+            summary = (
+                f"{action} (round {data.get('round', '?')}){to} not sent: the draft failed "
+                "Bido's checks. Needs your decision"
+            )
+        case "rfq.followup_draft_held":
+            what = "Clarification question" if data.get("kind") == "clarification" else "Reminder"
+            kind, actor = "agent", BIDO
+            summary = f"{what}{to} not sent: the draft failed Bido's checks. Needs your decision"
         case "purchase_order.sent":
             kind, summary = "email", f"Purchase order sent{to}"
         case "award.notice_sent":

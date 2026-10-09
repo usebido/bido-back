@@ -22,12 +22,14 @@ from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
     AuditEvent,
+    CopilotConversation,
     Invite,
     MailboxConnection,
     Message,
     Rfq,
     RfqLine,
     RfqTemplate,
+    Supplier,
     Tenant,
 )
 from bido_back.rfqs import service, suppliers
@@ -386,6 +388,92 @@ async def test_prepare_send_renders_the_tenants_default_template_and_pins_its_ve
     ]
     assert "- Lieferzeit\n- Gültigkeit\n" in body
     assert "Gültigkeit des Angebots" not in body  # "Gültigkeit" covers it
+
+
+async def test_a_supplier_added_with_a_name_and_an_email_gets_the_buyers_language(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    """RFQ-6 (email audit F5): a Brazilian supplier added like the copilot adds one (no
+    country, the language column's default "en") got English. Its legal form and the
+    buyer's Portuguese template now decide, once, for the whole thread."""
+    principal = buyer(rfq_rows)
+    rfq = await make_rfq(app_engine, principal)
+    supplier = await suppliers.create_supplier(
+        app_engine,
+        principal,
+        CreateSupplierRequest(
+            name="MetalNova Teste Ltda",
+            contacts=[ContactIn(email="vendas@metalnova.example.test")],
+        ),
+    )
+    assert supplier.language == "en"  # stored as created: never changed
+    invite = await service.add_invite(
+        app_engine, principal, rfq.id, supplier.id, supplier.contacts[0].id
+    )
+    preview = await service.preview_email(app_engine, principal, rfq.id, invite.id, FakeWriter())
+    assert preview.language == "pt"
+    assert preview.subject == f"[{rfq.ref}] Solicitação de cotação: {rfq.title}"
+
+    result = await service.prepare_send(
+        app_engine, principal, rfq.id, FakeWriter(), FakeMailboxes()
+    )
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        approval = await session.get(Approval, result.approvals[0].approval_id)
+    assert approval is not None
+    assert approval.args["subject"] == preview.subject
+    # The approved document records the thread's language for every later email.
+    assert approval.args["document"]["language"] == "pt"
+
+
+async def test_with_nothing_known_about_a_supplier_the_buyers_language_decides(
+    app_engine: AsyncEngine, migrator_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    principal = buyer(rfq_rows)
+    rfq = await make_rfq(app_engine, principal)
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        # The RFQ creator talks to the copilot in Spanish (the titler labels the language).
+        session.add(
+            CopilotConversation(
+                tenant_id=rfq_rows.tenant,
+                user_id=rfq_rows.owner,
+                id=uuid4(),
+                title="Cotización de componentes",
+                title_language="es",
+            )
+        )
+    try:
+        supplier = await suppliers.create_supplier(
+            app_engine,
+            principal,
+            CreateSupplierRequest(
+                name="Nowhere Components",
+                contacts=[ContactIn(email="sales@nowhere.example.test")],
+            ),
+        )
+        invite = await service.add_invite(
+            app_engine, principal, rfq.id, supplier.id, supplier.contacts[0].id
+        )
+        assert invite.document_language == "es"
+        detail = await service.get_rfq(app_engine, principal, rfq.id)
+        assert detail.document_language == "es"
+        preview = await service.preview_email(
+            app_engine, principal, rfq.id, invite.id, FakeWriter()
+        )
+        assert preview.language == "es"
+
+        await service.prepare_send(app_engine, principal, rfq.id, FakeWriter(), FakeMailboxes())
+        async with tenant_session(app_engine, rfq_rows.tenant) as session:
+            # Edited after its email was prepared: the thread keeps its language.
+            await session.execute(
+                update(Supplier).where(Supplier.id == supplier.id).values(language="de")
+            )
+        detail = await service.get_rfq(app_engine, principal, rfq.id)
+        assert [i.document_language for i in detail.invites] == ["es"]
+    finally:
+        async with tenant_session(migrator_engine, rfq_rows.tenant) as session:
+            await session.execute(
+                delete(CopilotConversation).where(CopilotConversation.tenant_id == rfq_rows.tenant)
+            )
 
 
 async def test_prepare_send_without_a_mailbox_fails_before_any_draft(

@@ -59,7 +59,7 @@ from bido_back.supplier_email.model import (
     TargetPrice,
     ValuesToConfirm,
 )
-from bido_back.templates.render import signature
+from bido_back.templates.signature import signature
 
 # The zone a cut-off is shown in: an unambiguous instant, the same for every supplier.
 CUTOFF_ZONE: Final = "UTC"
@@ -122,12 +122,9 @@ def trading_name(name: str) -> str:
 
 
 def signature_lines(sig: Signature) -> list[str]:
-    """The signature, printed once.
-
-    STAND-IN (N1): workstream N1 adds the single signature function; switch to it at
-    merge. Until then: the RFQ email's own rule (`templates.render.signature`, name then
-    company, the company alone when they are the same), then role and phone when set.
-    """
+    """The signature, printed once: the rule of every supplier email
+    (`templates.signature.signature`: the name, then the company when it says something
+    new), then role and phone when set."""
     lines = signature(clean_text(sig.name, _NAME_LIMIT), clean_text(sig.company, _NAME_LIMIT))
     for extra in (sig.role, sig.phone):
         cleaned = clean_text(extra or "", _NAME_LIMIT)

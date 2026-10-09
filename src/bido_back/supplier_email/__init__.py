@@ -15,10 +15,10 @@ proposed (`checks.email_problems`).
 - `subject`, `threading`: `Re: ` + the first subject; In-Reply-To the latest message.
 - `deadlines`: the reply-by date of each type.
 - `checks`, `compose`: the send gate, then the note.
-- `language`: the thread's language and locale.
 
-Stand-ins to switch at merge with workstream N1 (each is one function, marked STAND-IN):
-`locale.plain_decimal` (the no-exponent decimal formatter), `render.signature_lines` (the
-single signature function) and `language.thread_language` / `language.thread_locale`
-(the per-invite language persisted on the invite).
+Shared with the rest of the supplier emails: the language is the thread's, decided once
+at the RFQ email's first send and recorded in its approved document
+(`bido_back.rfqs.language.thread_language`), with the supplier's country as the region
+of the `locale.Locale`; numbers print through `bido_back.decimals` (never in exponent
+form); the signature is `bido_back.templates.signature.signature`, printed once.
 """

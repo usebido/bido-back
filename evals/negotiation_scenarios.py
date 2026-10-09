@@ -2720,17 +2720,16 @@ def diagnosis(scenario: str, check: str) -> tuple[str, ...]:
 
 
 # Checks that fail on the current code in mock mode (scenario, step, check): the tests
-# mark them non-strict xfail. Remove an entry when its gap is fixed. Fixed by the code-
-# rendered layout (`bido_back.supplier_email`): double_signature, clarification_reply_by.
+# mark them non-strict xfail. Remove an entry when its gap is fixed. Fixed so far:
+# supplier_language (the thread's language, decided once at the RFQ email's first send:
+# rfq6_replay email:language on every email), double_signature (one signature, rendered
+# by code: email:single_signature on every email) and clarification_reply_by (the
+# code-rendered layout, `bido_back.supplier_email`: email:reply_by_date on every email).
 # Fixed by the negotiation planner (`bido_back.negotiation.planner`): the per-supplier
 # state the buyer reads (visible_*), status_matches_emails, canceled_round_numbers,
 # refused_drafts and the lead-time ask as a date from the need-by date.
 EXPECTED_MOCK_FAILURES: Final[frozenset[tuple[str, str, str]]] = frozenset(
     {
-        *(
-            ("rfq6_replay", step, "email:language")
-            for step in ("rfq", "first_reply", "second_reply")
-        ),
         ("rfq6_replay", "first_reply", "no_quantity_tier_asked"),
         ("partial_quote", "third_line", "offer_completed"),
         ("partial_quote", "third_line", "offer_usable"),

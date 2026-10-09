@@ -29,6 +29,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 from bido_back.agents.catalog.contracts import NegotiationEmailInput, NegotiationLineAsk
+from bido_back.decimals import format_decimal
 from bido_back.negotiation.planner import EmailPlan, LinePlan
 from bido_back.negotiation.strategy import plain
 from bido_back.supplier_email.builders import Header, RequestedLine, negotiation_email
@@ -225,8 +226,11 @@ def legacy_lines(decision: EmailDecision, plans: tuple[LinePlan, ...]) -> list[J
         entry: dict[str, JsonValue] = {
             "rfq_line_id": str(plan.rfq_line_id),
             "decision": _line_decision(plan, position),
-            "offered": str(plan.offered_price) if plan.offered_price is not None else None,
-            "ask": str(ask) if ask is not None else None,
+            # Plain digits ("100", never "1E+2" or a stray "100.00").
+            "offered": format_decimal(plan.offered_price)
+            if plan.offered_price is not None
+            else None,
+            "ask": format_decimal(ask) if ask is not None else None,
             "best_price": position.best_price if position is not None else False,
             "ask_lead_days": (deliver_by - decision.order_date).days
             if deliver_by is not None
@@ -256,14 +260,13 @@ def writer_task(
     *,
     rfq_ref: str,
     rfq_title: str,
-    buyer_company: str,
-    buyer_name: str,
     supplier_name: str,
     language: str,
 ) -> NegotiationEmailInput:
     """What the negotiation writer reads before it may add its optional note.
 
-    `language` is the email's (the thread's). A delivery-date ask becomes
+    No buyer name or company: code signs the email. `language` is the email's (the
+    thread's). A delivery-date ask becomes
     `required_lead_time_days`: the days from the decision's order date to the
     deliver-by date (the writer's contract has no date per line); the email
     itself shows the date.
@@ -294,8 +297,6 @@ def writer_task(
         action="bafo" if decision.kind == "bafo" else "counter",
         rfq_ref=rfq_ref,
         rfq_title=rfq_title,
-        buyer_company=buyer_company,
-        buyer_name=buyer_name,
         supplier_name=supplier_name,
         supplier_language=language,
         round=decision.round,

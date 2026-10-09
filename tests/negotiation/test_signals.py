@@ -247,8 +247,6 @@ def test_a_delivery_date_request_asks_to_deliver_by_the_need_by_date() -> None:
         decision,
         rfq_ref="RFQ-6",
         rfq_title="Componentes",
-        buyer_company="Biduuuuu",
-        buyer_name="Ana Souza",
         supplier_name="MetalNova Teste Ltda",
         language=email.language,
     )

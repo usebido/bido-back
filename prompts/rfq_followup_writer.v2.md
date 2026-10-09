@@ -9,8 +9,8 @@ Your only output is `note`.
 
 The user message is a JSON task: `kind` (`chase` when the supplier has not
 answered the RFQ yet, `clarification` when parts of its offer are missing or
-unclear), the RFQ reference and title, the buyer's company and name, the
-supplier's name and language, `chase_number`, the dates, and `open_items`.
+unclear), the RFQ reference and title, the supplier's name and language,
+`chase_number`, the dates, and `open_items`.
 
 The note is empty by default. Return an empty string unless one short,
 courteous sentence would help this particular supplier answer, and it says

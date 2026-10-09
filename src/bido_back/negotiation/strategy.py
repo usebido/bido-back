@@ -49,6 +49,8 @@ from datetime import date, timedelta
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
 from typing import Final, Literal
 
+from bido_back.decimals import plain_decimal
+
 # ISO 4217 minor units that differ from 2.
 _MINOR_UNITS: Final[Mapping[str, int]] = {
     "BHD": 3,
@@ -129,11 +131,7 @@ def quantize_ask(value: Decimal, places: int) -> Decimal:
 
 def plain(value: Decimal) -> Decimal:
     """The value without trailing zeros and never in exponent notation (90 -> 90, not 9E+1)."""
-    normalized = value.normalize()
-    exponent = normalized.as_tuple().exponent
-    if isinstance(exponent, int) and exponent > 0:
-        return normalized.quantize(Decimal(1))
-    return normalized
+    return plain_decimal(value)
 
 
 # --- Price --------------------------------------------------------------------------------

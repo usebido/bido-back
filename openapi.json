@@ -5372,6 +5372,18 @@
             "title": "Contact Id",
             "type": "string"
           },
+          "document_language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ISO 639-1 of the email and PDF this supplier gets: the language its RFQ email was prepared in (every later email of the thread keeps it), else the one the send would pick now (the supplier's own, its country's, its legal form's, the buyer's). Lets the on-screen preview match the document",
+            "title": "Document Language"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -9800,6 +9812,18 @@
             "description": "Where base_currency came from",
             "title": "Currency Source"
           },
+          "document_language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ISO 639-1 the RFQ document is rendered in when nothing about the supplier decides otherwise (the default before any invite exists): the buyer's own template, else the buyer's language, else Bido's standard template; each invite's document_language is the one its own PDF uses",
+            "title": "Document Language"
+          },
           "footer_override": {
             "anyOf": [
               {
@@ -9955,6 +9979,18 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "document_language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ISO 639-1 the RFQ document is rendered in when nothing about the supplier decides otherwise (the default before any invite exists): the buyer's own template, else the buyer's language, else Bido's standard template; each invite's document_language is the one its own PDF uses",
+            "title": "Document Language"
           },
           "footer_override": {
             "anyOf": [
@@ -10689,6 +10725,18 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "document_language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ISO 639-1 the RFQ document is rendered in when nothing about the supplier decides otherwise (the default before any invite exists): the buyer's own template, else the buyer's language, else Bido's standard template; each invite's document_language is the one its own PDF uses",
+            "title": "Document Language"
           },
           "footer_override": {
             "anyOf": [

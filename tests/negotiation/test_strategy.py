@@ -258,8 +258,6 @@ def _task(**overrides: object) -> NegotiationEmailInput:
         "action": "counter",
         "rfq_ref": "RFQ-7",
         "rfq_title": "Passives",
-        "buyer_company": "Voltwerk",
-        "buyer_name": "Anna",
         "supplier_name": "Rhein",
         "supplier_language": "de",
         "round": 1,
@@ -348,3 +346,106 @@ def test_a_last_ask_above_a_lowered_maximum_is_no_anchor() -> None:
     assert (lowered.status, lowered.ask) == ("above_max", Decimal("80.00"))
     # An offer meeting that old ask is above the maximum now: not "ask met".
     assert lowered.status != "ask_met"
+
+
+# --- How the v1 draft check reads amounts (email audit F1, F2) -------------------
+
+
+RFQ6_LINES = [
+    NegotiationLineAsk(
+        position=1,
+        line="Rolamento motor MTR-100 (000101)",
+        quantity=Decimal(70),
+        unit="pcs",
+        currency="BRL",
+        offered_unit_price=Decimal("19.5"),
+        target_unit_price=Decimal(18),
+    ),
+    NegotiationLineAsk(
+        position=2,
+        line="Eixo motor MTR-100 (000102)",
+        quantity=Decimal(15),
+        unit="pcs",
+        currency="BRL",
+        offered_unit_price=Decimal(89),
+        target_unit_price=Decimal(85),
+    ),
+    NegotiationLineAsk(
+        position=3,
+        line="Fio de cobre esmaltado (000104)",
+        quantity=Decimal("12.5"),
+        unit="kg",
+        currency="BRL",
+        offered_unit_price=Decimal(95),
+        target_unit_price=Decimal("89.9"),
+    ),
+]
+
+
+def test_an_amount_never_continues_on_the_next_line_of_a_numbered_list() -> None:
+    """The live BAFO "... BRL 18\\n2. Eixo ..." was read as the amount 18 2 and refused."""
+    task = _task(action="bafo", supplier_language="pt", lines=RFQ6_LINES)
+    body = (
+        "Prezados, sobre a RFQ-7 pedimos sua melhor e última oferta:\n"
+        "1. Rolamento motor MTR-100 — 70 pcs: BRL 18\n"
+        "2. Eixo motor MTR-100 — 15 pcs: BRL 85\n"
+        "3. Fio de cobre esmaltado — 12.5 kg: BRL 89.9\n"
+        "Atenciosamente,"
+    )
+    assert negotiation_email_problems(task, NegotiationEmailOutput(body=body)) == []
+
+
+def test_amounts_are_read_in_every_usual_spelling() -> None:
+    task = _task(supplier_language="pt", lines=RFQ6_LINES)
+    for spelling in ("R$ 18,00", "R$18,00", "BRL 18", "18,00 BRL", "18,00 R$", "18,00\u00a0R$"):
+        body = (
+            f"RFQ-7: rolamento {spelling} por peça (hoje R$ 19,50); eixo R$ 85,00; "
+            "fio R$ 89,90 por kg."
+        )
+        assert negotiation_email_problems(task, NegotiationEmailOutput(body=body)) == [], spelling
+        invented = body + f" Outro fornecedor cobra {spelling.replace('18', '17')}."
+        assert negotiation_email_problems(task, NegotiationEmailOutput(body=invented)) == [
+            "unknown_amount"
+        ], spelling
+
+
+def test_codes_are_not_amounts_and_do_not_stand_in_for_a_missing_target() -> None:
+    ask = NegotiationLineAsk(
+        position=2,
+        line="Eixo motor MTR-100",
+        quantity=Decimal(15),
+        unit="pcs",
+        currency="BRL",
+        offered_unit_price=Decimal(105),
+        target_unit_price=Decimal(100),
+    )
+    task = _task(supplier_language="pt", lines=[ask])
+    # "MTR-100 BRL 100": the 100 of the code is no amount next to the currency.
+    ok = "RFQ-7: Eixo motor MTR-100 BRL 100 por peça."
+    assert negotiation_email_problems(task, NegotiationEmailOutput(body=ok)) == []
+    # The target left out: the code's 100 does not count as written.
+    missing = "RFQ-7: Eixo motor MTR-100, pedimos uma redução do preço."
+    assert negotiation_email_problems(task, NegotiationEmailOutput(body=missing)) == [
+        "target_missing:2"
+    ]
+
+
+def test_a_required_lead_time_must_be_asked() -> None:
+    ask = NegotiationLineAsk(
+        position=2,
+        line="Eixo motor MTR-100",
+        quantity=Decimal(15),
+        unit="pcs",
+        currency="BRL",
+        offered_unit_price=Decimal(89),
+        target_unit_price=None,
+        offered_lead_time_days=12,
+        required_lead_time_days=10,
+    )
+    task = _task(supplier_language="pt", lines=[ask])
+    ok = "RFQ-7: para o eixo precisamos de um prazo de no máximo 10 dias (hoje 12)."
+    assert negotiation_email_problems(task, NegotiationEmailOutput(body=ok)) == []
+    vague = "RFQ-7: para o eixo precisamos de um prazo menor."
+    assert negotiation_email_problems(task, NegotiationEmailOutput(body=vague)) == [
+        "lead_time_missing:2"
+    ]
