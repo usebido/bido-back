@@ -53,9 +53,10 @@ from bido_back.db.models import (
     SupplierContact,
 )
 from bido_back.purchasing.analysis import PRICE_PLACES
-from bido_back.purchasing.importers import norm
 from bido_back.purchasing.schemas import InvitedSupplier
 from bido_back.purchasing.sources.contracts import AssessmentLine, PriceBenchmark, SupplierEvidence
+from bido_back.purchasing.sources.status import APPROVED, disqualified, status
+from bido_back.purchasing.sources.timing import late
 from bido_back.rfqs import suppliers as supplier_service
 from bido_back.rfqs.currency import fx_factor
 from bido_back.rfqs.language import DEFAULT_LANGUAGE, country_language
@@ -66,18 +67,6 @@ from bido_back.rfqs.service import add_draft_invite
 LIMIT_CEILING: Final = Decimal(10) ** 12
 # A benchmark of one purchase is a single last price, not an estimate: no limits from it.
 MIN_RECEIVED_ORDERS: Final = 2
-# Qualification statuses of the buyer's approved-source data, compared after `norm`.
-APPROVED: Final = frozenset(
-    {"homologado", "homologada", "aprovado", "aprovada", "approved", "qualificado",
-     "qualificada", "qualified", "certificado", "certificada", "certified", "preferencial",
-     "preferred", "ativo", "ativa", "active"}
-)  # fmt: skip
-DISQUALIFIED: Final = frozenset(
-    {"bloqueado", "bloqueada", "blocked", "suspenso", "suspensa", "suspended", "reprovado",
-     "reprovada", "rejected", "desqualificado", "desqualificada", "disqualified",
-     "descredenciado", "descredenciada", "inativo", "inativa", "inactive", "vencido",
-     "vencida", "expired", "cancelado", "cancelada", "cancelled", "canceled", "debarred"}
-)  # fmt: skip
 
 SkipReason = Literal[
     "no_contact_email", "invalid_email", "no_company_name", "ambiguous_identity", "disqualified"
@@ -250,21 +239,22 @@ def wanted_suppliers(lines: Sequence[AssessmentLine], per_line: int) -> list[Wan
     wanted: dict[object, WantedSupplier] = {}
     blocked: dict[object, WantedSupplier] = {}
     for line in lines:
-        suggested = [s for s in line.suppliers if s.suggested]
-        candidates = suggested or [
-            s for s in line.suppliers if _has_history(s) or _status(s) in APPROVED
-        ]
+        # A source the timing check found too late is left out (the line's assumptions say
+        # so); the buyer can still invite it.
+        timely = [s for s in line.suppliers if not late(s)]
+        suggested = [s for s in timely if s.suggested]
+        candidates = suggested or [s for s in timely if _has_history(s) or status(s) in APPROVED]
         # Approved sources of supply with a current agreement compete too.
         chosen = {id(s) for s in candidates}
         candidates += [
             s
-            for s in line.suppliers
-            if id(s) not in chosen and _status(s) in APPROVED and s.contract_expired is False
+            for s in timely
+            if id(s) not in chosen and status(s) in APPROVED and s.contract_expired is False
         ]
         for supplier in candidates:
-            if _disqualified(supplier):
+            if disqualified(supplier):
                 _want(blocked, supplier, line.part_number).disqualified = True
-        eligible = [s for s in candidates if not _disqualified(s)]
+        eligible = [s for s in candidates if not disqualified(s)]
         for supplier in eligible[:per_line]:
             _want(wanted, supplier, line.part_number)
     return [*wanted.values(), *blocked.values()]
@@ -406,15 +396,6 @@ async def _buyer_language(session: AsyncSession) -> str | None:
 def new_supplier_language(evidence: SupplierEvidence, buyer_language: str | None) -> str:
     """A new supplier's email language: its country's, else the buyer's, else English."""
     return country_language(evidence.country) or buyer_language or DEFAULT_LANGUAGE
-
-
-def _status(supplier: SupplierEvidence) -> str:
-    return norm(supplier.qualification_status or "")
-
-
-def _disqualified(supplier: SupplierEvidence) -> bool:
-    """The buyer's approved-source data or supplier master (purchasing block) excludes it."""
-    return supplier.purchase_blocked or _status(supplier) in DISQUALIFIED
 
 
 def _has_history(supplier: SupplierEvidence) -> bool:

@@ -98,6 +98,8 @@ CATALOG: dict[str, list[str]] = {
         "as_of",
         "receipt_date",
         "balance_basis",
+        # The material's merchandise group (e.g. SAP "Grupo de mercadorias").
+        "material_group",
     ],
     "material_requirement": [
         "part_number",
@@ -140,6 +142,9 @@ CATALOG: dict[str, list[str]] = {
         "rejected_quantity",
         "open_quantity",
         "expected_at",
+        # The date an MRP list asks to move the open order to (SAP MD04 "Data
+        # reprogramação").
+        "reschedule_to",
     ],
     "supplier_performance": [
         "supplier_code",
@@ -188,6 +193,7 @@ CATALOG: dict[str, list[str]] = {
         "rounding",
         "mrp_type",
         "safety_stock",
+        "material_group",
     ],
     "bom": [
         "product_code",

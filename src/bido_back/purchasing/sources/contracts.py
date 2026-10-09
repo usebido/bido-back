@@ -251,6 +251,10 @@ class InboundEvidence(BaseModel):
     quantity: Decimal
     expected_at: date | None = None
     eligible: bool = False
+    # The order's supplier, when the order evidence names one.
+    supplier_code: str | None = None
+    # The date an MRP list (e.g. SAP MD04 exception 10) asks to bring the order forward to.
+    reschedule_to: date | None = None
     evidence: list[SourceRef]
 
 
@@ -286,6 +290,17 @@ class RecognizedReport(BaseModel):
     pack: str
     report: str
     rows: int
+
+
+# agreement: the purchasing info record / price agreement; history: the average of the
+# item's completed orders; reported: the source's own supplier lead time; material_master:
+# the material's planned delivery time.
+LeadTimeSource = Literal["agreement", "history", "reported", "material_master"]
+# meets: arrives by the first shortage date (the projected balance, without new orders,
+# falls below the safety stock); meets_consuming_safety_stock: after it, but by the first
+# stockout date (the balance falls below zero), so the safety stock is used meanwhile;
+# does_not_meet: after the first stockout date.
+ArrivalStatus = Literal["meets", "meets_consuming_safety_stock", "does_not_meet"]
 
 
 class SupplierEvidence(BaseModel):
@@ -332,6 +347,19 @@ class SupplierEvidence(BaseModel):
     avg_lead_time_days: Decimal | None = None
     last_received_at: date | None = None
     suggested: bool = False
+    # When a new order placed on the reference date would arrive (`TimingCheck`): the
+    # lead time used and where it came from, the arrival, and how the arrival meets the
+    # line's projected balance. None: no lead time is known, arrival not checked.
+    planned_lead_time_days: int | None = None
+    lead_time_source: LeadTimeSource | None = None
+    estimated_arrival: date | None = None
+    arrival_status: ArrivalStatus | None = None
+    # Days after the first shortage date it would arrive (0 when by then).
+    days_late: int | None = None
+    # How much of the purchase needs fall on or after its arrival.
+    coverable_quantity: Decimal | None = None
+    # The source the timing check picks for this line (`TimingCheck.recommended_supplier`).
+    recommended: bool = False
 
 
 LineFlagCode = Literal[
@@ -350,6 +378,26 @@ class LineFlag(BaseModel):
     code: LineFlagCode
     supplier: str | None = None
     value: Decimal | None = None
+
+
+class PriceOutlier(BaseModel):
+    supplier: str | None = None
+    ordered_at: date
+    unit_price: Decimal
+    # The median of the item's other price references it was compared with.
+    reference_price: Decimal
+    deviation_pct: Decimal
+    # Whether the outlier is part of the benchmark's average and maximum (it is: flagged,
+    # never dropped), and the target and maximum the benchmark would have without it.
+    in_benchmark: bool
+    target_without: Decimal | None = None
+    max_without: Decimal | None = None
+    # Its order-to-receipt days and the median of the item's other completed orders; an
+    # abnormally short lead time suggests an emergency purchase (never a stated cause).
+    lead_time_days: int | None = None
+    reference_lead_time_days: Decimal | None = None
+    possible_emergency: bool = False
+    evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
 
 
 class PriceBenchmark(BaseModel):
@@ -373,6 +421,9 @@ class PriceBenchmark(BaseModel):
     max_price: Decimal
     estimated_cost_at_target: Decimal | None = None
     estimated_cost_at_last: Decimal | None = None
+    # Completed-purchase prices far from the item's other price references (other
+    # purchases and current agreements): shown, never silently used as a reference.
+    outliers: list[PriceOutlier] = Field(default_factory=list[PriceOutlier])
     evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
 
 
@@ -381,6 +432,107 @@ class SpendTotal(BaseModel):
     lines: int
     total_at_target: Decimal
     total_at_last_price: Decimal
+
+
+Involved = Literal["production_planning"]
+
+
+class DatedQuantity(BaseModel):
+    need_by: date
+    quantity: Decimal
+
+
+class AffectedDemand(BaseModel):
+    """A demand the earliest new order cannot cover in time."""
+
+    reference: str
+    # The product the material is needed for (a production order's product), when known.
+    product_code: str | None = None
+    product_description: str | None = None
+    # Other materials the same order needs, as the evidence names them: they identify a
+    # product the evidence does not describe.
+    product_components: list[str] = Field(default_factory=list[str])
+    need_by: date
+    quantity: Decimal
+
+
+class ProjectedBalance(BaseModel):
+    on: date
+    balance: Decimal
+
+
+class TimingCheck(BaseModel):
+    """Whether a new order can arrive before the line runs short, from lead times.
+
+    Computed by code over the projected balance without new orders (stock plus open
+    orders as counted, minus dated demand); the quantity to buy is unchanged by it.
+    """
+
+    # Orders are placed on the reference date (the stock snapshot's date).
+    order_date: date
+    safety_stock: Decimal = Decimal(0)
+    # The projected balance per need date, without new orders.
+    projected: list[ProjectedBalance] = Field(default_factory=list[ProjectedBalance])
+    # The first date the balance falls below the safety stock, and below zero.
+    first_shortage_date: date | None = None
+    first_stockout_date: date | None = None
+    # meets / meets_consuming_safety_stock: the recommended source's arrival status;
+    # unavoidable_stockout: no usable source arrives by the first stockout date;
+    # unknown: no usable source with a known lead time.
+    outcome: Literal["meets", "meets_consuming_safety_stock", "unavoidable_stockout", "unknown"]
+    recommended_supplier: str | None = None
+    recommended_arrival: date | None = None
+    # The best-ranked source when the recommendation switched away from it for timing.
+    switched_from: str | None = None
+    # The deepest shortfall below zero before the recommended arrival, without and with
+    # the expedite actions honored.
+    uncovered_quantity: Decimal = Decimal(0)
+    uncovered_after_expedite: Decimal | None = None
+    # The demands dated while the balance is below zero before that arrival (e.g. the
+    # production orders the material feeds, from the MRP element data).
+    affected_demand: list[AffectedDemand] = Field(default_factory=list[AffectedDemand])
+    # Who must act besides purchasing: production planning re-sequences or reschedules
+    # the orders a late material holds up.
+    involve: list[Involved] = Field(default_factory=list[Involved])
+
+
+ExpediteReason = Literal["mrp_reschedule_in", "mrp_reschedule_out", "due_after_shortage", "overdue"]
+
+
+class ExpediteAction(BaseModel):
+    """Ask a supplier to bring an open order forward: before buying more, a late open
+    order may cover the earliest needs."""
+
+    po_number: str
+    po_line: str
+    supplier_code: str | None = None
+    supplier_name: str | None = None
+    quantity: Decimal
+    current_date: date
+    requested_date: date
+    # mrp_reschedule_in / mrp_reschedule_out: the MRP list asks to move it earlier or
+    # later (e.g. SAP exceptions 10 and 15); due_after_shortage: it is due after the
+    # line's first stockout date; overdue: its date has passed and it is still open, yet
+    # counted as arriving now (e.g. SAP exception 07): confirm it with the supplier.
+    reason: ExpediteReason
+    # How much of the shortfall below the safety stock dated before its current date it
+    # would cover.
+    would_cover: Decimal = Decimal(0)
+    evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
+
+
+class SourcingProposal(BaseModel):
+    """No known supplier can be used: find one before buying."""
+
+    reason: Literal["no_usable_supplier"] = "no_usable_supplier"
+    # Each known supplier and why it cannot be used.
+    excluded: list[str] = Field(default_factory=list[str])
+    # The material's merchandise group (e.g. SAP MM60 "Grupo de mercadorias").
+    material_group: str | None = None
+    # Other suppliers in the evidence of items of that same group, not yet sources of
+    # it. Never suppliers of other categories; empty when there are none.
+    candidates: list[str] = Field(default_factory=list[str])
+    action: Literal["rfq_new_suppliers"] = "rfq_new_suppliers"
 
 
 class AssessmentLine(BaseModel):
@@ -417,6 +569,14 @@ class AssessmentLine(BaseModel):
     # high: stated evidence only; medium: known conventions or defaults (assumptions);
     # low: an inconsistency or ambiguity was settled by the most plausible reading.
     confidence: Literal["high", "medium", "low"] = "high"
+    # The quantity to buy per need date (the netting's purchase steps): a schedule, not
+    # one lump on the first date.
+    need_schedule: list[DatedQuantity] = Field(default_factory=list[DatedQuantity])
+    # The gross demand per date, as the requirements give it.
+    demand_schedule: list[DatedQuantity] = Field(default_factory=list[DatedQuantity])
+    timing: TimingCheck | None = None
+    expedite: list[ExpediteAction] = Field(default_factory=list[ExpediteAction])
+    sourcing: SourcingProposal | None = None
 
 
 class Assessment(BaseModel):
