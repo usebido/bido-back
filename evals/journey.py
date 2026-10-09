@@ -482,6 +482,9 @@ class Snapshot:
     reply_kind: str | None
     extras: tuple[str, ...]
     invite_status: str
+    # The reply signals stored with the offer: declared final, the parts it declines.
+    final: bool = False
+    declined: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -911,6 +914,8 @@ async def snapshot(j: Journey, supplier_key: str) -> Snapshot:
             key = part or f"unmatched:{row.offered_mpn or row.id}"
             lines[key] = (row.unit_price, row.lead_time_days, row.needs_review)
         kind = state.get("reply_kind")
+        signals = offer_signals(proposal.fields)
+        parts = {position: part for part, position in j.positions.items()}
         return Snapshot(
             proposal.version,
             lines,
@@ -918,6 +923,8 @@ async def snapshot(j: Journey, supplier_key: str) -> Snapshot:
             str(kind) if kind is not None else None,
             tuple(extras),
             status,
+            final=signals.final_offer,
+            declined=tuple(sorted(parts.get(p, str(p)) for p in signals.declined_positions)),
         )
 
 
@@ -1721,6 +1728,16 @@ async def step_replies(j: Journey, step: Step) -> None:
         f"held: issues={late.issues if late else None}",
         owner="extraction",
     )
+    # A "melhor e última oferta" is a declared final offer, nothing else is; a declined
+    # line is kept as declined (never a missing price).
+    misread = [
+        f"{e.key}: final={snap.final}, declined={list(snap.declined)}"
+        for e in SCRIPT
+        if (snap := j.snapshots.get(e.key)) is not None
+        and snap.version is not None
+        and (snap.final != (e.kind == "final") or not set(e.declined) <= set(snap.declined))
+    ]
+    step.check("offer_signals_read", not misread, "; ".join(misread[:4]), owner="extraction")
     held = {
         key: snap.issues
         for key, snap in j.snapshots.items()
