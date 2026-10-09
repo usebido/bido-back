@@ -67,6 +67,9 @@ from bido_back.quotes.terms import offer_terms
 
 AskStatus = Literal["proposed", "open", "answered", "unusable", "withdrawn", "resolved"]
 QuestionStatus = Literal["open", "answered", "dismissed"]
+# A follow-up the send gate refused: its row is `canceled` with this reason, held for the
+# buyer (`bido_back.followups.service`), and never rendered again.
+DRAFT_REFUSED: Final = "draft_refused"
 # Asks that still count as asked (never asked again automatically).
 _ASKED: Final = ("proposed", "open", "answered", "unusable", "resolved")
 # A held offer: these `_offer_state` keys say the latest reply could not be applied.
@@ -521,7 +524,7 @@ def proposal_items(
 # --- Per supplier: what Bido waits for and what the buyer must do ------------------------------
 
 RequestKind = Literal["clarification", "counter", "bafo"]
-DecisionKind = Literal["unusable_answer", "asked_before", "offer_held", "no_answer"]
+DecisionKind = Literal["unusable_answer", "asked_before", "offer_held", "no_answer", "email_held"]
 FollowupPhase = Literal[
     "needs_your_answer",
     "needs_your_decision",
@@ -681,11 +684,12 @@ def _open_request(
     if not candidates:
         return None
     request = max(candidates, key=lambda r: r.sent_at)
+    # Reminded: proposed, sent, turned down, or refused by the send gate (held).
     reminders = [
         f
         for f in rows.followups
         if f.kind == "reminder"
-        and f.status != "canceled"
+        and (f.status != "canceled" or f.canceled_reason == DRAFT_REFUSED)
         and request.message_row_id is not None
         and f.regarding_message_id == request.message_row_id
     ]
@@ -842,6 +846,31 @@ async def supplier_followups(
             and now.date() > request.reminder_reply_by
         ):
             decisions.append(Decision(kind="no_answer", since=request.sent_at))
+        # The last follow-up the send gate refused, while it still matters: held for the
+        # buyer, never rendered again (a chase until an offer comes, a clarification for
+        # its offer version, a reminder for the email it is about).
+        last = max(mine.followups, key=lambda f: f.created_at, default=None)
+        if (
+            last is not None
+            and last.status == "canceled"
+            and last.canceled_reason == DRAFT_REFUSED
+            and (
+                (last.kind == "chase" and proposal is None)
+                or (
+                    last.kind == "clarification"
+                    and proposal is not None
+                    and last.proposal_id == proposal.id
+                )
+                or (
+                    last.kind == "reminder"
+                    and request is not None
+                    and last.regarding_message_id == request.message_row_id
+                )
+            )
+        ):
+            decisions.append(
+                Decision(kind="email_held", reasons=(last.kind,), since=last.created_at)
+            )
         result[invite.id] = SupplierFollowup(
             invite_id=invite.id,
             invite_status=invite.status,

@@ -2695,18 +2695,14 @@ def diagnosis(scenario: str, check: str) -> tuple[str, ...]:
 
 
 # Checks that fail on the current code in mock mode (scenario, step, check): the tests
-# mark them non-strict xfail. Remove an entry when its gap is fixed. Fixed by the code-
-# rendered layout (`bido_back.supplier_email`): double_signature, clarification_reply_by.
-_RFQ6_EVERY_EMAIL: Final = ("email:language",)
+# mark them non-strict xfail. Remove an entry when its gap is fixed. Fixed so far:
+# supplier_language (the thread's language, decided once at the RFQ email's first send:
+# rfq6_replay email:language on every email), double_signature (one signature, rendered
+# by code: email:single_signature on every email) and clarification_reply_by (the
+# code-rendered layout, `bido_back.supplier_email`: email:reply_by_date on every email).
 EXPECTED_MOCK_FAILURES: Final[frozenset[tuple[str, str, str]]] = frozenset(
     {
-        ("rfq6_replay", "rfq", "email:language"),
-        *(
-            ("rfq6_replay", "first_reply", check)
-            for check in (*_RFQ6_EVERY_EMAIL, "status_matches_emails")
-        ),
-        ("rfq6_replay", "second_reply", "email:language"),
-        ("rfq6_replay", "second_reply", "email:single_signature"),
+        ("rfq6_replay", "first_reply", "status_matches_emails"),
         ("rfq6_replay", "first_reply", "no_quantity_tier_asked"),
         # Reached since prompt v5 reads business days: the shaft's lead-time counter asks
         # with the limit computed when the mandate was approved.

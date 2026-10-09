@@ -89,12 +89,13 @@ from bido_back.db.models import (
     User,
 )
 from bido_back.rfqs.errors import AgentFailed, InvalidState, NotFound, RfqError
+from bido_back.rfqs.language import country_code
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.service import buyer_display_name
 from bido_back.supplier_email.builders import Header, not_selected_email
 from bido_back.supplier_email.checks import GateContext, problems_text
 from bido_back.supplier_email.compose import Refused, compose
-from bido_back.supplier_email.language import thread_locale
+from bido_back.supplier_email.locale import Locale
 from bido_back.supplier_email.model import Answered, Signature, SupplierEmail
 
 logger = logging.getLogger(__name__)
@@ -371,7 +372,7 @@ async def request_notices(
             header = Header(
                 rfq_ref=thread.rfq.ref,
                 subject=thread.subject,
-                locale=thread_locale(thread.language, thread.supplier.country),
+                locale=Locale.of(thread.language, country_code(thread.supplier.country)),
                 supplier_name=thread.supplier.name,
                 buyer_company=tenant.name,
                 signature=Signature(name=buyer_name, company=tenant.name),
@@ -392,10 +393,9 @@ async def request_notices(
                     task=AwardNoticeInput(
                         rfq_ref=thread.rfq.ref,
                         rfq_title=thread.rfq.title,
-                        buyer_company=tenant.name,
-                        buyer_name=buyer_name,
                         supplier_name=thread.supplier.name,
-                        supplier_language=thread.language,
+                        # The language the notice is rendered in (the thread's).
+                        supplier_language=header.locale.language,
                     ),
                 )
             )

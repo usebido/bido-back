@@ -90,7 +90,7 @@ _ALLOWED_TAGS: Final = frozenset(
 class GateContext:
     """What the gate compares the email with."""
 
-    # The language the thread's RFQ email went out in (`language.thread_language`).
+    # The language the thread's RFQ email went out in (`rfqs.language.thread_language`).
     thread_language: str
     # The RFQ email's subject as stored; None when it was never sent through Bido.
     first_subject: str | None

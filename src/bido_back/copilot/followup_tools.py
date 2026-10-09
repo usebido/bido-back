@@ -142,6 +142,12 @@ def _decision(decision: ledger.Decision) -> str:
             )
         case "no_answer":
             return f"no answer to our email of {_day(decision.since)}, even after the reminder"
+        case "email_held":
+            kind = decision.reasons[0] if decision.reasons else "follow-up"
+            return (
+                f"the {kind} Bido prepared on {_day(decision.since)} failed its checks and was "
+                "not sent (see the RFQ's activity)"
+            )
 
 
 def _note(state: ledger.SupplierFollowup) -> str:

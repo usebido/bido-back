@@ -29,8 +29,8 @@ from bido_back.db.models import (
 )
 from bido_back.email.types import OutboundAttachment, OutboundEmail
 from bido_back.rfqs.errors import NotFound
+from bido_back.rfqs.language import thread_language
 from bido_back.rfqs.send import SEND_RFQ_EMAIL, RfqActDeps, send_proposal_ids
-from bido_back.supplier_email.language import thread_language
 from bido_back.supplier_email.subject import reply_subject
 from bido_back.supplier_email.threading import reply_headers
 
@@ -48,7 +48,8 @@ class Thread:
     subject: str
     # The RFQ email's subject as stored (None: never sent through Bido).
     first_subject: str | None
-    # The language the RFQ email went out in: every later email of the thread uses it.
+    # The language the RFQ email went out in (`rfqs.language.thread_language`): every
+    # email of the thread keeps it.
     language: str
 
 
@@ -93,12 +94,7 @@ async def thread_of(session: AsyncSession, invite_id: UUID) -> Thread:
         sender_user_id=sender,
         subject=reply_subject(first_subject, rfq.ref, rfq.title),
         first_subject=first_subject,
-        language=thread_language(
-            rfq_email_args=sent.args if sent is not None else None,
-            first_subject=first_subject,
-            supplier_language=supplier.language,
-            supplier_country=supplier.country,
-        ),
+        language=thread_language(sent.args if sent is not None else None, supplier),
     )
 
 

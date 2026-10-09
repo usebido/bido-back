@@ -108,6 +108,13 @@ class InviteView(BaseModel):
     status: InviteStatus
     sent_at: datetime | None
     responded_at: datetime | None
+    document_language: str | None = Field(
+        default=None,
+        description="ISO 639-1 of the email and PDF this supplier gets: the language its "
+        "RFQ email was prepared in (every later email of the thread keeps it), else the one "
+        "the send would pick now (the supplier's own, its country's, its legal form's, the "
+        "buyer's). Lets the on-screen preview match the document",
+    )
 
 
 # Why the RFQ's draft invites cannot be prepared for sending right now
@@ -145,6 +152,13 @@ class RfqHeader(BaseModel):
     logo_placement: LogoPlacement | None = Field(
         default=None,
         description="Where this RFQ's logo sits in its box; null = the company default",
+    )
+    document_language: str | None = Field(
+        default=None,
+        description="ISO 639-1 the RFQ document is rendered in when nothing about the "
+        "supplier decides otherwise (the default before any invite exists): the buyer's "
+        "own template, else the buyer's language, else Bido's standard template; each "
+        "invite's document_language is the one its own PDF uses",
     )
 
 

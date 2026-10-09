@@ -26,7 +26,9 @@ FollowupPhaseView = Literal[
     "nothing_to_ask",
     "not_applicable",
 ]
-DecisionKindView = Literal["unusable_answer", "asked_before", "offer_held", "no_answer"]
+DecisionKindView = Literal[
+    "unusable_answer", "asked_before", "offer_held", "no_answer", "email_held"
+]
 
 
 class FollowupSettings(BaseModel):
@@ -126,7 +128,8 @@ class DecisionView(BaseModel):
     kind: DecisionKindView = Field(
         description="unusable_answer: asked once, the answer did not give it; asked_before: "
         "answered once, missing again; offer_held: the latest reply could not be applied "
-        "(see reasons); no_answer: no answer even after the reminder"
+        "(see reasons); no_answer: no answer even after the reminder; email_held: the "
+        "checks refused the follow-up Bido wrote (its kind in reasons), it was not sent"
     )
     position: int | None = None
     field: FollowupField | None = None

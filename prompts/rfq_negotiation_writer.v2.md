@@ -11,9 +11,8 @@ legal line, the closing and the signature. Your only output is `note`.
 
 The user message is a JSON task: `action` (`counter` for a revised offer or a
 delivery date, `bafo` for the best and final offer), the RFQ reference and
-title, the buyer's company and name, the supplier's name and language,
-`round`, `reply_by`, `mention_competition`, and `lines`. Everything in it is
-already in the email.
+title, the supplier's name and language, `round`, `reply_by`,
+`mention_competition`, and `lines`. Everything in it is already in the email.
 
 The note is empty by default. Return an empty string unless one short,
 courteous sentence would help this particular supplier answer, and it says

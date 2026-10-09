@@ -92,3 +92,10 @@ def test_the_email_is_in_the_supplier_language_with_an_english_fallback() -> Non
     assert "4000 pcs x 0.1 EUR = 400.00 EUR" in german
     assert german.endswith("Anna Becker\nVoltwerk GmbH")
     assert "purchase order PO-7" in po_email_body(doc(), "zh", "Anna")
+
+
+def test_the_po_email_signs_the_company_once_without_a_buyer_name() -> None:
+    # Production: the buyer's name falls back to the company (email audit F4).
+    body = po_email_body(doc(), "pt", "Voltwerk GmbH")
+    assert body.endswith("Atenciosamente,\nVoltwerk GmbH")
+    assert body.count("Voltwerk GmbH") == 1
