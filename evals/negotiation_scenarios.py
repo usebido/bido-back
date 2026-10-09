@@ -104,7 +104,7 @@ from bido_back.rfqs.service import NewRfqLine
 from bido_back.settings import get_settings
 from bido_back.worker.envelope import Envelope
 from bido_back.worker.job_types import FOLLOWUPS_SWEEP, NEGOTIATION_SWEEP
-from evals.harness import Env, MemoryStorage, Mode
+from evals.harness import Env, MemoryStorage, Mode, as_drafted
 from evals.negotiation_text import (
     amounts,
     commitment,
@@ -899,7 +899,11 @@ async def classify(run: Run, captured: Sequence[Captured], step: str) -> list[Se
         body = item.body.strip()
         if followup is not None:
             email.kind = followup.kind
-            task = followup_drafts.get(body)
+            # Code signs under the draft (the writers do not): match the draft it signed.
+            task = followup_drafts.get(body) or next(
+                (t for draft, t in followup_drafts.items() if as_drafted(body, [draft])),
+                None,
+            )
             email.drafted = task is not None
             if task is not None:
                 email.items = [(i.position, i.field, i.problem) for i in task.open_items]
@@ -908,7 +912,7 @@ async def classify(run: Run, captured: Sequence[Captured], step: str) -> list[Se
         elif negotiation is not None:
             email.kind = negotiation.action
             email.round = negotiation.round
-            email.drafted = body in negotiation_drafts
+            email.drafted = as_drafted(body, negotiation_drafts)
             raw = cast(dict[str, JsonValue], negotiation.terms).get("lines")
             for entry in raw if isinstance(raw, list) else []:
                 if not isinstance(entry, dict):
@@ -2666,11 +2670,12 @@ def diagnosis(scenario: str, check: str) -> tuple[str, ...]:
 
 
 # Checks that fail on the current code in mock mode (scenario, step, check): the tests
-# mark them non-strict xfail. Remove an entry when its gap is fixed.
-_RFQ6_EVERY_EMAIL: Final = ("email:language", "email:single_signature", "email:reply_by_date")
+# mark them non-strict xfail. Remove an entry when its gap is fixed. Fixed so far:
+# supplier_language and double_signature (rfq6_replay email:language and
+# email:single_signature on every email).
+_RFQ6_EVERY_EMAIL: Final = ("email:reply_by_date",)
 EXPECTED_MOCK_FAILURES: Final[frozenset[tuple[str, str, str]]] = frozenset(
     {
-        ("rfq6_replay", "rfq", "email:language"),
         *(
             ("rfq6_replay", step, check)
             for step in ("first_reply", "second_reply", "shaft_on_time")
@@ -2808,17 +2813,22 @@ async def run_scenario(env: Env, scenario: Scenario, number: int, model: Scenari
     if result.steps:
         result.steps[-1].check("only_test_recipients", not leaked, f"{leaked}", owner="core")
     world = run.world
-    sent = {c.body.strip() for c in world.outbox.sent}
+    sent = [c.body for c in world.outbox.sent]
+
+    def went_out(draft: str) -> bool:
+        # Sent as drafted, under the signature code adds (the writers do not sign).
+        return any(as_drafted(body, [draft]) for body in sent)
+
     # Drafts that never went out: refused by the draft checks, canceled (a newer offer),
     # or still waiting (daily cap) when the scenario ended.
     unsent = [
         f"{task.action} r{task.round} to {task.supplier_name}: {' '.join(out.body.split())}"[:900]
         for task, out in world.negotiation_writer.calls
-        if out is not None and out.body.strip() not in sent
+        if out is not None and not went_out(out.body)
     ] + [
         f"{task.kind} to {task.supplier_name}: {' '.join(out.body.split())}"[:900]
         for task, out in world.followup_writer.calls
-        if out is not None and out.body.strip() not in sent
+        if out is not None and not went_out(out.body)
     ]
     result.notes = {
         "rfq": run.ref,

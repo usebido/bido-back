@@ -680,9 +680,10 @@ def _lang(language: str) -> str:
     return language if language in _SIGN_OFF else "en"
 
 
-def _signature(language: str, name: str, company: str) -> str:
-    """ "Sign with the buyer's name and company", exactly as the prompts say."""
-    return f"{_SIGN_OFF[language]}\n{name}\n{company}"
+def _signature(language: str) -> str:
+    """The closing formula only: the v2 prompts leave the signature to code
+    (`bido_back.templates.signature.signed` puts the buyer's name lines under it)."""
+    return _SIGN_OFF[language]
 
 
 def _date(language: str, value: date) -> str:
@@ -726,9 +727,9 @@ _CONFIRM: Final = {
 
 
 def followup_writer(task: FollowupEmailInput) -> FollowupEmailOutput:
-    """The follow-up writer (v1 prompt): a chase, or exactly the open items."""
+    """The follow-up writer (v2 prompt): a chase, or exactly the open items."""
     lang = _lang(task.supplier_language)
-    sign = _signature(lang, task.buyer_name, task.buyer_company)
+    sign = _signature(lang)
     if task.kind == "chase":
         sent = _date(lang, task.original_sent_on) if task.original_sent_on else ""
         due = _date(lang, task.response_due) if task.response_due else None
@@ -779,9 +780,9 @@ def followup_writer(task: FollowupEmailInput) -> FollowupEmailOutput:
 
 
 def negotiation_writer(task: NegotiationEmailInput) -> NegotiationEmailOutput:
-    """The negotiation writer (v1 prompt): every number as given, by `reply_by`."""
+    """The negotiation writer (v2 prompt): every number as given, by `reply_by`."""
     lang = _lang(task.supplier_language)
-    sign = _signature(lang, task.buyer_name, task.buyer_company)
+    sign = _signature(lang)
     words = {
         "pt": {
             "hello": f"Prezados, {task.supplier_name},",
