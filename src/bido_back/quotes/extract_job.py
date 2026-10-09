@@ -115,8 +115,9 @@ class _Loaded:
     body: str
     supplier_language: str | None
     requested: list[RfqEmailLine]
-    line_ids: dict[int, UUID]
-    line_mpns: dict[int, str | None]
+    # The same lines, as validation compares a quoted line against them.
+    requested_checks: list[RequestedLine]
+    rfq_currency: str | None
     attachments: list[_AttachmentRef]
     prior_supplier_offer: PriorSupplierOffer | None
 
@@ -175,10 +176,7 @@ async def handle_quote_extract(
 
     validated = validate_quote(
         result.output,
-        requested=[
-            RequestedLine(id=line_id, position=position, mpn=loaded.line_mpns.get(position))
-            for position, line_id in loaded.line_ids.items()
-        ],
+        requested=loaded.requested_checks,
         sources=QuoteSources(
             email_subject=loaded.subject,
             email_body=body,
@@ -186,6 +184,7 @@ async def handle_quote_extract(
         ),
         today=today or datetime.now(UTC).date(),
         decimal=decimal_separator_for(loaded.supplier_language),
+        rfq_currency=loaded.rfq_currency,
     )
     meta: RunMeta = {
         "agent": agent.name,
@@ -249,7 +248,7 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
 
         row = (
             await session.execute(
-                select(Invite.id, Rfq.id, Rfq.ref, Supplier.language)
+                select(Invite.id, Rfq.id, Rfq.ref, Rfq.base_currency, Supplier.language)
                 .join(Rfq, Rfq.id == Invite.rfq_id)
                 .join(Supplier, Supplier.id == Invite.supplier_id)
                 .where(Invite.id == message.invite_id)
@@ -258,7 +257,7 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
         if row is None:
             logger.warning("quote.extract: invite not found message=%s", message_id)
             return None
-        invite_id, rfq_id, rfq_ref, language = row
+        invite_id, rfq_id, rfq_ref, rfq_currency, language = row
 
         lines = (
             await session.scalars(
@@ -287,8 +286,8 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
             body=message.body_text or "",
             supplier_language=language,
             requested=[email_line(line) for line in lines],
-            line_ids={line.position: line.id for line in lines},
-            line_mpns={line.position: line.mpn for line in lines},
+            requested_checks=[requested_line(line) for line in lines],
+            rfq_currency=rfq_currency,
             attachments=[
                 _AttachmentRef(a.filename, a.content_type, a.storage_key) for a in attachments
             ],
@@ -317,6 +316,18 @@ def email_line(line: RfqLine) -> RfqEmailLine:
         need_by=line.need_by,
         incoterm=line.incoterm,
         qualification=line.qualification,
+    )
+
+
+def requested_line(line: RfqLine) -> RequestedLine:
+    """An RFQ line as validation compares a quoted line against it."""
+    return RequestedLine(
+        id=line.id,
+        position=line.position,
+        mpn=line.mpn,
+        quantities=tuple(Decimal(str(q)) for q in line.quantities),
+        incoterm=line.incoterm,
+        delivery_location=line.delivery_location,
     )
 
 

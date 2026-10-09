@@ -1174,7 +1174,11 @@ def _quote_preview(extracted: quote_upload.ExtractedUpload) -> ProposalPreview:
     target, quote = extracted.target, extracted.validated
     currency = quote.parsed("currency")
     quoted: list[QuotedLinePreview] = []
-    issues = [*quote.issues, *(f"missing:{f}" for f in quote.output.missing_fields)]
+    issues = [
+        *quote.issues,
+        *(f"{name}:{issue}" for name, f in quote.header.items() for issue in f.issues),
+        *(f"missing:{f}" for f in quote.output.missing_fields),
+    ]
     for line in quote.lines:
         position = line.draft.rfq_line_position
         line_issues = [
@@ -2480,8 +2484,11 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             "is read like an emailed reply and the quote stored the same way: it shows in the "
             "comparison and the Quotes tab, marked as uploaded by the buyer. The preview "
             "lists the supplier, the terms (currency, payment terms, validity, Incoterm), "
-            "each quoted line (price, quantity, lead time) and `issues` to check; show all "
-            "of it. Nothing is sent." + _CONFIRM_FIRST,
+            "each quoted line (price, quantity, lead time in calendar days) and `issues` to "
+            "check: values the file does not back, missing terms, and what differs from "
+            "the RFQ (quantity_mismatch, incoterm_mismatch, delivery_location_mismatch, "
+            "currency_mismatch). Show all of it, every issue by name; never say there are "
+            "none when the list is not empty. Nothing is sent." + _CONFIRM_FIRST,
             RegisterQuoteIn,
             RegisterQuoteOut,
             "draft",

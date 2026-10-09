@@ -227,6 +227,9 @@ class QuoteExtractionOutput(BaseModel):
     valid_until: ExtractedValue
     incoterm: ExtractedValue
     payment_terms: ExtractedValue
+    # The named place the supplier delivers to ("CIF Joinville/SC" -> "Joinville/SC"),
+    # as written; compared with the RFQ's delivery location by code.
+    delivery_location: ExtractedValue = Field(default_factory=_absent_value)
     lines: list[ProposalLineDraft] = Field(default_factory=list[ProposalLineDraft])
     missing_fields: list[str] = Field(default_factory=list[str])
     # Offers for things not requested; empty when there are none.

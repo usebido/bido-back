@@ -88,8 +88,8 @@ def rfq_email_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[RfqEmailLoca
 def quote_extraction(model: str = EXTRACTION_MODEL) -> AgentDefinition[QuoteExtractionOutput]:
     return AgentDefinition(
         name="quote_extraction",
-        prompt_file="quote_extraction.v4.md",
-        prompt_version=4,
+        prompt_file="quote_extraction.v5.md",
+        prompt_version=5,
         model=model,
         output_model=QuoteExtractionOutput,
         max_turns=_MAX_TURNS,

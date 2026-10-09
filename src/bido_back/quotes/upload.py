@@ -64,15 +64,16 @@ from bido_back.db.models import (
 from bido_back.documents import DocumentText, extract_text, render_documents
 from bido_back.files.policy import can_read_upload
 from bido_back.intake.service import safe_filename
-from bido_back.quotes.extract_job import RunMeta, email_line, offer_events, persist_quote
+from bido_back.quotes.extract_job import (
+    RunMeta,
+    email_line,
+    offer_events,
+    persist_quote,
+    requested_line,
+)
 from bido_back.quotes.parsing import decimal_separator_for
 from bido_back.quotes.state import reconcile
-from bido_back.quotes.validation import (
-    QuoteSources,
-    RequestedLine,
-    ValidatedQuote,
-    validate_quote,
-)
+from bido_back.quotes.validation import QuoteSources, ValidatedQuote, validate_quote
 from bido_back.rfqs import audit
 from bido_back.storage import BlobStorage
 
@@ -162,6 +163,7 @@ class QuoteTarget:
     rfq_ref: str
     rfq_title: str
     rfq_status: str
+    rfq_currency: str | None
     invite_id: UUID
     supplier_id: UUID
     supplier_name: str
@@ -219,6 +221,7 @@ async def quote_target(session: AsyncSession, rfq: Rfq, invite_id: UUID) -> Quot
         rfq_ref=rfq.ref,
         rfq_title=rfq.title,
         rfq_status=rfq.status,
+        rfq_currency=rfq.base_currency,
         invite_id=invite.id,
         supplier_id=supplier.id,
         supplier_name=supplier.name,
@@ -287,9 +290,7 @@ async def extract_uploaded_quote(
     )
     validated = validate_quote(
         output,
-        requested=[
-            RequestedLine(id=line.id, position=line.position, mpn=line.mpn) for line in lines
-        ],
+        requested=[requested_line(line) for line in lines],
         sources=QuoteSources(
             email_subject="",
             email_body="",
@@ -297,6 +298,7 @@ async def extract_uploaded_quote(
         ),
         today=today,
         decimal=decimal_separator_for(target.supplier_language),
+        rfq_currency=target.rfq_currency,
     )
     if not validated.is_quote:
         raise NotAQuote(
