@@ -90,6 +90,7 @@ async def test_list_row_has_suppliers_need_by_owner_and_filters(
     assert row.supplier_names and row.supplier_names[0].startswith("Rhein")
     assert row.invited_count == 1
     assert row.base_currency == "EUR"
+    assert row.document_language == "en"
     assert row.owner is not None
     expected_need_by = min(
         (line.need_by for line in quoted.rfq.lines if line.need_by is not None), default=None

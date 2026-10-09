@@ -5345,6 +5345,18 @@
             "title": "Contact Id",
             "type": "string"
           },
+          "document_language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ISO 639-1 of the email and PDF this supplier gets, as the send would render them now: the supplier's own language, else its country's, else English. Lets the on-screen preview match the document",
+            "title": "Document Language"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -9276,6 +9288,18 @@
             "description": "Where base_currency came from",
             "title": "Currency Source"
           },
+          "document_language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ISO 639-1 the RFQ document is rendered in when no supplier decides otherwise (the default before any invite exists); each invite's document_language is the one its own PDF uses",
+            "title": "Document Language"
+          },
           "footer_override": {
             "anyOf": [
               {
@@ -9431,6 +9455,18 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "document_language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ISO 639-1 the RFQ document is rendered in when no supplier decides otherwise (the default before any invite exists); each invite's document_language is the one its own PDF uses",
+            "title": "Document Language"
           },
           "footer_override": {
             "anyOf": [
@@ -10146,6 +10182,18 @@
             "format": "date-time",
             "title": "Created At",
             "type": "string"
+          },
+          "document_language": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "ISO 639-1 the RFQ document is rendered in when no supplier decides otherwise (the default before any invite exists); each invite's document_language is the one its own PDF uses",
+            "title": "Document Language"
           },
           "footer_override": {
             "anyOf": [

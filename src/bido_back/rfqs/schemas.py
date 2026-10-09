@@ -108,6 +108,12 @@ class InviteView(BaseModel):
     status: InviteStatus
     sent_at: datetime | None
     responded_at: datetime | None
+    document_language: str | None = Field(
+        default=None,
+        description="ISO 639-1 of the email and PDF this supplier gets, as the send would "
+        "render them now: the supplier's own language, else its country's, else English. "
+        "Lets the on-screen preview match the document",
+    )
 
 
 # Why the RFQ's draft invites cannot be prepared for sending right now
@@ -145,6 +151,12 @@ class RfqHeader(BaseModel):
     logo_placement: LogoPlacement | None = Field(
         default=None,
         description="Where this RFQ's logo sits in its box; null = the company default",
+    )
+    document_language: str | None = Field(
+        default=None,
+        description="ISO 639-1 the RFQ document is rendered in when no supplier decides "
+        "otherwise (the default before any invite exists); each invite's "
+        "document_language is the one its own PDF uses",
     )
 
 

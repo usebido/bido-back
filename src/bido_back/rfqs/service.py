@@ -92,7 +92,7 @@ from bido_back.rfqs.document import (
     render_pdf,
 )
 from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound, ReplyByRequired
-from bido_back.rfqs.language import supplier_email_language
+from bido_back.rfqs.language import DEFAULT_LANGUAGE, supplier_email_language
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.readiness import reply_by_refusal, send_blockers, utc_today
 from bido_back.rfqs.schemas import (
@@ -188,15 +188,17 @@ def _line_view(line: RfqLine) -> RfqLineView:
     )
 
 
-def _invite_view(invite: Invite, supplier_name: str) -> InviteView:
+def _invite_view(invite: Invite, supplier: Supplier) -> InviteView:
     return InviteView(
         id=invite.id,
         supplier_id=invite.supplier_id,
-        supplier_name=supplier_name,
+        supplier_name=supplier.name,
         contact_id=invite.contact_id,
         status=cast(InviteStatus, invite.status),
         sent_at=invite.sent_at,
         responded_at=invite.responded_at,
+        # The same rule `_render_for` applies when the email and PDF are built.
+        document_language=supplier_email_language(supplier),
     )
 
 
@@ -214,6 +216,8 @@ def _summary_fields(rfq: Rfq) -> dict[str, object]:
         "logo_asset_id": rfq.logo_asset_id,
         "footer_override": rfq.footer_override,
         "logo_placement": rfq_logo_placement(rfq),
+        # What a supplier with no language of its own gets (`bido_back.rfqs.language`).
+        "document_language": DEFAULT_LANGUAGE,
     }
 
 
@@ -236,7 +240,7 @@ async def _lines(session: AsyncSession, rfq_id: UUID) -> list[RfqLine]:
 async def _detail(session: AsyncSession, rfq: Rfq) -> RfqDetail:
     lines = await _lines(session, rfq.id)
     invites = await session.execute(
-        select(Invite, Supplier.name)
+        select(Invite, Supplier)
         .join(Supplier, Supplier.id == Invite.supplier_id)
         .where(Invite.rfq_id == rfq.id)
         .order_by(Invite.created_at, Invite.id)
@@ -246,7 +250,7 @@ async def _detail(session: AsyncSession, rfq: Rfq) -> RfqDetail:
             **_summary_fields(rfq),
             "base_currency": rfq.base_currency,
             "lines": [_line_view(line) for line in lines],
-            "invites": [_invite_view(invite, name) for invite, name in invites],
+            "invites": [_invite_view(invite, supplier) for invite, supplier in invites],
         }
     )
 
@@ -823,7 +827,7 @@ async def add_invite(
         session.add(_invite_event(principal, audit.RFQ_INVITE_ADDED, invite, supplier.name))
         await session.flush()
         await session.refresh(invite)
-        return _invite_view(invite, supplier.name)
+        return _invite_view(invite, supplier)
 
 
 async def remove_invite(db: Db, principal: Principal, rfq_id: UUID, invite_id: UUID) -> RfqDetail:
