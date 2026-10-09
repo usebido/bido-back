@@ -110,9 +110,10 @@ class InviteView(BaseModel):
     responded_at: datetime | None
     document_language: str | None = Field(
         default=None,
-        description="ISO 639-1 of the email and PDF this supplier gets, as the send would "
-        "render them now: the supplier's own language, else its country's, else English. "
-        "Lets the on-screen preview match the document",
+        description="ISO 639-1 of the email and PDF this supplier gets: the language its "
+        "RFQ email was prepared in (every later email of the thread keeps it), else the one "
+        "the send would pick now (the supplier's own, its country's, its legal form's, the "
+        "buyer's). Lets the on-screen preview match the document",
     )
 
 
@@ -154,9 +155,10 @@ class RfqHeader(BaseModel):
     )
     document_language: str | None = Field(
         default=None,
-        description="ISO 639-1 the RFQ document is rendered in when no supplier decides "
-        "otherwise (the default before any invite exists); each invite's "
-        "document_language is the one its own PDF uses",
+        description="ISO 639-1 the RFQ document is rendered in when nothing about the "
+        "supplier decides otherwise (the default before any invite exists): the buyer's "
+        "own template, else the buyer's language, else Bido's standard template; each "
+        "invite's document_language is the one its own PDF uses",
     )
 
 

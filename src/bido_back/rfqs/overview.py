@@ -32,7 +32,7 @@ from bido_back.db.models import (
     Supplier,
     User,
 )
-from bido_back.rfqs.language import DEFAULT_LANGUAGE
+from bido_back.rfqs.document_language import default_languages
 from bido_back.rfqs.readiness import send_blockers
 from bido_back.rfqs.schemas import RfqNextStep, RfqStage, RfqStatus, RfqSummary
 
@@ -148,6 +148,7 @@ async def list_rfq_overviews(
         need_by = await _need_by(session, [r.id for r in rfqs])
         owners = await owner_names(session, {r.created_by for r in rfqs})
         quoted = await _quoted(session, [r.id for r in rfqs])
+        languages = await default_languages(session, rfqs)
 
     best: dict[UUID, Decimal | None] = {}
     for rfq in rfqs:
@@ -167,7 +168,7 @@ async def list_rfq_overviews(
             send_blockers=send_blockers(rfq.status, rfq.response_due, today),
             payment_terms=rfq.payment_terms,
             quote_validity_days=rfq.quote_validity_days,
-            document_language=DEFAULT_LANGUAGE,
+            document_language=languages[rfq.id],
             stage=derive_stage(rfq.status, rfq.negotiation_status, facts[rfq.id]),
             next_step=derive_next_step(rfq.status, rfq.negotiation_status, facts[rfq.id]),
             supplier_names=facts[rfq.id].suppliers,
