@@ -547,7 +547,9 @@ class OpenRequest:
     # Our outbound `messages` row: what a reminder refers to.
     message_row_id: UUID | None
     asks: tuple[Ask, ...] = ()
-    # Reminded once already (proposed, sent, or turned down by the buyer).
+    # Reminded once already (proposed, sent, turned down by the buyer, or held). Only a
+    # clarification is reminded by the follow-ups; the negotiation decides what follows
+    # a counter-offer or best-and-final request.
     reminded: bool = False
     reminded_at: datetime | None = None
     # The reminder's own reply-by date.

@@ -19,6 +19,7 @@ from bido_back.db import create_sessionmaker
 from bido_back.settings import Settings
 from tests.db.conftest import app_engine, migrator_engine
 from tests.followups.test_ledger_db import (
+    ASKED,
     INCOMPLETE,
     QUESTION,
     UPDATE,
@@ -99,10 +100,7 @@ async def test_questions_over_http(
     [invite] = view["invites"]
     assert invite["phase"] == "needs_your_answer"
     [asked] = invite["questions"]
-    assert (asked["status"], asked["question"]) == (
-        "open",
-        "Can you send the drawing of the shaft (000102)?",
-    )
+    assert (asked["status"], asked["question"]) == ("open", ASKED)
 
     assert (
         await http.post(f"/v1/rfqs/{rfq_id}/invites/{invite_id}/answers", json={"answer": " "})

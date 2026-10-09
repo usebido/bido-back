@@ -23,17 +23,15 @@ per tenant:
      `every` business days of the supplier's last email, never before
      `invites.followups_paused_until` (an auto-reply);
    - an email the supplier has not answered (a clarification whose asks are
-     open, a counter-offer or best-and-final request for its latest offer): one
-     reminder, the business day after that email's reply-by date (never before),
-     and nothing else until the supplier answers;
+     open, a counter-offer or best-and-final request for its latest offer) is
+     its open request: nothing else until the supplier answers. A clarification
+     gets one reminder, the business day after its reply-by date (never
+     before); what follows a counter-offer or a best-and-final request is the
+     negotiation's to decide (no reminder from here);
    - otherwise, what the latest offer still lacks (`bido_back.followups.missing`)
      and was never asked goes out in ONE clarification, asked once. Items asked
      before are never asked again: they need the buyer's decision. A held offer
      (its latest reply could not be applied) needs the buyer's decision first.
-
-A counter-offer or best-and-final request the supplier has not answered is also
-its open request: nothing else goes out meanwhile, and the negotiation decides
-what follows it (no reminder from here).
 
 A due follow-up is rendered by code in the standard layout
 (`bido_back.supplier_email`, built by `bido_back.followups.emails`: a chase is

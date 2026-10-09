@@ -23,7 +23,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
@@ -32,12 +32,14 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.catalog.contracts import (
+    DeclinedLine,
     ExtractedValue,
     LeadTimeValue,
     ProposalLineDraft,
     QuoteExtractionOutput,
     SourceRef,
 )
+from bido_back.agents.catalog.contracts import SupplierQuestion as SupplierQuestionDraft
 from bido_back.agents.config import RunnerConfig
 from bido_back.auth import Principal
 from bido_back.corrections import service as corrections
@@ -50,6 +52,8 @@ from bido_back.db.models import (
     FollowupMessage,
     Invite,
     Membership,
+    Message,
+    NegotiationMessage,
     Proposal,
     ProposalLine,
     SupplierQuestion,
@@ -481,6 +485,88 @@ async def test_a_refused_reminder_is_held_once_and_is_the_one_reminder(
     assert (await thread.sweep(timedelta(days=8))).reminders == 0
 
 
+DECLINE = "We cannot supply the shafts (000102)."
+PARTIAL = (
+    "Hello, our prices: BRL 19.50 per piece for the bearings (000101) and BRL 95.00 per kg "
+    f"for the copper wire (000104). Lead time 10 days. Net 30. {DECLINE}"
+)
+
+
+def partial() -> QuoteExtractionOutput:
+    """Two of three lines priced, the third declined in so many words; no validity."""
+    return QuoteExtractionOutput(
+        is_quote=True,
+        currency=ev("BRL", "BRL 19.50"),
+        valid_until=NONE,
+        incoterm=NONE,
+        payment_terms=ev("Net 30", "Net 30"),
+        lead_time=days("10", "Lead time 10 days"),
+        lines=[
+            draft(
+                p,
+                unit_price=ev(PRICES[p], f"BRL {PRICES[p]} per {UNITS[p]} for the {NAMES[p]}"),
+                unit=ev(UNITS[p], f"per {UNITS[p]} for the {NAMES[p]}"),
+            )
+            for p in (1, 3)
+        ],
+        declined_lines=[DeclinedLine(rfq_line_position=2, quote=DECLINE)],
+    )
+
+
+async def test_a_declined_line_is_never_asked(thread: Thread) -> None:
+    await thread.reply(PARTIAL, partial(), timedelta(hours=1))
+    proposal, _ = await thread.latest()
+    assert proposal.fields["_offer_state"]["declined_line_positions"] == [2]
+    # Only the validity: never "the price of the shafts, or tell us you do not quote them".
+    assert (await thread.sweep(timedelta(hours=2))).clarifications == 1
+    assert thread.clarification_tasks() == [[(None, "valid_until", "value")]]
+
+
+async def test_a_counter_offer_waiting_for_its_answer_is_the_open_request(
+    thread: Thread,
+) -> None:
+    # An offer without its validity (something to ask), and a counter-offer sent for it.
+    await thread.reply(INCOMPLETE, incomplete(), timedelta(hours=1))
+    proposal, _ = await thread.latest()
+    header = "<counter-1@ledger.example.test>"
+    sent_at = START + timedelta(hours=1, minutes=30)
+    async with tenant_session(thread.world.engine, thread.world.tenant_id) as session:
+        session.add(
+            Message(
+                tenant_id=thread.world.tenant_id,
+                invite_id=thread.invite_id,
+                direction="out",
+                message_id_header=header,
+                status="stored",
+                occurred_at=sent_at,
+            )
+        )
+        session.add(
+            NegotiationMessage(
+                id=uuid4(),
+                tenant_id=thread.world.tenant_id,
+                invite_id=thread.invite_id,
+                proposal_id=proposal.id,
+                round=1,
+                action="counter",
+                status="sent",
+                terms={"reply_by": "2026-10-13"},
+                message_id_header=header,
+                sent_at=sent_at,
+            )
+        )
+    state = await thread.state()
+    assert state.request is not None
+    assert (state.request.kind, state.request.reply_by) == ("counter", date(2026, 10, 13))
+    assert state.phase == "waiting_for_supplier"
+    # Nothing else goes out while it waits: no clarification, and no reminder from the
+    # follow-ups even after its reply-by date (what follows is the negotiation's call).
+    assert (await thread.sweep(timedelta(hours=2))).clarifications == 0
+    result = await thread.sweep(timedelta(days=6))
+    assert (result.clarifications, result.reminders) == (0, 0)
+    assert await thread.followups() == []
+
+
 async def test_a_reply_without_an_offer_keeps_our_clarification_and_asks_nothing_twice(
     thread: Thread,
 ) -> None:
@@ -527,13 +613,12 @@ async def test_chases_wait_for_the_reply_by_and_survive_a_reply_without_an_offer
 
 # --- Supplier questions ------------------------------------------------------------------------
 
-QUESTION = (
-    "Hello, before quoting: can you send the drawing of the shaft (000102) with its "
-    "tolerances? Sales Team"
-)
+ASKED = "can you send the drawing of the shaft (000102) with its tolerances?"
+QUESTION = f"Hello, before quoting: {ASKED} Sales Team"
 
 
 def question() -> QuoteExtractionOutput:
+    """A first reply that only asks (prompt v5: the question copied exactly, no offer)."""
     return QuoteExtractionOutput(
         is_quote=False,
         currency=NONE,
@@ -541,7 +626,9 @@ def question() -> QuoteExtractionOutput:
         incoterm=NONE,
         payment_terms=NONE,
         reply_kind="clarification",
-        technical_questions=["Can you send the drawing of the shaft (000102)?"],
+        supplier_questions=[
+            SupplierQuestionDraft(quote=ASKED, topic="technical", rfq_line_position=2)
+        ],
     )
 
 
@@ -549,11 +636,10 @@ async def test_a_question_waits_for_the_buyer_and_pauses_automatic_emails(
     thread: Thread,
 ) -> None:
     await thread.reply(QUESTION, question(), timedelta(hours=3))
+    # No offer yet, but the question is stored, word for word, for the buyer.
     state = await thread.state()
-    assert state.phase == "needs_your_answer"
-    assert [q.text for q in state.open_questions] == [
-        "Can you send the drawing of the shaft (000102)?"
-    ]
+    assert state.phase == "needs_your_answer" and not state.has_offer
+    assert [q.text for q in state.open_questions] == [ASKED]
     # Nothing automatic, even once a chase would be due.
     assert (await thread.sweep(timedelta(days=12))).chases == 0
     assert await thread.followups() == []
