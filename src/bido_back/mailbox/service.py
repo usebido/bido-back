@@ -26,7 +26,8 @@ valid regardless of what the send did, and a revoked grant stays revoked.
 
 Sync: `sync_rfq_threads(db, tenant_id, ingest=...)`, for each active
 connection, fetches the new messages of the threads of its invites that are
-`sent`/`responded` on an `open` RFQ, skips the buyer's own messages (From is
+`sent`/`responded` on an `open` RFQ (or, once awarded, with a sent purchase order
+still open: the supplier answers the order there), skips the buyer's own messages (From is
 the connected address), hands everything else to `ingest(raw, tenant_id=,
 invite_id=)` (intake's `InboundService.ingest_for_invite`, which deduplicates
 by Message-ID), and records the handled provider message ids in
@@ -56,12 +57,20 @@ from uuid import UUID
 
 import httpx
 from pydantic import JsonValue
-from sqlalchemy import case, func, select, text, update
+from sqlalchemy import case, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from bido_back.awards.schemas import RESPONDING_FULFILMENT_STATES
 from bido_back.db import create_sessionmaker, tenant_session
-from bido_back.db.models import Invite, MailboxConnection, Membership, Message, Rfq
+from bido_back.db.models import (
+    Invite,
+    IssuedPurchaseOrder,
+    MailboxConnection,
+    Membership,
+    Message,
+    Rfq,
+)
 from bido_back.email.inbound import parse_inbound
 from bido_back.email.types import OutboundEmail
 from bido_back.mailbox.base import (
@@ -567,6 +576,17 @@ async def _load_sync_work(db: Db, tenant_id: UUID) -> list[tuple[MailboxConnecti
         )
         if not connections:
             return []
+        # An awarded RFQ is closed, but the winner's thread carries the purchase order:
+        # its replies (the confirmation, a new date) keep being read while it is open.
+        open_order = (
+            select(IssuedPurchaseOrder.id)
+            .where(
+                IssuedPurchaseOrder.invite_id == Invite.id,
+                IssuedPurchaseOrder.status == "sent",
+                IssuedPurchaseOrder.fulfilment_state.in_(list(RESPONDING_FULFILMENT_STATES)),
+            )
+            .exists()
+        )
         rows = await session.execute(
             select(Invite.id, Invite.provider_thread_id, Invite.mailbox_connection_id)
             .join(Rfq, Rfq.id == Invite.rfq_id)
@@ -574,7 +594,7 @@ async def _load_sync_work(db: Db, tenant_id: UUID) -> list[tuple[MailboxConnecti
                 Invite.mailbox_connection_id.in_([c.id for c in connections]),
                 Invite.provider_thread_id.is_not(None),
                 Invite.status.in_(SYNCED_INVITE_STATUSES),
-                Rfq.status == "open",
+                or_(Rfq.status == "open", open_order),
             )
             .order_by(Invite.created_at, Invite.id)
         )

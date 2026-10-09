@@ -4,7 +4,7 @@ from datetime import date
 from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 
 DecimalText = Annotated[str, StringConstraints(pattern=r"^-?[0-9]+(\.[0-9]+)?$", max_length=40)]
 
@@ -32,6 +32,10 @@ class AwardLine(BaseModel):
     currency: str
     lead_time_days: int | None
     recommended_invite_id: UUID | None
+    # The buyer's limits this offer breaks (`above_buyer_maximum`,
+    # `above_buyer_lead_time_limit`, ...), from the comparison. Left out of the
+    # arguments when unset: awards proposed before it existed keep their hash.
+    buyer_limit_issues: tuple[str, ...] | None = Field(default=None, exclude_if=lambda v: v is None)
 
 
 class AwardApprovalView(BaseModel):
@@ -47,6 +51,8 @@ class AwardApprovalView(BaseModel):
 class ThreadEmailApprovalView(BaseModel):
     """What an approver sees for a purchase-order or "not selected" email."""
 
+    # A purchase order's cancellation email is `purchase_order` too: the item's `tool`
+    # (`send_po_cancellation`) tells them apart.
     kind: Literal["purchase_order", "award_notice"]
     invite_id: UUID
     rfq_id: UUID | None

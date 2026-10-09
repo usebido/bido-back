@@ -34,6 +34,7 @@ from bido_back.approvals import ActToolRegistry, ApprovalExecutor, decide_approv
 from bido_back.approvals.executor import APPROVAL_EXECUTE_JOB
 from bido_back.auth import Principal
 from bido_back.awards.agents import default_notice_writer
+from bido_back.awards.responses import handle_po_response
 from bido_back.awards.send import register_award_act_tools
 from bido_back.db import tenant_session
 from bido_back.db.models import (
@@ -66,7 +67,7 @@ from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
 from bido_back.rfqs.send import RfqActDeps, register_act_tools
 from bido_back.rfqs.service import NewRfqLine
 from bido_back.worker.envelope import Envelope
-from bido_back.worker.job_types import NEGOTIATION_SWEEP, QUOTE_EXTRACT
+from bido_back.worker.job_types import NEGOTIATION_SWEEP, PO_RESPONSE, QUOTE_EXTRACT
 from evals.harness import Env, new_company
 from evals.personas import ITEMS, Item, Persona, Reply, reply_for
 from evals.scripted import ScriptedModel
@@ -276,6 +277,13 @@ class World:
             for job in batch:
                 if job.type == APPROVAL_EXECUTE_JOB:
                     await self.executor(job)
+                elif job.type == PO_RESPONSE:
+                    await handle_po_response(
+                        job,
+                        db=self.engine,
+                        storage=self.env.storage,
+                        runner_config=self.env.runner_config,
+                    )
                 elif job.type != QUOTE_EXTRACT:
                     raise RuntimeError(f"the eval world has no handler for {job.type}")
             await asyncio.gather(*(self._extract(job) for job in extractions))

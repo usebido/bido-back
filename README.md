@@ -304,13 +304,25 @@ best-and-final request equal the code-decided asks, never above the maximum,
 never revealing it or a competitor, no commitment language, round and daily
 caps; early close; deadline close and the recommendation with the broker
 rule; a committing draft held), `recipients` (a non-test domain held until
-confirmed, test domains pass, the guarded sender as the net) and `award`
+confirmed, test domains pass, the guarded sender as the net), `award`
 (purchase orders, PO email in the supplier's language, "not selected" notices
-without prices). After the send, the buyer records the order's life in Bido
-(`/v1/purchase-orders/{id}/acknowledge`, `/receipts`, `/close`, `/cancel`, or
-the Copilot's purchase-order tools): `fulfilment.state` goes sent ->
-acknowledged -> partially_received -> received -> closed (or cancelled), and
-the RFQ shows as `completed` once every order is closed or cancelled.
+without prices) and `po_lifecycle` (the order after the award, below).
+
+The purchase order goes out, after approval, as a reply in the RFQ thread with
+the PO as a PDF in the supplier's language (buyer and supplier, the offer it
+accepts, every line with part number, quantity, unit price, total, delivery
+date and place, Incoterm, payment terms, the approver) and as .xlsx
+(`/v1/purchase-orders/{id}.pdf|.xlsx`). The supplier's replies in that thread
+keep being read after the award (`awards.responses`, job `po.response`): a plain
+confirmation acknowledges the order with their order number; a new date, price
+or quantity, a refusal or a question is flagged (`needs_review`) and never
+applied, until the buyer decides (`POST .../review`, or acknowledges, closes or
+cancels). The buyer records the rest (`/acknowledge`, `/receipts`, `/close`,
+`/cancel`, or the Copilot's purchase-order tools): `fulfilment.state` goes
+sent -> acknowledged -> partially_received -> received -> closed (or
+cancelled); cancelling a sent order proposes the cancellation email to the
+supplier (`send_po_cancellation`, after approval). The RFQ shows as
+`completed` once every order is closed or cancelled.
 
 ```bash
 uv run python -m evals.flow --mock     # scripted model: checks the harness (free)

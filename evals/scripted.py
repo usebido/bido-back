@@ -23,6 +23,8 @@ from bido_back.agents.catalog.contracts import (
     FollowupEmailOutput,
     NegotiationEmailInput,
     NegotiationEmailOutput,
+    PoResponseInput,
+    PoResponseOutput,
     QuoteExtractionInput,
     QuoteExtractionOutput,
     RfqEmailLocalizeInput,
@@ -41,6 +43,8 @@ class ScriptedModel:
     def __init__(self) -> None:
         self.intake: dict[str, RfqIntakeOutput] = {}
         self.extraction: dict[str, QuoteExtractionOutput] = {}
+        # A supplier's reply to a purchase order (its body) -> what a correct reader says.
+        self.po_responses: dict[str, PoResponseOutput] = {}
         self.calls: list[str] = []
         self._scripts: dict[str, Script] = {
             "rfq_intake": self._intake,
@@ -49,6 +53,7 @@ class ScriptedModel:
             "rfq_followup_writer": followup,
             "rfq_negotiation_writer": negotiation,
             "award_notice_writer": notice,
+            "po_response_reader": self._po_response,
         }
 
     def _intake(self, task: RfqIntakeInput) -> RfqIntakeOutput | None:
@@ -56,6 +61,9 @@ class ScriptedModel:
 
     def _extract(self, task: QuoteExtractionInput) -> QuoteExtractionOutput | None:
         return self.extraction.get(task.email_body.strip())
+
+    def _po_response(self, task: PoResponseInput) -> PoResponseOutput | None:
+        return self.po_responses.get(task.email_body.strip())
 
     async def stream_run(
         self, definition: Any, input: BaseModel, context: ToolContext, **_: object
