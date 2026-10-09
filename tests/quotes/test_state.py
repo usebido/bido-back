@@ -3,6 +3,7 @@
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any, cast
 from uuid import uuid4
 
 from bido_back.agents.catalog.contracts import (
@@ -371,3 +372,27 @@ def test_withdrawing_the_whole_offer_withdraws_its_extras() -> None:
     )
     state = reconcile([first, event(withdrawal, 1, parent=first)])
     assert state.quote.output.extra_offers == []
+
+
+def test_stored_quotes_keep_conversions_and_restore_fields_they_predate() -> None:
+    body = BODY + "Lieferzeit 30 AT.\n"
+    quote = validate(output(line(lead_time_days=ev("30", "Lieferzeit 30 AT"))), body=body)
+    stored = store_quote(quote)
+
+    restored = restore_quote(stored)
+
+    lead_time = restored.lines[0].fields["lead_time_days"]
+    assert lead_time.parsed == 42
+    assert lead_time.conversion == quote.lines[0].fields["lead_time_days"].conversion
+    assert restored == quote
+
+    # A quote stored before a field joined the contract restores with it absent.
+    header = cast(dict[str, Any], stored["header"])
+    del header["delivery_location"]
+    for raw_line in cast(list[dict[str, Any]], stored["lines"]):
+        del raw_line["fields"]["price_basis_quantity"]
+    older = restore_quote(stored)
+    assert older.parsed("delivery_location") is None
+    assert older.header["delivery_location"].extracted.value is None
+    assert older.lines[0].parsed("price_basis_quantity") is None
+    assert not older.needs_review

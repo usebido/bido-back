@@ -22,15 +22,25 @@ from bido_back.agents.tools import ToolError
 from bido_back.auth import Principal
 from bido_back.comparison.loader import load_comparison
 from bido_back.db import tenant_session
-from bido_back.db.models import Attachment, AuditEvent, Invite, Message, Proposal, ProposalLine
+from bido_back.db.models import (
+    Attachment,
+    AuditEvent,
+    Invite,
+    Message,
+    Proposal,
+    ProposalLine,
+    RfqLine,
+)
 from bido_back.onboarding import service as onboarding
+from bido_back.rfqs import service
 from bido_back.rfqs.activity import rfq_activity
 from bido_back.rfqs.schemas import RfqCreated
 from tests.approvals.conftest import People
 from tests.documents.fixtures import PdfPage, PdfText, build_pdf
 from tests.quotes.test_extract_job import FakeStorage
+from tests.rfqs.conftest import FakeIntake
 
-from .conftest import buyer_of, context_of, invite, make_rfq, make_tools, supplier
+from .conftest import buyer_of, context_of, invite, make_tools, supplier
 
 pytestmark = pytest.mark.db
 
@@ -48,7 +58,7 @@ QUOTE_LINES = (
     "Moeda: BRL",
     "Condicao de pagamento: 28 DDL",
     "Validade da proposta: 31/12/2026",
-    "Incoterm: CIF Joinville",
+    "Incoterm: DAP Curitiba",
 )
 
 
@@ -94,7 +104,8 @@ def quote_output(
         "declined": False,
         "currency": _pdf("BRL", "Moeda: BRL", attachment),
         "valid_until": _pdf("2026-12-31", "Validade da proposta: 31/12/2026", attachment),
-        "incoterm": _pdf("CIF", "Incoterm: CIF Joinville", attachment),
+        "incoterm": _pdf("DAP", "Incoterm: DAP Curitiba", attachment),
+        "delivery_location": _pdf("Curitiba", "Incoterm: DAP Curitiba", attachment),
         "payment_terms": _pdf("28 DDL", "Condicao de pagamento: 28 DDL", attachment),
         "lines": list(lines) or [line_output(attachment=attachment)],
         "missing_fields": ["origin_country"],
@@ -175,7 +186,11 @@ class Scene:
 async def scene_of(engine: AsyncEngine, people: People) -> Scene:
     principal = buyer_of(people)
     storage = FakeStorage()
-    rfq = await make_rfq(engine, principal)
+    # In the quote's currency, with line 1 asking DAP Curitiba (tests.rfqs.conftest):
+    # the scripted quote answers the RFQ exactly, so the clean path stays clean.
+    rfq = await service.create_rfq_from_text(
+        engine, principal, "Need MLCC", FakeIntake(), currency="BRL"
+    )
     seller = await supplier(engine, principal, SUPPLIER)
     invite_id = await invite(engine, principal, rfq, seller)
     scene = Scene(principal, rfq, seller.id, invite_id, uuid4(), storage, engine)
@@ -214,7 +229,7 @@ async def test_the_preview_reads_the_quote_and_stores_nothing(
     assert [s.name for s in preview.suppliers] == [SUPPLIER]
     assert preview.suppliers[0].email is not None
     assert preview.files == ["proposta.pdf"]
-    assert (preview.currency, preview.payment_terms, preview.incoterm) == ("BRL", "28 DDL", "CIF")
+    assert (preview.currency, preview.payment_terms, preview.incoterm) == ("BRL", "28 DDL", "DAP")
     assert preview.valid_until == date(2026, 12, 31)
     [quoted] = preview.quoted
     assert quoted.rfq_line_position == 1 and quoted.description == "MLCC 100nF 50V X7R 0603"
@@ -274,7 +289,7 @@ async def test_confirming_stores_the_quote_as_an_email_reply_would(
     assert (proposal.currency, proposal.payment_terms, proposal.incoterm) == (
         "BRL",
         "28 DDL",
-        "CIF",
+        "DAP",
     )
     assert proposal.valid_until == date(2026, 12, 31)
     assert proposal.fields["_extraction"]["origin"] == "copilot_upload"
@@ -359,6 +374,106 @@ async def test_a_line_the_rfq_does_not_have_is_an_issue_and_stored_for_review(
     assert out.version == 1 and out.needs_review is True
     [(_, [line])] = await scene.proposals()
     assert line.rfq_line_id is None and line.needs_review is True
+
+
+# What the supplier's PDF said for RFQ-3 in production (2026-10-09): 50 pcs CIF in
+# 25 business days, against a line asking 1,500 pcs FOB Joinville-SC.
+RFQ3_LINES = (
+    "ARTHUR TESTE MOTORES LTDA",
+    "PROPOSTA COMERCIAL N. 2026-0421 - Ref. RFQ-3",
+    "Item 1 - MLCC 100nF - MPN GRM188R71H104KA93D",
+    "Quantidade: 50 pcs",
+    "Preco unitario: R$ 1.284,50",
+    "Preco total: R$ 64.225,00",
+    "Prazo de entrega: 25 dias uteis apos pedido - entrega CIF Joinville/SC",
+    "Condicao de pagamento: 28 DDL",
+    "Garantia: 12 meses",
+    "Validade da proposta: 30 dias",
+)
+
+
+def rfq3_output(attachment: str = "proposta-rfq3.pdf") -> QuoteExtractionOutput:
+    lead = "Prazo de entrega: 25 dias uteis apos pedido - entrega CIF Joinville/SC"
+    return quote_output(
+        {
+            **line_output(attachment=attachment),
+            "min_quantity": _pdf("50", "Quantidade: 50 pcs", attachment),
+            "unit_price": _pdf("1284.50", "Preco unitario: R$ 1.284,50", attachment),
+            "unit": _pdf("pcs", "Quantidade: 50 pcs", attachment),
+            "lead_time_days": _pdf("25", lead, attachment),
+        },
+        attachment=attachment,
+        currency=_pdf("BRL", "Preco unitario: R$ 1.284,50", attachment),
+        # The model computed the date from "30 dias": the file does not state it.
+        valid_until=_pdf("2026-11-08", "Validade da proposta: 30 dias", attachment),
+        incoterm=_pdf("CIF", "entrega CIF Joinville/SC", attachment),
+        delivery_location=_pdf("Joinville/SC", "entrega CIF Joinville/SC", attachment),
+        missing_fields=[],
+    )
+
+
+async def test_the_preview_lists_what_differs_from_the_rfq_and_business_day_lead_times(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    scene = await scene_of(app_engine, copilot_rows)
+    async with tenant_session(app_engine, scene.principal.tenant_id) as session:
+        first = await session.scalar(
+            select(RfqLine).where(RfqLine.rfq_id == scene.rfq.id, RfqLine.position == 1)
+        )
+        assert first is not None
+        first.quantities = [1500]
+        first.incoterm = "FOB"
+        first.delivery_location = "Joinville-SC"
+    upload_id = await scene.upload("proposta-rfq3.pdf", quote_pdf(RFQ3_LINES))
+    tools = make_tools(
+        app_engine,
+        attachment_ids=(upload_id,),
+        storage=scene.storage,
+        quote_extractor=FakeExtractor(rfq3_output()),
+    )
+    ctx = context_of(scene.principal)
+    args: dict[str, object] = {
+        "rfq": scene.rfq.ref,
+        "supplier": SUPPLIER,
+        "upload_ids": [str(upload_id)],
+    }
+
+    proposed = await tools.call(ctx, "register_quote", **args)
+
+    preview = proposed.preview
+    [quoted] = preview.quoted
+    assert quoted.quantity == Decimal(50) and quoted.unit_price == Decimal("1284.50")
+    # 25 business days, stored as calendar days by the written rule (5 = 7, rounded up).
+    assert quoted.lead_time_days == 35
+    assert quoted.issues == ["quantity_mismatch"]
+    assert preview.incoterm == "CIF" and preview.currency == "BRL"
+    # Never "none": the RFQ asked 1,500 pcs FOB; the file quotes 50 pcs CIF.
+    assert "line 1: quantity_mismatch" in preview.issues
+    assert "incoterm_mismatch" in preview.issues
+    assert "valid_until:not_grounded" in preview.issues
+    assert "delivery_location_mismatch" not in preview.issues  # Joinville/SC is Joinville-SC
+    assert "currency_mismatch" not in preview.issues  # the RFQ is in BRL
+    assert proposed.issues == preview.issues
+
+    later = replace(ctx, run_id=uuid4())
+    out = await tools.call(later, "register_quote", **args, proposal_id=str(proposed.proposal_id))
+
+    # Registered all the same, held for review, with the differences on the record.
+    assert out.version == 1 and out.needs_review is True and out.issues == preview.issues
+    [(proposal, [line])] = await scene.proposals()
+    assert proposal.incoterm == "CIF"
+    assert "incoterm_mismatch" in proposal.fields["_review"]["issues"]
+    assert proposal.fields["delivery_location"]["parsed"] == "Joinville/SC"
+    assert line.needs_review is True and line.min_quantity == Decimal(50)
+    assert "quantity_mismatch" in line.fields["_review"]["issues"]
+    assert line.lead_time_days == 35
+    assert line.fields["lead_time_days"]["value"] == "25"
+    assert line.fields["lead_time_days"]["conversion"] == {
+        "quoted": 25,
+        "unit": "business_days",
+        "calendar_days": 35,
+        "rule": "ceil(business_days * 7 / 5)",
+    }
 
 
 async def test_the_same_file_registers_once_and_another_file_is_the_next_version(
