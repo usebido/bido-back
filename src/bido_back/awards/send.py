@@ -285,6 +285,7 @@ class _SendPurchaseOrder:
             )
             po.status = "sent"
             po.sent_at = datetime.now(UTC)
+            po.fulfilment_state = "sent"
             po.message_id_header = message_id
             session.add(
                 AuditEvent(

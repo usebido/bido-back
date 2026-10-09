@@ -23,7 +23,27 @@ __all__ = ["AwardApprovalView", "AwardLine", "DecimalText", "ThreadEmailApproval
 
 Subject = Annotated[str, StringConstraints(min_length=1, max_length=300, pattern=r"^[^\r\n]*$")]
 PurchaseOrderStatus = Literal["draft", "pending_approval", "sent"]
+# The order after the send (`fulfilment.state`): `not_sent` while the send is
+# a draft or waits for approval; then sent -> acknowledged -> partially_received
+# -> received; `closed` (fully received, or short with a reason) and `cancelled`
+# are terminal. `status` stays the send's own enum.
+FulfilmentState = Literal[
+    "not_sent",
+    "sent",
+    "acknowledged",
+    "partially_received",
+    "received",
+    "closed",
+    "cancelled",
+]
+OPEN_FULFILMENT_STATES: frozenset[str] = frozenset(
+    {"sent", "acknowledged", "partially_received", "received"}
+)
 AwardState = Literal["none", "pending_approval", "awarded"]
+Reason = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+ShortRef = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=120)]
+Note = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2000)]
+ReceiptQuantity = Annotated[Decimal, Field(gt=0, max_digits=18, decimal_places=4)]
 
 
 # --- Requests ------------------------------------------------------------------------
@@ -47,6 +67,57 @@ class AwardRequest(BaseModel):
     lines: list[AwardSelection] = Field(default_factory=list[AwardSelection], max_length=200)
     # Required when any selection differs from the recommendation.
     reason: Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)] | None = None
+
+
+class AcknowledgeRequest(BaseModel):
+    """The supplier confirmed the order; the buyer records it."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    acknowledged_on: date | None = Field(
+        default=None, description="When the supplier confirmed; today when omitted"
+    )
+    supplier_order_ref: ShortRef | None = Field(
+        default=None, description="The supplier's own order or confirmation number"
+    )
+    note: Note | None = None
+
+
+class ReceiptLineRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    line_id: UUID = Field(description="The PO line (`lines[].id` of the purchase order)")
+    quantity: ReceiptQuantity = Field(description="Received now, in the line's unit")
+
+
+class ReceiptRequest(BaseModel):
+    """One delivery: what arrived per line, when, and the invoice it came with."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    received_on: date | None = Field(default=None, description="Delivery date; today if omitted")
+    invoice_number: ShortRef | None = None
+    invoice_date: date | None = None
+    note: Note | None = None
+    lines: list[ReceiptLineRequest] = Field(min_length=1, max_length=200)
+
+
+class CloseRequest(BaseModel):
+    """Close a fully received PO; or close it short, with a reason, recording the shortfall."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    short: bool = Field(
+        default=False,
+        description="Close although not everything was received (the rest is given up)",
+    )
+    reason: Reason | None = Field(default=None, description="Required when closing short")
+
+
+class CancelRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Reason
 
 
 # --- Approved args -------------------------------------------------------------------
@@ -106,7 +177,49 @@ class ThreadEmailResult(BaseModel):
 # --- Views ---------------------------------------------------------------------------
 
 
+class PurchaseOrderFulfilment(BaseModel):
+    """Where the order stands after the send, and who moved it there."""
+
+    state: FulfilmentState
+    open: bool = Field(description="Sent and neither closed nor cancelled: still expecting goods")
+    ordered_quantity: Decimal = Field(description="Sum of the lines' ordered quantities")
+    received_quantity: Decimal = Field(description="Sum of what every receipt brought so far")
+    receipts_count: int = 0
+    acknowledged_at: datetime | None = None
+    acknowledged_by: UUID | None = None
+    supplier_order_ref: str | None = None
+    acknowledgement_note: str | None = None
+    closed_at: datetime | None = None
+    closed_by: UUID | None = None
+    closed_short: bool = False
+    close_reason: str | None = None
+    cancelled_at: datetime | None = None
+    cancelled_by: UUID | None = None
+    cancel_reason: str | None = None
+
+
+class ReceiptLineView(BaseModel):
+    line_id: UUID
+    position: int
+    description: str
+    unit: str
+    quantity: Decimal
+
+
+class ReceiptView(BaseModel):
+    id: UUID
+    purchase_order_id: UUID
+    received_on: date
+    invoice_number: str | None
+    invoice_date: date | None
+    note: str | None
+    recorded_by: UUID
+    created_at: datetime
+    lines: list[ReceiptLineView]
+
+
 class IssuedPurchaseOrderLineView(BaseModel):
+    id: UUID = Field(description="Pass it as `line_id` in a receipt")
     position: int
     rfq_line_id: UUID | None
     proposal_line_id: UUID | None
@@ -118,6 +231,10 @@ class IssuedPurchaseOrderLineView(BaseModel):
     line_total: Decimal
     need_by: date | None
     lead_time_days: int | None
+    received_quantity: Decimal = Field(default=Decimal(0), description="Received so far")
+    remaining_quantity: Decimal = Field(
+        default=Decimal(0), description="Ordered minus received; what is still expected"
+    )
 
 
 class PurchaseOrderView(BaseModel):
@@ -137,6 +254,9 @@ class PurchaseOrderView(BaseModel):
     sent_at: datetime | None
     # The pending send approval, while one waits.
     send_approval_id: UUID | None = None
+    fulfilment: PurchaseOrderFulfilment = Field(
+        description="The order after the send; see `fulfilment.state`"
+    )
     lines: list[IssuedPurchaseOrderLineView]
 
 
@@ -151,6 +271,9 @@ class PurchaseOrderSummary(BaseModel):
     total: Decimal
     created_at: datetime
     sent_at: datetime | None
+    fulfilment: PurchaseOrderFulfilment = Field(
+        description="The order after the send; see `fulfilment.state`"
+    )
 
 
 class AwardView(BaseModel):

@@ -54,6 +54,7 @@ from bido_back.comparison.loader import load_comparison
 from bido_back.comparison.policy import ComparisonPolicy
 from bido_back.copilot import proposals, queries
 from bido_back.copilot.journey_tools import journey_tools, reply_by_explained
+from bido_back.copilot.order_tools import order_tools
 from bido_back.copilot.proposals import (
     PROPOSAL_ARG,
     AwaitingConfirmation,
@@ -2549,4 +2550,5 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             artifact_kind="approvals",
         ),
         *journey_tools(deps),
+        *order_tools(deps),
     )

@@ -211,6 +211,39 @@ def _event_item(
             actor = actor or BIDO
         case "purchase_order.sent":
             kind, summary = "email", f"Purchase order sent{to}"
+        case "purchase_order.acknowledged":
+            kind = "user" if data.get("source") != "email" else "email"
+            by = f" by {supplier}" if supplier else ""
+            theirs = data.get("supplier_order_ref")
+            ref = f" (their ref {theirs})" if isinstance(theirs, str) and theirs else ""
+            summary = f"Purchase order {_po_ref(data)} acknowledged{by}{ref}"
+        case "purchase_order.received":
+            kind = "user"
+            what = "fully received" if data.get("state") == "received" else "partially received"
+            summary = f"Purchase order {_po_ref(data)} {what}: {_received_lines(data)}"
+            invoice = data.get("invoice_number")
+            if isinstance(invoice, str) and invoice:
+                summary += f" (invoice {invoice})"
+        case "purchase_order.closed":
+            kind = "user"
+            if data.get("short"):
+                short = data.get("shortfall")
+                count = len(cast(list[object], short)) if isinstance(short, list) else 0
+                summary = (
+                    f"Purchase order {_po_ref(data)} closed short{_count(count, 'line', ': ')}"
+                )
+                summary += " outstanding" if count else ""
+            else:
+                summary = f"Purchase order {_po_ref(data)} closed"
+        case "purchase_order.cancelled":
+            kind, summary = "user", f"Purchase order {_po_ref(data)} cancelled"
+        case "rfq.completed":
+            kind = "system"
+            closed, cancelled = data.get("closed"), data.get("cancelled")
+            summary = f"RFQ completed{_count(closed, 'purchase order', ': ')} closed"
+            if isinstance(cancelled, int) and cancelled:
+                summary += f", {cancelled} cancelled"
+            actor = actor or BIDO
         case "award.notice_sent":
             kind, summary = "email", f"Not-selected notice sent{to}"
         case "rfq.awarded":
@@ -288,6 +321,28 @@ def _event_item(
         supplier_name=supplier,
         summary=summary,
     )
+
+
+def _po_ref(data: Mapping[str, Any]) -> str:
+    ref = data.get("purchase_order_ref")
+    return ref if isinstance(ref, str) and ref else "?"
+
+
+def _received_lines(data: Mapping[str, Any]) -> str:
+    """`line 1: 300 of 500, line 2: 10 of 10` from the receipt event's lines."""
+    lines = data.get("lines")
+    if not isinstance(lines, list):
+        return "no lines"
+    parts: list[str] = []
+    for item in cast(list[object], lines):
+        if not isinstance(item, Mapping):
+            continue
+        line = cast(Mapping[str, object], item)
+        parts.append(
+            f"line {line.get('position', '?')}: {_value(line.get('received'))} of "
+            f"{_value(line.get('ordered'))}"
+        )
+    return ", ".join(parts) or "no lines"
 
 
 def _count(value: object, noun: str, prefix: str) -> str:
