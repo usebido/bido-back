@@ -28,9 +28,16 @@ The buyer, in Portuguese, in one conversation:
    e-mails go out to the three suppliers.
 4. replies: the scripted suppliers answer over four simulated days
    (`evals.journey_suppliers.SCRIPT`): the extracted state must follow the
-   business rules after every e-mail.
-5. negotiation: the counter-offers and best-and-final requests the sweeps send
-   under the mandate, against golden asks from the buyer's rules.
+   business rules after every e-mail. A negotiation sweep runs after each day's
+   replies; the buyer's view of the negotiation is read right before and right
+   after each sweep.
+5. negotiation: what the sweeps decided, sent and showed under the mandate,
+   graded against the buyer's negotiation rules as properties
+   (`evals.journey_negotiation`: one request per round, one best-and-final
+   request with a common cut-off, asks within the limits, no concession without
+   a move, the no-progress stop, the late-line date ask, the buyer-visible
+   state), not against a golden sequence: which day a supplier's offer becomes
+   usable varies in live runs.
 6. comparison: "Feche e me mostre a comparação final": the outcome per line,
    the extra kept apart, explicit gaps, and no award, PO or PR.
 
@@ -58,7 +65,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as clock
-from decimal import ROUND_FLOOR, Decimal, InvalidOperation
+from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final, Protocol, cast
 from uuid import UUID, uuid4
@@ -88,6 +95,7 @@ from bido_back.db.models import (
     MandateSend,
     Message,
     NegotiationMandate,
+    NegotiationMessage,
     Proposal,
     ProposalLine,
     Rfq,
@@ -103,7 +111,9 @@ from bido_back.intake.service import IngestResult
 from bido_back.mandates import service as mandates
 from bido_back.mandates.policy import commitment_language
 from bido_back.mandates.schemas import ApproveMandateArgs, ProposeMandateRequest
-from bido_back.negotiation.schemas import LineLimitsUpdate
+from bido_back.negotiation.decision import decision_of
+from bido_back.negotiation.schemas import LineLimitsUpdate, RfqNegotiation
+from bido_back.negotiation.service import get_negotiation
 from bido_back.onboarding.service import store_upload
 from bido_back.purchasing.sources.contracts import PlanningScope, SourceAssessment
 from bido_back.purchasing.sources.mapping import default_mapper
@@ -115,6 +125,7 @@ from bido_back.rfqs import suppliers as supplier_service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
 from bido_back.settings import get_settings
+from evals import journey_negotiation as rules
 from evals.harness import Env, MemoryStorage, Mode
 from evals.journey_suppliers import (
     DAYS,
@@ -473,7 +484,8 @@ class Snapshot:
 
 @dataclass(slots=True)
 class SweepRecord:
-    """One negotiation sweep: who had replied that day, what was drafted, what went out."""
+    """One negotiation sweep: who had replied that day, what was drafted, what went out,
+    and what the buyer saw of the negotiation right before and right after it."""
 
     day: int
     at: datetime
@@ -482,6 +494,8 @@ class SweepRecord:
     # The writers' optional notes (code renders the emails).
     notes: list[str]
     sent: list[Captured]
+    before: RfqNegotiation | None = None
+    after: RfqNegotiation | None = None
 
 
 @dataclass(slots=True)
