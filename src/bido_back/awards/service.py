@@ -9,8 +9,9 @@ default; a second person in four-eyes tenants), and the worker executes it once.
   reason is required) and proposes `award_rfq`. Only an `open` RFQ with
   answers can be awarded, once.
 - `request_notices`: after the award, one polite "not selected" email per
-  supplier that took part and did not win, written by the notice writer in
-  the supplier's language, each proposed as `send_award_notice`.
+  supplier that took part and did not win, rendered by code in the standard
+  layout and the thread's language (`bido_back.supplier_email`; the notice
+  writer may only add an optional note), each proposed as `send_award_notice`.
 - `request_po_send`: proposes `send_purchase_order` with the PO email (code
   writes it, in the supplier's language) and the hash of the PO it carries.
 """
@@ -28,7 +29,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.agents.approvals import ApprovalProposal
 from bido_back.agents.catalog.contracts import AwardNoticeInput
-from bido_back.agents.catalog.definitions import award_notice_problems
 from bido_back.agents.context import ToolContext
 from bido_back.agents.events import args_hash
 from bido_back.approvals.errors import ApprovalConflict
@@ -81,15 +81,21 @@ from bido_back.db.models import (
     AwardNotice,
     Invite,
     IssuedPurchaseOrder,
+    Message,
+    Proposal,
     Rfq,
     Supplier,
     Tenant,
     User,
 )
 from bido_back.rfqs.errors import AgentFailed, InvalidState, NotFound, RfqError
-from bido_back.rfqs.language import supplier_email_language
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.service import buyer_display_name
+from bido_back.supplier_email.builders import Header, not_selected_email
+from bido_back.supplier_email.checks import GateContext, problems_text
+from bido_back.supplier_email.compose import Refused, compose
+from bido_back.supplier_email.language import thread_locale
+from bido_back.supplier_email.model import Answered, Signature, SupplierEmail
 
 logger = logging.getLogger(__name__)
 
@@ -293,8 +299,27 @@ class _NoticeDraft:
     supplier_name: str
     sender_user_id: UUID
     to: str
-    subject: str
+    email: SupplierEmail
+    gate: GateContext
+    # What the notice writer sees when it may add its optional note.
     task: AwardNoticeInput
+
+
+async def _answered(session: AsyncSession, invite: Invite) -> Answered | None:
+    """The supplier's latest offer, by date; our RFQ email when it never sent one."""
+    proposal = await session.scalar(
+        select(Proposal)
+        .where(Proposal.invite_id == invite.id)
+        .order_by(Proposal.version.desc())
+        .limit(1)
+    )
+    if proposal is not None:
+        received = await session.scalar(
+            select(Message.occurred_at).where(Message.id == proposal.message_id)
+        )
+        if received is not None:
+            return Answered("offer", received.date())
+    return Answered("request", invite.sent_at.date()) if invite.sent_at else None
 
 
 async def request_notices(
@@ -323,6 +348,12 @@ async def request_notices(
         tenant = await session.get(Tenant, principal.tenant_id)
         if tenant is None:
             raise NotFound("tenant not found")
+        rows = await session.execute(
+            select(Invite.id, Supplier.name)
+            .join(Supplier, Supplier.id == Invite.supplier_id)
+            .where(Invite.rfq_id == rfq_id)
+        )
+        names = {invite_id: name for invite_id, name in rows}
         for invite in invites:
             if invite.id in winners:
                 continue
@@ -336,20 +367,35 @@ async def request_notices(
             if sender is None or not thread.contact_email or invite.thread_message_id is None:
                 skipped.append(invite.id)
                 continue
+            buyer_name = await buyer_display_name(session, sender, tenant.name)
+            header = Header(
+                rfq_ref=thread.rfq.ref,
+                subject=thread.subject,
+                locale=thread_locale(thread.language, thread.supplier.country),
+                supplier_name=thread.supplier.name,
+                buyer_company=tenant.name,
+                signature=Signature(name=buyer_name, company=tenant.name),
+            )
             drafts.append(
                 _NoticeDraft(
                     invite_id=invite.id,
                     supplier_name=thread.supplier.name,
                     sender_user_id=sender.id,
                     to=thread.contact_email,
-                    subject=thread.subject,
+                    email=not_selected_email(header, answered=await _answered(session, invite)),
+                    gate=GateContext(
+                        thread_language=thread.language,
+                        first_subject=thread.first_subject,
+                        rfq_title=thread.rfq.title,
+                        other_suppliers=tuple(n for i, n in names.items() if i != invite.id),
+                    ),
                     task=AwardNoticeInput(
                         rfq_ref=thread.rfq.ref,
                         rfq_title=thread.rfq.title,
                         buyer_company=tenant.name,
-                        buyer_name=await buyer_display_name(session, sender, tenant.name),
+                        buyer_name=buyer_name,
                         supplier_name=thread.supplier.name,
-                        supplier_language=supplier_email_language(thread.supplier),
+                        supplier_language=thread.language,
                     ),
                 )
             )
@@ -360,25 +406,38 @@ async def request_notices(
         context = ToolContext(
             tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4()
         )
-        try:
-            output = await writer(draft.task, context)
-        except AgentFailed:
-            logger.warning("notice writer failed for invite %s", draft.invite_id)
+
+        async def note(draft: _NoticeDraft = draft, context: ToolContext = context) -> str:
+            try:
+                return (await writer(draft.task, context)).note
+            except AgentFailed:
+                logger.warning("notice writer failed for invite %s", draft.invite_id)
+                return ""
+
+        composed = await compose(draft.email, draft.gate, note)
+        if isinstance(composed, Refused):
+            logger.warning(
+                "notice for invite %s refused: %s",
+                draft.invite_id,
+                problems_text(composed.problems),
+            )
             skipped.append(draft.invite_id)
             continue
-        problems = award_notice_problems(draft.task, output)
-        if problems:
-            logger.warning("notice draft for invite %s refused: %s", draft.invite_id, problems)
-            skipped.append(draft.invite_id)
-            continue
+        if composed.note_dropped:
+            logger.info(
+                "notice note left out invite=%s problems=%s",
+                draft.invite_id,
+                problems_text(composed.note_dropped),
+            )
         row_id = notice_id(draft.invite_id)
         args = SendAwardNoticeArgs(
             notice_id=row_id,
             invite_id=draft.invite_id,
             sender_user_id=draft.sender_user_id,
             to=[draft.to],
-            subject=draft.subject,
-            body=output.body.strip(),
+            subject=composed.rendered.subject,
+            body=composed.rendered.text,
+            html_body=composed.rendered.html,
         )
         approval_id = await _propose(
             db,
@@ -512,7 +571,7 @@ async def request_po_send(
         doc = await po_document(session, po)
         body = po_email_body(
             doc,
-            supplier_email_language(thread.supplier),
+            thread.language,
             await buyer_display_name(session, sender, tenant.name),
         )
         call_id = po_send_proposal_ids(po.id)[1]
@@ -598,6 +657,7 @@ async def queue_details(session: AsyncSession, approvals: list[Approval]) -> Que
                     cc=list(email.cc),
                     subject=email.subject,
                     body=email.body,
+                    html_body=email.html_body,
                 )
         except ValueError:
             logger.error("approval %s has args that do not validate", approval.id)

@@ -11,8 +11,10 @@ runs this handler once, with the APPROVED arguments.
 
 It goes out from the connected mailbox of the buyer who sent the RFQ email
 (`sender_user_id`, also the approval's requester), as a reply in the invite's
-thread: In-Reply-To / References point at the RFQ email's Message-ID, and the
-mailbox sender puts it in the same provider thread.
+thread: In-Reply-To is the latest message with the supplier and References run
+from the RFQ email's Message-ID to it (`supplier_email.threading`), so the
+mailbox sender puts it in the same provider thread. The approved text and HTML
+parts (`html_body`, rendered by code) go out as multipart/alternative.
 
 Stale proposals are not sent: a row no longer `proposed` (a reply canceled
 it), a chase whose supplier has sent an offer or declined, a clarification
@@ -60,6 +62,7 @@ from bido_back.followups.ledger import mark_asked, reopen_questions, withdraw_as
 from bido_back.rfqs.errors import InvalidState, NotFound
 from bido_back.rfqs.schemas import EmailAddress
 from bido_back.rfqs.send import RfqActDeps
+from bido_back.supplier_email.threading import reply_headers
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +106,9 @@ class SendFollowupEmailArgs(BaseModel):
     cc: list[EmailAddress] = Field(default_factory=list[str], max_length=10)
     subject: Annotated[str, StringConstraints(min_length=1, max_length=300, pattern=r"^[^\r\n]*$")]
     body: str = Field(min_length=1, max_length=20_000)
+    # The same email as HTML. Left out of the arguments when unset: proposals made before
+    # it existed keep their hash, and go out as text only.
+    html_body: str | None = Field(default=None, max_length=200_000, exclude_if=lambda v: v is None)
 
 
 class SendFollowupEmailResult(BaseModel):
@@ -261,6 +267,9 @@ class _SendFollowupEmail:
                 .order_by(Contact.created_at)
                 .limit(1)
             )
+            in_reply_to, references = await reply_headers(
+                session, args.invite_id, claim.thread_message_id
+            )
             sender = await self._deps.mailbox_senders(session, ctx.tenant_id, buyer.id)
             mailbox_address: object = getattr(sender, "address", None)
             sent = await sender.send(
@@ -273,10 +282,11 @@ class _SendFollowupEmail:
                     cc=tuple(args.cc),
                     subject=args.subject,
                     text_body=args.body,
+                    html_body=args.html_body,
                     message_id=claim.message_id,
                     possibly_sent=claim.possibly_sent,
-                    in_reply_to=claim.thread_message_id,
-                    references=(claim.thread_message_id,),
+                    in_reply_to=in_reply_to,
+                    references=references,
                 )
             )
             message_id = sent.message_id or claim.message_id
@@ -287,7 +297,7 @@ class _SendFollowupEmail:
                     invite_id=args.invite_id,
                     direction="out",
                     message_id_header=message_id,
-                    in_reply_to=claim.thread_message_id,
+                    in_reply_to=in_reply_to,
                     from_contact_id=buyer_contact.id if buyer_contact else None,
                     subject=args.subject,
                     body_text=args.body,

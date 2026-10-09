@@ -31,14 +31,21 @@ per tenant:
      before are never asked again: they need the buyer's decision. A held offer
      (its latest reply could not be applied) needs the buyer's decision first.
 
-A due follow-up is written by the follow-up writer agent, checked
-(`followup_email_problems`), and recorded as a PENDING approval of
-`send_followup_email` requested on behalf of the buyer who sent the RFQ email,
-exactly like that first send; the worker sends it once, in the invite's thread
+A counter-offer or best-and-final request the supplier has not answered is also
+its open request: nothing else goes out meanwhile, and the negotiation decides
+what follows it (no reminder from here).
+
+A due follow-up is rendered by code in the standard layout
+(`bido_back.supplier_email`, built by `bido_back.followups.emails`: a chase is
+the layout's reminder of the RFQ, a clarification asks exactly its open items, a
+reminder asks them again), in the language of the thread's RFQ email, with a
+reply-by date (`supplier_email.deadlines`); the follow-up writer agent may only
+add an optional note. It is checked by the send gate (`supplier_email.checks`)
+and recorded as a PENDING approval of `send_followup_email` requested on behalf
+of the buyer who sent the RFQ email, exactly like that first send: a person
+decides, and the worker sends it once, in the invite's thread
 (`bido_back.followups.send`). A clarification records its asks in the ledger
-with the approval; they open when it goes out. Each clarification and reminder
-carries a reply-by date: two business days in the supplier's calendar, never
-after the negotiation deadline.
+with the approval; they open when it goes out.
 
 Intake calls `cancel_on_reply` (a stored reply makes a proposed chase or
 reminder moot) and `pause_on_auto_reply` (an out-of-office) in its own
@@ -49,7 +56,7 @@ Logs carry ids and counts only.
 """
 
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Final, cast
@@ -62,7 +69,6 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.agents.approvals import ApprovalProposal
 from bido_back.agents.catalog.contracts import FollowupEmailInput, FollowupItem, FollowupKind
-from bido_back.agents.catalog.definitions import followup_email_problems
 from bido_back.agents.context import ToolContext
 from bido_back.agents.events import args_hash
 from bido_back.approvals.errors import ApprovalConflict
@@ -76,7 +82,9 @@ from bido_back.db.models import (
     Invite,
     Message,
     Proposal,
+    ProposalLine,
     Rfq,
+    RfqLine,
     Supplier,
     SupplierQuestion,
     Tenant,
@@ -86,6 +94,7 @@ from bido_back.followups import ledger
 from bido_back.followups import missing as missing_rules
 from bido_back.followups.agents import FollowupWriter
 from bido_back.followups.calendar import add_business_days, is_business_day
+from bido_back.followups.emails import clarification_of, quoted_lead_time
 from bido_back.followups.hooks import AUTOMATIC, cancel_followups
 from bido_back.followups.missing import ExpectedDelivery, OpenItem
 from bido_back.followups.schemas import (
@@ -111,10 +120,26 @@ from bido_back.followups.send import (
     followup_proposal_ids,
     published_kind,
 )
+from bido_back.quotes.terms import line_terms
 from bido_back.rfqs.errors import AgentFailed, NotFound
-from bido_back.rfqs.language import supplier_email_language
-from bido_back.rfqs.send import SEND_RFQ_EMAIL, send_proposal_ids, subject_marker
+from bido_back.rfqs.send import SEND_RFQ_EMAIL, send_proposal_ids
 from bido_back.rfqs.service import buyer_display_name
+from bido_back.supplier_email.builders import Header, email_line, reminder_email
+from bido_back.supplier_email.builders import RequestedLine as RequestedEmailLine
+from bido_back.supplier_email.checks import GateContext, problems_text
+from bido_back.supplier_email.compose import Refused, compose
+from bido_back.supplier_email.deadlines import reply_by_for
+from bido_back.supplier_email.language import thread_language, thread_locale
+from bido_back.supplier_email.model import (
+    Answered,
+    EmailType,
+    LeadTime,
+    ReplyBy,
+    Signature,
+    SupplierEmail,
+)
+from bido_back.supplier_email.render import RenderedEmail
+from bido_back.supplier_email.subject import reply_subject
 
 logger = logging.getLogger(__name__)
 
@@ -122,9 +147,6 @@ Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
 # Chases that count toward `max_chases`: sent, waiting, or turned down.
 _COUNTED: Final = ("proposed", "sent", "rejected")
-_REPLY_PREFIXES: Final = ("re:", "aw:", "sv:", "réf:", "rif:", "res:")
-# How long a supplier has to answer a clarification or a reminder.
-REPLY_BUSINESS_DAYS: Final = 2
 
 
 # --- The schedule ------------------------------------------------------------------
@@ -236,15 +258,6 @@ def plan_reminder(
     if last_reply_at is not None and last_reply_at > request.sent_at:
         # The supplier wrote since (no offer yet): give it time.
         due = max(due, add_business_days(last_reply_at, every, country))
-    return due
-
-
-def reply_by_date(now: datetime, country: str | None, deadline: datetime | None) -> date:
-    """The date an email asks for an answer by: two business days in the supplier's
-    calendar, never after the negotiation deadline."""
-    due = add_business_days(now, REPLY_BUSINESS_DAYS, country).date()
-    if deadline is not None and deadline.date() < due:
-        due = max(deadline.date(), now.date())
     return due
 
 
@@ -494,7 +507,7 @@ class SweepResult:
 
 @dataclass(frozen=True, slots=True)
 class _Due:
-    """One follow-up to write and propose. Everything the writer and the email need."""
+    """One follow-up to render and propose: the email, its gate, and the writer's task."""
 
     kind: FollowupKindName
     sequence: int
@@ -503,7 +516,9 @@ class _Due:
     rfq_id: UUID
     sender_user_id: UUID
     to: str
-    subject: str
+    email: SupplierEmail
+    gate: GateContext
+    # What the writer agent sees when it may add its optional note.
     task: FollowupEmailInput
     # A clarification: what it asks (recorded in the ledger with the proposal).
     items: tuple[OpenItem, ...] = ()
@@ -531,23 +546,32 @@ async def sweep_tenant(
     sink = PostgresApprovalSink(db)
     for item in due:
         context = ToolContext(tenant_id=tenant_id, user_id=item.sender_user_id, run_id=uuid4())
-        try:
-            draft = await writer(item.task, context)
-        except AgentFailed:
-            skipped += 1
-            continue
-        problems = followup_email_problems(item.task, draft)
-        if problems:
+
+        async def note(item: _Due = item, context: ToolContext = context) -> str:
+            try:
+                return (await writer(item.task, context)).note
+            except AgentFailed:
+                return ""
+
+        composed = await compose(item.email, item.gate, note)
+        if isinstance(composed, Refused):
             logger.warning(
-                "followup draft refused tenant=%s invite=%s kind=%s problems=%s",
+                "followup email refused tenant=%s invite=%s kind=%s problems=%s",
                 tenant_id,
                 item.invite_id,
                 item.kind,
-                ",".join(problems),
+                problems_text(composed.problems),
             )
             skipped += 1
             continue
-        if await _propose(db, sink, tenant_id, item, draft.body.strip()):
+        if composed.note_dropped:
+            logger.info(
+                "followup note left out tenant=%s invite=%s problems=%s",
+                tenant_id,
+                item.invite_id,
+                problems_text(composed.note_dropped),
+            )
+        if await _propose(db, sink, tenant_id, item, composed.rendered):
             proposed[item.kind] += 1
 
     result = SweepResult(
@@ -660,19 +684,28 @@ async def _due_followups(
     if tenant is None:
         return []
     invite_ids = [invite.id for invite, *_ in rows]
+    rfq_ids = list(dict.fromkeys(rfq.id for _, rfq, _, _ in rows))
     followups = list(
         await session.scalars(
             select(FollowupMessage).where(FollowupMessage.invite_id.in_(invite_ids))
         )
     )
     states: dict[UUID, ledger.SupplierFollowup] = {}
-    for rfq_id in dict.fromkeys(rfq.id for _, rfq, _, _ in rows):
+    for rfq_id in rfq_ids:
         states.update(
             await ledger.supplier_followups(
                 session, rfq_id, now=now, expected_delivery=expected_delivery
             )
         )
     last_reply = await _last_inbound(session, invite_ids)
+    # Every supplier invited to these RFQs: the writer's note may name none of the others.
+    invited = (
+        await session.execute(
+            select(Invite.rfq_id, Invite.id, Supplier.name)
+            .join(Supplier, Supplier.id == Invite.supplier_id)
+            .where(Invite.rfq_id.in_(rfq_ids))
+        )
+    ).all()
 
     due: list[_Due] = []
     for invite, rfq, supplier, contact_email in rows:
@@ -683,24 +716,22 @@ async def _due_followups(
             # The supplier waits for the buyer's answer, or an email waits for approval.
             continue
         mine = [f for f in followups if f.invite_id == invite.id]
-        target = _Target(tenant, invite, rfq, supplier, contact_email)
+        others = tuple(
+            name for rfq_id, other, name in invited if rfq_id == rfq.id and other != invite.id
+        )
+        target = _Target(tenant, invite, rfq, supplier, contact_email, others)
         if not state.has_offer:
             plan = _chase_plan(
                 invite, rfq, supplier.country, mine, state, last_reply.get(invite.id), now
             )
             if plan.state != "scheduled" or plan.due_at is None or plan.due_at > now:
                 continue
-            # The RFQ's reply-by date is today or past: the chase asks for a new one.
-            built = await _build(
-                session,
-                target,
-                kind="chase",
-                writer_kind="chase",
-                sequence=_next_sequence(mine, "chase"),
-                chase_number=_next_sequence(mine, "chase"),
-                reply_by=reply_by_date(now, supplier.country, rfq.negotiation_deadline),
-            )
+            built = await _chase(session, target, mine, now)
         elif state.request is not None:
+            if state.request.kind != "clarification":
+                # A counter-offer or best-and-final request waits for its answer: the
+                # negotiation decides what follows it, nothing else goes out meanwhile.
+                continue
             built = await _reminder(session, target, state.request, mine, last_reply, now)
         elif state.to_ask and not any(d.kind == "offer_held" for d in state.decisions):
             built = await _clarification(session, target, state.to_ask, mine, now)
@@ -718,10 +749,44 @@ class _Target:
     rfq: Rfq
     supplier: Supplier
     contact_email: str
+    # The other suppliers invited to the RFQ: the writer's note may name none of them.
+    others: tuple[str, ...] = ()
 
 
 def _next_sequence(rows: Sequence[FollowupMessage], kind: str) -> int:
     return max((f.sequence for f in rows if f.kind == kind), default=0) + 1
+
+
+def _reply_by(kind: EmailType, target: _Target, now: datetime) -> ReplyBy | None:
+    """The date the email asks for an answer by (`supplier_email.deadlines`)."""
+    return reply_by_for(
+        kind,
+        now=now,
+        country=target.supplier.country,
+        response_due=target.rfq.response_due,
+        deadline=target.rfq.negotiation_deadline,
+    )
+
+
+async def _chase(
+    session: AsyncSession, target: _Target, mine: Sequence[FollowupMessage], now: datetime
+) -> _Due | None:
+    """No offer yet: remind the supplier of the RFQ."""
+    sequence = _next_sequence(mine, "chase")
+    sent_at = target.invite.sent_at
+    reply_by = _reply_by("reminder", target, now)
+    return await _build(
+        session,
+        target,
+        kind="chase",
+        writer_kind="chase",
+        sequence=sequence,
+        chase_number=sequence,
+        reply_by=reply_by,
+        email=lambda header: reminder_email(
+            header, requested_on=sent_at.date() if sent_at else None, reply_by=reply_by
+        ),
+    )
 
 
 async def _clarification(
@@ -732,29 +797,41 @@ async def _clarification(
     now: datetime,
 ) -> _Due | None:
     """One clarification asking every item the latest offer lacks and nobody asked."""
-    proposal_id = await session.scalar(
-        select(Proposal.id)
+    proposal = await session.scalar(
+        select(Proposal)
         .where(Proposal.invite_id == target.invite.id)
         .order_by(Proposal.version.desc())
         .limit(1)
     )
-    if proposal_id is None or any(
-        f.kind == "clarification" and f.proposal_id == proposal_id and f.status != "canceled"
+    if proposal is None or any(
+        f.kind == "clarification" and f.proposal_id == proposal.id and f.status != "canceled"
         for f in mine
     ):
         # One clarification per offer version (one sent before the ledger recorded its asks).
         return None
-    reply_by = reply_by_date(now, target.supplier.country, target.rfq.negotiation_deadline)
+    asked = [item.followup_item() for item in items]
+    reply_by = _reply_by("clarification", target, now)
+    lines = await _email_lines(session, target.rfq.id)
+    answered = await _answered(session, proposal)
+    quoted = await _quoted_lead_times(session, proposal)
     return await _build(
         session,
         target,
         kind="clarification",
         writer_kind="clarification",
         sequence=_next_sequence(mine, "clarification"),
-        proposal_id=proposal_id,
+        proposal_id=proposal.id,
         items=tuple(items),
-        open_items=[item.followup_item() for item in items],
+        open_items=asked,
         reply_by=reply_by,
+        email=lambda header: clarification_of(
+            header,
+            answered=answered,
+            lines=lines,
+            items=asked,
+            reply_by=reply_by,
+            quoted=quoted,
+        ),
     )
 
 
@@ -766,46 +843,100 @@ async def _reminder(
     last_reply: Mapping[UUID, datetime],
     now: datetime,
 ) -> _Due | None:
-    """Once, after its reply-by date: our email the supplier has not answered."""
+    """Once, after its reply-by date: our clarification the supplier has not answered,
+    asked again as it was, with a new reply-by date."""
     due_at = plan_reminder(
         request,
         country=target.supplier.country,
         every=target.rfq.followup_every_days,
         last_reply_at=last_reply.get(target.invite.id),
     )
-    if due_at is None or due_at > now:
+    if due_at is None or due_at > now or not request.asks:
         return None
-    # A clarification is asked again as it was; a counter-offer is recalled, no numbers.
-    open_items: list[FollowupItem] = []
-    if request.kind == "clarification":
-        labels = await _line_labels(session, target.rfq.id)
-        open_items = [
-            FollowupItem(
-                position=ask.position,
-                line=labels.get(ask.position) if ask.position is not None else None,
-                field=ask.field,
-                problem="missing" if ask.question in ("value", "price_or_decline") else "unclear",
-                question=ask.question,
-                need_by=ask.need_by,
-            )
-            for ask in request.asks
-        ]
+    labels = await _line_labels(session, target.rfq.id)
+    items = [
+        FollowupItem(
+            position=ask.position,
+            line=labels.get(ask.position) if ask.position is not None else None,
+            field=ask.field,
+            problem="missing" if ask.question in ("value", "price_or_decline") else "unclear",
+            question=ask.question,
+            need_by=ask.need_by,
+        )
+        for ask in request.asks
+    ]
+    # The offer the clarification was about: what the reminder thanks for and restates.
+    asked_in = {f.id: f for f in mine}.get(request.asks[0].followup_id)
+    proposal = (
+        await session.get(Proposal, asked_in.proposal_id)
+        if asked_in is not None and asked_in.proposal_id is not None
+        else None
+    )
+    answered = await _answered(session, proposal) if proposal is not None else None
+    quoted = await _quoted_lead_times(session, proposal) if proposal is not None else {}
+    lines = await _email_lines(session, target.rfq.id)
+    reply_by = _reply_by("clarification", target, now)
     return await _build(
         session,
         target,
         kind="reminder",
-        writer_kind="clarification" if request.kind == "clarification" else "chase",
+        writer_kind="clarification",
         sequence=_next_sequence(mine, "reminder"),
-        chase_number=1,
-        open_items=open_items,
-        reply_by=reply_by_date(now, target.supplier.country, target.rfq.negotiation_deadline),
+        open_items=items,
+        reply_by=reply_by,
         reminder_of=request.sent_at.date(),
         regarding_message_id=request.message_row_id,
+        email=lambda header: clarification_of(
+            header,
+            answered=answered,
+            lines=lines,
+            items=items,
+            reply_by=reply_by,
+            quoted=quoted,
+        ),
     )
 
 
 async def _line_labels(session: AsyncSession, rfq_id: UUID) -> dict[int, str]:
     return {line.position: line.label for line in await ledger.requested_lines(session, rfq_id)}
+
+
+async def _email_lines(session: AsyncSession, rfq_id: UUID) -> list[RequestedEmailLine]:
+    """The RFQ's lines as its email showed them."""
+    return [
+        email_line(row)
+        for row in await session.scalars(
+            select(RfqLine).where(RfqLine.rfq_id == rfq_id).order_by(RfqLine.position)
+        )
+    ]
+
+
+async def _answered(session: AsyncSession, proposal: Proposal) -> Answered | None:
+    """The supplier message an email about `proposal` answers: its offer, or a later reply."""
+    received = await session.scalar(
+        select(Message.occurred_at).where(Message.id == proposal.message_id)
+    )
+    if received is None:
+        return None
+    return Answered("offer" if proposal.version == 1 else "reply", received.date())
+
+
+async def _quoted_lead_times(session: AsyncSession, proposal: Proposal) -> dict[int, LeadTime]:
+    """The lead time each position's offer states (`quotes.terms.line_terms`), in days."""
+    rows = (
+        await session.execute(
+            select(RfqLine.position, ProposalLine.fields)
+            .join(RfqLine, RfqLine.id == ProposalLine.rfq_line_id)
+            .where(ProposalLine.proposal_id == proposal.id)
+            .order_by(RfqLine.position, ProposalLine.id)
+        )
+    ).all()
+    quoted: dict[int, LeadTime] = {}
+    for position, fields in rows:
+        lead = quoted_lead_time(line_terms(fields).lead_time)
+        if lead is not None:
+            quoted.setdefault(position, lead)
+    return quoted
 
 
 async def _build(
@@ -815,23 +946,42 @@ async def _build(
     kind: FollowupKindName,
     writer_kind: FollowupKind,
     sequence: int,
+    email: Callable[[Header], SupplierEmail],
+    reply_by: ReplyBy | None,
     proposal_id: UUID | None = None,
     items: tuple[OpenItem, ...] = (),
     open_items: Sequence[FollowupItem] = (),
     chase_number: int = 0,
-    reply_by: date | None = None,
     reminder_of: date | None = None,
     regarding_message_id: UUID | None = None,
 ) -> _Due | None:
     invite, rfq, supplier, tenant = target.invite, target.rfq, target.supplier, target.tenant
     # Whose mailbox: the buyer who requested the RFQ email (its executed approval).
-    sender_user_id = await rfq_sender(session, invite.id)
-    if sender_user_id is None:
+    original = await _rfq_send(session, invite.id)
+    sender_user_id = _sender(original)
+    if original is None or sender_user_id is None:
         logger.warning("followup: no executed send for invite=%s", invite.id)
         return None
     user = await session.get(User, sender_user_id)
     if user is None:
         return None
+    first_subject = await _first_subject(session, invite)
+    buyer_name = await buyer_display_name(session, user, tenant.name)
+    language = thread_language(
+        rfq_email_args=original.args,
+        first_subject=first_subject,
+        supplier_language=supplier.language,
+        supplier_country=supplier.country,
+    )
+    header = Header(
+        rfq_ref=rfq.ref,
+        subject=reply_subject(first_subject, rfq.ref, rfq.title),
+        locale=thread_locale(language, supplier.country),
+        supplier_name=supplier.name,
+        buyer_company=tenant.name,
+        signature=Signature(name=buyer_name, company=tenant.name),
+    )
+    reply_day = reply_by.day if reply_by is not None else None
     return _Due(
         kind=kind,
         sequence=sequence,
@@ -840,26 +990,32 @@ async def _build(
         rfq_id=rfq.id,
         sender_user_id=sender_user_id,
         to=target.contact_email,
-        subject=await thread_subject(session, invite, rfq),
+        email=email(header),
+        gate=GateContext(
+            thread_language=language,
+            first_subject=first_subject,
+            rfq_title=rfq.title,
+            other_suppliers=target.others,
+        ),
         task=FollowupEmailInput(
             kind=writer_kind,
             rfq_ref=rfq.ref,
             rfq_title=rfq.title,
             buyer_company=tenant.name,
-            buyer_name=await buyer_display_name(session, user, tenant.name),
+            buyer_name=buyer_name,
             supplier_name=supplier.name,
-            supplier_language=supplier_email_language(supplier),
+            supplier_language=language,
             chase_number=chase_number if writer_kind == "chase" else 0,
             original_sent_on=invite.sent_at.date() if invite.sent_at else None,
             # The date the supplier is asked to answer by: the RFQ's, or this email's own
             # once that one is today or past.
-            response_due=_later(rfq.response_due, reply_by),
+            response_due=_later(rfq.response_due, reply_day),
             open_items=list(open_items),
-            reply_by=reply_by,
+            reply_by=reply_day,
             reminder_of=reminder_of,
         ),
         items=items,
-        reply_by=reply_by,
+        reply_by=reply_day,
         regarding_message_id=regarding_message_id,
     )
 
@@ -869,16 +1025,18 @@ def _later(first: date | None, second: date | None) -> date | None:
     return max(dates) if dates else None
 
 
-async def rfq_sender(session: AsyncSession, invite_id: UUID) -> UUID | None:
-    """The buyer who requested the invite's RFQ email (its executed approval): every
-    email in the thread goes out from their mailbox."""
-    original = await session.scalar(
+async def _rfq_send(session: AsyncSession, invite_id: UUID) -> Approval | None:
+    """The invite's executed RFQ-email approval."""
+    return await session.scalar(
         select(Approval).where(
             Approval.tool == SEND_RFQ_EMAIL,
             Approval.tool_call_id == send_proposal_ids(invite_id)[1],
             Approval.status == "executed",
         )
     )
+
+
+def _sender(original: Approval | None) -> UUID | None:
     if original is None:
         return None
     try:
@@ -887,28 +1045,30 @@ async def rfq_sender(session: AsyncSession, invite_id: UUID) -> UUID | None:
         return None
 
 
-async def thread_subject(session: AsyncSession, invite: Invite, rfq: Rfq) -> str:
-    first_subject = await session.scalar(
+async def rfq_sender(session: AsyncSession, invite_id: UUID) -> UUID | None:
+    """The buyer who requested the invite's RFQ email (its executed approval): every
+    email in the thread goes out from their mailbox."""
+    return _sender(await _rfq_send(session, invite_id))
+
+
+async def _first_subject(session: AsyncSession, invite: Invite) -> str | None:
+    """The subject of the thread's RFQ email, as stored."""
+    return await session.scalar(
         select(Message.subject).where(
             Message.invite_id == invite.id,
             Message.direction == "out",
             Message.message_id_header == invite.thread_message_id,
         )
     )
-    return reply_subject(first_subject, rfq.ref, rfq.title)
 
 
-def reply_subject(original: str | None, rfq_ref: str, title: str) -> str:
-    """`Re: <the RFQ email's subject>`, always carrying the `[RFQ-n]` marker, one line."""
-    base = " ".join((original or f"{subject_marker(rfq_ref)} {title}").split())
-    if subject_marker(rfq_ref) not in base:
-        base = f"{subject_marker(rfq_ref)} {base}"
-    subject = base if base.lower().startswith(_REPLY_PREFIXES) else f"Re: {base}"
-    return subject[:300]
+async def thread_subject(session: AsyncSession, invite: Invite, rfq: Rfq) -> str:
+    """`Re: ` plus the thread's first subject (`supplier_email.subject.reply_subject`)."""
+    return reply_subject(await _first_subject(session, invite), rfq.ref, rfq.title)
 
 
 async def _propose(
-    db: Db, sink: PostgresApprovalSink, tenant_id: UUID, item: _Due, body: str
+    db: Db, sink: PostgresApprovalSink, tenant_id: UUID, item: _Due, rendered: RenderedEmail
 ) -> bool:
     """Record the approval, then the follow-up row (and a clarification's asks); once per
     (invite, kind, sequence)."""
@@ -919,8 +1079,9 @@ async def _propose(
         kind=item.kind,
         sender_user_id=item.sender_user_id,
         to=[item.to],
-        subject=item.subject,
-        body=body,
+        subject=rendered.subject,
+        body=rendered.text,
+        html_body=rendered.html,
     )
     payload = cast(dict[str, JsonValue], args.model_dump(mode="json"))
     run_id, call_id = followup_proposal_ids(row_id)

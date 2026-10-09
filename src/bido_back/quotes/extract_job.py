@@ -10,19 +10,25 @@ Payload: `{"message_id": "<uuid>"}`; the tenant comes from the envelope.
    them into text (`bido_back.documents`), then run the `quote_extraction`
    agent. The agent has no tools at all: supplier content is untrusted.
 3. Validate the output deterministically (`bido_back.quotes.validation`).
+   Durations run from the message's date (its Date header, bounded by when it
+   was received); business days skip the supplier country's holidays.
 4. In a second transaction, lock the message and the invite, re-check that no
    proposal references the message (a concurrent delivery may have won), and
-   insert the next proposal version with its lines and per-field provenance.
-   The message becomes `extracted`. A reply that is not a quote (out-of-office,
-   question, refusal, "we will answer tomorrow") creates no proposal; a refusal
-   marks the invite `declined`.
+   insert the next proposal version with its lines and per-field provenance,
+   the message's signals (`_signals`: final offer, declined lines, questions),
+   the offer's general notes and, per line, which quantity its price applies
+   to (`_terms`); `bido_back.quotes.terms` reads them back. The message
+   becomes `extracted`. A reply that is not a quote (out-of-office, question,
+   refusal, "we will answer tomorrow") creates no proposal; a refusal marks
+   the invite `declined`.
 
 The clarification ledger (`bido_back.followups.ledger`) takes part in step 4:
 a reply with an offer that arrives after our clarification went out answers its
 open asks, so it is applied as an amendment of exactly those fields, and the
 asks are settled (answered, or unusable when still missing). The questions a
-reply asks the buyer are stored, whatever else it says, and pause the automatic
-emails to that supplier: pending ones are canceled.
+reply asks the buyer (its signals) are stored, whatever else it says, even
+without an offer, and pause the automatic emails to that supplier: pending ones
+are canceled.
 
 An agent-run failure marks the message `failed` and returns normally: the job
 is done, a retry is a deliberate re-enqueue (a `failed` message is extracted
@@ -86,6 +92,13 @@ from bido_back.quotes.state import (
     stamp_quote,
     store_quote,
 )
+from bido_back.quotes.terms import (
+    LINE_TERMS_KEY,
+    OFFER_NOTES_KEY,
+    SIGNALS_KEY,
+    QuantityTerms,
+    offer_terms,
+)
 from bido_back.quotes.validation import (
     HEADER_FIELDS,
     LINE_FIELDS,
@@ -95,6 +108,8 @@ from bido_back.quotes.validation import (
     QuoteSources,
     RequestedLine,
     ValidatedQuote,
+    absent_field,
+    quantity_bases,
     validate_quote,
 )
 from bido_back.storage import BlobStorage
@@ -127,11 +142,15 @@ class _Loaded:
     subject: str
     body: str
     supplier_language: str | None
+    supplier_country: str | None
     requested: list[RfqEmailLine]
     line_ids: dict[int, UUID]
     line_mpns: dict[int, str | None]
     attachments: list[_AttachmentRef]
     prior_supplier_offer: PriorSupplierOffer | None
+    # The message's date, and the date of the supplier's first offer in this thread.
+    offer_date: date
+    original_offer_date: date | None
 
 
 async def handle_quote_extract(
@@ -168,6 +187,7 @@ async def handle_quote_extract(
         email_body=body,
         attachments_text=render_documents(documents),
         prior_supplier_offer=loaded.prior_supplier_offer,
+        message_date=loaded.offer_date,
     )
 
     context = ToolContext(tenant_id=tenant_id, user_id=None, run_id=uuid4())
@@ -186,10 +206,16 @@ async def handle_quote_extract(
         await _mark_failed(db, tenant_id, message_id)
         return
 
+    quantities = {line.position: tuple(line.quantities) for line in loaded.requested}
     validated = validate_quote(
         result.output,
         requested=[
-            RequestedLine(id=line_id, position=position, mpn=loaded.line_mpns.get(position))
+            RequestedLine(
+                id=line_id,
+                position=position,
+                mpn=loaded.line_mpns.get(position),
+                quantities=quantities.get(position, ()),
+            )
             for position, line_id in loaded.line_ids.items()
         ],
         sources=QuoteSources(
@@ -199,6 +225,9 @@ async def handle_quote_extract(
         ),
         today=today or datetime.now(UTC).date(),
         decimal=decimal_separator_for(loaded.supplier_language),
+        offer_date=loaded.offer_date,
+        original_offer_date=loaded.original_offer_date,
+        country=loaded.supplier_country,
     )
     meta: _RunMeta = {
         "agent": agent.name,
@@ -262,7 +291,7 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
 
         row = (
             await session.execute(
-                select(Invite.id, Rfq.id, Rfq.ref, Supplier.language)
+                select(Invite.id, Rfq.id, Rfq.ref, Supplier.language, Supplier.country)
                 .join(Rfq, Rfq.id == Invite.rfq_id)
                 .join(Supplier, Supplier.id == Invite.supplier_id)
                 .where(Invite.id == message.invite_id)
@@ -271,7 +300,7 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
         if row is None:
             logger.warning("quote.extract: invite not found message=%s", message_id)
             return None
-        invite_id, rfq_id, rfq_ref, language = row
+        invite_id, rfq_id, rfq_ref, language, country = row
 
         lines = (
             await session.scalars(
@@ -299,6 +328,11 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
             subject=message.subject or "",
             body=message.body_text or "",
             supplier_language=language,
+            supplier_country=country,
+            offer_date=message_date(message.occurred_at, message.created_at),
+            original_offer_date=min(
+                (message_date(e.occurred_at, e.received_at) for e in prior_events), default=None
+            ),
             requested=[_email_line(line) for line in lines],
             line_ids={line.position: line.id for line in lines},
             line_mpns={line.position: line.mpn for line in lines},
@@ -315,6 +349,15 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
                 else None
             ),
         )
+
+
+def message_date(occurred_at: datetime, received_at: datetime | None) -> date:
+    """The date a supplier message counts from: its Date header, never after its receipt.
+
+    In UTC: the supplier's own time zone is not kept with the message.
+    """
+    moment = min(occurred_at, received_at) if received_at is not None else occurred_at
+    return moment.astimezone(UTC).date()
 
 
 def _email_line(line: RfqLine) -> RfqEmailLine:
@@ -475,10 +518,12 @@ async def _events(session: AsyncSession, invite_id: UUID) -> list[OfferEvent]:
     for proposal, message in rows:
         event_record: object = proposal.fields.get("_quote_event")
         quote = (
-            restore_quote(event_record)
+            _with_every_field(restore_quote(event_record))
             if event_record is not None
             else _legacy_quote(proposal, stored_lines[proposal.id], positions)
         )
+        # The message's signals (declined lines...) are stored beside the event.
+        quote = replace(quote, signals=offer_terms(proposal.fields).signals)
         events.append(
             OfferEvent(
                 message_id=message.id,
@@ -558,6 +603,26 @@ async def _events(session: AsyncSession, invite_id: UUID) -> list[OfferEvent]:
     return events
 
 
+def _with_every_field(quote: ValidatedQuote) -> ValidatedQuote:
+    """An event stored before a field existed (e.g. `lead_time`, prompt v5) lacks it:
+    complete it as not stated, so a later reply can update or inherit it."""
+    if set(quote.header) >= HEADER_FIELDS.keys() and all(
+        set(line.fields) >= LINE_FIELDS.keys() for line in quote.lines
+    ):
+        return quote
+    return replace(
+        quote,
+        header={name: quote.header.get(name) or absent_field(name) for name in HEADER_FIELDS},
+        lines=tuple(
+            replace(
+                line,
+                fields={name: line.fields.get(name) or absent_field(name) for name in LINE_FIELDS},
+            )
+            for line in quote.lines
+        ),
+    )
+
+
 async def _has_proposal(session: AsyncSession, message_id: UUID) -> bool:
     found = await session.scalar(
         select(Proposal.id).where(Proposal.message_id == message_id).limit(1)
@@ -611,16 +676,20 @@ async def _mark_failed(db: Db, tenant_id: UUID, message_id: UUID) -> None:
 
 def _updates_offer(validated: ValidatedQuote, has_offer: bool) -> bool:
     """A reply that is not a whole quote but changes the stored offer: an amendment, a
-    withdrawal, or (with an offer to apply it to) a clarification that states something
-    or asks the buyer something. A reply with neither ("we will answer tomorrow") leaves
-    the offer, and our open questions, as they are."""
+    withdrawal, or (with an offer to apply it to) a clarification that states something,
+    asks the buyer something or declines a requested line. A reply with none of these
+    ("we will answer tomorrow") leaves the offer, and our open questions, as they are."""
     output = validated.output
     if output.reply_kind in {"amendment", "withdrawal"}:
         return True
     return (
         output.reply_kind == "clarification"
         and has_offer
-        and (has_offer_content(validated) or bool(output.technical_questions or output.conflicts))
+        and (
+            has_offer_content(validated)
+            or bool(output.technical_questions or output.conflicts)
+            or bool(validated.signals.declined_lines)
+        )
     )
 
 
@@ -704,14 +773,19 @@ async def _persist(
             select(func.max(Proposal.version)).where(Proposal.invite_id == invite.id)
         )
         event_quote = stamp_quote(validated, message.id)
-        # Its first reply with an offer after our clarification went out answers it.
-        asks = (
-            await ledger.asks_answered_by(session, invite.id, message.created_at)
-            if previous_events
-            and has_offer_content(validated)
-            and validated.output.reply_kind != "withdrawal"
-            else []
-        )
+        # Its first reply with an offer after our clarification went out answers it; a reply
+        # that only declines lines answers what we asked about those lines.
+        asks: list[ledger.Ask] = []
+        if previous_events and validated.output.reply_kind != "withdrawal":
+            declined = set(validated.signals.declined_line_positions)
+            if has_offer_content(validated):
+                asks = await ledger.asks_answered_by(session, invite.id, message.created_at)
+            elif declined:
+                asks = [
+                    ask
+                    for ask in await ledger.asks_answered_by(session, invite.id, message.created_at)
+                    if ask.position in declined
+                ]
         state = reconcile(
             [
                 *previous_events,
@@ -744,6 +818,11 @@ async def _persist(
         fields["extra_offers"] = [
             offer.model_dump(mode="json") for offer in effective.output.extra_offers[:20]
         ]
+        # General terms of the offer (packaging, warranty...): shown, never blocking.
+        fields[OFFER_NOTES_KEY] = list(effective.output.offer_notes[:20])
+        # What this message says about the negotiation: final offer, declined lines,
+        # questions (`bido_back.quotes.terms.offer_terms`).
+        fields[SIGNALS_KEY] = validated.signals.model_dump(mode="json")
         proposal = Proposal(
             tenant_id=tenant_id,
             invite_id=invite.id,
@@ -757,19 +836,32 @@ async def _persist(
         )
         session.add(proposal)
         await session.flush()
-        session.add_all(_proposal_line(tenant_id, proposal.id, line) for line in effective.lines)
+        bases = quantity_bases(
+            effective.lines,
+            {
+                loaded.line_ids[line.position]: line.quantities
+                for line in loaded.requested
+                if line.position in loaded.line_ids
+            },
+        )
+        proposal_lines = [
+            _proposal_line(tenant_id, proposal.id, line, basis)
+            for line, basis in zip(effective.lines, bases, strict=True)
+        ]
+        session.add_all(proposal_lines)
         message.status = "extracted"
         # A counter-offer awaiting approval answered an older offer: cancel it.
         if state.active_message_id == message.id or state.issues:
             await cancel_on_new_offer(session, invite.id)
         if asks:
-            # Each answered item is answered, or unusable (asked once, still missing).
+            # Each answered item is answered, or unusable (asked once, still missing): the
+            # same rules as every "what is missing" list, on the version just stored.
             country = await session.scalar(
                 select(Supplier.country).where(Supplier.id == invite.supplier_id)
             )
-            still_missing = ledger.quote_items(
-                effective,
-                offer_state,
+            still_missing = ledger.proposal_items(
+                proposal,
+                proposal_lines,
                 await ledger.requested_lines(session, invite.rfq_id),
                 country=country,
                 today=today,
@@ -783,21 +875,30 @@ async def _persist(
                 at=message.created_at,
             )
         await session.flush()
+        signals = validated.signals
         logger.info(
             "quote.extract: proposal stored message=%s proposal=%s version=%s lines=%s "
-            "needs_review=%s answered_asks=%s run=%s",
+            "needs_review=%s final_offer=%s declined_lines=%s questions=%s answered_asks=%s "
+            "run=%s",
             loaded.message_id,
             proposal.id,
             proposal.version,
             len(effective.lines),
             effective.needs_review,
+            signals.final_offer,
+            len(signals.declined_lines),
+            len(signals.questions),
             len(asks),
             meta["run_id"],
         )
 
 
-def _proposal_line(tenant_id: UUID, proposal_id: UUID, line: LineCheck) -> ProposalLine:
+def _proposal_line(
+    tenant_id: UUID, proposal_id: UUID, line: LineCheck, quantity: QuantityTerms
+) -> ProposalLine:
     lead_time = line.parsed("lead_time_days")
+    fields = line.provenance()
+    fields[LINE_TERMS_KEY] = quantity.model_dump(mode="json")
     return ProposalLine(
         tenant_id=tenant_id,
         proposal_id=proposal_id,
@@ -811,7 +912,7 @@ def _proposal_line(tenant_id: UUID, proposal_id: UUID, line: LineCheck) -> Propo
         moq=_decimal(line.parsed("moq")),
         lead_time_days=lead_time if isinstance(lead_time, int) else None,
         origin_country=_str(line.parsed("origin_country")),
-        fields=line.provenance(),
+        fields=fields,
         needs_review=line.needs_review,
     )
 

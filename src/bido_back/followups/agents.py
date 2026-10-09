@@ -2,25 +2,26 @@
 
 `default_followup_writer()` runs `RFQ_FOLLOWUP_WRITER` through
 `runner.run_to_completion`, importing the definitions (and so Agno) on first
-use. The agent has no tools: what it writes becomes a proposal that a person
-approves, recorded by code, never by the model.
+use. The agent has no tools: code renders the email (`bido_back.supplier_email`)
+and the agent may only add an optional note to it. The email becomes a proposal
+that a person approves, recorded by code, never by the model.
 """
 
 import logging
 from collections.abc import Awaitable, Callable
 
-from bido_back.agents.catalog.contracts import FollowupEmailInput, FollowupEmailOutput
+from bido_back.agents.catalog.contracts import EmailNoteOutput, FollowupEmailInput
 from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
 from bido_back.rfqs.errors import AgentFailed
 
 logger = logging.getLogger(__name__)
 
-FollowupWriter = Callable[[FollowupEmailInput, ToolContext], Awaitable[FollowupEmailOutput]]
+FollowupWriter = Callable[[FollowupEmailInput, ToolContext], Awaitable[EmailNoteOutput]]
 
 
 def default_followup_writer(config: RunnerConfig | None = None) -> FollowupWriter:
-    async def write(task: FollowupEmailInput, context: ToolContext) -> FollowupEmailOutput:
+    async def write(task: FollowupEmailInput, context: ToolContext) -> EmailNoteOutput:
         from bido_back.agents.catalog.definitions import RFQ_FOLLOWUP_WRITER
         from bido_back.agents.runner import Completed, Failed, run_to_completion
 

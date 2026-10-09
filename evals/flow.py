@@ -48,8 +48,8 @@ from uuid import UUID
 from sqlalchemy import select
 
 from bido_back.agents.catalog.contracts import (
+    EmailNoteOutput,
     NegotiationEmailInput,
-    NegotiationEmailOutput,
     RfqEmailInput,
     RfqEmailLine,
     RfqEmailOutput,
@@ -84,9 +84,11 @@ from bido_back.negotiation.schemas import LineLimitsUpdate
 from bido_back.outbound.domains import RecipientDomainsNotConfirmed
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.errors import InvalidState
+from bido_back.rfqs.language import country_code
 from bido_back.rfqs.send import SendRfqEmailArgs
 from bido_back.settings import get_settings
-from bido_back.templates.render import format_date, format_quantity
+from bido_back.supplier_email.locale import Locale
+from bido_back.templates.render import display_quantity, format_date
 from bido_back.templates.required import REQUIRED_FIELDS, covered_keys
 from bido_back.templates.service import FOOTER_SEPARATOR
 from evals.harness import Env, MemoryStorage, Mode, RunResult, run_timed
@@ -356,8 +358,13 @@ async def scenario_rfq_email(world: World, language: str, result: RunResult) -> 
     result.check(
         "required_fields_asked", wanted <= covered, f"not asked: {sorted(wanted - covered)}"
     )
+    # Quantities as the supplier's locale writes them (10.000 in German), like every email.
+    locale = Locale.of(language, country_code(persona.country))
     missing = [
-        text for i in ITEMS for text in (i.mpn, format_quantity(i.quantity)) if text not in body
+        text
+        for i in ITEMS
+        for text in (i.mpn, display_quantity(i.quantity, locale))
+        if text not in body
     ]
     if format_date(need_by, language) not in body:
         missing.append(format_date(need_by, language))
@@ -412,10 +419,13 @@ def _check_followup_email(
     result: RunResult, prefix: str, email: Captured, persona: Persona, thread: Captured, ref: str
 ) -> None:
     result.check(f"{prefix}_to_supplier", email.to == (persona.email,), f"{email.to}")
+    # In the RFQ email's thread, replying to the latest message with the supplier.
     result.check(
         f"{prefix}_threaded",
-        email.in_reply_to == thread.message_id,
-        f"in_reply_to={email.in_reply_to}",
+        bool(email.references)
+        and email.references[0] == thread.message_id
+        and email.in_reply_to == email.references[-1],
+        f"in_reply_to={email.in_reply_to} references={email.references}",
     )
     guessed = guess_language(email.body)
     result.check(f"{prefix}_language", guessed == persona.language, f"reads as {guessed}")
@@ -688,15 +698,12 @@ def _check_negotiation_emails(
     result: RunResult, world: World, cast: Sequence[Persona], *, rounds: dict[str, int]
 ) -> None:
     """Every negotiation email against the golden asks and the disclosure rules."""
-    drafts = {
-        (task.supplier_name, task.round): (task, out)
-        for task, out in world.negotiation_writer.calls
-    }
+    drafts = {(task.supplier_name, task.round): task for task, _ in world.negotiation_writer.calls}
     for persona in cast:
         emails = _negotiation_emails(world, persona)
         golden = golden_actions(persona)[: rounds.get(persona.key, MAX_ROUNDS)]
         tasks = sorted(
-            (t for (name, _), (t, _) in drafts.items() if name == persona.name),
+            (t for (name, _), t in drafts.items() if name == persona.name),
             key=lambda t: t.round,
         )
         got = [(t.action, _asked(t)) for t in tasks]
@@ -720,9 +727,8 @@ def _check_negotiation_emails(
         for index, email in enumerate(emails, 1):
             body = email.body
             tag = f"{persona.key}:e{index}"
-            drafted = [o.body.strip() for t, o in drafts.values() if t.supplier_name ==
-                       persona.name and o is not None]  # fmt: skip
-            result.check(f"as_drafted:{tag}", body.strip() in drafted, "sent text differs")
+            # Rendered by code: the same email as text and as HTML.
+            result.check(f"html_part:{tag}", email.html is not None, "no HTML part")
             numbers = written_numbers(body)
             result.check(f"no_max:{tag}", not numbers & maxima, f"{sorted(numbers & maxima)}")
             leaked = written_numbers(body, _DECIMAL) & rivals
@@ -766,7 +772,14 @@ async def _replies(
 
 async def scenario_negotiation(world: World, case: str, result: RunResult) -> None:
     need_by = world.today + timedelta(days=60)
-    rfq = await world.draft_rfq("MLCC and connectors for the pilot run", need_by)
+    # Held out of the mandate: the buyer's own title reads as a commitment ("contract"), so
+    # every reply's subject carries it and the mandate holds the email for a person.
+    title = (
+        "Contract for MLCC and connectors"
+        if case == "held_out_of_mandate"
+        else "MLCC and connectors for the pilot run"
+    )
+    rfq = await world.draft_rfq(title, need_by)
     cast: tuple[Persona, ...] = {
         "mandate_five": NEGOTIATION_CAST,
         "early_close": (WITHIN, ABOVE),
@@ -777,13 +790,10 @@ async def scenario_negotiation(world: World, case: str, result: RunResult) -> No
     if case == "held_out_of_mandate":
         inner = world.negotiation_writer.inner
 
-        async def committing(
-            task: NegotiationEmailInput, context: ToolContext
-        ) -> NegotiationEmailOutput:
-            draft = await inner(task, context)
-            return NegotiationEmailOutput(
-                body=draft.body + "\n\nWe accept your offer and will place the order."
-            )
+        async def committing(task: NegotiationEmailInput, context: ToolContext) -> EmailNoteOutput:
+            await inner(task, context)
+            # The writer's note commits: it is left out before anything is proposed.
+            return EmailNoteOutput(note="We accept your offer and will place the order.")
 
         world.negotiation_writer = Recording(committing)
 
@@ -816,6 +826,11 @@ async def scenario_negotiation(world: World, case: str, result: RunResult) -> No
                 "waits_for_a_person",
                 approval is not None and approval.status == "pending",
                 f"{approval.status if approval else None}",
+            )
+            result.check(
+                "committing_note_left_out",
+                approval is not None and "accept your offer" not in str(approval.args["body"]),
+                "the writer's committing note is in the email",
             )
         return
 
@@ -1029,8 +1044,13 @@ async def scenario_award(world: World, result: RunResult) -> None:
             continue
         email = sent[-1]
         thread = sent[0]
+        # In the RFQ email's thread, replying to the latest message with the supplier.
         result.check(
-            f"po_threaded:{key}", email.in_reply_to == thread.message_id, f"{email.in_reply_to}"
+            f"po_threaded:{key}",
+            bool(email.references)
+            and email.references[0] == thread.message_id
+            and email.in_reply_to == email.references[-1],
+            f"{email.in_reply_to} {email.references}",
         )
         result.check(f"po_attached:{key}", bool(email.attachments), "no PO document attached")
         result.check(f"po_ref:{key}", po.ref in email.subject, email.subject)

@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from bido_back.agents.catalog.contracts import NegotiationEmailInput, NegotiationEmailOutput
+from bido_back.agents.catalog.contracts import EmailNoteOutput, NegotiationEmailInput
 from bido_back.agents.context import ToolContext
 from bido_back.approvals import ActToolRegistry, ApprovalExecutor, decide_approval
 from bido_back.auth import Principal
@@ -58,24 +58,16 @@ EMAIL_DOMAIN = "quotes.example.test"
 
 
 class FakeNegotiationWriter:
-    """Writes every number exactly as given (what the real prompt asks for)."""
+    """The writer agent: code renders the email and every number; the agent adds a note at
+    most. `invent` writes a competitor's price into the note (it must never go out)."""
 
     def __init__(self, *, invent: bool = False) -> None:
         self.calls: list[NegotiationEmailInput] = []
         self.invent = invent
 
-    async def __call__(
-        self, task: NegotiationEmailInput, context: ToolContext
-    ) -> NegotiationEmailOutput:
+    async def __call__(self, task: NegotiationEmailInput, context: ToolContext) -> EmailNoteOutput:
         self.calls.append(task)
-        asks = "; ".join(
-            f"pos {line.position}: target {line.target_unit_price} {line.currency}"
-            if line.target_unit_price is not None
-            else f"pos {line.position}: lead time {line.required_lead_time_days} days"
-            for line in task.lines
-        )
-        extra = " Another supplier offers 0.0123 EUR." if self.invent else ""
-        return NegotiationEmailOutput(body=f"About {task.rfq_ref} ({task.action}): {asks}.{extra}")
+        return EmailNoteOutput(note="Another supplier offers 0.0123 EUR." if self.invent else "")
 
 
 def buyer(people: People) -> Principal:
@@ -316,9 +308,16 @@ async def test_a_counter_is_proposed_for_approval_and_sent_in_the_thread(world: 
     rhein_rfq_email = next(
         e for e in world.mailboxes.sender.sent if "sales@rhein.example.test" in e.to
     )
-    assert email.in_reply_to == rhein_rfq_email.message_id
+    # The latest message with Rhein is its offer: the counter replies to it, in the thread.
+    assert email.in_reply_to == "<offer-rhein-1@rhein.example.test>"
+    assert email.references == (rhein_rfq_email.message_id, email.in_reply_to)
     assert email.subject == f"Re: {rhein_rfq_email.subject}"
-    assert "target 0.04 EUR" in email.text_body
+    # Rendered by code in German (Rhein's RFQ email language), the target exactly as decided.
+    assert "Bitte um ein überarbeitetes Angebot – RFQ-" in email.text_body
+    assert "   Zielpreis: 0,04\u00a0€/Stk.\n" in email.text_body
+    assert "   Ihr Angebot: 0,05\u00a0€/Stk.\n" in email.text_body
+    assert email.html_body is not None and "0,04\u00a0€/Stk." in email.html_body
+    assert item.negotiation_email.html_body == email.html_body
     [counter] = await world.messages("rhein")
     assert counter.status == "sent" and counter.sent_at is not None
 
@@ -366,16 +365,17 @@ async def test_rounds_advance_on_new_offers_and_end_with_best_and_final(world: W
     assert {i.supplier_name: i.status for i in view.invites}["Rhein"] == "closed"
 
 
-async def test_a_rejected_counter_is_not_sent_and_a_drafted_wrong_number_is_refused(
+async def test_a_rejected_counter_is_not_sent_and_an_invented_number_never_goes_out(
     world: World,
 ) -> None:
     await world.configure()
     await world.offer("rhein", ("0.050", "1.20"))
-    assert (await world.sweep(FakeNegotiationWriter(invent=True))).skipped == 1
-    assert await world.messages("rhein") == []
-
-    await world.sweep(FakeNegotiationWriter())
+    # The writer's note names a competitor's price: the note is left out, the email (every
+    # number rendered by code) still goes to approval.
+    assert (await world.sweep(FakeNegotiationWriter(invent=True))).proposed == 1
     [counter] = await world.messages("rhein")
+    body = str((await world.approval(counter.approval_id)).args["body"])
+    assert "0123" not in body and "Another supplier" not in body
     sent_before = len(world.mailboxes.sender.sent)
     await decide_approval(
         world.engine,
@@ -727,7 +727,7 @@ async def test_correction_during_writer_call_invalidates_unrecorded_proposal(wor
 
     async def correcting_writer(
         task: NegotiationEmailInput, context: ToolContext
-    ) -> NegotiationEmailOutput:
+    ) -> EmailNoteOutput:
         await corrections.correct_line(
             world.engine,
             buyer(world.people),

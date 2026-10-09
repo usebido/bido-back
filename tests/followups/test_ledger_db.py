@@ -1,24 +1,28 @@
 """The clarification ledger end to end, on a real RFQ thread with a pinned clock.
 
 The production pieces run (intake, quote extraction with validation and offer
-reconciliation, the follow-up sweep, approvals, the send tool) inside
-`evals.world.World`; only the models are scripted: extraction returns a careful
-model's output for each supplier email, the writer the scripted follow-up text.
+reconciliation, the follow-up sweep with the code-rendered emails, approvals, the
+send tool) inside `evals.world.World`; only the models are scripted: extraction
+returns a careful model's output for each supplier email (prompt v5,
+`tests.quotes.rfq6`), the writer no note.
 
-The RFQ-6 replay follows the real thread (2026-10-08, MetalNova Teste Ltda):
+The RFQ-6 replay follows the real thread (2026-10-08, MetalNova Teste Ltda), with
+the lead-time-to-date helper the product uses (`missing.DEFAULT_EXPECTED_DELIVERY`):
 - `historical`: Bido's actual clarification (validity, quantity tier and lead time
   for every line) went out, the supplier answered everything;
-- `new_rules`: the clarification the missing-field rules ask today.
-Both must end with the answers applied, nothing asked twice, no duplicate a day
-later, and the shaft's late delivery as the one targeted ask (typed for the
-negotiation's delivery-date request) when a lead-time-to-date helper is present.
+- `new_rules`: the clarification the missing-field rules ask today: only whether
+  the bearings and the shafts can arrive by 22 Oct ("approximately 10 business
+  days" lands on 26 Oct).
+Both end with the second reply applied as answers, nothing asked twice, no
+duplicate a day later, and the shafts' late delivery (12 business days: 28 Oct)
+typed for the negotiation's delivery-date request.
 """
 
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any, cast
+from typing import Any
 from uuid import UUID
 
 import pytest
@@ -29,6 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.catalog.contracts import (
     ExtractedValue,
+    LeadTimeValue,
     ProposalLineDraft,
     QuoteExtractionOutput,
     SourceRef,
@@ -53,8 +58,7 @@ from bido_back.db.models import (
 )
 from bido_back.followups import ledger, questions, service
 from bido_back.followups import missing as missing_rules
-from bido_back.followups.calendar import add_business_days
-from bido_back.followups.missing import OfferedLine, OpenItem
+from bido_back.followups.missing import OpenItem
 from bido_back.followups.schemas import AnswerQuestionsRequest, DismissQuestionRequest
 from bido_back.followups.send import SEND_SUPPLIER_ANSWER
 from bido_back.mandates.service import AUTO_TOOLS
@@ -66,6 +70,7 @@ from evals.personas import Persona
 from evals.scripted import ScriptedModel
 from evals.world import RfqRef, World
 from tests.db.conftest import app_engine, migrator_engine
+from tests.quotes.rfq6 import REPLY_1, REPLY_2, first_reply, second_reply
 
 __all__ = ["app_engine", "migrator_engine"]
 
@@ -86,44 +91,6 @@ METALNOVA = Persona(
     contact="Sales Team",
 )
 
-REPLY_1 = """Hello,
-
-Thank you for reaching out!
-
-We can supply the requested items. Our current prices are BRL 19.50 per piece for the bearings (000101), BRL 89.00 per piece for the shafts (000102), and BRL 95.00 per kg for the copper wire (000104).
-
-Our standard payment terms are Net 30, and the quotation is valid for 15 days. The MOQ is 10 pieces for bearings and shafts, and 5 kg for copper wire. All items are supplied in standard industrial packaging.
-
-Lead time is approximately 10 business days after order confirmation. We may need a few additional days for the shafts, depending on production availability.
-
-Let us know if these conditions work for you.
-
-Best regards,
-Sales Team
-MetalNova Teste"""  # noqa: E501
-
-REPLY_2 = """Hello Biduuuuu,
-
-Thank you for your follow-up.
-
-Our quotation is valid for 15 calendar days from the date of our original offer.
-
-The quoted prices apply to the quantities requested in RFQ-6:
-
-For the bearings (000101), BRL 19.50 per piece applies to the requested 70 pieces, with a lead time of 7 business days.
-
-For the shafts (000102), BRL 89.00 per piece applies to the requested 15 pieces, with a lead time of 12 business days due to our current production schedule.
-
-For the copper wire (000104), BRL 95.00 per kg applies to the requested 12.5 kg, with a lead time of 8 business days.
-
-All lead times are counted from purchase order confirmation.
-
-Please let us know if you would like to proceed.
-
-Best regards,
-Sales Team
-MetalNova Teste"""  # noqa: E501
-
 NONE = ExtractedValue(value=None, source=None, confidence=0)
 
 
@@ -133,7 +100,17 @@ def ev(value: str, quote: str, confidence: float = 0.95) -> ExtractedValue:
     )
 
 
-def draft(position: int, **values: ExtractedValue) -> ProposalLineDraft:
+def days(value: str, quote: str) -> LeadTimeValue:
+    """A lead time in calendar days, as prompt v5 writes it."""
+    return LeadTimeValue(
+        value=value,
+        source=SourceRef(kind="email_body", quote=quote),
+        confidence=0.95,
+        unit="calendar_days",
+    )
+
+
+def draft(position: int, **values: Any) -> ProposalLineDraft:
     fields: dict[str, Any] = {
         name: NONE
         for name in (
@@ -143,7 +120,6 @@ def draft(position: int, **values: ExtractedValue) -> ProposalLineDraft:
             "unit",
             "tooling_cost",
             "moq",
-            "lead_time_days",
             "origin_country",
             "qualification",
         )
@@ -161,93 +137,6 @@ RFQ6_LINES = [
 NAMES = {1: "bearings", 2: "shafts", 3: "copper wire"}
 PRICES = {1: "19.50", 2: "89.00", 3: "95.00"}
 UNITS = {1: "piece", 2: "piece", 3: "kg"}
-LEAD_1 = "Lead time is approximately 10 business days after order confirmation"
-
-
-def reply_1() -> QuoteExtractionOutput:
-    """A careful extraction of the first reply under the current contract: the validity
-    is a date computed from "15 days" (low confidence), the shared approximate lead time
-    on the lines it names, nothing for the shafts' "few additional days"."""
-    moq = {
-        1: ev("10", "The MOQ is 10 pieces for bearings and shafts"),
-        2: ev("10", "The MOQ is 10 pieces for bearings and shafts"),
-        3: ev("5", "5 kg for copper wire"),
-    }
-    return QuoteExtractionOutput(
-        is_quote=True,
-        currency=ev("BRL", "BRL 19.50 per piece"),
-        valid_until=ev("2026-10-24", "the quotation is valid for 15 days", 0.6),
-        incoterm=NONE,
-        payment_terms=ev("Net 30", "Our standard payment terms are Net 30"),
-        lines=[
-            draft(
-                p,
-                offered_mpn=ev(PARTS[p], f"{NAMES[p]} ({PARTS[p]})"),
-                unit_price=ev(PRICES[p], f"BRL {PRICES[p]} per {UNITS[p]} for the {NAMES[p]}"),
-                unit=ev(UNITS[p], f"per {UNITS[p]} for the {NAMES[p]}"),
-                moq=moq[p],
-                lead_time_days=ev("10", LEAD_1, 0.7) if p != 2 else NONE,
-            )
-            for p in (1, 2, 3)
-        ],
-        missing_fields=["lead_time"],
-    )
-
-
-def reply_2() -> QuoteExtractionOutput:
-    """The second reply as the live model reads it: an amendment, no 'other terms
-    unchanged', per-line business days and the requested quantities."""
-    days = {1: "7", 2: "12", 3: "8"}
-    quantities = {1: ("70", "70 pieces"), 2: ("15", "15 pieces"), 3: ("12.5", "12.5 kg")}
-    return QuoteExtractionOutput(
-        is_quote=True,
-        reply_kind="amendment",
-        currency=ev("BRL", "BRL 19.50 per piece"),
-        valid_until=ev(
-            "2026-10-24",
-            "Our quotation is valid for 15 calendar days from the date of our original offer",
-            0.6,
-        ),
-        incoterm=NONE,
-        payment_terms=NONE,
-        lines=[
-            draft(
-                p,
-                offered_mpn=ev(PARTS[p], f"{NAMES[p]} ({PARTS[p]})"),
-                min_quantity=ev(quantities[p][0], f"applies to the requested {quantities[p][1]}"),
-                unit_price=ev(
-                    PRICES[p],
-                    f"BRL {PRICES[p]} per {UNITS[p]} applies to the requested {quantities[p][1]}",
-                ),
-                unit=ev(UNITS[p], f"per {UNITS[p]} applies"),
-                lead_time_days=ev(days[p], f"with a lead time of {days[p]} business days", 0.9),
-            )
-            for p in (1, 2, 3)
-        ],
-        missing_fields=["validity"],
-    )
-
-
-def business_days_helper(line: OfferedLine, reference: date) -> tuple[date, bool] | None:
-    """A stand-in for the extraction workstream's lead-time-to-date helper: business days
-    (flagged `working_days`) in the supplier's calendar; approximate when the cited text
-    says so."""
-    raw = line.fields.get("lead_time_days")
-    if not isinstance(raw, dict):
-        return None
-    entry = cast(dict[str, object], raw)
-    value = entry.get("parsed")
-    source = entry.get("source")
-    if not isinstance(value, str | int) or not isinstance(source, dict):
-        return None
-    quote = str(cast(dict[str, object], source).get("quote") or "")
-    start = datetime.combine(reference, datetime.min.time(), tzinfo=UTC)
-    issues = entry.get("issues")
-    if isinstance(issues, list) and "working_days" in cast(list[object], issues):
-        day = add_business_days(start, int(value), line.supplier_country).date()
-    else:
-        day = reference + timedelta(days=int(value))
-    return day, "approximately" not in quote.lower()
 
 
 @dataclass
@@ -325,6 +214,13 @@ class Thread:
             )
         return states[self.invite_id]
 
+    async def body(self, followup: FollowupMessage) -> str:
+        """The text of the email a follow-up proposes (its approval's arguments)."""
+        async with tenant_session(self.world.engine, self.world.tenant_id) as session:
+            approval = await session.get(Approval, followup.approval_id)
+            assert approval is not None
+            return str(approval.args["body"])
+
     def clarification_tasks(self) -> list[list[tuple[int | None, str, str]]]:
         return [
             [(i.position, i.field, i.question) for i in task.open_items]
@@ -396,13 +292,10 @@ def legacy_items(lines: dict[int, UUID]) -> Callable[..., list[OpenItem]]:
     return items
 
 
-@pytest.mark.parametrize("helper", [False, True], ids=["no_helper", "with_helper"])
 async def test_rfq6_replay_the_historical_clarification_is_answered(
-    thread: Thread, helper: bool, monkeypatch: pytest.MonkeyPatch
+    thread: Thread, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    if helper:
-        monkeypatch.setattr(missing_rules, "DEFAULT_EXPECTED_DELIVERY", business_days_helper)
-    await thread.reply(REPLY_1, reply_1(), timedelta(minutes=1))
+    await thread.reply(REPLY_1, first_reply(), timedelta(minutes=1))
     # Bido's real clarification #1 (the old rules), sent 3 minutes later.
     with monkeypatch.context() as patched:
         patched.setattr(ledger, "proposal_items", legacy_items(thread.rfq.lines))
@@ -410,7 +303,7 @@ async def test_rfq6_replay_the_historical_clarification_is_answered(
     await thread.approve_pending()
     assert set((await thread.asks()).values()) == {"open"}
 
-    await thread.reply(REPLY_2, reply_2(), timedelta(minutes=6))
+    await thread.reply(REPLY_2, second_reply(), timedelta(minutes=6))
 
     # The second reply is applied as answers: no 'other terms unchanged' needed, Net 30
     # and the MOQ carried over, nothing held.
@@ -419,12 +312,9 @@ async def test_rfq6_replay_the_historical_clarification_is_answered(
     assert offer_state["issues"] == [] and offer_state["reply_kind"] == "amendment"
     assert len(offer_state["answered_asks"]) == 7
     assert proposal.payment_terms == "Net 30"
-    assert {p: line.lead_time_days for p, line in lines.items()} == {1: 7, 2: 12, 3: 8}
-    assert {p: line.min_quantity for p, line in lines.items()} == {
-        1: Decimal(70),
-        2: Decimal(15),
-        3: Decimal("12.5"),
-    }
+    assert proposal.valid_until == date(2026, 10, 24)
+    # 7, 12 and 8 business days from 9 Oct (12 Oct is a holiday), as calendar days.
+    assert {p: line.lead_time_days for p, line in lines.items()} == {1: 12, 2: 19, 3: 13}
     assert {p: line.moq for p, line in lines.items()} == {
         1: Decimal(10),
         2: Decimal(10),
@@ -443,70 +333,73 @@ async def test_rfq6_replay_the_historical_clarification_is_answered(
 
     state = await thread.state()
     assert state.to_ask == () and state.decisions == ()
-    # The one targeted question left: the shaft's delivery date (12 business days from
-    # 9 Oct is 28 Oct, after the 22 Oct need-by), typed for the negotiation's
-    # delivery-date request. Without a lead-time helper Bido cannot tell: none.
-    if helper:
-        assert [(i.position, i.need_by, i.expected) for i in state.late] == [
-            (2, NEED_BY, date(2026, 10, 28))
-        ]
-    else:
-        assert state.late == ()
+    # The one targeted question left: the shafts' delivery date (12 business days from
+    # 10 Oct is 28 Oct, after the 22 Oct need-by), typed for the negotiation's
+    # delivery-date request, not a clarification.
+    assert [(i.position, i.need_by, i.expected) for i in state.late] == [
+        (2, NEED_BY, date(2026, 10, 28))
+    ]
     assert state.phase == "nothing_to_ask"
 
 
-@pytest.mark.parametrize("helper", [False, True], ids=["no_helper", "with_helper"])
-async def test_rfq6_replay_under_the_new_rules(
-    thread: Thread, helper: bool, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    if helper:
-        monkeypatch.setattr(missing_rules, "DEFAULT_EXPECTED_DELIVERY", business_days_helper)
-    await thread.reply(REPLY_1, reply_1(), timedelta(minutes=1))
+async def test_rfq6_replay_under_the_new_rules(thread: Thread) -> None:
+    await thread.reply(REPLY_1, first_reply(), timedelta(minutes=1))
     assert (await thread.sweep(timedelta(minutes=4))).clarifications == 1
     # Never the validity ("15 days"), never a quantity tier (one price per line), never the
-    # lead time already given: only the shafts' missing lead time and, with a helper, the
-    # bearings' date ("approximately 10 business days" lands after 22 Oct).
-    expected = [(2, "lead_time", "value")]
-    if helper:
-        expected = [(1, "delivery_date", "deliver_by"), *expected]
-    assert thread.clarification_tasks() == [expected]
+    # lead time already given: only whether "approximately 10 business days" (26 Oct)
+    # meets the bearings' and the shafts' 22 Oct (the wire is needed by 26 Oct).
+    assert thread.clarification_tasks() == [
+        [(1, "delivery_date", "deliver_by"), (2, "delivery_date", "deliver_by")]
+    ]
     [clarification] = await thread.followups()
     assert clarification.reply_by == date(2026, 10, 14)  # two business days, 12 Oct a holiday
+    # One question, rendered by code in the thread's language (Portuguese, the RFQ email's)
+    # under the lead time each position quoted, with the reply-by date.
+    body = await thread.body(clarification)
+    assert "Vocês conseguem entregar as posições 1 e 2 até 22/10/2026?" in body
+    assert body.count("Prazo informado: aprox. 10 dias úteis após o pedido") == 2
+    assert "14/10/2026" in body
     await thread.approve_pending()
 
-    await thread.reply(REPLY_2, reply_2(), timedelta(minutes=6))
+    await thread.reply(REPLY_2, second_reply(), timedelta(minutes=6))
     proposal, lines = await thread.latest()
     assert proposal.fields["_offer_state"]["issues"] == []
-    assert {p: line.lead_time_days for p, line in lines.items()} == {1: 7, 2: 12, 3: 8}
-    assert set((await thread.asks()).values()) == {"answered"}
+    assert {p: line.lead_time_days for p, line in lines.items()} == {1: 12, 2: 19, 3: 13}
+    # Both answered: the bearings arrive on 21 Oct; the shafts' answer is a date after
+    # the need-by (a "no", for the negotiation).
+    assert await thread.asks() == {
+        (1, "delivery_date"): "answered",
+        (2, "delivery_date"): "answered",
+    }
 
     assert (await thread.sweep(timedelta(minutes=19))).clarifications == 0
     assert (await thread.sweep(timedelta(hours=24, minutes=20))).clarifications == 0
     assert len(thread.clarification_tasks()) == 1
     state = await thread.state()
-    assert [i.position for i in state.late] == ([2] if helper else [])
+    assert [(i.position, i.expected) for i in state.late] == [(2, date(2026, 10, 28))]
     assert state.phase == "nothing_to_ask"
 
 
 # --- One open request per supplier, and one reminder -------------------------------------------
 
-INCOMPLETE = """Hello, our prices: BRL 19.50 per piece for the bearings (000101), BRL 89.00 per piece for the shafts (000102) and BRL 95.00 per kg for the copper wire (000104). Lead time 20 days. Net 30."""  # noqa: E501
+INCOMPLETE = """Hello, our prices: BRL 19.50 per piece for the bearings (000101), BRL 89.00 per piece for the shafts (000102) and BRL 95.00 per kg for the copper wire (000104). Lead time 10 days. Net 30."""  # noqa: E501
 
 
 def incomplete() -> QuoteExtractionOutput:
-    """Prices and a lead time, no validity."""
+    """Prices and a lead time for the whole offer that meets every need-by date (19 Oct),
+    no validity."""
     return QuoteExtractionOutput(
         is_quote=True,
         currency=ev("BRL", "BRL 19.50"),
         valid_until=NONE,
         incoterm=NONE,
         payment_terms=ev("Net 30", "Net 30"),
+        lead_time=days("10", "Lead time 10 days"),
         lines=[
             draft(
                 p,
                 unit_price=ev(PRICES[p], f"BRL {PRICES[p]} per {UNITS[p]} for the {NAMES[p]}"),
                 unit=ev(UNITS[p], f"per {UNITS[p]} for the {NAMES[p]}"),
-                lead_time_days=ev("20", "Lead time 20 days"),
             )
             for p in (1, 2, 3)
         ],
@@ -600,10 +493,9 @@ async def test_chases_wait_for_the_reply_by_and_survive_a_reply_without_an_offer
     # On the reply-by date (Tue 20 Oct, 02:50): the first chase, although it answered.
     assert (await thread.sweep(timedelta(days=11, minutes=1))).chases == 1
     [chase] = await thread.followups()
-    assert chase.kind == "chase" and chase.reply_by == date(2026, 10, 22)
-    task = thread.world.followup_writer.calls[-1][0]
-    # The RFQ's own date is past: the chase asks for a new one.
-    assert task.response_due == date(2026, 10, 22)
+    # It asks for an answer by the RFQ's own date, today.
+    assert chase.kind == "chase" and chase.reply_by == date(2026, 10, 20)
+    assert "20/10/2026" in await thread.body(chase)
 
 
 # --- Supplier questions ------------------------------------------------------------------------
@@ -774,7 +666,7 @@ def update_without_statement() -> QuoteExtractionOutput:
         valid_until=NONE,
         incoterm=NONE,
         payment_terms=NONE,
-        lines=[draft(1, lead_time_days=ev("25", "the lead time is now 25 days"))],
+        lines=[draft(1, lead_time=days("25", "the lead time is now 25 days"))],
     )
 
 

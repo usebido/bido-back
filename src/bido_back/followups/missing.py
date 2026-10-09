@@ -8,12 +8,16 @@ truly missing, so a supplier is never asked for what it already said:
 - Currency: asked only when the offer states none (or an unclear one) and the
   RFQ named none to the supplier (`rfq_currency`, a currency the RFQ email told
   suppliers to quote in). Not asked when nothing is priced.
-- Validity: a date, or a duration ("valid for 15 days": the provenance's
-  `validity_days`, or a duration in the cited text), answers it.
+- Validity: a date, or a duration ("valid for 15 days": the extraction's
+  `validity`, `quotes.terms.offer_terms`; for offers read before prompt v5,
+  `validity_days` or a duration in the cited text), answers it.
 - Price: a requested line with no price is asked once as "the price for this
   position, or tell us you do not quote it". Nothing else is asked about it.
 - Quantity: a single per-unit price applies to the requested quantity. The
-  quantity (tier) is asked only when several price breaks lack quantities.
+  quantity (tier) is asked only when the extraction could not tell which
+  quantity a price applies to (`quotes.terms.line_terms`: `quantity_basis ==
+  "ambiguous"`, several prices and no quantity for this one); for lines read
+  before prompt v5, when several price breaks lack quantities.
 - Lead time: a lead time given for the whole offer applies to every line. It
   is asked only when none is given at all. Where the line has a need-by date,
   the given lead time must be shown to meet it (`expected_delivery`). When it
@@ -21,7 +25,7 @@ truly missing, so a supplier is never asked for what it already said:
   need-by date), Bido asks for a date: "can you deliver by <need-by>? If not,
   the earliest date". A definite lead time that misses the date is not a
   clarification: it is a commercial ask, the negotiation's delivery-date
-  request. Without a delivery helper, no date is asked.
+  request (`late_deliveries`).
 - Declined: positions the supplier declined or withdrew are never asked again.
 
 Each `OpenItem` is typed for the email renderer: the position, the field, the
@@ -32,22 +36,22 @@ was already asked (and must not be asked again) is the ledger's business
 `expected_delivery(offer_line, reference_date) -> (date, exact) | None` is the
 lead-time-to-date helper: when would `offer_line` arrive if ordered on
 `reference_date`, and is that date exact (False for "approximately")? None
-when it cannot tell. It reads the line's provenance (`OfferedLine.fields`:
-the lead time, its unit and basis) and the offer's (`offer_fields`: an
-offer-level lead time), with the supplier's country for holidays. Until the
-extraction records a lead time's unit and basis, `DEFAULT_EXPECTED_DELIVERY`
-is None (no helper): callers take one as an argument, and the extraction
-workstream installs its helper there.
+when it cannot tell. `DEFAULT_EXPECTED_DELIVERY` (`stored_expected_delivery`)
+reads the lead time the extraction stored with the line (its unit, basis and
+the supplier's holiday calendar, `quotes.terms.line_terms`) and converts it with
+`quotes.lead_time.expected_delivery`; callers may pass another one.
 """
 
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
 from typing import Final, Literal, cast
 from uuid import UUID
 
 from bido_back.agents.catalog.contracts import FollowupField, FollowupItem, FollowupQuestion
+from bido_back.quotes.lead_time import expected_delivery as lead_time_delivery
+from bido_back.quotes.terms import line_terms, offer_terms
 
 Problem = Literal["missing", "unclear"]
 # One item of the ledger: (requested line, or None for the whole offer; field).
@@ -98,8 +102,36 @@ class OfferedLine:
 # (offer_line, reference_date) -> (expected delivery date, exact) | None
 ExpectedDelivery = Callable[[OfferedLine, date], tuple[date, bool] | None]
 
-# The lead-time-to-date helper the product uses (see the module docstring): none yet.
-DEFAULT_EXPECTED_DELIVERY: ExpectedDelivery | None = None
+
+def stored_expected_delivery(offer: OfferedLine, reference_date: date) -> tuple[date, bool] | None:
+    """When `offer` would arrive if ordered on `reference_date`, from what the extraction
+    stored with the line.
+
+    - The stated lead time (prompt v5, `line_terms`): converted with the supplier's
+      holiday calendar; not exact when approximate, counted from payment or approval,
+      ex works, or in business days without a known calendar.
+    - A person's correction of `lead_time_days`: those calendar days, exact.
+    - A stated lead time that could not be used (it needs review): no date (None).
+    - Lines read before prompt v5: `lead_time_days` as calendar days, never exact (the
+      unit the supplier wrote is unknown).
+    """
+    stored = line_terms(offer.fields).lead_time
+    if stored is not None:
+        found = lead_time_delivery(stored, reference_date)
+        return found.delivery_date, found.exact
+    corrected = _corrected(offer.fields, "lead_time_days")
+    if not corrected and (
+        _stated(offer.fields, "lead_time_terms") or _flagged(offer.fields, "lead_time_days")
+    ):
+        return None
+    days = offer.values.get("lead_time_days")
+    if not isinstance(days, int) or isinstance(days, bool) or days < 0:
+        return None
+    return reference_date + timedelta(days=days), corrected
+
+
+# The lead-time-to-date helper the product uses (see the module docstring).
+DEFAULT_EXPECTED_DELIVERY: ExpectedDelivery | None = stored_expected_delivery
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,8 +241,14 @@ def _line_items(
     if all(_flagged(t.fields, "unit_price") for t in priced):
         items.append(item("unit_price", "confirm", "unclear"))
 
-    # A single price applies to the requested quantity; only several breaks need theirs.
-    if len(priced) > 1:
+    # A single price applies to the requested quantity; only several prices without
+    # their quantities need them.
+    bases = [b for b in (line_terms(t.fields).quantity for t in priced) if b is not None]
+    if bases:
+        if any(b.quantity_basis == "ambiguous" for b in bases):
+            items.append(item("quantity", "value", "missing"))
+    elif len(priced) > 1:
+        # Read before prompt v5: from the price breaks themselves.
         without = [t for t in priced if t.values.get("min_quantity") is None]
         if len(without) > 1:
             items.append(item("quantity", "value", "missing"))
@@ -313,6 +351,12 @@ def _stated(provenance: Mapping[str, object], key: str) -> bool:
     return entry is not None and entry.get("value") is not None
 
 
+def _corrected(provenance: Mapping[str, object], key: str) -> bool:
+    """A person corrected `key`: their value stands."""
+    entry = _entry(provenance, key)
+    return entry is not None and entry.get("corrected") is True
+
+
 def _currency(
     value: object, provenance: Mapping[str, object], rfq_currency: str | None
 ) -> Problem | None:
@@ -326,9 +370,12 @@ def _currency(
 def validity_duration_given(provenance: Mapping[str, object]) -> bool:
     """The offer's validity was given as a duration ("valid for 15 days").
 
-    Read from `validity_days` when the extraction records it, else from the text
-    the extraction cited for the validity.
+    Read from the extraction's `validity` (prompt v5, `quotes.terms.offer_terms`): the
+    duration counts even when its end date could not be computed. Offers read before
+    prompt v5: `validity_days`, else the text the extraction cited for the validity.
     """
+    if offer_terms(provenance).validity is not None or _stated(provenance, "validity"):
+        return True
     days = _entry(provenance, VALIDITY_DAYS_KEY)
     if days is not None and (days.get("parsed") is not None or days.get("value") is not None):
         return True
@@ -350,12 +397,15 @@ def _validity(value: object, provenance: Mapping[str, object]) -> Problem | None
 
 def offer_lead_time_given(offer_fields: Mapping[str, object]) -> bool:
     """A lead time stated for the whole offer, which applies to every line."""
-    return any(_stated(offer_fields, key) for key in OFFER_LEAD_TIME_KEYS)
+    return offer_terms(offer_fields).lead_time is not None or any(
+        _stated(offer_fields, key) for key in OFFER_LEAD_TIME_KEYS
+    )
 
 
 def _lead_time_given(offer: OfferedLine) -> bool:
     return (
         offer.values.get("lead_time_days") is not None
         or _stated(offer.fields, "lead_time_days")
+        or _stated(offer.fields, "lead_time_terms")
         or offer_lead_time_given(offer.offer_fields)
     )

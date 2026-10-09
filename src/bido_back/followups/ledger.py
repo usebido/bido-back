@@ -63,7 +63,7 @@ from bido_back.followups.missing import (
     open_items,
 )
 from bido_back.quotes.state import AskedField
-from bido_back.quotes.validation import ValidatedQuote
+from bido_back.quotes.terms import offer_terms
 
 AskStatus = Literal["proposed", "open", "answered", "unusable", "withdrawn", "resolved"]
 QuestionStatus = Literal["open", "answered", "dismissed"]
@@ -441,10 +441,14 @@ def _positions(offer_state: object, key: str) -> frozenset[int]:
 
 
 def declined_positions(proposal_fields: Mapping[str, object]) -> frozenset[int]:
-    """Positions the supplier declined or withdrew (`_offer_state`)."""
+    """Positions the supplier declined or withdrew and has not offered since
+    (`_offer_state`, which also keeps what earlier replies declined), and those the
+    latest reply declines (its signals, `quotes.terms.offer_terms`)."""
     offer_state = proposal_fields.get("_offer_state")
-    return _positions(offer_state, "declined_line_positions") | _positions(
-        offer_state, "withdrawn_line_positions"
+    return (
+        _positions(offer_state, "declined_line_positions")
+        | _positions(offer_state, "withdrawn_line_positions")
+        | frozenset(offer_terms(proposal_fields).signals.declined_line_positions)
     )
 
 
@@ -509,48 +513,6 @@ def proposal_items(
         requested=requested,
         offered=offered_lines(proposal, lines, country),
         declined_positions=declined_positions(proposal.fields),
-        reference_date=today,
-        expected_delivery=expected_delivery,
-    )
-
-
-def quote_items(
-    quote: ValidatedQuote,
-    offer_state: Mapping[str, JsonValue],
-    requested: Sequence[RequestedLine],
-    *,
-    country: str | None,
-    today: date,
-    expected_delivery: ExpectedDelivery | None,
-) -> list[OpenItem]:
-    """What a reconciled offer still lacks: the same rules as `proposal_items`, on the
-    state the extraction is about to store."""
-    offer_fields: dict[str, object] = {**quote.provenance(), "_offer_state": offer_state}
-    offered: list[OfferedLine] = []
-    for line in quote.lines:
-        lead = line.parsed("lead_time_days")
-        offered.append(
-            OfferedLine(
-                rfq_line_id=line.rfq_line_id,
-                values={
-                    "unit_price": line.parsed("unit_price"),
-                    "min_quantity": line.parsed("min_quantity"),
-                    "lead_time_days": lead if isinstance(lead, int) else None,
-                },
-                fields=line.provenance(),
-                offer_fields=offer_fields,
-                supplier_country=country,
-            )
-        )
-    return open_items(
-        header_values={
-            "currency": quote.parsed("currency"),
-            "valid_until": quote.parsed("valid_until"),
-        },
-        header_fields=offer_fields,
-        requested=requested,
-        offered=offered,
-        declined_positions=declined_positions(offer_fields),
         reference_date=today,
         expected_delivery=expected_delivery,
     )

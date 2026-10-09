@@ -3,27 +3,26 @@
 `default_negotiation_writer()` runs `RFQ_NEGOTIATION_WRITER` through
 `runner.run_to_completion`, importing the definitions (and so Agno) on first
 use. The agent has no tools and decides no numbers: the strategy
-(`bido_back.negotiation.strategy`) does, and what it writes becomes a proposal
-that a person approves.
+(`bido_back.negotiation.strategy`) does, code renders the email
+(`bido_back.supplier_email`), and the agent may only add an optional note to it.
+What goes out is a proposal that a person approves.
 """
 
 import logging
 from collections.abc import Awaitable, Callable
 
-from bido_back.agents.catalog.contracts import NegotiationEmailInput, NegotiationEmailOutput
+from bido_back.agents.catalog.contracts import EmailNoteOutput, NegotiationEmailInput
 from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
 from bido_back.rfqs.errors import AgentFailed
 
 logger = logging.getLogger(__name__)
 
-NegotiationWriter = Callable[
-    [NegotiationEmailInput, ToolContext], Awaitable[NegotiationEmailOutput]
-]
+NegotiationWriter = Callable[[NegotiationEmailInput, ToolContext], Awaitable[EmailNoteOutput]]
 
 
 def default_negotiation_writer(config: RunnerConfig | None = None) -> NegotiationWriter:
-    async def write(task: NegotiationEmailInput, context: ToolContext) -> NegotiationEmailOutput:
+    async def write(task: NegotiationEmailInput, context: ToolContext) -> EmailNoteOutput:
         from bido_back.agents.catalog.definitions import RFQ_NEGOTIATION_WRITER
         from bido_back.agents.runner import Completed, Failed, run_to_completion
 

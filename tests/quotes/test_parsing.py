@@ -8,16 +8,25 @@ import pytest
 from bido_back.quotes.parsing import (
     DecimalSeparator,
     dates_in,
+    day_months_in,
     decimal_separator_for,
     detect_currencies,
     find_number,
     incoterms_in,
+    is_delivery_timing,
+    mentions_approximation,
+    mentions_calendar_days,
+    mentions_days,
+    mentions_months,
+    mentions_original_offer,
     mentions_per_unit,
+    mentions_stock,
     mentions_weeks,
     mentions_working_days,
     parse_amount,
     parse_canonical,
     parse_decimal,
+    ranges_in,
 )
 
 
@@ -146,3 +155,90 @@ def test_incoterms_and_lead_time_words() -> None:
     assert not mentions_weeks("42 days")
     assert mentions_working_days("30 AT") and mentions_working_days("20 working days")
     assert not mentions_working_days("at 0.45 each")
+
+
+def test_dates_with_portuguese_and_spanish_month_names() -> None:
+    assert dates_in("válida até 30 de outubro de 2026") == {date(2026, 10, 30)}
+    assert dates_in("válida hasta el 30 de octubre del 2026") == {date(2026, 10, 30)}
+
+
+def test_day_and_month_without_a_year() -> None:
+    assert day_months_in("consegna entro il 30/10") == {(10, 30)}
+    assert day_months_in("Liefertermin 30.10.") == {(10, 30)}
+    assert day_months_in("entrega até 30 de outubro") == {(10, 30)}
+    assert day_months_in("delivery by October 30th") == {(10, 30)}
+    # Both readings of an ambiguous day/month; dates with a year are not yearless.
+    assert day_months_in("by 05/10") == {(10, 5), (5, 10)}
+    assert day_months_in("bis 30.10.2026") == set()
+    assert day_months_in("BRL 19.50 per piece") == set()
+
+
+def test_business_days_in_every_language() -> None:
+    for text in (
+        "10 business days",
+        "10 dias úteis",
+        "10 días hábiles",
+        "10 Arbeitstage",
+        "10 Werktage",
+        "10 giorni lavorativi",
+        "10 jours ouvrés",
+        "10 werkdagen",
+    ):
+        assert mentions_working_days(text), text
+        assert mentions_days(text), text
+    assert not mentions_working_days("15 dias corridos")
+
+
+def test_day_month_and_calendar_day_units() -> None:
+    for text in ("15 days", "15 dias", "15 Tage", "15 jours", "15 giorni", "60 gg", "30d"):
+        assert mentions_days(text), text
+    assert not mentions_days("6 Wochen")
+    for text in ("15 calendar days", "15 dias corridos", "15 Kalendertage", "15 días naturales"):
+        assert mentions_calendar_days(text), text
+    assert not mentions_calendar_days("15 business days")
+    for text in ("2 months", "2 meses", "1 mês", "2 Monate", "1 mois", "2 mesi"):
+        assert mentions_months(text), text
+    assert not mentions_months("2 weeks")
+
+
+def test_hedges_ranges_stock_and_original_offer() -> None:
+    for text in (
+        "approximately 10 business days",
+        "ca. 3 Wochen",
+        "cerca de 15 dias",
+        "aprox. 20 dias",
+        "environ 3 semaines",
+        "about 2 weeks",
+        "previsão de 10 dias",
+    ):
+        assert mentions_approximation(text), text
+    assert not mentions_approximation("Lead time 10 business days")
+    assert ranges_in("2-3 Wochen") == [(Decimal(2), Decimal(3))]
+    assert ranges_in("4 a 6 semanas") == [(Decimal(4), Decimal(6))]
+    assert ranges_in("3/4 settimane") == [(Decimal(3), Decimal(4))]
+    assert ranges_in("2 bis 3 Wochen") == [(Decimal(2), Decimal(3))]
+    assert ranges_in("consegna entro il 30/10") == []  # not low-high
+    assert ranges_in("10 business days") == []
+    for text in ("ex stock", "pronta entrega", "ab Lager", "pronta consegna", "from stock"):
+        assert mentions_stock(text), text
+    assert mentions_original_offer("valid for 15 calendar days from the date of our original offer")
+    assert mentions_original_offer("válida por 15 dias a partir da proposta original")
+    assert mentions_original_offer("gültig 30 Tage ab dem ursprünglichen Angebot")
+    assert not mentions_original_offer("the quotation is valid for 15 days")
+
+
+def test_delivery_timing_sentences() -> None:
+    assert is_delivery_timing(
+        "We may need a few additional days for the shafts, depending on production availability."
+    )
+    assert is_delivery_timing(
+        "Lead time is approximately 10 business days after order confirmation."
+    )
+    assert is_delivery_timing("Für die Wellen benötigen wir ca. 1 Woche länger in der Fertigung.")
+    # Price, payment or validity are never only about timing.
+    assert not is_delivery_timing("Price valid only for delivery within 30 days.")
+    assert not is_delivery_timing(
+        "Our standard payment terms are Net 30, and the quotation is valid for 15 days."
+    )
+    assert not is_delivery_timing("Subject to stock availability.")  # no time unit: a condition
+    assert not is_delivery_timing("BRL 5.00 extra for delivery within 3 days.")

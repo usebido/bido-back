@@ -376,6 +376,9 @@ class NegotiationEmailDraft(BaseModel):
     cc: list[str]
     subject: str
     body: str
+    # The same email as HTML (the positions as a real table), when the proposal has one:
+    # the approver previews what the supplier's mail client shows.
+    html_body: str | None = None
 
 
 class MandateLineView(BaseModel):

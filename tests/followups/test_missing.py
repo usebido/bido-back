@@ -5,15 +5,19 @@ from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
+from bido_back.followups.ledger import declined_positions
 from bido_back.followups.missing import (
+    DEFAULT_EXPECTED_DELIVERY,
     ExpectedDelivery,
     OfferedLine,
     OpenItem,
     RequestedLine,
     late_deliveries,
     open_items,
+    stored_expected_delivery,
     validity_duration_given,
 )
+from bido_back.quotes.lead_time import LeadTime, encode_lead_time
 
 TODAY = date(2026, 10, 9)
 NEED_BY = date(2026, 10, 22)
@@ -274,3 +278,106 @@ def test_open_items_are_typed_for_the_email() -> None:
         "price_or_decline",
     )
     assert item.key == (SHAFT.id, "unit_price")
+
+
+# --- What the extraction stores (prompt v5) -----------------------------------------------------
+
+
+def quantity(basis: str) -> dict[str, object]:
+    """A line's `_terms`: which quantity its price applies to (`quotes.terms.line_terms`)."""
+    return {
+        "_terms": {
+            "quantity_basis": basis,
+            "price_applies_to_requested_quantity": basis != "ambiguous",
+        }
+    }
+
+
+def test_the_tier_is_asked_only_when_the_extraction_finds_it_ambiguous() -> None:
+    # Two prices for the bearings without tier quantities, each read with its quantity.
+    read = [
+        offered(BEARING, fields=quantity("stated_tier")),
+        offered(BEARING, price="18.00", fields=quantity("stated_tier")),
+        offered(SHAFT, fields=quantity("requested_quantity")),
+    ]
+    assert items(read, requested=(BEARING, SHAFT)) == []
+    ambiguous = [
+        offered(BEARING, fields=quantity("ambiguous")),
+        offered(BEARING, price="18.00", fields=quantity("ambiguous")),
+        offered(SHAFT, fields=quantity("requested_quantity")),
+    ]
+    assert items(ambiguous, requested=(BEARING, SHAFT)) == [(1, "quantity", "value")]
+
+
+def lead_terms(
+    unit: str,
+    amount: str,
+    days: int,
+    *,
+    approximate: bool = False,
+    review: bool = False,
+) -> dict[str, object]:
+    """A line's lead time as the extraction stores it: the statement and its calendar days."""
+    lead = LeadTime.model_validate(
+        {
+            "unit": unit,
+            "amount": Decimal(amount),
+            "approximate": approximate,
+            "basis": "order",
+            "holiday_calendar": "BR",
+        }
+    )
+    return {
+        "lead_time_terms": {"value": f"{amount} {unit}", "parsed": encode_lead_time(lead, TODAY)},
+        "lead_time_days": {"value": str(days), "parsed": days, "needs_review": review},
+    }
+
+
+def test_the_expected_delivery_comes_from_the_stored_lead_time() -> None:
+    # "approximately 10 business days" from Friday 9 Oct (12 Oct a holiday in Brazil).
+    approximate = offered(
+        BEARING, lead=17, fields=lead_terms("business_days", "10", 17, approximate=True)
+    )
+    assert stored_expected_delivery(approximate, TODAY) == (date(2026, 10, 26), False)
+    exact = offered(SHAFT, lead=19, fields=lead_terms("business_days", "12", 19))
+    assert stored_expected_delivery(exact, TODAY) == (date(2026, 10, 28), True)
+    assert stored_expected_delivery(exact, date(2026, 10, 10)) == (date(2026, 10, 28), True)
+    # A person's correction: its calendar days, exact.
+    fixed = {"lead_time_days": {"value": "30", "parsed": 30, "corrected": True}}
+    assert stored_expected_delivery(offered(SHAFT, lead=30, fields=fixed), TODAY) == (
+        TODAY + timedelta(days=30),
+        True,
+    )
+    # Stated, but it needs review: no date can be told.
+    review = offered(SHAFT, lead=19, fields=lead_terms("business_days", "12", 19, review=True))
+    assert stored_expected_delivery(review, TODAY) is None
+    # Read before prompt v5: calendar days, never exact (the unit written is unknown).
+    legacy = offered(SHAFT, lead=20, fields={"lead_time_days": stated(20, "Lead time 20 days")})
+    assert stored_expected_delivery(legacy, TODAY) == (TODAY + timedelta(days=20), False)
+    assert stored_expected_delivery(offered(SHAFT, lead=None), TODAY) is None
+    # It is the product's helper.
+    assert DEFAULT_EXPECTED_DELIVERY is stored_expected_delivery
+
+
+def test_the_extractions_validity_and_offer_lead_time_answer_their_questions() -> None:
+    validity = {"validity": {"value": "15 calendar_days", "parsed": None}}
+    assert validity_duration_given(validity)
+    assert items(complete(), valid_until=None, header_fields=validity) == []
+    lead = LeadTime.model_validate(
+        {"unit": "business_days", "amount": Decimal(10), "approximate": True, "scope": "offer"}
+    )
+    offer_level = {
+        "lead_time": {"value": "10 business_days", "parsed": encode_lead_time(lead, TODAY)}
+    }
+    lines = [offered(line, lead=None, offer_fields=offer_level) for line in (BEARING, SHAFT, WIRE)]
+    assert items(lines) == []
+
+
+def test_declined_lines_come_from_the_replies_and_the_offer_state() -> None:
+    fields = {
+        "_signals": {
+            "declined_lines": [{"rfq_line_position": 2, "quote": "We cannot supply the shafts."}]
+        },
+        "_offer_state": {"declined_line_positions": [3], "withdrawn_line_positions": []},
+    }
+    assert declined_positions(fields) == frozenset({2, 3})

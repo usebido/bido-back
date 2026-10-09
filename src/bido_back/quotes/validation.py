@@ -17,13 +17,42 @@ any model:
 Anything that fails marks the field, and through it the line or the proposal,
 `needs_review`. Nothing is dropped: the persisted provenance keeps the raw
 value, the source, the confidence and the reasons.
+
+Durations are data, not numbers (prompt v5):
+
+- a lead time is an amount and a unit (calendar days, business days, weeks,
+  months, or a date), a basis, an approximate flag and a risk note. The
+  offer-level lead time applies to every line without its own. Code converts it
+  to calendar days from the offer date with the supplier's holiday calendar
+  (`bido_back.quotes.lead_time`) and stores that in `lead_time_days`; the
+  statement itself is kept in the line's `lead_time_terms` field and, for the
+  offer-level one, in the header's `lead_time` field (`parsed` holds it as JSON);
+- a validity given as a duration ("valid for 15 days") becomes `valid_until`,
+  counted from the supplier message's date (or its first offer's, when the text
+  says so). The duration is kept in the `validity` header field.
+
+Review issues of a converted value always sit on the field a person can correct
+(`lead_time_days`, `valid_until`); the `lead_time_terms`, `lead_time` and
+`validity` fields only carry the statement and never need review themselves.
+
+Also deterministic, never the model's call:
+
+- an unverified `min_quantity` equal to a requested quantity was copied from the
+  request: it is dropped, not flagged (a single price without tiers applies to
+  the requested quantity, see `quantity_bases`);
+- a condition repeated on the lines of every requested position is a general
+  term of the offer: it becomes an offer note and blocks no line; a condition
+  sentence only about delivery timing ("a few additional days for the shafts")
+  becomes that line's lead-time risk note;
+- the supplier's signals (final offer, declined lines, questions) are grounded
+  against its message (`ValidatedQuote.signals`).
 """
 
 import re
 import unicodedata
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from datetime import date
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Final, Literal
 from uuid import UUID
@@ -32,25 +61,54 @@ from pydantic import JsonValue
 
 from bido_back.agents.catalog.contracts import (
     ExtractedValue,
+    LeadTimeBasis,
+    LeadTimeValue,
     ProposalLineDraft,
     QuoteExtractionOutput,
     SourceRef,
+    ValidityValue,
 )
 from bido_back.documents import DocumentText
+from bido_back.quotes.lead_time import (
+    LeadTime,
+    LeadTimeScope,
+    PeriodUnit,
+    ValidityPeriod,
+    decode_lead_time,
+    encode_lead_time,
+    expected_delivery,
+    holiday_calendar_for,
+    validity_end,
+)
 from bido_back.quotes.parsing import (
     INCOTERMS,
     ISO_CURRENCIES,
     DecimalSeparator,
     dates_in,
+    day_months_in,
     detect_currencies,
     find_number,
     incoterms_in,
+    is_delivery_timing,
+    mentions_approximation,
+    mentions_calendar_days,
+    mentions_days,
+    mentions_months,
     mentions_none,
+    mentions_original_offer,
+    mentions_stock,
     mentions_weeks,
     mentions_working_days,
     normalize_text,
     parse_canonical,
     parse_decimal,
+    ranges_in,
+)
+from bido_back.quotes.terms import (
+    DeclinedLineSignal,
+    QuantityTerms,
+    QuestionSignal,
+    SupplierSignals,
 )
 
 REVIEW_CONFIDENCE: Final = 0.8
@@ -59,7 +117,18 @@ MAX_AMOUNT: Final = Decimal(10) ** 12
 MAX_LEAD_TIME_DAYS: Final = 3650
 
 FieldKind = Literal[
-    "amount", "quantity", "days", "currency", "date", "incoterm", "country", "mpn", "text"
+    "amount",
+    "quantity",
+    "days",
+    "currency",
+    "date",
+    "incoterm",
+    "country",
+    "mpn",
+    "text",
+    # A stated lead time / validity period: `parsed` is its JSON (`quotes.lead_time`).
+    "lead_time",
+    "validity",
 ]
 
 HEADER_FIELDS: Final[Mapping[str, FieldKind]] = {
@@ -67,6 +136,8 @@ HEADER_FIELDS: Final[Mapping[str, FieldKind]] = {
     "valid_until": "date",
     "incoterm": "incoterm",
     "payment_terms": "text",
+    "validity": "validity",
+    "lead_time": "lead_time",
 }
 LINE_FIELDS: Final[Mapping[str, FieldKind]] = {
     "offered_mpn": "mpn",
@@ -82,7 +153,14 @@ LINE_FIELDS: Final[Mapping[str, FieldKind]] = {
     "freight_cost": "amount",
     "tax_rate_percent": "amount",
     "conditional_terms": "text",
+    # The lead time that applies to the line (its own or the offer's), as JSON.
+    "lead_time_terms": "lead_time",
 }
+# Fields checked by `check_field`; the others are derived below.
+_GENERIC_HEADER: Final = ("currency", "valid_until", "incoterm", "payment_terms")
+_DERIVED_LINE: Final = frozenset({"lead_time_terms", "lead_time_days"})
+# A quantity the model could only have copied from the request.
+_UNVERIFIED: Final = frozenset({"not_grounded", "quote_not_found", "no_source"})
 
 type Parsed = Decimal | int | date | str
 
@@ -95,6 +173,8 @@ class RequestedLine:
     id: UUID
     position: int
     mpn: str | None = None
+    # The requested quantity tiers; a copied `min_quantity` is recognized by them.
+    quantities: tuple[Decimal, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,10 +262,15 @@ class LineCheck:
 
 @dataclass(frozen=True, slots=True)
 class ValidatedQuote:
+    # The model's output, with `technical_questions` completed from
+    # `supplier_questions` and `offer_notes` reduced to verified sentences.
     output: QuoteExtractionOutput
     header: Mapping[str, FieldCheck]
     lines: tuple[LineCheck, ...]
     issues: tuple[str, ...] = ()
+    # The signals of this message only. Not part of a stored offer state: the
+    # extraction job stores them per proposal (`bido_back.quotes.terms`).
+    signals: SupplierSignals = field(default_factory=SupplierSignals)
 
     @property
     def is_quote(self) -> bool:
@@ -216,6 +301,17 @@ class ValidatedQuote:
 # --- Validation ----------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class _Context:
+    sources: QuoteSources
+    decimal: DecimalSeparator | None
+    review_confidence: float
+    # The supplier message's date: durations are converted from it.
+    reference: date
+    original_offer_date: date | None
+    holiday_calendar: str | None
+
+
 def validate_quote(
     output: QuoteExtractionOutput,
     *,
@@ -224,11 +320,20 @@ def validate_quote(
     today: date,
     decimal: DecimalSeparator | None = None,
     review_confidence: float = REVIEW_CONFIDENCE,
+    offer_date: date | None = None,
+    original_offer_date: date | None = None,
+    country: str | None = None,
 ) -> ValidatedQuote:
     """Check an extraction against its sources and the RFQ.
 
     `decimal` is the supplier's likely decimal separator (from its language);
     without it, numbers like `1,000` are ambiguous and go to review.
+    `offer_date` is the date of the supplier's message (default `today`):
+    lead times and validity periods run from it. `original_offer_date` is the
+    date of the supplier's first offer in this thread, for a validity "from the
+    date of our original offer". `country` is the supplier's ISO country, whose
+    public holidays business days skip; without it, the offer currency's country
+    when only one country uses that currency (BRL: Brazil).
     """
 
     def check(name: str, kind: FieldKind, value: ExtractedValue) -> FieldCheck:
@@ -236,24 +341,66 @@ def validate_quote(
             name, kind, value, sources, decimal=decimal, review_confidence=review_confidence
         )
 
-    header = {
-        name: check(name, kind, getattr(output, name)) for name, kind in HEADER_FIELDS.items()
+    generic = {
+        name: check(name, HEADER_FIELDS[name], getattr(output, name)) for name in _GENERIC_HEADER
     }
-    if not output.is_quote and output.reply_kind == "replacement":
-        return ValidatedQuote(output=output, header=header, lines=())
-
-    currency = header["currency"]
+    currency = generic["currency"]
+    trusted_currency = currency.parsed if isinstance(currency.parsed, str) else None
+    ctx = _Context(
+        sources=sources,
+        decimal=decimal,
+        review_confidence=review_confidence,
+        reference=offer_date or today,
+        original_offer_date=original_offer_date,
+        holiday_calendar=holiday_calendar_for(
+            country, trusted_currency if not currency.needs_review else None
+        ),
+    )
+    offer_lead = _check_lead_time(output.lead_time, ctx, scope="offer")
+    validity = _check_validity(output.validity, ctx)
+    derived = {
+        "valid_until": _valid_until(generic["valid_until"], validity),
+        "validity": _validity_field(validity),
+        "lead_time": _lead_time_field(
+            "lead_time", offer_lead, offer_lead.lead_time if offer_lead else None, ctx
+        ),
+    }
+    merged = {**generic, **derived}
+    header = {name: merged[name] for name in HEADER_FIELDS}
     by_position = {line.position: line for line in requested}
-    lines: list[LineCheck] = []
-    for draft in output.lines:
-        fields = {
-            name: check(name, kind, getattr(draft, name)) for name, kind in LINE_FIELDS.items()
-        }
-        lines.append(
-            _check_line(
-                draft, fields, by_position, currency, partial=output.reply_kind != "replacement"
-            )
+    notes = _verified_notes(output.offer_notes, sources)
+    signals = _signals(output, by_position, sources, review_confidence)
+    if not output.is_quote and output.reply_kind == "replacement":
+        return ValidatedQuote(
+            output=_normalized(output, notes), header=header, lines=(), signals=signals
         )
+
+    drafts: list[ProposalLineDraft] = []
+    line_fields: list[dict[str, FieldCheck]] = []
+    for draft in output.lines:
+        position = draft.rfq_line_position
+        fields = {
+            name: check(name, kind, getattr(draft, name))
+            for name, kind in LINE_FIELDS.items()
+            if name not in _DERIVED_LINE
+        }
+        fields.update(_line_lead_time(draft, offer_lead, output.lead_time, ctx, check))
+        fields["min_quantity"], draft = _without_copied_quantity(
+            fields["min_quantity"],
+            draft,
+            by_position.get(position) if position is not None else None,
+        )
+        drafts.append(draft)
+        line_fields.append({name: fields[name] for name in LINE_FIELDS})
+    drafts, line_fields, general = _general_terms(drafts, line_fields, notes)
+    drafts, line_fields = _timing_out_of_conditions(drafts, line_fields, ctx)
+    notes = _unique([*notes, *general])
+    lines = [
+        _check_line(
+            draft, fields, by_position, currency, partial=output.reply_kind != "replacement"
+        )
+        for draft, fields in zip(drafts, line_fields, strict=True)
+    ]
 
     issues: list[str] = []
     if not lines and output.reply_kind == "replacement":
@@ -274,7 +421,13 @@ def validate_quote(
         evidence = check(name, "text", getattr(output, name))
         if evidence.needs_review:
             issues.append(f"unverified:{name}")
-    return ValidatedQuote(output=output, header=header, lines=tuple(lines), issues=tuple(issues))
+    return ValidatedQuote(
+        output=_normalized(output, notes),
+        header=header,
+        lines=tuple(lines),
+        issues=tuple(issues),
+        signals=signals,
+    )
 
 
 def _check_line(
@@ -333,6 +486,618 @@ def _check_line(
         issues=tuple(issues),
         notes=tuple(notes),
     )
+
+
+def absent_field(name: str) -> FieldCheck:
+    """A field the supplier did not state."""
+    return FieldCheck(
+        name=name, extracted=ExtractedValue(value=None, source=None, confidence=0), parsed=None
+    )
+
+
+# --- Lead times ------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _LeadCheck:
+    raw: LeadTimeValue
+    # None when the value cannot be used (no unit, not a number or a date).
+    lead_time: LeadTime | None
+    issues: tuple[str, ...]
+
+
+def _check_lead_time(
+    value: LeadTimeValue, ctx: _Context, *, scope: LeadTimeScope
+) -> _LeadCheck | None:
+    """The stated lead time checked against its quote: the number, and its unit word."""
+    raw = (value.value or "").strip()
+    if not raw:
+        return None
+    issues = _evidence_issues(value, ctx)
+    source = value.source
+    quote = source.quote if source is not None else ""
+    header = _column_header(source, ctx.sources) if source is not None else None
+    unit_text = f"{quote}\n{header}" if header else quote
+    risk = _verbatim(value.risk_note, ctx.sources)
+    approximate = value.approximate or mentions_approximation(quote)
+    basis: LeadTimeBasis = value.basis or "unspecified"
+
+    def done(lead: LeadTime | None, *more: str) -> _LeadCheck:
+        return _LeadCheck(value, lead, tuple(dict.fromkeys((*issues, *more))))
+
+    unit = value.unit
+    if unit is None:
+        return done(None, "unit_missing")
+    if unit == "date":
+        try:
+            delivery = date.fromisoformat(raw)
+        except ValueError:
+            return done(None, "invalid_value")
+        lead = LeadTime(
+            unit="date",
+            delivery_date=delivery,
+            basis=basis,
+            approximate=approximate,
+            risk_note=risk,
+            scope=scope,
+            holiday_calendar=ctx.holiday_calendar,
+        )
+        if quote.strip() and not _date_grounded(delivery, quote, ctx.reference):
+            return done(lead, "not_grounded")
+        return done(lead)
+
+    amount = parse_canonical(raw)
+    if amount is None:
+        amount = parse_decimal(raw, decimal=ctx.decimal)
+    whole_days = unit in ("calendar_days", "business_days")
+    if amount is None or amount < 0 or (whole_days and amount != amount.to_integral_value()):
+        return done(None, "invalid_value")
+    more: list[str] = []
+    if quote.strip():
+        match = find_number(amount, quote, decimal=ctx.decimal)
+        if not match.found and not (amount == 0 and mentions_stock(quote)):
+            more.append("not_grounded")
+        elif match.ambiguous:
+            more.append("ambiguous_number")
+        if not _unit_grounded(unit, unit_text):
+            more.append("unit_not_grounded")
+        highs = [high for low, high in ranges_in(quote) if amount in (low, high)]
+        if highs:
+            # A range is approximate, and the buyer plans with its end.
+            approximate = True
+            amount = max(highs)
+    if _rough_days(amount, unit) > MAX_LEAD_TIME_DAYS:
+        return done(None, *more, "out_of_range")
+    lead = LeadTime(
+        unit=unit,
+        amount=amount,
+        basis=basis,
+        approximate=approximate,
+        risk_note=risk,
+        scope=scope,
+        holiday_calendar=ctx.holiday_calendar,
+    )
+    return done(lead, *more)
+
+
+def _line_lead_time(
+    draft: ProposalLineDraft,
+    offer: _LeadCheck | None,
+    offer_raw: LeadTimeValue,
+    ctx: _Context,
+    check: Callable[[str, FieldKind, ExtractedValue], FieldCheck],
+) -> dict[str, FieldCheck]:
+    """The line's `lead_time_terms` and `lead_time_days`: its own lead time, else the
+    offer's.
+
+    The basis and the risk note complete each other: "All lead times are counted
+    from purchase order confirmation" gives every line its basis, and "a few
+    additional days for the shafts" stays on the shafts' line.
+    """
+    own = _check_lead_time(draft.lead_time, ctx, scope="line")
+    chosen = own if own is not None else offer
+    if chosen is None:
+        # Nothing in v5 terms: the model's calendar days, as prompts up to v4 wrote them.
+        return {
+            "lead_time_terms": absent_field("lead_time_terms"),
+            "lead_time_days": check("lead_time_days", "days", draft.lead_time_days),
+        }
+    lead = chosen.lead_time
+    if lead is not None:
+        other = offer_raw if chosen is own else draft.lead_time
+        basis = lead.basis if lead.basis != "unspecified" else other.basis or "unspecified"
+        risk = _verbatim(draft.lead_time.risk_note, ctx.sources) or lead.risk_note
+        lead = lead.model_copy(update={"basis": basis, "risk_note": risk})
+    return {
+        "lead_time_terms": _lead_time_field("lead_time_terms", chosen, lead, ctx),
+        "lead_time_days": _lead_time_days_field(chosen, lead, ctx),
+    }
+
+
+def _lead_time_field(
+    name: str, chosen: _LeadCheck | None, lead: LeadTime | None, ctx: _Context
+) -> FieldCheck:
+    """The stated lead time, as evidence; review issues go on `lead_time_days`."""
+    if chosen is None:
+        return absent_field(name)
+    raw = chosen.raw
+    return FieldCheck(
+        name=name,
+        extracted=ExtractedValue(
+            value=_describe(lead) if lead is not None else raw.value,
+            source=raw.source,
+            confidence=raw.confidence,
+        ),
+        parsed=encode_lead_time(lead, ctx.reference) if lead is not None else None,
+    )
+
+
+def _lead_time_days_field(chosen: _LeadCheck, lead: LeadTime | None, ctx: _Context) -> FieldCheck:
+    """Calendar days from the offer date to the expected delivery: what comparisons use."""
+    issues = list(chosen.issues)
+    days: int | None = None
+    if lead is not None:
+        days = expected_delivery(lead, ctx.reference).calendar_days
+        if not 0 <= days <= MAX_LEAD_TIME_DAYS:
+            issues.append("out_of_range")
+            days = None
+    raw = chosen.raw
+    return FieldCheck(
+        name="lead_time_days",
+        extracted=ExtractedValue(
+            value=str(days) if days is not None else raw.value,
+            source=raw.source,
+            confidence=raw.confidence,
+        ),
+        parsed=days,
+        issues=tuple(dict.fromkeys(issues)),
+    )
+
+
+def _describe(lead: LeadTime) -> str:
+    if lead.unit == "date" and lead.delivery_date is not None:
+        return lead.delivery_date.isoformat()
+    amount = format(lead.amount, "f") if lead.amount is not None else "?"
+    return f"{amount} {lead.unit}"
+
+
+def _unit_grounded(unit: PeriodUnit, text: str) -> bool:
+    """The unit word is in the quote (or its sheet column header). Plain days are calendar."""
+    match unit:
+        case "calendar_days":
+            if mentions_working_days(text) and not mentions_calendar_days(text):
+                return False
+            return mentions_days(text) or not (mentions_weeks(text) or mentions_months(text))
+        case "business_days":
+            return mentions_working_days(text)
+        case "weeks":
+            return mentions_weeks(text)
+        case "months":
+            return mentions_months(text)
+
+
+def _rough_days(amount: Decimal, unit: PeriodUnit) -> Decimal:
+    """An upper estimate in calendar days, for the range check only."""
+    match unit:
+        case "calendar_days":
+            return amount
+        case "business_days":
+            return amount * 2
+        case "weeks":
+            return amount * 7
+        case "months":
+            return amount * 31
+
+
+def _date_grounded(value: date, quote: str, reference: date) -> bool:
+    """The date is written in the quote; without a year, it is the next such day."""
+    if value in dates_in(quote):
+        return True
+    if (value.month, value.day) not in day_months_in(quote):
+        return False
+    return value == _next_day_month(value.month, value.day, reference - timedelta(days=1))
+
+
+def _next_day_month(month: int, day: int, start: date) -> date | None:
+    for year in range(start.year, start.year + 5):
+        try:
+            candidate = date(year, month, day)
+        except ValueError:
+            continue  # 29 February
+        if candidate >= start:
+            return candidate
+    return None
+
+
+# --- Validity -------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidityCheck:
+    raw: ValidityValue
+    period: ValidityPeriod | None
+    issues: tuple[str, ...]
+
+
+def _check_validity(value: ValidityValue, ctx: _Context) -> _ValidityCheck | None:
+    """A validity duration checked like a lead time, then turned into an end date."""
+    raw = (value.value or "").strip()
+    if not raw:
+        return None
+    issues = _evidence_issues(value, ctx)
+    quote = value.source.quote if value.source is not None else ""
+
+    def done(period: ValidityPeriod | None, *more: str) -> _ValidityCheck:
+        return _ValidityCheck(value, period, tuple(dict.fromkeys((*issues, *more))))
+
+    unit = value.unit
+    if unit is None:
+        return done(None, "unit_missing")
+    amount = parse_canonical(raw)
+    if amount is None:
+        amount = parse_decimal(raw, decimal=ctx.decimal)
+    whole_days = unit in ("calendar_days", "business_days")
+    if amount is None or amount <= 0 or (whole_days and amount != amount.to_integral_value()):
+        return done(None, "invalid_value")
+    if _rough_days(amount, unit) > MAX_LEAD_TIME_DAYS:
+        return done(None, "out_of_range")
+    more: list[str] = []
+    if quote.strip():
+        match = find_number(amount, quote, decimal=ctx.decimal)
+        if not match.found:
+            more.append("not_grounded")
+        elif match.ambiguous:
+            more.append("ambiguous_number")
+        if not _unit_grounded(unit, quote):
+            more.append("unit_not_grounded")
+    original = ctx.original_offer_date
+    from_original = original is not None and mentions_original_offer(quote)
+    anchor = (
+        min(original, ctx.reference) if original is not None and from_original else ctx.reference
+    )
+    valid_until, exact = validity_end(amount, unit, anchor, ctx.holiday_calendar)
+    period = ValidityPeriod(
+        amount=amount,
+        unit=unit,
+        anchor=anchor,
+        anchor_kind="original_offer" if from_original else "message",
+        holiday_calendar=ctx.holiday_calendar,
+        valid_until=valid_until,
+        exact=exact,
+    )
+    return done(period, *more)
+
+
+def _valid_until(written: FieldCheck, validity: _ValidityCheck | None) -> FieldCheck:
+    """A clean written date wins; else the end of the stated period, with its issues."""
+    if validity is None or validity.period is None:
+        return written
+    if written.parsed is not None and not written.issues:
+        return written
+    raw = validity.raw
+    end = validity.period.valid_until
+    return FieldCheck(
+        name="valid_until",
+        extracted=ExtractedValue(
+            value=end.isoformat(), source=raw.source, confidence=raw.confidence
+        ),
+        parsed=end,
+        issues=validity.issues,
+    )
+
+
+def _validity_field(validity: _ValidityCheck | None) -> FieldCheck:
+    """The stated period, as evidence; review issues go on `valid_until`."""
+    if validity is None:
+        return absent_field("validity")
+    raw = validity.raw
+    period = validity.period
+    return FieldCheck(
+        name="validity",
+        extracted=ExtractedValue(
+            value=f"{format(period.amount, 'f')} {period.unit}"
+            if period is not None
+            else raw.value,
+            source=raw.source,
+            confidence=raw.confidence,
+        ),
+        parsed=period.model_dump_json() if period is not None else None,
+    )
+
+
+# --- Quantities ---------------------------------------------------------------------------
+
+
+def _without_copied_quantity(
+    check: FieldCheck, draft: ProposalLineDraft, requested: RequestedLine | None
+) -> tuple[FieldCheck, ProposalLineDraft]:
+    """Drop a tier quantity the supplier never wrote but the request did.
+
+    A single price without tiers applies to the requested quantity; a model that
+    copies that quantity into `min_quantity` must not put the line on review.
+    """
+    if (
+        requested is None
+        or not isinstance(check.parsed, Decimal)
+        or not _UNVERIFIED & set(check.issues)
+        or check.parsed not in requested.quantities
+    ):
+        return check, draft
+    absent = absent_field(check.name)
+    return absent, draft.model_copy(update={check.name: absent.extracted})
+
+
+def quantity_bases(
+    lines: Sequence[LineCheck], requested_quantities: Mapping[UUID, Sequence[Decimal]]
+) -> list[QuantityTerms]:
+    """Per line, which quantity its price applies to (see `terms.QuantityBasis`).
+
+    Lines are tiers of one part when they answer the same requested line with the
+    same part (the requested one, or the same alternative MPN).
+    """
+
+    def part(line: LineCheck) -> tuple[UUID | None, str | None]:
+        offered = line.fields["offered_mpn"].parsed if "offered_mpn" in line.fields else None
+        alternative = _alnum(offered) if isinstance(offered, str) else "?"
+        return line.rfq_line_id, alternative if line.is_alternative else None
+
+    tiers: dict[tuple[UUID | None, str | None], int] = {}
+    for line in lines:
+        tiers[part(line)] = tiers.get(part(line), 0) + 1
+    result: list[QuantityTerms] = []
+    for line in lines:
+        if line.rfq_line_id is None:
+            result.append(
+                QuantityTerms(quantity_basis="unmatched", price_applies_to_requested_quantity=False)
+            )
+            continue
+        check = line.fields.get("min_quantity")
+        stated = check.parsed if check is not None else None
+        quantities = requested_quantities.get(line.rfq_line_id, ())
+        if isinstance(stated, Decimal) and check is not None and not check.needs_review:
+            applies = any(stated <= quantity for quantity in quantities)
+            result.append(
+                QuantityTerms(
+                    quantity_basis="stated_tier", price_applies_to_requested_quantity=applies
+                )
+            )
+        elif stated is None and tiers[part(line)] == 1:
+            result.append(
+                QuantityTerms(
+                    quantity_basis="requested_quantity", price_applies_to_requested_quantity=True
+                )
+            )
+        else:
+            result.append(
+                QuantityTerms(quantity_basis="ambiguous", price_applies_to_requested_quantity=False)
+            )
+    return result
+
+
+# --- General terms and notes ---------------------------------------------------------------
+
+_SENTENCE_BREAK = re.compile(r"(?<=[.;!?])\s+|\n+")
+
+
+def _sentences(text: str) -> list[str]:
+    return [sentence.strip() for sentence in _SENTENCE_BREAK.split(text) if sentence.strip()]
+
+
+def _sentence_key(text: str) -> str:
+    return normalize_text(text).rstrip(" .;:!?,")
+
+
+def _general_terms(
+    drafts: list[ProposalLineDraft], line_fields: list[dict[str, FieldCheck]], notes: list[str]
+) -> tuple[list[ProposalLineDraft], list[dict[str, FieldCheck]], list[str]]:
+    """Take the offer's general terms out of the lines' `conditional_terms`.
+
+    A sentence on the lines of every requested position (two or more), or one the
+    supplier's general notes already hold, is a term of the whole offer (payment,
+    validity, packaging...), not a condition on one line's price: it becomes an
+    offer note and blocks nothing. Returns the drafts, the fields and the moved
+    sentences.
+    """
+    texts = [fields["conditional_terms"].parsed for fields in line_fields]
+    positions = {draft.rfq_line_position for draft in drafts if draft.rfq_line_position is not None}
+    common: set[str] = set()
+    if len(positions) >= 2 and all(isinstance(text, str) for text in texts):
+        keys = [{_sentence_key(s) for s in _sentences(str(text))} for text in texts]
+        common = keys[0].intersection(*keys[1:])
+    general = common | {_sentence_key(note) for note in notes}
+    if not general - {""}:
+        return drafts, line_fields, []
+    moved: list[str] = []
+    out_drafts: list[ProposalLineDraft] = []
+    out_fields: list[dict[str, FieldCheck]] = []
+    for draft, fields in zip(drafts, line_fields, strict=True):
+        current = fields["conditional_terms"]
+        text = current.parsed
+        sentences = _sentences(text) if isinstance(text, str) else []
+        keep = [s for s in sentences if _sentence_key(s) not in general]
+        if len(keep) == len(sentences):
+            out_drafts.append(draft)
+            out_fields.append(fields)
+            continue
+        moved.extend(s for s in sentences if _sentence_key(s) in common)
+        if keep:
+            remaining = " ".join(keep)
+            replacement = replace(
+                current,
+                extracted=current.extracted.model_copy(update={"value": remaining}),
+                parsed=remaining,
+            )
+        else:
+            replacement = absent_field("conditional_terms")
+        out_fields.append({**fields, "conditional_terms": replacement})
+        out_drafts.append(draft.model_copy(update={"conditional_terms": replacement.extracted}))
+    return out_drafts, out_fields, moved
+
+
+def _timing_out_of_conditions(
+    drafts: list[ProposalLineDraft], line_fields: list[dict[str, FieldCheck]], ctx: _Context
+) -> tuple[list[ProposalLineDraft], list[dict[str, FieldCheck]]]:
+    """A condition sentence only about delivery timing is the line's lead-time risk.
+
+    "We may need a few additional days for the shafts, depending on production
+    availability" filed as a condition would block the line; it belongs with the
+    line's lead time as its risk note (verbatim, and only when the line has a lead
+    time to qualify). Anything about price, payment or validity stays a condition.
+    """
+    out_drafts: list[ProposalLineDraft] = []
+    out_fields: list[dict[str, FieldCheck]] = []
+    for draft, fields in zip(drafts, line_fields, strict=True):
+        current = fields["conditional_terms"]
+        terms = fields["lead_time_terms"]
+        stored = decode_lead_time(terms.parsed)
+        text = current.parsed
+        if not isinstance(text, str) or stored is None:
+            out_drafts.append(draft)
+            out_fields.append(fields)
+            continue
+        sentences = _sentences(text)
+        timing = [s for s in sentences if is_delivery_timing(s) and _found(s, ctx.sources)]
+        if not timing:
+            out_drafts.append(draft)
+            out_fields.append(fields)
+            continue
+        keep = [s for s in sentences if s not in timing]
+        risk = " ".join(_unique([*([stored.risk_note] if stored.risk_note else []), *timing]))
+        lead = LeadTime.model_validate(
+            {**stored.model_dump(include=set(LeadTime.model_fields)), "risk_note": risk}
+        )
+        if keep:
+            remaining = " ".join(keep)
+            condition = replace(
+                current,
+                extracted=current.extracted.model_copy(update={"value": remaining}),
+                parsed=remaining,
+            )
+        else:
+            condition = absent_field("conditional_terms")
+        out_fields.append(
+            {
+                **fields,
+                "conditional_terms": condition,
+                "lead_time_terms": replace(terms, parsed=encode_lead_time(lead, ctx.reference)),
+            }
+        )
+        out_drafts.append(draft.model_copy(update={"conditional_terms": condition.extracted}))
+    return out_drafts, out_fields
+
+
+def _verified_notes(notes: Sequence[str], sources: QuoteSources) -> list[str]:
+    return _unique([note.strip() for note in notes if _found(note, sources)])
+
+
+def _unique(texts: Sequence[str]) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for text in texts:
+        key = _sentence_key(text)
+        if key and key not in seen:
+            seen.add(key)
+            result.append(text)
+    return result
+
+
+def _normalized(output: QuoteExtractionOutput, notes: list[str]) -> QuoteExtractionOutput:
+    """Every supplier question also holds the offer (`technical_questions`)."""
+    asked = [question.quote.strip() for question in output.supplier_questions]
+    technical = list(dict.fromkeys(q for q in (*output.technical_questions, *asked) if q.strip()))
+    return output.model_copy(update={"technical_questions": technical, "offer_notes": notes})
+
+
+# --- Signals ---------------------------------------------------------------------------------
+
+
+def _signals(
+    output: QuoteExtractionOutput,
+    by_position: Mapping[int, RequestedLine],
+    sources: QuoteSources,
+    review_confidence: float,
+) -> SupplierSignals:
+    """The final-offer statement, declined lines and questions, each found in the message."""
+    final = output.final_offer
+    final_quote: str | None = None
+    if (
+        (final.value or "").strip()
+        and final.source is not None
+        and final.confidence >= review_confidence
+        and _locate(final.source, sources) is None
+    ):
+        final_quote = final.source.quote.strip()
+    priced = {
+        draft.rfq_line_position
+        for draft in output.lines
+        if draft.rfq_line_position is not None and draft.unit_price.value is not None
+    }
+    declined: dict[int, DeclinedLineSignal] = {}
+    for line in output.declined_lines:
+        position = line.rfq_line_position
+        if (
+            position in by_position
+            and position not in priced
+            and position not in declined
+            and _found(line.quote, sources)
+        ):
+            declined[position] = DeclinedLineSignal(
+                rfq_line_position=position, quote=line.quote.strip()
+            )
+    questions = tuple(
+        QuestionSignal(
+            quote=question.quote.strip(),
+            topic=question.topic,
+            rfq_line_position=(
+                question.rfq_line_position if question.rfq_line_position in by_position else None
+            ),
+            grounded=_found(question.quote, sources),
+        )
+        for question in output.supplier_questions
+        if question.quote.strip()
+    )
+    return SupplierSignals(
+        final_offer=final_quote is not None,
+        final_offer_quote=final_quote,
+        declined_lines=tuple(declined[position] for position in sorted(declined)),
+        questions=questions,
+    )
+
+
+# --- Evidence ---------------------------------------------------------------------------------
+
+
+def _evidence_issues(value: ExtractedValue, ctx: _Context) -> list[str]:
+    issues: list[str] = []
+    if value.confidence < ctx.review_confidence:
+        issues.append("low_confidence")
+    if value.source is None:
+        issues.append("no_source")
+    else:
+        located = _locate(value.source, ctx.sources)
+        if located is not None:
+            issues.append(located)
+    return issues
+
+
+def _found(text: str, sources: QuoteSources) -> bool:
+    """`text` appears word for word in the message or a readable attachment."""
+    wanted = normalize_text(text)
+    if not wanted:
+        return False
+    if wanted in normalize_text(sources.email_text):
+        return True
+    return any(
+        wanted in normalize_text(document.text)
+        for document in sources.documents.values()
+        if document.readable
+    )
+
+
+def _verbatim(text: str | None, sources: QuoteSources) -> str | None:
+    if text is None or not _found(text, sources):
+        return None
+    return text.strip()
 
 
 def check_field(
@@ -505,7 +1270,7 @@ def _parse(
             if _COUNTRY_CODE.fullmatch(code) is None:
                 return None, ["invalid_value"]
             return code, []
-        case "mpn" | "text":
+        case "mpn" | "text" | "lead_time" | "validity":
             return value, []
 
 
@@ -548,8 +1313,9 @@ def _grounding(
         case "mpn":
             assert isinstance(parsed, str)
             return [] if _alnum(parsed) in _alnum(quote) else ["not_grounded"]
-        case "country" | "text":
+        case "country" | "text" | "lead_time" | "validity":
             # Free text or a code for a country name: the located quote is the evidence.
+            # (Lead times and validity periods are checked by their own functions.)
             return []
 
 

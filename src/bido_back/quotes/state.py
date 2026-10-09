@@ -19,7 +19,10 @@ How a reply changes the offer:
   payment, Incoterm, conditions) holds the offer, unless the reply is a whole
   new offer.
 - A question-only reply changes nothing and holds nothing: supplier questions
-  are tracked in the ledger (`technical_questions` still names them).
+  are tracked in the ledger (`technical_questions` still names them). Nor does a
+  reply that only declines requested lines.
+- Declined lines (a reply's signals, `ValidatedQuote.signals`, or a withdrawal)
+  are kept in `declined_line_positions` until a later reply offers them.
 - A buyer release ("use the current offer", `OfferEvent.released`) clears the
   holds up to that reply: the offer as shown is the offer.
 
@@ -555,13 +558,13 @@ def _amend(
 # The quote fields an asked item lets the answer set.
 _ANSWERED_HEADER: Final[Mapping[str, tuple[str, ...]]] = {
     "currency": ("currency",),
-    "valid_until": ("valid_until",),
+    "valid_until": ("valid_until", "validity"),
 }
 _ANSWERED_LINE: Final[Mapping[str, tuple[str, ...]]] = {
     "unit_price": ("unit_price", "unit", "price_basis_quantity"),
     "quantity": ("min_quantity", "price_basis_quantity"),
-    "lead_time": ("lead_time_days",),
-    "delivery_date": ("lead_time_days",),
+    "lead_time": ("lead_time_days", "lead_time_terms"),
+    "delivery_date": ("lead_time_days", "lead_time_terms"),
 }
 # The offer's commercial basis: a reply may not change these unasked.
 _COMMERCIAL_HEADER: Final = ("currency", "incoterm", "payment_terms")
@@ -784,10 +787,13 @@ def answers_offer(event: OfferEvent, effective: ValidatedQuote | None) -> bool:
 
 
 def _question_only(quote: ValidatedQuote) -> bool:
+    """A reply that only asks the buyer something and/or declines requested lines it never
+    priced: nothing in the offer changes and nothing is held (the questions wait in the
+    ledger, the declined lines are never asked for)."""
     output = quote.output
     return (
         output.reply_kind == "clarification"
-        and bool(output.technical_questions)
+        and bool(output.technical_questions or quote.signals.declined_lines)
         and not output.conflicts
         and not has_offer_content(quote)
     )
@@ -949,6 +955,9 @@ def reconcile(events: list[OfferEvent]) -> OfferState:
         answered = event.answers if supplement and applied else ()
         if applied:
             progress.declined -= _offered_positions(current)
+        # Lines the reply says the supplier will not quote (its signals): never asked for,
+        # until a later reply offers them.
+        progress.declined |= set(current.signals.declined_line_positions)
         if current.output.conflicts:
             progress.hold(event, "conflicting_sources")
         if event.released:

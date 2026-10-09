@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
-from bido_back.agents.catalog.contracts import ProposalLineDraft
+from bido_back.agents.catalog.contracts import DeclinedLine, ProposalLineDraft
 from bido_back.quotes.state import AskedField, OfferEvent, reconcile
 from bido_back.quotes.validation import (
     LINE_FIELDS,
@@ -17,6 +17,7 @@ from bido_back.quotes.validation import (
     ValidatedQuote,
     validate_quote,
 )
+from tests.quotes import rfq6 as rfq6_v5
 from tests.quotes.test_validation import BODY, LINE_2, NONE, ev, line, output, validate
 
 START = datetime(2026, 10, 6, 12, tzinfo=UTC)
@@ -297,6 +298,48 @@ def test_withdrawn_lines_count_as_declined_until_offered_again() -> None:
     assert again.declined_line_positions == ()
 
 
+DECLINE = "LM317DCYR können wir leider nicht anbieten."
+
+
+def test_a_line_the_reply_declines_is_declined_until_offered_again() -> None:
+    # A partial quote: line 1 priced, line 2 declined in so many words (its signals).
+    body = BODY + DECLINE
+    partial_quote = validate(
+        output(declined_lines=[DeclinedLine(rfq_line_position=2, quote=DECLINE)]), body=body
+    )
+    assert partial_quote.signals.declined_line_positions == (2,)
+    state = reconcile([event(partial_quote)])
+    assert state.declined_line_positions == (2,) and state.issues == ()
+    assert state.provenance()["declined_line_positions"] == [2]
+    # It stays declined over later replies that do not offer it...
+    restated = reconcile([event(partial_quote), event(first_offer(), 1)])
+    assert restated.declined_line_positions == (2,)
+    # ...until one does.
+    two = validate(output(line(), line(rfq_line_position=2, offered_mpn=NONE)))
+    assert reconcile([event(partial_quote), event(two, 1)]).declined_line_positions == ()
+
+
+def test_a_reply_that_only_declines_a_line_holds_nothing() -> None:
+    declined = validate(
+        output(
+            lines=[],
+            is_quote=False,
+            currency=NONE,
+            valid_until=NONE,
+            incoterm=NONE,
+            payment_terms=NONE,
+            reply_kind="clarification",
+            declined_lines=[DeclinedLine(rfq_line_position=2, quote=DECLINE)],
+        ),
+        body=DECLINE,
+    )
+    state = reconcile([event(first_offer()), event(declined, 1)])
+    assert state.issues == () and state.reply_kind == "replacement"
+    assert state.quote.lines[0].parsed("unit_price") == Decimal("0.45")
+    assert state.declined_line_positions == (2,)
+    assert state.provenance()["requires_clarification"] is False
+
+
 # --- RFQ-6 -------------------------------------------------------------------------------------
 
 LINES = [RequestedLine(id=uuid4(), position=p) for p in (1, 2, 3)]
@@ -398,3 +441,33 @@ def test_rfq6_the_second_reply_is_applied_as_answers() -> None:
     }
     # Business days are for the conversion to decide; the offer itself is not held.
     assert by_position[2].fields["lead_time_days"].issues == ("working_days",)
+
+
+def test_rfq6_read_by_prompt_v5_the_second_reply_is_applied_as_answers() -> None:
+    # The extraction (v5) reads the second reply right; reconciliation used to hold it
+    # (an amendment without "other terms unchanged"). As answers to what we asked, it is
+    # the offer: the stated lead times, the requested quantities, everything else kept.
+    first = rfq6_v5.validate(rfq6_v5.first_reply(), rfq6_v5.REPLY_1, country="BR")
+    second = rfq6_v5.validate(
+        rfq6_v5.second_reply(),
+        rfq6_v5.REPLY_2,
+        original_offer_date=rfq6_v5.OFFER_DATE,
+        country="BR",
+    )
+    held = reconcile([event(first), event(second, 1)])
+    assert "amendment_without_explicit_preservation" in held.issues
+
+    asked = (AskedField(1, "delivery_date"), AskedField(2, "delivery_date"))
+    state = reconcile([event(first), event(second, 1, answers=asked)])
+    assert state.issues == () and state.reply_kind == "amendment"
+    assert state.answered == asked
+    by_position = {line.draft.rfq_line_position: line for line in state.quote.lines}
+    # 7, 12 and 8 business days from 9 Oct (12 Oct a holiday in Brazil), in calendar days.
+    assert {p: line.parsed("lead_time_days") for p, line in by_position.items()} == {
+        1: 12,
+        2: 19,
+        3: 13,
+    }
+    assert not any(line.needs_review for line in state.quote.lines)
+    assert state.quote.parsed("payment_terms") == "Net 30"
+    assert state.quote.parsed("valid_until") == date(2026, 10, 24)

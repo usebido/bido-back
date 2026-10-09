@@ -97,7 +97,7 @@ from bido_back.rfqs.document import (
     render_pdf,
 )
 from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound, ReplyByRequired
-from bido_back.rfqs.language import supplier_email_language
+from bido_back.rfqs.language import country_code, supplier_email_language
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.readiness import reply_by_refusal, send_blockers, utc_today
 from bido_back.rfqs.schemas import (
@@ -1013,6 +1013,8 @@ async def _render_for(
         lines=[_render_line(line) for line in ctx.lines],
         payment_terms=ctx.rfq.payment_terms,
         quote_validity_days=ctx.rfq.quote_validity_days,
+        # The supplier's number format (es-MX, de-CH), as in every later email of the thread.
+        region=country_code(supplier.country),
     )
     rendered = render_rfq(render_input)
     problems = rfq_email_problems(
@@ -1410,6 +1412,7 @@ async def list_approvals(
                 cc=list(negotiation_args.cc),
                 subject=negotiation_args.subject,
                 body=negotiation_args.body,
+                html_body=negotiation_args.html_body,
             )
         items.append(
             ApprovalQueueItem(

@@ -39,7 +39,14 @@ from weasyprint import HTML  # pyright: ignore[reportMissingTypeStubs]
 from weasyprint.urls import URLFetcher  # pyright: ignore[reportMissingTypeStubs]
 
 from bido_back.db.models import Rfq, RfqLine
-from bido_back.templates.render import RenderInput, asks, format_date, format_quantity
+from bido_back.supplier_email.locale import Locale, unit_label
+from bido_back.templates.render import (
+    RenderInput,
+    asks,
+    display_quantity,
+    format_date,
+    format_quantity,
+)
 
 PDF_CONTENT_TYPE: Final = "application/pdf"
 
@@ -310,10 +317,26 @@ class RfqDocument(BaseModel):
     asks: list[str] = Field(default_factory=list[str])
     # The buyer company the RFQ goes out from.
     branding: DocumentBranding
+    # The supplier's country, for its number format (es-MX, de-CH). Left out of the
+    # approved arguments when unset, so documents approved before it hash the same.
+    region: str | None = Field(default=None, max_length=2, exclude_if=lambda v: v is None)
+
+    @property
+    def locale(self) -> Locale:
+        return Locale.of(self.language, self.region)
 
 
 def _quantity(value: Decimal) -> str:
+    """The quantity as stored in the approved arguments (plain digits): the staleness check
+    compares these, so they never depend on the locale. The PDF shows them localized."""
     return format_quantity(value)
+
+
+def _shown_quantity(stored: str, locale: Locale) -> str:
+    try:
+        return display_quantity(Decimal(stored), locale)
+    except ArithmeticError:
+        return stored
 
 
 def build_document(
@@ -339,6 +362,7 @@ def build_document(
         currency=currency,
         payment_terms=data.payment_terms,
         quote_validity_days=data.quote_validity_days,
+        region=data.region,
         lines=[
             DocumentLine(
                 position=line.position,
@@ -637,7 +661,9 @@ def document_html(document: RfqDocument) -> str:
     )
 
     rows: list[str] = []
+    locale = document.locale
     for line in document.lines:
+        quantities = " / ".join(_shown_quantity(q, locale) for q in line.quantities)
         meta_bits: list[str] = []
         if line.part_number:
             meta_bits.append(f"{words['part_no']} {line.part_number}")
@@ -649,8 +675,8 @@ def document_html(document: RfqDocument) -> str:
         rows.append(
             "<tr>"
             f'<td class="desc">{_e(line.position)}. {_e(line.description)}{meta_line}</td>'
-            f'<td class="num">{_e(" / ".join(line.quantities))}</td>'
-            f'<td class="num">{_e(line.unit)}</td>'
+            f'<td class="num">{_e(quantities)}</td>'
+            f'<td class="num">{_e(unit_label(line.unit, locale))}</td>'
             + (f'<td class="num">{_e(_date(line.need_by, lang))}</td>' if need_dates else "")
             + "</tr>"
         )

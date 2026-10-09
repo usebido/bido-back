@@ -1,5 +1,5 @@
-"""Business days, auto-reply pauses, the chase and reminder plans, reply-by dates and the
-open items. No database."""
+"""Business days, auto-reply pauses, the chase and reminder plans and the open items. No
+database."""
 
 from dataclasses import replace
 from datetime import UTC, date, datetime
@@ -19,7 +19,6 @@ from bido_back.followups.service import (
     first_chase_due,
     plan_chase,
     plan_reminder,
-    reply_by_date,
     reply_subject,
 )
 
@@ -199,16 +198,6 @@ def test_one_reminder_the_business_day_after_the_reply_by_date() -> None:
     assert plan_reminder(request(), country="BR", every=2, last_reply_at=wrote) == datetime(
         2026, 10, 19, 9, 0, tzinfo=UTC
     )
-
-
-def test_reply_by_is_two_business_days_and_never_after_the_deadline() -> None:
-    friday = datetime(2026, 10, 9, 14, 0, tzinfo=UTC)
-    assert reply_by_date(friday, "BR", None) == date(2026, 10, 14)  # 12 Oct is a holiday
-    assert reply_by_date(friday, None, None) == date(2026, 10, 13)
-    deadline = datetime(2026, 10, 12, 23, 59, tzinfo=UTC)
-    assert reply_by_date(friday, "BR", deadline) == date(2026, 10, 12)
-    # A deadline already past: today, never a date before it.
-    assert reply_by_date(friday, "BR", datetime(2026, 10, 1, tzinfo=UTC)) == date(2026, 10, 9)
 
 
 def test_a_complete_offer_has_no_open_items() -> None:

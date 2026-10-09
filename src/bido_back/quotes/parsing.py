@@ -278,12 +278,22 @@ _MONTHS = {
     # Spanish
     "enero": 1, "febrero": 2, "abril": 4, "mayo": 5, "junio": 6, "julio": 7,
     "septiembre": 9, "setiembre": 9, "octubre": 10, "noviembre": 11, "diciembre": 12,
+    # Portuguese
+    "janeiro": 1, "fevereiro": 2, "março": 3, "marco": 3, "maio": 5, "junho": 6,
+    "julho": 7, "setembro": 9, "outubro": 10, "novembro": 11, "dezembro": 12,
 }  # fmt: skip
 
 _ISO_DATE = re.compile(r"(?<!\d)(\d{4})-(\d{1,2})-(\d{1,2})(?!\d)")
 _NUMERIC_DATE = re.compile(r"(?<!\d)(\d{1,2})[./-](\d{1,2})[./-](\d{4}|\d{2})(?!\d)")
-_DAY_MONTH_YEAR = re.compile(r"(?<!\d)(\d{1,2})\.?\s+([^\W\d_]+)\.?,?\s+(\d{4})(?!\d)")
+# "30 de outubro de 2026", "30. Oktober 2026", "30º de octubre del 2026".
+_DAY_MONTH_YEAR = re.compile(
+    r"(?<!\d)(\d{1,2})(?:º|°)?\.?\s+(?:de\s+)?([^\W\d_]+)\.?,?\s+(?:de\s+|del\s+)?(\d{4})(?!\d)"
+)
 _MONTH_DAY_YEAR = re.compile(r"(?<![^\W\d_])([^\W\d_]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4})")
+# Without a year: "30/10", "30.10.", "30 ottobre", "30 de outubro", "October 30".
+_DAY_MONTH = re.compile(r"(?<![\d./-])(\d{1,2})[./-](\d{1,2})(?!\d|[./-]\d)")
+_DAY_MONTH_NAME = re.compile(r"(?<!\d)(\d{1,2})(?:st|nd|rd|th|º|°)?\.?\s+(?:de\s+)?([^\W\d_]+)")
+_MONTH_NAME_DAY = re.compile(r"(?<![^\W\d_])([^\W\d_]+)\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?!\d)")
 
 
 def dates_in(text: str) -> set[date]:
@@ -310,6 +320,33 @@ def _add_date(found: set[date], year: int, month: int, day: int) -> None:
         found.add(date(year, month, day))
     except ValueError:
         pass
+
+
+def day_months_in(text: str) -> set[tuple[int, int]]:
+    """Every (month, day) written in `text` without a year: `30/10`, `30 ottobre`, `Oct 30`.
+
+    Numeric forms keep both readings (`05/10` is 5 October or 10 May).
+    """
+    found: set[tuple[int, int]] = set()
+    for first, second in _DAY_MONTH.findall(text):
+        _add_day_month(found, int(second), int(first))
+        _add_day_month(found, int(first), int(second))
+    lowered = text.casefold()
+    for day, month in _DAY_MONTH_NAME.findall(lowered):
+        if month in _MONTHS:
+            _add_day_month(found, _MONTHS[month], int(day))
+    for month, day in _MONTH_NAME_DAY.findall(lowered):
+        if month in _MONTHS:
+            _add_day_month(found, _MONTHS[month], int(day))
+    return found
+
+
+def _add_day_month(found: set[tuple[int, int]], month: int, day: int) -> None:
+    try:
+        date(2024, month, day)  # a leap year: 29 February is a valid day
+    except ValueError:
+        return
+    found.add((month, day))
 
 
 # --- Incoterms and lead times ------------------------------------------------------
@@ -350,11 +387,54 @@ _WEEK_WORDS = re.compile(
     re.IGNORECASE,
 )
 _WORKING_DAY_WORDS = re.compile(
-    r"\b(working|business|work)\s+days?\b|\barbeitstage?n?\b|\bwerktage?n?\b|jours ouvr",
+    r"\b(working|business|work)\s+days?\b|\barbeitstage?n?\b|\bwerktage?n?\b|jours ouvr"
+    r"|\bdias?\s+(?:úteis|uteis|útil|util)\b|\bd[ií]as?\s+(?:h[aá]biles?|laborables?)\b"
+    r"|\bgiorn[oi]\s+lavorativ[oi]\b|\bgg\.?\s+lavorativ[oi]\b|\bwerkdag(?:en)?\b"
+    r"|\bdni\s+robocz\w*",
     re.IGNORECASE,
 )
 # German "Arbeitstage", abbreviated; case-sensitive so English "at" does not match.
 _WORKING_DAYS_ABBREVIATION = re.compile(r"(?:(?<=\d)|\b)AT\b")
+# Any day unit, including business days: "15 days", "15 dias", "15 Tage", "15 gg", "15d".
+_DAY_WORDS = re.compile(
+    r"\bdays?\b|\bd[ií]as?\b|\btage?n?\b|kalendertage?n?\b|arbeitstage?n?\b|werktage?n?\b"
+    r"|\bjours?\b|\bgiorn[oi]\b|\bgg\b|\bdni\b|\bdag(?:en|ar)?\b|(?<=\d)\s?(?:d|j|t|gg)\b",
+    re.IGNORECASE,
+)
+# Days said to be calendar days, even next to a business-day word.
+_CALENDAR_DAY_WORDS = re.compile(
+    r"\bcalendar\s+days?\b|\bconsecutive\s+days?\b|\bdias?\s+corridos\b|\bkalendertage?n?\b"
+    r"|\bjours?\s+calendaires?\b|\bgiorni\s+(?:di\s+calendario|solari)\b"
+    r"|\bd[ií]as?\s+(?:naturales|calendario|corridos)\b",
+    re.IGNORECASE,
+)
+_MONTH_WORDS = re.compile(
+    r"\bmonths?\b|\bm[eê]s(?:es)?\b|\bmonat(?:e|en)?\b|\bmois\b|\bmes[ei]\b|\bmaand(?:en)?\b"
+    r"|\bmiesi[aą]c\w*",
+    re.IGNORECASE,
+)
+# A hedged figure: "approximately 10 days", "ca. 3 Wochen", "cerca de 15 dias", "previsão".
+_APPROXIMATE_WORDS = re.compile(
+    r"\b(?:approx(?:imately|imate)?\b\.?|about\b|around\b|roughly\b|circa\b|ca\.|"
+    r"aprox(?:imadamente)?\b\.?|cerca\s+de\b|em\s+torno\s+de\b|por\s+volta\s+de\b|"
+    r"alrededor\s+de\b|unos\b|unas\b|etwa\b|ungef[äa]hr\b|voraussichtlich\b|environ\b|"
+    r"approximativement\b|approssimativamente\b|indicativ\w*|previs\w*|estimad\w*|"
+    r"estimated\b|expected\b|tentative\w*)",
+    re.IGNORECASE,
+)
+# Two numbers given as a range: "2-3 weeks", "4 a 6 semanas", "2 bis 3 Wochen", "3/4 settimane".
+_RANGE = re.compile(
+    r"(?<![\d.,])(\d+(?:[.,]\d+)?)\s*(?:-|–|—|/|to|a|até|ate|bis|à|al|y|e|ou|or|oder|o)\s*"
+    r"(\d+(?:[.,]\d+)?)(?![\d.,]*\d)",
+    re.IGNORECASE,
+)
+# Goods available at once: "ex stock", "ab Lager", "pronta entrega", "pronta consegna".
+_STOCK_WORDS = re.compile(
+    r"\b(?:ex[-\s]?stock|from\s+stock|in\s+stock|on\s+stock|immediate(?:ly)?|ab\s+lager"
+    r"|lagerware|sofort|pronta\s+entrega|imediat[oa]|em\s+estoque|de\s+stock|en\s+stock"
+    r"|inmediat[oa]|imm[ée]diat\w*|pronta\s+consegna|a\s+magazzino|subito)\b",
+    re.IGNORECASE,
+)
 
 
 def mentions_weeks(text: str) -> bool:
@@ -365,6 +445,88 @@ def mentions_working_days(text: str) -> bool:
     return (
         _WORKING_DAY_WORDS.search(text) is not None
         or _WORKING_DAYS_ABBREVIATION.search(text) is not None
+    )
+
+
+def mentions_days(text: str) -> bool:
+    """A day unit of any kind (calendar or business)."""
+    return _DAY_WORDS.search(text) is not None or mentions_working_days(text)
+
+
+def mentions_calendar_days(text: str) -> bool:
+    return _CALENDAR_DAY_WORDS.search(text) is not None
+
+
+def mentions_months(text: str) -> bool:
+    return _MONTH_WORDS.search(text) is not None
+
+
+def mentions_approximation(text: str) -> bool:
+    return _APPROXIMATE_WORDS.search(text) is not None
+
+
+def mentions_stock(text: str) -> bool:
+    return _STOCK_WORDS.search(text) is not None
+
+
+def ranges_in(text: str) -> list[tuple[Decimal, Decimal]]:
+    """Every `low`-`high` range written in `text`, low < high (`2-3`, `4 a 6`, `2 bis 3`)."""
+    found: list[tuple[Decimal, Decimal]] = []
+    for first, second in _RANGE.findall(text):
+        low = Decimal(first.replace(",", "."))
+        high = Decimal(second.replace(",", "."))
+        if low < high:
+            found.append((low, high))
+    return found
+
+
+# "valid for 15 days from the date of our original offer": the period starts earlier.
+_ORIGINAL_OFFER = re.compile(
+    r"\b(?:original|first|initial|previous|earlier|prior)\s+(?:offer|quot(?:e|ation)|proposal)"
+    r"|\b(?:proposta|cota[cç][aã]o|oferta|or[cç]amento)\s+(?:original|inicial|anterior)"
+    r"|\bprimeira\s+(?:proposta|cota[cç][aã]o|oferta)"
+    r"|\b(?:cotizaci[oó]n|propuesta)\s+(?:original|inicial|anterior)"
+    r"|\bprimera\s+(?:oferta|cotizaci[oó]n|propuesta)"
+    r"|\b(?:urspr[üu]nglich\w*|erst\w*|vorherig\w*|bisherig\w*)\s+angebot\w*|\berstangebot\w*"
+    r"|\boffre\s+(?:initiale|originale|pr[ée]c[ée]dente)|\bpremi[eè]re\s+offre|\bdevis\s+initial"
+    r"|\bofferta\s+(?:originale|iniziale|precedente)|\bprima\s+offerta",
+    re.IGNORECASE,
+)
+
+
+def mentions_original_offer(text: str) -> bool:
+    return _ORIGINAL_OFFER.search(text) is not None
+
+
+# Delivery timing vocabulary ("additional days ... production", "Lieferzeit", "prazo").
+_DELIVERY_WORDS = re.compile(
+    r"\b(?:lead\s*time|deliver\w*|ship\w*|dispatch\w*|production|manufactur\w*|ready"
+    r"|prazo|entrega\w*|produ[çc][ãa]o|fabrica[çc][ãa]o|embarque"
+    r"|liefer\w*|produktion\w*|fertigung\w*|versand\w*"
+    r"|consegn\w*|produzion\w*|spedizion\w*|plazo|producci[oó]n|env[ií]o"
+    r"|d[ée]lai\w*|livraison\w*|exp[ée]dition\w*)",
+    re.IGNORECASE,
+)
+# Words that make a sentence about price, payment or validity rather than timing.
+_PRICE_TERMS_WORDS = re.compile(
+    r"\b(?:price\w*|cost\w*|pay\w*|valid\w*|discount\w*|pre[çc]o\w*|custo\w*|pag\w*"
+    r"|v[aá]lid\w*|descont\w*|preis\w*|kosten\w*|zahl\w*|g[üu]ltig\w*|rabatt\w*|prix"
+    r"|co[uû]t\w*|paiement\w*|valable\w*|remise\w*|prezz\w*|cost[oi]|pagament\w*"
+    r"|precio\w*|pago\w*)",
+    re.IGNORECASE,
+)
+
+
+def is_delivery_timing(text: str) -> bool:
+    """A sentence only about when goods arrive: a time unit and delivery or production
+    words, and nothing about price, payment or validity ("We may need a few
+    additional days for the shafts, depending on production availability")."""
+    has_unit = mentions_days(text) or mentions_weeks(text) or mentions_months(text)
+    return (
+        has_unit
+        and _DELIVERY_WORDS.search(text) is not None
+        and _PRICE_TERMS_WORDS.search(text) is None
+        and not detect_currencies(text)
     )
 
 
