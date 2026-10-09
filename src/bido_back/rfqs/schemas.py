@@ -195,6 +195,11 @@ class RfqSummary(RfqHeader):
     base_currency: str | None = None
     need_by: date | None = Field(default=None, description="Earliest need-by among the lines")
     owner: str | None = Field(default=None, description="The buyer who created the RFQ")
+    completed_at: datetime | None = Field(
+        default=None,
+        description="When every purchase order of the RFQ was closed or cancelled (at least "
+        "one closed): the `completed` stage. Null until then",
+    )
 
 
 class RfqDetail(RfqHeader):
