@@ -78,6 +78,7 @@ async def run[OutT: BaseModel](
     config: RunnerConfig | None = None,
     usage: UsageMeter | None = None,
     trace_session: str | None = None,
+    parent: tracing.RunScope | None = None,
 ) -> AsyncGenerator[Event]:
     """Run `agent` on `input` as `context`; yield events, ending with one terminal event.
 
@@ -88,9 +89,10 @@ async def run[OutT: BaseModel](
     run's LLM trace with others (the Copilot passes its conversation id).
 
     A run started by another run's tool nests in it: its usage counts toward
-    the outer run too, and its trace spans hang under that tool call.
+    the outer run too, and its trace spans hang under that tool call. `parent`
+    nests the run explicitly (a run that writes another run's reply).
     """
-    parent = tracing.current_scope()
+    parent = parent or tracing.current_scope()
     meter = usage or UsageMeter(parent.meter if parent is not None else None)
     span = tracing.start_run_span(
         agent=agent.name,
