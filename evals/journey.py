@@ -1945,6 +1945,12 @@ def view_text(view: rules.SupplierView | None) -> str:
     return f"{view.phase}:{view.reason} ({view.status})" if view is not None else "-"
 
 
+def last_view(view: rules.SupplierView) -> str:
+    """The supplier's label and its lines that are not acceptable (status/price/delivery)."""
+    off = [f"{x.part} {x.status}/{x.price}/{x.delivery}" for x in view.lines if not x.acceptable]
+    return f"{view.label} | not acceptable: {', '.join(off) or '-'}"
+
+
 _CONTENT_CHECKS: Final = (
     "html_part",
     "no_max_revealed",
@@ -2030,6 +2036,8 @@ async def step_negotiation(j: Journey, step: Step) -> None:
         for sweep in n.sweeps
         for s in n.suppliers
     ]
+    if n.sweeps:
+        step.notes["last_view"] = {s: last_view(v) for s, v in n.sweeps[-1].after.items()}
     await check_email_content(j, step, n)
     step.notes["emails"] = [
         f"day {sweep.day} -> {', '.join(e.to)}: {e.body[:700]}"
