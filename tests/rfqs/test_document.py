@@ -317,3 +317,13 @@ async def test_a_changed_rfq_after_approval_is_not_sent(
     async with tenant_session(app_engine, rfq_rows.tenant) as session:
         invite = await session.get(Invite, invites["Rhein"])
     assert invite is not None and invite.status == "pending_approval"
+
+
+def test_no_need_by_column_or_band_entry_when_no_line_has_a_date() -> None:
+    dated = document_html(_doc())
+    assert "Necessário em" in dated
+
+    undated_lines = [line.model_copy(update={"need_by": None}) for line in _doc().lines]
+    undated = document_html(_doc(lines=undated_lines))
+    assert "Necessário em" not in undated
+    assert '<col class="col-need">' not in undated

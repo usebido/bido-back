@@ -389,3 +389,18 @@ def test_the_email_checks_require_the_payment_terms_when_set() -> None:
 
     assert problems(with_terms) == []
     assert problems(without) == ["payment_terms_missing"]
+
+
+def test_a_bido_column_empty_on_every_line_is_dropped_supplier_columns_stay() -> None:
+    template = replace(
+        BUYER_TEMPLATE, columns=["Descrição", "Qtd", "Un", "Prazo", "Preço unitário"]
+    )
+    no_dates = tuple(replace(line, need_by=None) for line in (THERMISTOR, CAPACITOR))
+
+    header, *rows = table_rows(render(template, lines=no_dates).text)
+    assert "Prazo" not in header  # our need-by column, empty on every line
+    assert "Preço unitário" in header  # the supplier fills it: stays empty on purpose
+    assert all(len(row) == len(header) for row in rows)
+
+    header, *_ = table_rows(render(template).text)
+    assert "Prazo" in header  # with dates it stays
