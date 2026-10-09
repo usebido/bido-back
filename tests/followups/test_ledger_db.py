@@ -38,6 +38,7 @@ from bido_back.agents.catalog.contracts import (
     ProposalLineDraft,
     QuoteExtractionOutput,
     SourceRef,
+    ValidityValue,
 )
 from bido_back.agents.catalog.contracts import SupplierQuestion as SupplierQuestionDraft
 from bido_back.agents.config import RunnerConfig
@@ -56,6 +57,7 @@ from bido_back.db.models import (
     NegotiationMessage,
     Proposal,
     ProposalLine,
+    RfqLine,
     SupplierQuestion,
     Tenant,
     User,
@@ -66,6 +68,8 @@ from bido_back.followups.missing import OpenItem
 from bido_back.followups.schemas import AnswerQuestionsRequest, DismissQuestionRequest
 from bido_back.followups.send import SEND_SUPPLIER_ANSWER
 from bido_back.mandates.service import AUTO_TOOLS
+from bido_back.quotes.extract_job import persist_quote, requested_line
+from bido_back.quotes.validation import QuoteSources, validate_quote
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.errors import Forbidden, NotFound
 from bido_back.rfqs.service import NewRfqLine
@@ -565,6 +569,73 @@ async def test_a_counter_offer_waiting_for_its_answer_is_the_open_request(
     result = await thread.sweep(timedelta(days=6))
     assert (result.clarifications, result.reminders) == (0, 0)
     assert await thread.followups() == []
+
+
+UPLOADED = "Offer validity: 30 days."
+
+
+async def test_a_quote_the_buyer_uploads_answers_our_clarification(thread: Thread) -> None:
+    await thread.reply(INCOMPLETE, incomplete(), timedelta(hours=1))
+    await thread.sweep(timedelta(hours=2))
+    await thread.approve_pending()
+    assert await thread.asks() == {(None, "valid_until"): "open"}
+    # The supplier sent its validity outside Bido: the buyer uploads it in the Copilot,
+    # stored through the same step as an emailed reply (`persist_quote`).
+    thread.at(timedelta(hours=5))
+    answer = QuoteExtractionOutput(
+        is_quote=True,
+        reply_kind="amendment",
+        currency=NONE,
+        valid_until=NONE,
+        incoterm=NONE,
+        payment_terms=NONE,
+        validity=ValidityValue(
+            value="30",
+            unit="calendar_days",
+            source=SourceRef(kind="email_body", quote=UPLOADED),
+            confidence=0.95,
+        ),
+        lines=[],
+    )
+    async with tenant_session(thread.world.engine, thread.world.tenant_id) as session:
+        invite = await session.get(Invite, thread.invite_id)
+        assert invite is not None
+        rows = await session.scalars(select(RfqLine).where(RfqLine.rfq_id == thread.rfq.id))
+        validated = validate_quote(
+            answer,
+            requested=[requested_line(row) for row in rows],
+            sources=QuoteSources(email_subject="Quote uploaded by the buyer", email_body=UPLOADED),
+            today=thread.world.now.date(),
+            offer_date=thread.world.now.date(),
+            country="BR",
+        )
+        message = Message(
+            tenant_id=thread.world.tenant_id,
+            invite_id=invite.id,
+            direction="in",
+            origin="copilot_upload",
+            message_id_header="<upload-ledger@copilot.bido>",
+            subject="Quote uploaded by the buyer: validity.pdf",
+            status="stored",
+            occurred_at=thread.world.now,
+            created_at=thread.world.now,
+        )
+        session.add(message)
+        await session.flush()
+        proposal = await persist_quote(
+            session,
+            tenant_id=thread.world.tenant_id,
+            message=message,
+            invite=invite,
+            validated=validated,
+            meta={"run_id": "upload"},
+        )
+    assert proposal is not None and proposal.version == 2
+    # Applied as the answer it is (no "other terms unchanged" needed), and settled.
+    assert proposal.fields["_offer_state"]["issues"] == []
+    assert proposal.valid_until == thread.world.now.date() + timedelta(days=30)
+    assert await thread.asks() == {(None, "valid_until"): "answered"}
+    assert (await thread.state()).phase == "nothing_to_ask"
 
 
 async def test_a_reply_without_an_offer_keeps_our_clarification_and_asks_nothing_twice(
