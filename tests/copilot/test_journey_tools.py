@@ -9,8 +9,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.tools import ToolError
 from bido_back.db import tenant_session
-from bido_back.db.models import Approval, Contact, Proposal
+from bido_back.db.models import Approval, Contact, Proposal, Supplier
 from bido_back.onboarding import service as onboarding
+from bido_back.rfqs.language import supplier_email_language
 from tests.approvals.conftest import People
 from tests.purchasing.conftest import FakeStorage, purchasing_rows, xlsx
 
@@ -42,6 +43,66 @@ async def test_contacts_from_the_chat_are_saved_once(
             await session.scalars(select(Contact.email).where(Contact.kind == "supplier"))
         )
     assert emails == ["vendite@rame.example.test"]
+
+
+async def test_a_contact_from_the_chat_carries_the_suppliers_locale(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    """The RFQ document's language follows the supplier's country: given by the model,
+    else inferred from an unambiguous email TLD or legal suffix, else asked, never guessed
+    (2026-10-09: a Brazilian supplier saved from the chat got an English RFQ)."""
+    principal = buyer_of(copilot_rows)
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+
+    stated = await tools.call(
+        ctx,
+        "add_supplier_contact",
+        supplier="Magnetica Europe",
+        email="sales@magnetica.com",
+        country="de",
+    )
+    inferred = await tools.call(
+        ctx,
+        "add_supplier_contact",
+        supplier="Cobre Sul Fios Esmaltados S.A.",
+        email="vendas@cobresul.com.br",
+    )
+    unknown = await tools.call(
+        ctx, "add_supplier_contact", supplier="Acme Corp", email="sales@acme.com"
+    )
+
+    assert (stated.country, stated.document_language, stated.question) == ("DE", "de", None)
+    assert (inferred.country, inferred.document_language, inferred.question) == ("BR", "pt", None)
+    assert (unknown.country, unknown.document_language) == (None, "en")
+    assert unknown.question is not None and "Acme Corp" in unknown.question
+
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        rows = {
+            s.name: (s.country, s.language, supplier_email_language(s))
+            for s in await session.scalars(select(Supplier))
+        }
+    assert rows["Magnetica Europe"] == ("DE", "en", "de")
+    assert rows["Cobre Sul Fios Esmaltados S.A."] == ("BR", "pt", "pt")
+    assert rows["Acme Corp"] == (None, "en", "en")
+
+    # The buyer answers the question: the same call with the country records it.
+    answered = await tools.call(
+        ctx, "add_supplier_contact", supplier="Acme Corp", email="sales@acme.com", country="BR"
+    )
+    assert (answered.supplier_created, answered.country, answered.document_language) == (
+        False,
+        "BR",
+        "pt",
+    )
+    assert answered.question is None
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        acme = await session.scalar(select(Supplier).where(Supplier.name == "Acme Corp"))
+        emails = list(
+            await session.scalars(select(Contact.email).where(Contact.kind == "supplier"))
+        )
+    assert acme is not None and supplier_email_language(acme) == "pt"
+    assert emails.count("sales@acme.com") == 1
 
 
 async def test_only_this_conversations_attachments_can_be_imported(
