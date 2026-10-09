@@ -10234,6 +10234,17 @@
       },
       "RfqEmailPreview": {
         "properties": {
+          "attachment_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Attachment Name"
+          },
           "html": {
             "title": "Html",
             "type": "string"

@@ -1,5 +1,11 @@
 """Render the RFQ email for one supplier from a template version and the RFQ lines.
 
+Two bodies. By default the RFQ goes as the supplier's PDF
+(`bido_back.rfqs.document`, which carries the items, terms and questions built
+here) and the email is a short cover note (`render_cover`): what is attached,
+how many items, the reply-by date and how to reply. When no PDF can be
+attached, the full email (`render_rfq`) lists everything in the body.
+
 Deterministic: code builds the subject, the item table (plain text and HTML)
 and the closing; no model writes any part of it. The buyer's own text (the
 greeting, column headings, footer fields) is used as written, or as
@@ -186,8 +192,111 @@ _SUPPLIER_FILLS: Final = (
 )
 
 
+# The cover note that carries the RFQ document (the PDF): no item table, no questions.
+_COVER: Final[dict[str, dict[str, str]]] = {
+    "en": {
+        "salutation": "Dear Sir or Madam,",
+        "attached": "Please find attached our request for quotation {ref} ({title}).",
+        "count_one": (
+            "It covers 1 item; the quantities, terms and what to include in your quote "
+            "are in the attached PDF."
+        ),
+        "count_many": (
+            "It covers {count} items; the quantities, terms and what to include in your "
+            "quote are in the attached PDF."
+        ),
+        "reply": (
+            "Please reply to this email keeping {marker} in the subject and attach your quote."
+        ),
+    },
+    "pt": {
+        "salutation": "Prezados,",
+        "attached": "Segue em anexo nossa solicitação de cotação {ref} ({title}).",
+        "count_one": (
+            "A solicitação tem 1 item; as quantidades, as condições e o que informar na "
+            "proposta estão no PDF anexo."
+        ),
+        "count_many": (
+            "A solicitação tem {count} itens; as quantidades, as condições e o que informar "
+            "na proposta estão no PDF anexo."
+        ),
+        "reply": (
+            "Por favor, responda a este e-mail mantendo {marker} no assunto e anexe sua proposta."
+        ),
+    },
+    "de": {
+        "salutation": "Sehr geehrte Damen und Herren,",
+        "attached": "anbei erhalten Sie unsere Angebotsanfrage {ref} ({title}).",
+        "count_one": (
+            "Sie umfasst 1 Position; Mengen, Konditionen und die gewünschten Angaben "
+            "finden Sie im beigefügten PDF."
+        ),
+        "count_many": (
+            "Sie umfasst {count} Positionen; Mengen, Konditionen und die gewünschten "
+            "Angaben finden Sie im beigefügten PDF."
+        ),
+        "reply": (
+            "Bitte antworten Sie auf diese E-Mail, behalten Sie {marker} im Betreff bei "
+            "und hängen Sie Ihr Angebot an."
+        ),
+    },
+    "fr": {
+        "salutation": "Madame, Monsieur,",
+        "attached": "Veuillez trouver ci-joint notre demande de prix {ref} ({title}).",
+        "count_one": (
+            "Elle porte sur 1 article ; les quantités, les conditions et les éléments à "
+            "indiquer dans votre offre figurent dans le PDF joint."
+        ),
+        "count_many": (
+            "Elle porte sur {count} articles ; les quantités, les conditions et les éléments "
+            "à indiquer dans votre offre figurent dans le PDF joint."
+        ),
+        "reply": (
+            "Pour répondre, répondez à cet e-mail en gardant {marker} dans l'objet et "
+            "joignez votre offre."
+        ),
+    },
+    "es": {
+        "salutation": "Estimados señores:",
+        "attached": "Adjuntamos nuestra solicitud de cotización {ref} ({title}).",
+        "count_one": (
+            "Incluye 1 artículo; las cantidades, las condiciones y lo que debe indicar en "
+            "su oferta están en el PDF adjunto."
+        ),
+        "count_many": (
+            "Incluye {count} artículos; las cantidades, las condiciones y lo que debe "
+            "indicar en su oferta están en el PDF adjunto."
+        ),
+        "reply": (
+            "Para responder, conteste este correo manteniendo {marker} en el asunto y "
+            "adjunte su cotización."
+        ),
+    },
+    "it": {
+        "salutation": "Gentili Signori,",
+        "attached": "In allegato trovate la nostra richiesta di offerta {ref} ({title}).",
+        "count_one": (
+            "Comprende 1 articolo; le quantità, le condizioni e le informazioni da indicare "
+            "nell'offerta sono nel PDF allegato."
+        ),
+        "count_many": (
+            "Comprende {count} articoli; le quantità, le condizioni e le informazioni da "
+            "indicare nell'offerta sono nel PDF allegato."
+        ),
+        "reply": (
+            "Per rispondere, rispondete a questa e-mail mantenendo {marker} nell'oggetto e "
+            "allegate la vostra offerta."
+        ),
+    },
+}
+
+
 def phrases(language: str) -> dict[str, str]:
     return _PHRASES.get(language, _PHRASES["en"])
+
+
+def cover_phrases(language: str) -> dict[str, str]:
+    return _COVER.get(language, _COVER["en"])
 
 
 def _headings(language: str) -> dict[str, str]:
@@ -394,8 +503,7 @@ def asks(data: RenderInput) -> list[str]:
     A column the supplier fills ("Prazo de entrega") already asks its question.
     """
     shown = list(data.display.footer_fields)
-    supplier_columns = [c for c in data.template.columns if column_key(c) is None]
-    covered = covered_keys([*data.template.footer_fields, *supplier_columns])
+    covered = covered_keys(template_ask_labels(data))
     for field in REQUIRED_FIELDS:
         if field.kind != "ask" or field.key in covered:
             continue
@@ -406,6 +514,27 @@ def asks(data: RenderInput) -> list[str]:
     if any(line.qualification for line in data.lines) and qualification.key not in covered:
         shown.append(qualification.label(data.language))
     return shown
+
+
+def _supplier_columns(data: RenderInput) -> list[tuple[str, str]]:
+    """The template's columns the supplier fills: (original, shown) labels."""
+    return [
+        (original, shown)
+        for original, shown in zip(data.template.columns, data.display.columns, strict=True)
+        if column_key(original) is None
+    ]
+
+
+def document_asks(data: RenderInput) -> list[str]:
+    """What the RFQ document asks for: the template's columns the supplier fills
+    ("Preço unitário", "Prazo de entrega"; the PDF has no blank columns), then `asks`."""
+    return list(dict.fromkeys([*(shown for _, shown in _supplier_columns(data)), *asks(data)]))
+
+
+def template_ask_labels(data: RenderInput) -> list[str]:
+    """The template's own labels (its language) that ask the supplier something: the
+    footer fields and the columns the supplier fills. Coverage is matched on these."""
+    return [*data.template.footer_fields, *(original for original, _ in _supplier_columns(data))]
 
 
 def _text_table(headings: list[str], rows: list[list[str]]) -> str:
@@ -468,12 +597,69 @@ def signature(buyer_name: str, buyer_company: str) -> list[str]:
     return [name, company] if company else [name]
 
 
+def rfq_subject(data: RenderInput) -> str:
+    return f"[{data.rfq_ref}] {phrases(data.language)['subject']}: {data.rfq_title}"
+
+
+def _html_email(language: str, parts: Sequence[str]) -> str:
+    return (
+        f'<!doctype html><html lang="{html.escape(language)}"><body '
+        'style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1f2330">'
+        + "\n".join(parts)
+        + "</body></html>"
+    )
+
+
+def _p(value: str) -> str:
+    return f"<p>{html.escape(value)}</p>"
+
+
+def _closing_html(words: dict[str, str], data: RenderInput) -> str:
+    return (
+        "<p>"
+        + "<br>".join(
+            html.escape(v)
+            for v in (words["closing"], *signature(data.buyer_name, data.buyer_company))
+        )
+        + "</p>"
+    )
+
+
+def render_cover(data: RenderInput) -> RenderedRfq:
+    """The short cover note that carries the RFQ document (the PDF) for one supplier.
+
+    No item table and no questions: those are in the PDF. It says what is
+    attached, how many items, the reply-by date and how to reply. Same subject
+    as the full email.
+    """
+    words = phrases(data.language)
+    cover = cover_phrases(data.language)
+    count = len(data.lines)
+    paragraphs = [
+        cover["salutation"],
+        " ".join(
+            [
+                cover["attached"].format(ref=data.rfq_ref, title=data.rfq_title),
+                cover["count_one"] if count == 1 else cover["count_many"].format(count=count),
+            ]
+        ),
+    ]
+    if data.response_due:
+        paragraphs.append(words["due"].format(date=format_date(data.response_due, data.language)))
+    paragraphs.append(cover["reply"].format(marker=f"[{data.rfq_ref}]"))
+    closing = [words["closing"], *signature(data.buyer_name, data.buyer_company)]
+    text = "\n\n".join([*paragraphs, "\n".join(closing)]) + "\n"
+    markup = _html_email(data.language, [*map(_p, paragraphs), _closing_html(words, data)])
+    return RenderedRfq(subject=rfq_subject(data), text=text, html=markup, language=data.language)
+
+
 def render_rfq(data: RenderInput) -> RenderedRfq:
+    """The full RFQ email, item table and questions in the body: the fallback when the
+    RFQ document cannot be attached."""
     words = phrases(data.language)
     incoterm_label = required_field("incoterm_place").label(data.language)
     headings, rows, incoterm = table(data)
     questions = asks(data)
-    subject = f"[{data.rfq_ref}] {words['subject']}: {data.rfq_title}"
     due = (
         words["due"].format(date=format_date(data.response_due, data.language))
         if data.response_due
@@ -505,36 +691,25 @@ def render_rfq(data: RenderInput) -> RenderedRfq:
     )
     text = "\n\n".join(text_parts) + "\n"
 
-    def p(value: str) -> str:
-        return f"<p>{html.escape(value)}</p>"
-
     html_parts = [
-        p(data.display.greeting),
-        p(reference),
-        p(words["items"]),
+        _p(data.display.greeting),
+        _p(reference),
+        _p(words["items"]),
         _html_table(headings, rows),
     ]
     if incoterm:
-        html_parts.append(p(f"{incoterm_label}: {incoterm}"))
-    html_parts.append(p(price))
-    html_parts.append(p(words["asks"]))
+        html_parts.append(_p(f"{incoterm_label}: {incoterm}"))
+    html_parts.append(_p(price))
+    html_parts.append(_p(words["asks"]))
     html_parts.append("<ul>" + "".join(f"<li>{html.escape(q)}</li>" for q in questions) + "</ul>")
-    html_parts.append(p(words["alternative"]))
-    html_parts.extend(p(term) for term in terms)
+    html_parts.append(_p(words["alternative"]))
+    html_parts.extend(_p(term) for term in terms)
     if due:
-        html_parts.append(p(due))
-    html_parts.append(
-        "<p>"
-        + "<br>".join(
-            html.escape(v)
-            for v in (words["closing"], *signature(data.buyer_name, data.buyer_company))
-        )
-        + "</p>"
+        html_parts.append(_p(due))
+    html_parts.append(_closing_html(words, data))
+    return RenderedRfq(
+        subject=rfq_subject(data),
+        text=text,
+        html=_html_email(data.language, html_parts),
+        language=data.language,
     )
-    document = (
-        f'<!doctype html><html lang="{html.escape(data.language)}"><body '
-        'style="font-family:Arial,Helvetica,sans-serif;font-size:14px;color:#1f2330">'
-        + "\n".join(html_parts)
-        + "</body></html>"
-    )
-    return RenderedRfq(subject=subject, text=text, html=document, language=data.language)

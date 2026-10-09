@@ -239,7 +239,7 @@ async def test_rfq_email_writer_localizes_template_text(script: Script) -> None:
 
     output = cast(RfqEmailLocalizeOutput, result.output)
     assert output.labels == ["Pos.", "Menge", "Gültigkeit des Angebots"]
-    assert RFQ_EMAIL_WRITER.prompt_version == 2
+    assert RFQ_EMAIL_WRITER.prompt_version == 3
     _check_request(request, RFQ_EMAIL_WRITER, task)
 
 
