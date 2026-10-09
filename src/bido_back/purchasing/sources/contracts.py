@@ -75,11 +75,15 @@ class Record(BaseModel):
 
 
 class PlanningScope(BaseModel):
-    """Buyer-supplied planning boundaries, kept separate from extracted evidence."""
+    """Buyer-supplied planning boundaries, kept separate from extracted evidence.
+
+    `location` is empty only when the sources name no plant at all: the data is one site
+    and every row belongs to it.
+    """
 
     product_code: str | None = Field(default=None, min_length=1, max_length=200)
     area: str | None = Field(default=None, min_length=1, max_length=200)
-    location: str = Field(min_length=1, max_length=200)
+    location: str | None = Field(default=None, min_length=1, max_length=200)
     as_of: date
     horizon_end: date
     safety_stock: Decimal | None = Field(default=None, ge=0, lt=10**12)

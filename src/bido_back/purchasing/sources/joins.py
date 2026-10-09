@@ -62,10 +62,27 @@ def state(record: Record) -> str:
     return categorical(record, "status") or ""
 
 
-def _at_location(record: Record, location: str) -> bool:
+def _at_location(record: Record, location: str | None) -> bool:
     """The record is at the location, or names none (the caller decides about that)."""
     found = source_text(record, "location")
-    return found is None or same_key(found, location)
+    return found is None or (location is not None and same_key(found, location))
+
+
+def single_site(records: Sequence[Record]) -> bool:
+    """No record of any kind names a plant: the sources describe one site, and every row is at it.
+
+    A row without a plant among rows that name one stays unassignable; that is a
+    different situation, which each join reports.
+    """
+    return not any(source_text(record, "location") is not None for record in records)
+
+
+def located(record: Record, location: str | None, *, single_site: bool) -> bool:
+    """The record names the plant, or names none while the sources are one site."""
+    found = source_text(record, "location")
+    if found is None:
+        return single_site
+    return location is not None and same_key(found, location)
 
 
 def coalesce(
@@ -73,12 +90,17 @@ def coalesce(
     keys: tuple[str, ...],
     issues: list[Issue],
     code: str,
+    *,
+    single_site: bool = False,
 ) -> list[Record]:
     """Identical business facts may be repeated across reports; conflicts stay blocked.
 
     Facts are compared by meaning, not spelling: "000101"/"101", "25"/"25.0" and
     "2026-10-08"/"08/10/2026" agree. The first record's spelling is kept for display.
+    Sources that name no plant (`single_site`) key their facts without one.
     """
+    if single_site:
+        keys = tuple(key for key in keys if key != "location")
     grouped: dict[tuple[str, ...], list[Record]] = defaultdict(list)
     for record in records:
         if not all(source_text(record, field) for field in keys):
@@ -141,8 +163,9 @@ def inventory_at(
         and _at_location(r, scope.location)
     ]
     warehouses: dict[str, list[tuple[date, Record]]] = defaultdict(list)
+    one_site = single_site(records)
     for record in candidates:
-        if source_text(record, "location") is None:
+        if source_text(record, "location") is None and not one_site:
             add_issue(
                 issues,
                 "missing_inventory_location",
@@ -172,6 +195,7 @@ def inventory_at(
                 ("part_number", "location", "as_of"),
                 issues,
                 "conflicting_inventory_snapshot",
+                single_site=one_site,
             )
         )
         if latest < scope.as_of:
@@ -298,6 +322,7 @@ def receipts_for(
         ("po_number", "po_line", "location", "receipt_id", "movement"),
         issues,
         "conflicting_receipt",
+        single_site=single_site(records),
     )
     inline = _inline_receipt(order)
     if inline is not None and candidates:
@@ -471,8 +496,13 @@ def incoming_for(
         and same_key(source_text(r, "part_number"), part)
         and _at_location(r, scope.location)
     ]
+    one_site = single_site(records)
     orders = coalesce(
-        candidates, ("po_number", "po_line", "location"), issues, "conflicting_purchase_order"
+        candidates,
+        ("po_number", "po_line", "location"),
+        issues,
+        "conflicting_purchase_order",
+        single_site=one_site,
     )
     keys = {_order_key(order) for order in orders}
     for schedule in records:
@@ -540,6 +570,7 @@ def incoming_for(
             ("po_number", "po_line", "location"),
             issues,
             "conflicting_delivery_schedule",
+            single_site=one_site,
         )
         related = [order, *receipts, *schedules]
         receipts_known = _inline_receipt(order) is not None or any(

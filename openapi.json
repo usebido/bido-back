@@ -7615,7 +7615,7 @@
         "type": "object"
       },
       "PlanningScope-Input": {
-        "description": "Buyer-supplied planning boundaries, kept separate from extracted evidence.",
+        "description": "Buyer-supplied planning boundaries, kept separate from extracted evidence.\n\n`location` is empty only when the sources name no plant at all: the data is one site\nand every row belongs to it.",
         "properties": {
           "area": {
             "anyOf": [
@@ -7641,10 +7641,17 @@
             "type": "string"
           },
           "location": {
-            "maxLength": 200,
-            "minLength": 1,
-            "title": "Location",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
           },
           "product_code": {
             "anyOf": [
@@ -7685,7 +7692,6 @@
           }
         },
         "required": [
-          "location",
           "as_of",
           "horizon_end"
         ],
@@ -7693,7 +7699,7 @@
         "type": "object"
       },
       "PlanningScope-Output": {
-        "description": "Buyer-supplied planning boundaries, kept separate from extracted evidence.",
+        "description": "Buyer-supplied planning boundaries, kept separate from extracted evidence.\n\n`location` is empty only when the sources name no plant at all: the data is one site\nand every row belongs to it.",
         "properties": {
           "area": {
             "anyOf": [
@@ -7719,10 +7725,17 @@
             "type": "string"
           },
           "location": {
-            "maxLength": 200,
-            "minLength": 1,
-            "title": "Location",
-            "type": "string"
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Location"
           },
           "product_code": {
             "anyOf": [
@@ -7758,7 +7771,6 @@
           }
         },
         "required": [
-          "location",
           "as_of",
           "horizon_end"
         ],

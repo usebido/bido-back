@@ -38,6 +38,8 @@ from bido_back.purchasing.sources.joins import (
     coalesce,
     incoming_for,
     inventory_at,
+    located,
+    single_site,
     state,
 )
 from bido_back.purchasing.sources.pricing import ORDER_KEY, OrderFacts, measure, reconcile_order
@@ -125,7 +127,12 @@ def _part_name(records: Sequence[Record], known: Iterable[str], part: str) -> st
 
 
 def _matches_scope(
-    record: Record, records: Sequence[Record], scope: PlanningScope, issues: list[Issue]
+    record: Record,
+    records: Sequence[Record],
+    scope: PlanningScope,
+    issues: list[Issue],
+    *,
+    one_site: bool,
 ) -> bool:
     product = source_text(record, "product_code")
     if scope.product_code is not None and not same_code(product, scope.product_code):
@@ -142,8 +149,7 @@ def _matches_scope(
             )
         if area is None or norm(area) != norm(scope.area):
             return False
-    location = source_text(record, "location")
-    if location is None:
+    if source_text(record, "location") is None and not one_site:
         add_issue(
             issues,
             "missing_production_location",
@@ -151,7 +157,7 @@ def _matches_scope(
             [record],
         )
         return False
-    return same_place(location, scope.location)
+    return located(record, scope.location, single_site=one_site)
 
 
 def _bom_at(
@@ -207,12 +213,20 @@ def _production_demand(
 ) -> tuple[dict[str, list[DemandContribution]], dict[str, str]]:
     contributions: dict[str, list[DemandContribution]] = defaultdict(list)
     units: dict[str, str] = {}
+    one_site = single_site(records)
     candidates = [
         r
         for r in records
-        if r.kind == "production_plan" and _matches_scope(r, records, scope, issues)
+        if r.kind == "production_plan"
+        and _matches_scope(r, records, scope, issues, one_site=one_site)
     ]
-    plans = coalesce(candidates, ("reference", "location"), issues, "conflicting_production_order")
+    plans = coalesce(
+        candidates,
+        ("reference", "location"),
+        issues,
+        "conflicting_production_order",
+        single_site=one_site,
+    )
     for plan in plans:
         if state(plan) in CANCELLED | CLOSED:
             continue
@@ -342,14 +356,15 @@ def _direct_demand(
     issues: list[Issue],
 ) -> None:
     exploded_parts = set(contributions)
+    one_site = single_site(records)
 
     def exploded(part: str) -> bool:
         return any(same_key(part, name) for name in exploded_parts)
 
     candidates: list[Record] = []
     for row in records:
-        if row.kind != "material_requirement" or not same_key(
-            source_text(row, "location"), scope.location
+        if row.kind != "material_requirement" or not located(
+            row, scope.location, single_site=one_site
         ):
             continue
         part = source_text(row, "part_number")
@@ -389,6 +404,7 @@ def _direct_demand(
         ("reference", "part_number", "location"),
         issues,
         "conflicting_material_requirement",
+        single_site=one_site,
     ):
         need = source_date(row, "need_by", issues)
         if need is None:
@@ -466,17 +482,20 @@ def _history(
     masters = [r for r in records if r.kind == "supplier"]
     performance = [r for r in records if r.kind == "supplier_performance"]
     grouped: dict[str, list[Record]] = defaultdict(list)
+    one_site = single_site(records)
     candidates = [
         r
         for r in records
         if r.kind == "purchase"
         and same_key(source_text(r, "part_number"), part)
-        and same_key(source_text(r, "location"), scope.location)
+        and located(r, scope.location, single_site=one_site)
     ]
     histories = [r for r in candidates if state(r) in CLOSED]
     verified: list[Record] = []
     orders: list[OrderFacts] = []
-    for order in coalesce(histories, ORDER_KEY, issues, "conflicting_purchase_history"):
+    for order in coalesce(
+        histories, ORDER_KEY, issues, "conflicting_purchase_history", single_site=one_site
+    ):
         ordered_at = source_date(order, "ordered_at", issues)
         if ordered_at is None or ordered_at > scope.as_of:
             continue
@@ -530,7 +549,11 @@ def _history(
         verified.append(verified_order)
     # `incoming_for` reports open lines' problems; here they are delivery evidence only.
     for order in coalesce(
-        [r for r in candidates if state(r) in OPEN], ORDER_KEY, [], "conflicting_purchase_order"
+        [r for r in candidates if state(r) in OPEN],
+        ORDER_KEY,
+        [],
+        "conflicting_purchase_order",
+        single_site=one_site,
     ):
         ordered_at = source_date(order, "ordered_at", [])
         code = source_text(order, "supplier_code")

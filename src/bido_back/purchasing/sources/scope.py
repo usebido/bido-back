@@ -8,8 +8,12 @@ the `PlanningScope` the planner needs:
 - product: its code compared without case, spacing or punctuation; else a production
   product's code written inside the buyer's words (a code inside a longer one loses);
   else the only production product whose master description holds all their words;
+  else the only production product whose code holds what the buyer wrote (an ERP that
+  names products by description: "BP-200" for "BP-200 Bomba centrifuga");
 - area and plant: compared without case, accents, spacing or punctuation with the areas
-  and plants of the demand; a product planned at a single plant uses it;
+  and plants of the demand; a product planned at a single plant uses it; sources that
+  name no plant at all are one site: the plant the buyer named, if any, applies to
+  every row, and no plant is asked for;
 - reference date: when absent, the latest stock snapshot of that plant, never an older one;
 - horizon: `horizon_end`, or `as_of + horizon_days`. Without either, the candidate
   orders and their dates are offered: future plans are never all included silently.
@@ -40,14 +44,19 @@ from bido_back.purchasing.sources.contracts import (
     SourceRef,
 )
 from bido_back.purchasing.sources.evidence import source_date, source_refs, source_text
-from bido_back.purchasing.sources.joins import CANCELLED, CLOSED, state
+from bido_back.purchasing.sources.joins import CANCELLED, CLOSED, single_site, state
 from bido_back.purchasing.sources.planning import code_key, same_code, same_place
 
 MAX_OPTIONS = 12
 MAX_REFS = 10
 # Assumptions that settle a boundary from located evidence alone (no buyer words).
 _FROM_EVIDENCE = frozenset(
-    {"product_from_description", "location_single_plant", "as_of_latest_snapshot"}
+    {
+        "product_from_description",
+        "product_from_partial_code",
+        "location_single_plant",
+        "as_of_latest_snapshot",
+    }
 )
 # Words that name no product: articles, prepositions and "product" itself.
 _FILLER = frozenset(
@@ -124,7 +133,7 @@ def direct_scope(records: Sequence[Record], request: ScopeRequest) -> ResolvedSc
         location = _plant_spellings(records).get(norm(location), location)
     if (
         (request.product_code is None and request.area is None)
-        or location is None
+        or (location is None and not single_site(records))
         or request.as_of is None
         or end is None
     ):
@@ -188,6 +197,8 @@ class _Resolver:
         self.masters = [r for r in records if r.kind == "item"]
         # Joins downstream compare plants exactly: settle on the spelling most records use.
         self.spellings = _plant_spellings(records)
+        # No source names a plant: one site, so no plant is asked for or matched.
+        self.single_site = single_site(records)
         self.demands = [d for r in records if (d := self._demand(r)) is not None]
         self.assumptions: list[ScopeAssumption] = []
         self.questions: list[ScopeQuestion] = []
@@ -223,7 +234,7 @@ class _Resolver:
         if (
             self.questions
             or (product is None and area is None)
-            or location is None
+            or (location is None and not self.single_site)
             or as_of is None
             or horizon_end is None
         ):
@@ -297,6 +308,13 @@ class _Resolver:
             if len(found) == 1:
                 self.matched["product_code"] = _product_refs(found[0])
                 return found[0]
+            if not found:
+                # The ERP names products by description ("BP-200 Bomba centrifuga") and the
+                # buyer wrote the code part: the only product whose code spells it is theirs.
+                found = [p for p in products if _spans(_loose(given), norm(p.code).split())]
+                if len(found) == 1:
+                    self._assume_partial_code(given, found[0])
+                    return found[0]
             message = (
                 f"'{given}' matches several production products."
                 if found
@@ -320,6 +338,11 @@ class _Resolver:
                         _product_refs(found[0]),
                     )
                     return found[0]
+            if not found:
+                found = [p for p in products if _describes(words, p.code)]
+                if len(found) == 1:
+                    self._assume_partial_code(words, found[0])
+                    return found[0]
             message = (
                 f"'{words}' matches several production products."
                 if found
@@ -334,6 +357,16 @@ class _Resolver:
             [_product_option(p) for p in (found or products)],
         )
         return None
+
+    def _assume_partial_code(self, given: str, product: _Product) -> None:
+        self._assume(
+            "product_from_partial_code",
+            "product_code",
+            product.code,
+            f"'{given}' was read as product {product.code}, the only production product "
+            "whose code contains it.",
+            _product_refs(product),
+        )
 
     def _area(self, product: _Product | None) -> str | None:
         given = self.request.area
@@ -379,6 +412,26 @@ class _Resolver:
     def _location(self, subject: str, relevant: Sequence[_Demand]) -> str | None:
         plants = _places(d.location for d in relevant)
         given = self.request.location
+        if self.single_site:
+            if given is None:
+                self._assume(
+                    "location_single_site",
+                    "location",
+                    None,
+                    "No source names a plant: the data is read as one site, and every "
+                    "order, stock position and purchase belongs to it.",
+                    [],
+                )
+                return None
+            self._assume(
+                "location_applied_to_all",
+                "location",
+                given,
+                f"No source names a plant: '{given}' is taken as the site of every order, "
+                "stock position and purchase.",
+                [],
+            )
+            return given
         if given is not None:
             found = next((p for p in plants if same_place(p, given)), None)
             if found is None:
@@ -431,11 +484,14 @@ class _Resolver:
     def _as_of(self, location: str | None) -> date | None:
         if self.request.as_of is not None:
             return self.request.as_of
-        if location is None:
+        if location is None and not self.single_site:
             return None  # Settled once the plant is known.
+        where = f" of {location}" if location is not None else ""
         stock: list[tuple[date, Record]] = []
         for row in self.records:
-            if row.kind == "inventory" and same_place(source_text(row, "location"), location):
+            if row.kind == "inventory" and (
+                self.single_site or same_place(source_text(row, "location"), location)
+            ):
                 day = source_date(row, "as_of", [])
                 if day is not None:
                     stock.append((day, row))
@@ -452,7 +508,7 @@ class _Resolver:
             self._ask(
                 "missing_as_of",
                 "as_of",
-                f"No stock snapshot of {location} gives the reference (export) date; "
+                f"No stock snapshot{where} gives the reference (export) date; "
                 "which date should the analysis use?",
                 [ScopeOption(value=d.isoformat(), label=f"stock snapshot {d}") for d in dates],
             )
@@ -463,7 +519,7 @@ class _Resolver:
             "as_of_latest_snapshot",
             "as_of",
             latest.isoformat(),
-            f"No reference date was given: {latest}, the latest stock snapshot of {location}, "
+            f"No reference date was given: {latest}, the latest stock snapshot{where}, "
             "is used as the export date"
             + (f"; older snapshots ({', '.join(older)}) are not added to it." if older else "."),
             self._refs([row for day, row in stock if day == latest], "as_of"),
