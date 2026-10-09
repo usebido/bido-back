@@ -86,10 +86,15 @@ def rfq_email_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[RfqEmailLoca
 
 
 def quote_extraction(model: str = EXTRACTION_MODEL) -> AgentDefinition[QuoteExtractionOutput]:
+    """v5: lead times as data (amount, unit, basis, approximate, risk note) with an
+    offer-level lead time for every line; a validity given as a duration; a price
+    without tiers keeps `min_quantity` empty; `conditional_terms` only for conditions
+    on one line's price or availability (general terms go to `offer_notes`); the
+    supplier's final-offer statement, declined lines and questions as grounded signals."""
     return AgentDefinition(
         name="quote_extraction",
-        prompt_file="quote_extraction.v4.md",
-        prompt_version=4,
+        prompt_file="quote_extraction.v5.md",
+        prompt_version=5,
         model=model,
         output_model=QuoteExtractionOutput,
         max_turns=_MAX_TURNS,
