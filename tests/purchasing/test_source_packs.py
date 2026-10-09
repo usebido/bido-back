@@ -13,6 +13,7 @@ from bido_back.purchasing.sources.contracts import (
     MappingProposal,
     MappingTask,
     Record,
+    ScopeRequest,
     SourceAssessment,
     SourceRef,
 )
@@ -33,7 +34,7 @@ async def _no_model(task: MappingTask, context: ToolContext) -> MappingProposal:
     raise AssertionError(f"the mapper was called for {task.table}")
 
 
-async def _assess() -> SourceAssessment:
+async def _assess(scope: ScopeRequest | None = None) -> SourceAssessment:
     documents = [
         SourceDocument(name, name, "application/vnd.ms-excel", data)
         for name, data in reports().items()
@@ -43,6 +44,7 @@ async def _assess() -> SourceAssessment:
         "O que comprar, quanto e de quem",
         ToolContext(tenant_id=uuid4(), user_id=uuid4(), run_id=uuid4()),
         _no_model,
+        scope=scope,
         today=TODAY,
     )
 
@@ -66,6 +68,12 @@ async def test_the_eight_sap_reports_are_read_by_code_into_the_golden_plan() -> 
     assert result.scope is not None and result.scope.all_materials
     assert result.scope.as_of == date(2026, 10, 8)
     assert not [i for i in result.issues if i.severity == "blocker"]
+
+
+async def test_the_buyers_plant_words_select_the_mrp_lists_plant() -> None:
+    result = await _assess(ScopeRequest(location="planta 1000"))
+    assert result.scope is not None and result.scope.location == "1000"
+    assert {line.part_number: line.calculated_to_buy for line in result.lines} == golden()
 
 
 async def test_report_conventions_become_disclosed_assumptions() -> None:
