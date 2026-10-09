@@ -77,6 +77,7 @@ from bido_back.db.models import (
 )
 from bido_back.email.addresses import make_message_id
 from bido_back.email.types import OutboundAttachment, OutboundEmail
+from bido_back.rfqs import audit
 from bido_back.rfqs.document import (
     PDF_CONTENT_TYPE,
     RfqDocument,
@@ -306,11 +307,24 @@ class _SendRfqEmail:
             invite.thread_message_id = message_id
             invite.status = "sent"
             invite.sent_at = now
-            await session.execute(
+            opened = await session.scalar(
                 update(Rfq)
                 .where(Rfq.id == claim.rfq_id, Rfq.status == "draft")
                 .values(status="open")
+                .returning(Rfq.id)
             )
+            if opened is not None:
+                session.add(
+                    audit.rfq_event(
+                        ctx.tenant_id,
+                        ctx.user_id,
+                        audit.RFQ_STATUS_CHANGED,
+                        claim.rfq_id,
+                        from_status="draft",
+                        to_status="open",
+                        invite_id=invite.id,
+                    )
+                )
             # Ids only: who asked (and whose mailbox sent it) and who approved.
             session.add(
                 AuditEvent(

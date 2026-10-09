@@ -6,7 +6,7 @@ an email body, subject or attachment name.
 
 from collections.abc import Mapping
 from datetime import datetime
-from typing import Any, Final
+from typing import Any, Final, cast
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
@@ -49,6 +49,52 @@ _NEGOTIATION_ACTIONS: Final[Mapping[str, str]] = {
     "bafo": "Best-and-final request",
     "accept": "Acceptance",
 }
+_ORIGINS: Final[Mapping[str, str]] = {
+    "copilot": " from the Copilot",
+    "analysis": " from a purchase analysis",
+    "api": "",
+}
+# Lifecycle changes named in the summary. Fields whose values are short codes,
+# numbers or dates show old -> new; longer text only says that it changed.
+_FIELD_LABELS: Final[Mapping[str, str]] = {
+    "quantities": "quantity",
+    "unit": "unit",
+    "part_number": "part number",
+    "mpn": "MPN",
+    "manufacturer": "manufacturer",
+    "category": "category",
+    "incoterm": "Incoterm",
+    "delivery_location": "delivery location",
+    "need_by": "need-by date",
+    "description": "description",
+    "qualification": "qualification",
+    "title": "title",
+    "response_due": "response deadline",
+    "currency": "currency",
+    "payment_terms": "payment terms",
+    "quote_validity_days": "quote validity (days)",
+    "logo_asset_id": "logo",
+    "footer_override": "footer",
+    "logo_placement": "logo placement",
+}
+_FIELD_ORDER: Final[Mapping[str, int]] = {f: i for i, f in enumerate(_FIELD_LABELS)}
+_VALUED_FIELDS: Final = frozenset(
+    {
+        "quantities",
+        "unit",
+        "part_number",
+        "mpn",
+        "manufacturer",
+        "category",
+        "incoterm",
+        "delivery_location",
+        "need_by",
+        "response_due",
+        "currency",
+        "payment_terms",
+        "quote_validity_days",
+    }
+)
 
 
 async def rfq_activity(
@@ -165,6 +211,35 @@ def _event_item(
             count = len(data.get("purchase_order_ids") or [])
             kind = "user"
             summary = f"Awarded: {count} purchase order{'s' if count != 1 else ''} created"
+        case "rfq.created":
+            count = data.get("lines")
+            origin = _ORIGINS.get(str(data.get("origin")), "")
+            kind, summary = "user", f"RFQ created{origin}{_count(count, 'line', ' with ')}"
+        case "rfq.line_added":
+            kind, summary = "user", f"Line {data.get('position', '?')} added{_what(data)}"
+        case "rfq.line_removed":
+            kind, summary = "user", f"Line {data.get('position', '?')} removed{_what(data)}"
+        case "rfq.line_updated":
+            changed = _changes(data.get("changes"))
+            kind, summary = "user", f"Line {data.get('position', '?')} updated: {changed}"
+        case "rfq.terms_set":
+            parts = [_changes(data.get("changes"))] if data.get("changes") else []
+            line_fields = data.get("line_fields")
+            if isinstance(line_fields, Mapping):
+                lines = _count(data.get("lines"), "line", " on ")
+                for field, value in cast(Mapping[str, object], line_fields).items():
+                    parts.append(f"{_change(field, {'to': value})}{lines}")
+            kind, summary = "user", "Terms updated: " + ", ".join(parts)
+        case "rfq.invite_added":
+            supplier = supplier or _name(data)
+            kind, summary = "user", f"Supplier added: {supplier}"
+        case "rfq.invite_removed":
+            supplier = supplier or _name(data)
+            kind, summary = "user", f"Supplier removed: {supplier}"
+        case "rfq.status_changed":
+            kind = "system"
+            summary = f"RFQ {data.get('to_status', '?')} (was {data.get('from_status', '?')})"
+            actor = actor or BIDO
         case "rfq.negotiation_settings":
             kind, summary = "user", f"Negotiation limits set for {data.get('lines', 0)} lines"
         case "rfq.negotiation_ready":
@@ -199,6 +274,52 @@ def _event_item(
         supplier_name=supplier,
         summary=summary,
     )
+
+
+def _count(value: object, noun: str, prefix: str) -> str:
+    if not isinstance(value, int):
+        return ""
+    return f"{prefix}{value} {noun}{'s' if value != 1 else ''}"
+
+
+def _what(data: Mapping[str, Any]) -> str:
+    description = data.get("description")
+    return f": {description}" if isinstance(description, str) and description else ""
+
+
+def _name(data: Mapping[str, Any]) -> str:
+    name = data.get("supplier_name")
+    return name if isinstance(name, str) and name else "a supplier"
+
+
+def _changes(value: object) -> str:
+    if not isinstance(value, Mapping) or not value:
+        return "no change"
+    # JSONB does not keep key order: name the fields in a fixed one.
+    fields = cast(Mapping[str, object], value)
+    ordered = sorted(fields.items(), key=lambda item: _FIELD_ORDER.get(item[0], len(_FIELD_ORDER)))
+    return ", ".join(_change(field, change) for field, change in ordered)
+
+
+def _change(field: str, change: object) -> str:
+    label = _FIELD_LABELS.get(field, field.replace("_", " "))
+    if not isinstance(change, Mapping):
+        return f"{label} changed"
+    values = cast(Mapping[str, object], change)
+    old, new = values.get("from"), values.get("to")
+    if field not in _VALUED_FIELDS:
+        return f"{label} {'cleared' if new is None else 'set' if old is None else 'changed'}"
+    if new is None:
+        return f"{label} cleared"
+    if old is None:
+        return f"{label} set to {_value(new)}"
+    return f"{label} {_value(old)} -> {_value(new)}"
+
+
+def _value(value: object) -> str:
+    if isinstance(value, list):
+        return "/".join(_value(item) for item in cast(list[object], value))
+    return str(value)
 
 
 def _supplier(value: object, suppliers: Mapping[UUID, str]) -> str | None:

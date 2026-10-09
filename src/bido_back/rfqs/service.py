@@ -64,6 +64,7 @@ from bido_back.branding.service import (
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
+    AuditEvent,
     Contact,
     Invite,
     MailboxConnection,
@@ -79,6 +80,7 @@ from bido_back.followups.send import SEND_FOLLOWUP_EMAIL, SendFollowupEmailArgs
 from bido_back.negotiation.send import SEND_NEGOTIATION_EMAIL, SendNegotiationEmailArgs
 from bido_back.onboarding.standard import TemplateContent
 from bido_back.outbound.domains import RecipientCheck, check_recipients, recipients_in_args
+from bido_back.rfqs import audit
 from bido_back.rfqs.agents import EmailWriterAgent, IntakeAgent
 from bido_back.rfqs.currency import CurrencyChange, change_currency, resolve_currency
 from bido_back.rfqs.document import (
@@ -282,6 +284,7 @@ async def create_rfq_from_text(
     *,
     buyer_messages: Sequence[str] = (),
     currency: str | None = None,
+    origin: audit.RfqOrigin = "api",
 ) -> RfqCreated:
     """Structure the buyer's text with the intake agent and store it as a draft RFQ.
 
@@ -289,12 +292,13 @@ async def create_rfq_from_text(
     `buyer_messages` the buyer's own words, which win on codes and terms.
     `currency` is the one the buyer stated; without it the purchase history
     decides, and when it cannot, `CurrencyRequired` is raised before the intake
-    agent runs (`bido_back.rfqs.currency`).
+    agent runs (`bido_back.rfqs.currency`). `origin` is recorded in the
+    `rfq.created` audit event.
     """
     drafted = await draft_rfq_from_text(
         db, principal, source_text, intake, buyer_messages=buyer_messages, currency=currency
     )
-    return await store_text_draft(db, principal, drafted)
+    return await store_text_draft(db, principal, drafted, origin=origin)
 
 
 async def draft_rfq_from_text(
@@ -328,7 +332,9 @@ async def draft_rfq_from_text(
     )
 
 
-async def store_text_draft(db: Db, principal: Principal, drafted: TextDraft) -> RfqCreated:
+async def store_text_draft(
+    db: Db, principal: Principal, drafted: TextDraft, *, origin: audit.RfqOrigin = "api"
+) -> RfqCreated:
     """Store a draft from `draft_rfq_from_text` as a draft RFQ."""
     draft = drafted.draft
     async with tenant_session(db, principal.tenant_id) as session:
@@ -363,6 +369,7 @@ async def store_text_draft(db: Db, principal: Principal, drafted: TextDraft) -> 
                     qualification=line.qualification,
                 )
             )
+        session.add(_created_event(principal, rfq, origin, lines=len(draft.lines)))
         await session.flush()
         await session.refresh(rfq)
         detail = await _detail(session, rfq)
@@ -405,10 +412,12 @@ async def create_draft_rfq(
     source_text: str | None = None,
     response_due: date | None = None,
     base_currency: str,
+    origin: audit.RfqOrigin = "analysis",
 ) -> tuple[Rfq, list[RfqLine]]:
     """Store a draft RFQ with the given lines, in the caller's tenant session.
 
-    `base_currency` comes from `bido_back.rfqs.currency.resolve_currency`."""
+    `base_currency` comes from `bido_back.rfqs.currency.resolve_currency`; `origin`
+    goes into the `rfq.created` audit event."""
     rfq = Rfq(
         tenant_id=principal.tenant_id,
         ref=await _next_ref(session, principal.tenant_id),
@@ -439,6 +448,7 @@ async def create_draft_rfq(
         )
         session.add(row)
         rows.append(row)
+    session.add(_created_event(principal, rfq, origin, lines=len(rows)))
     await session.flush()
     await session.refresh(rfq)
     return rfq, rows
@@ -458,7 +468,83 @@ async def add_draft_invite(
     )
     session.add(invite)
     await session.flush()
+    name = await session.scalar(select(Supplier.name).where(Supplier.id == supplier_id))
+    session.add(_invite_event(principal, audit.RFQ_INVITE_ADDED, invite, name or ""))
+    await session.flush()
     return invite
+
+
+def _created_event(
+    principal: Principal, rfq: Rfq, origin: audit.RfqOrigin, *, lines: int
+) -> AuditEvent:
+    return audit.rfq_event(
+        principal.tenant_id,
+        principal.user_id,
+        audit.RFQ_CREATED,
+        rfq.id,
+        ref=rfq.ref,
+        origin=origin,
+        lines=lines,
+        currency=rfq.base_currency,
+    )
+
+
+def _invite_event(
+    principal: Principal, action: str, invite: Invite, supplier_name: str
+) -> AuditEvent:
+    return audit.rfq_event(
+        principal.tenant_id,
+        principal.user_id,
+        action,
+        invite.rfq_id,
+        invite_id=invite.id,
+        supplier_id=invite.supplier_id,
+        supplier_name=supplier_name,
+    )
+
+
+def _line_fields(line: RfqLine) -> dict[str, object]:
+    """The editable fields of a line, for the before/after of its audit event."""
+    return {
+        "description": line.description,
+        "part_number": line.part_number,
+        "mpn": line.mpn,
+        "manufacturer": line.manufacturer,
+        "category": line.category,
+        "quantities": list(line.quantities),
+        "unit": line.unit,
+        "need_by": line.need_by,
+        "incoterm": line.incoterm,
+        "delivery_location": line.delivery_location,
+        "qualification": line.qualification,
+    }
+
+
+def _line_event(principal: Principal, action: str, line: RfqLine, **payload: object) -> AuditEvent:
+    return audit.rfq_event(
+        principal.tenant_id,
+        principal.user_id,
+        action,
+        line.rfq_id,
+        line_id=line.id,
+        position=line.position,
+        **payload,
+    )
+
+
+def _terms_fields(rfq: Rfq) -> dict[str, object]:
+    """The RFQ-wide fields `edit_rfq` can change, for the before/after of its event."""
+    placement = rfq_logo_placement(rfq)
+    return {
+        "title": rfq.title,
+        "response_due": rfq.response_due,
+        "currency": rfq.base_currency,
+        "payment_terms": rfq.payment_terms,
+        "quote_validity_days": rfq.quote_validity_days,
+        "logo_asset_id": rfq.logo_asset_id,
+        "footer_override": rfq.footer_override,
+        "logo_placement": placement.model_dump(mode="json") if placement else None,
+    }
 
 
 async def rfq_detail(session: AsyncSession, rfq: Rfq) -> RfqDetail:
@@ -486,11 +572,15 @@ async def update_line(
         )
         if line is None:
             raise NotFound(f"line {line_id} not found")
+        before = _line_fields(line)
         for field, value in changes.items():
             if field == "quantities" and patch.quantities is not None:
                 line.quantities = [quantity_json(q) for q in patch.quantities]
             else:
                 setattr(line, field, value)
+        changed = audit.changes(before, _line_fields(line))
+        if changed:
+            session.add(_line_event(principal, audit.RFQ_LINE_UPDATED, line, changes=changed))
         await session.flush()
         return _line_view(line)
 
@@ -504,22 +594,32 @@ async def add_line(
         last = await session.scalar(
             select(func.max(RfqLine.position)).where(RfqLine.rfq_id == rfq_id)
         )
+        line = RfqLine(
+            tenant_id=principal.tenant_id,
+            rfq_id=rfq_id,
+            position=(last or 0) + 1,
+            description=request.description,
+            part_number=request.part_number,
+            mpn=request.mpn,
+            manufacturer=request.manufacturer,
+            category=request.category,
+            quantities=[quantity_json(q) for q in request.quantities],
+            unit=request.unit,
+            need_by=request.need_by,
+            incoterm=request.incoterm,
+            delivery_location=request.delivery_location,
+            qualification=request.qualification,
+        )
+        session.add(line)
+        await session.flush()
         session.add(
-            RfqLine(
-                tenant_id=principal.tenant_id,
-                rfq_id=rfq_id,
-                position=(last or 0) + 1,
-                description=request.description,
-                part_number=request.part_number,
-                mpn=request.mpn,
-                manufacturer=request.manufacturer,
-                category=request.category,
-                quantities=[quantity_json(q) for q in request.quantities],
-                unit=request.unit,
-                need_by=request.need_by,
-                incoterm=request.incoterm,
-                delivery_location=request.delivery_location,
-                qualification=request.qualification,
+            _line_event(
+                principal,
+                audit.RFQ_LINE_ADDED,
+                line,
+                description=line.description,
+                quantities=list(line.quantities),
+                unit=line.unit,
             )
         )
         await session.flush()
@@ -539,6 +639,9 @@ async def remove_line(db: Db, principal: Principal, rfq_id: UUID, line_id: UUID)
             raise NotFound(f"line {line_id} not found")
         if len(lines) == 1:
             raise InvalidState(f"rfq {rfq_id} has only this line; an RFQ needs at least one")
+        session.add(
+            _line_event(principal, audit.RFQ_LINE_REMOVED, line, description=line.description)
+        )
         await session.delete(line)
         await session.flush()
         # One at a time, lowest first: (rfq_id, position) is unique at every step.
@@ -579,6 +682,7 @@ async def edit_rfq(
             raise InvalidState(f"{required} cannot be cleared")
     async with tenant_session(db, principal.tenant_id) as session:
         rfq = await _editable_rfq(session, rfq_id)
+        before = _terms_fields(rfq)
         currency_change = None
         if "currency" in changes:
             currency_change = await change_currency(
@@ -611,10 +715,25 @@ async def edit_rfq(
             for field in ("incoterm", "delivery_location", "need_by")
             if field in changes
         }
+        line_count = 0
         if line_fields:
             for line in await _lines(session, rfq_id):
+                line_count += 1
                 for field, value in line_fields.items():
                     setattr(line, field, value)
+        changed = audit.changes(before, _terms_fields(rfq))
+        if changed or line_fields:
+            session.add(
+                audit.rfq_event(
+                    principal.tenant_id,
+                    principal.user_id,
+                    audit.RFQ_TERMS_SET,
+                    rfq.id,
+                    changes=changed,
+                    line_fields=line_fields,
+                    lines=line_count,
+                )
+            )
         await session.flush()
         await session.refresh(rfq)
         return EditedRfq(await _detail(session, rfq), currency_change)
@@ -701,6 +820,8 @@ async def add_invite(
         except IntegrityError:
             # A concurrent request invited the same supplier first.
             raise Duplicate(f"supplier {supplier_id} is already invited to rfq {rfq_id}") from None
+        session.add(_invite_event(principal, audit.RFQ_INVITE_ADDED, invite, supplier.name))
+        await session.flush()
         await session.refresh(invite)
         return _invite_view(invite, supplier.name)
 
@@ -722,6 +843,8 @@ async def remove_invite(db: Db, principal: Principal, rfq_id: UUID, invite_id: U
             raise NotFound(f"invite {invite_id} not found")
         if invite.status not in _EDITABLE_INVITES:
             raise InvalidState(f"invite {invite_id} is {invite.status}; it cannot be removed")
+        name = await session.scalar(select(Supplier.name).where(Supplier.id == invite.supplier_id))
+        session.add(_invite_event(principal, audit.RFQ_INVITE_REMOVED, invite, name or ""))
         await session.delete(invite)
         await session.flush()
         return await _detail(session, rfq)
