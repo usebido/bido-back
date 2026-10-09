@@ -34,6 +34,7 @@ from bido_back.comparison.compute import DecisionOffer, ExcludedOffer, OfferAlte
 from bido_back.comparison.loader import load_comparison
 from bido_back.comparison.policy import ComparisonPolicy, SupplierPerformance
 from bido_back.copilot import proposals, queries
+from bido_back.copilot.model_views import assessment_view
 from bido_back.copilot.proposals import (
     PROPOSAL_ARG,
     AwaitingConfirmation,
@@ -1003,6 +1004,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             SourceAssessment,
             "draft",
             save_procurement_assessment,
+            model_view=assessment_view,
         ),
         Tool(
             "get_procurement_assessment",
@@ -1011,6 +1013,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             SourceAssessment,
             "read",
             get_procurement_assessment,
+            model_view=assessment_view,
         ),
         Tool(
             "list_procurement_assessments",
@@ -1061,11 +1064,15 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             '"as_of": "2026-10-08", "horizon_end": "2026-10-22"}; "tudo da área de Manutenção '
             'até 20/10/2026, a montagem leva 2 dias" -> {"area": "Manutenção", "horizon_end": '
             '"2026-10-20", "production_lead_days": 2}; "analisa o motor" -> {"product": '
-            '"motor"}.',
+            '"motor"}. A large result is cut for you: `lines` are read in full (lines to '
+            "buy first), `more_lines` are one-row summaries of the others and `lines_left_out` "
+            "counts the lines not shown; cell references are only counted (`evidence_cells`). "
+            "Never present the lines shown as all of them.",
             AnalyzeSourcesIn,
             SourceAssessment,
             "read",
             analyze_procurement_sources,
+            model_view=assessment_view,
         ),
         Tool(
             "import_spreadsheet",

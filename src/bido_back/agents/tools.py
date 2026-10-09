@@ -13,6 +13,7 @@ Every tool declares a `kind`:
   proposal; execution happens elsewhere, after a person approves.
 """
 
+import json
 import re
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
@@ -52,6 +53,10 @@ class Tool[InT: BaseModel, OutT: BaseModel]:
     # Which successful outputs make that card (the JSON output); None = all. A
     # proposal awaiting the buyer's confirmation, for one, is not an RFQ yet.
     artifact_if: Callable[[Mapping[str, JsonValue]], bool] | None = None
+    # What the model reads of a successful output; None = the whole output. Only
+    # the model's context changes (and the history that replays it): the
+    # ToolResult event, the artifact and traces keep the whole output.
+    model_view: Callable[[OutT], JsonValue] | None = None
 
     def __post_init__(self) -> None:
         if not _TOOL_NAME.match(self.name):
@@ -73,6 +78,12 @@ class Tool[InT: BaseModel, OutT: BaseModel]:
                 f"expected {self.output_model.__name__}"
             )
         return output
+
+    def for_model(self, output: OutT) -> str:
+        """The JSON text the model reads for a successful output."""
+        if self.model_view is None:
+            return output.model_dump_json()
+        return json.dumps(self.model_view(output), ensure_ascii=False, separators=(",", ":"))
 
 
 # Heterogeneous tool lists hold tools of different input/output types.
