@@ -1312,15 +1312,17 @@ async def step_analysis(j: Journey, step: Step) -> None:
         f"{len(calls)} call(s), none with a scope",
         owner="A",
     )
-    if scoped:
-        problems = [scope_ok(cast(dict[str, JsonValue], c.args["scope"]), j.case) for c in scoped]
-        step.check(
-            "scope_matches_request",
-            any(not p for p in problems),
-            "; ".join(problems[-1]),
-            owner="A",
-        )
     result = parsed(SourceAssessment, last([c for c in scoped if c.ok]))
+    if scoped:
+        # The copilot passes the buyer's words; code resolves the exact boundaries. Grade
+        # the scope the tool resolved, not the request's spelling.
+        resolved = result.scope if result is not None else None
+        problems = (
+            scope_ok(cast(dict[str, JsonValue], resolved.model_dump(mode="json")), j.case)
+            if resolved is not None
+            else ["no resolved scope came back"]
+        )
+        step.check("scope_matches_request", not problems, "; ".join(problems), owner="A")
     if result is None:
         result = parsed(SourceAssessment, last([c for c in calls if c.ok]))
         step.notes["graded_assessment"] = "unscoped" if result is not None else "none"
