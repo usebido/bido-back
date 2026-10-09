@@ -48,6 +48,7 @@ from bido_back.templates.required import (
     normalize,
     required_field,
 )
+from bido_back.templates.signature import signature
 
 # --- Fixed phrases --------------------------------------------------------------------
 
@@ -196,14 +197,6 @@ _SUPPLIER_FILLS: Final = (
 
 def phrases(language: str) -> dict[str, str]:
     return _PHRASES.get(language, _PHRASES["en"])
-
-
-def subject_language(subject: str) -> str | None:
-    """The language of an RFQ email's subject, read from its type label (`] Angebotsanfrage:`)."""
-    for language, words in _PHRASES.items():
-        if f"] {words['subject']}: " in subject:
-            return language
-    return None
 
 
 def _headings(language: str) -> dict[str, str]:
@@ -483,14 +476,6 @@ def _html_table(headings: list[str], rows: list[list[str]]) -> str:
 def tiered(lines: Sequence[RenderLine]) -> bool:
     """Whether any line asks for more than one quantity."""
     return any(len(line.quantities) > 1 for line in lines)
-
-
-def signature(buyer_name: str, buyer_company: str) -> list[str]:
-    """The closing's name lines: the buyer, then the company when it says something new."""
-    name, company = buyer_name.strip(), buyer_company.strip()
-    if not name or name.casefold() == company.casefold():
-        return [company] if company else []
-    return [name, company] if company else [name]
 
 
 def render_rfq(data: RenderInput) -> RenderedRfq:

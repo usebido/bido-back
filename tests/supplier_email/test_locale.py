@@ -14,7 +14,6 @@ from bido_back.supplier_email.locale import (
     day,
     money,
     number,
-    plain_decimal,
     quantity,
     unit_label,
     weekday,
@@ -31,12 +30,13 @@ DE_CH = Locale.of("de", "CH")
 
 
 def test_no_exponent_ever() -> None:
-    # `quantize(...).normalize()` turns 90 into 9E+1: the strategy did that (audit F1).
-    assert plain_decimal(Decimal("9E+1")) == "90"
-    assert plain_decimal(Decimal("1E+3")) == "1000"
-    assert plain_decimal(Decimal("90.0000").normalize()) == "90"
-    assert plain_decimal(Decimal("0.0001")) == "0.0001"
-    assert plain_decimal(Decimal("-0")) == "0"
+    # `quantize(...).normalize()` turns 90 into 9E+1: the strategy did that (audit F1). The
+    # digits are `bido_back.decimals.format_decimal`'s.
+    assert number(Decimal("9E+1"), EN) == "90"
+    assert number(Decimal("1E+3"), EN) == "1,000"
+    assert number(Decimal("90.0000").normalize(), PT) == "90"
+    assert number(Decimal("0.0001"), PT) == "0,0001"
+    assert number(Decimal("-0"), EN) == "0"
     assert money(Decimal("9E+1"), "BRL", PT) == f"R${NBSP}90,00"
     assert money(Decimal("1E+2"), "EUR", EN) == f"EUR{NBSP}100.00"
 

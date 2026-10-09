@@ -29,11 +29,13 @@ from bido_back.db.models import (
     AuditEvent,
     Award,
     AwardNotice,
+    Invite,
     IssuedPurchaseOrder,
     Message,
     Proposal,
     ProposalLine,
     Rfq,
+    Supplier,
     Tenant,
 )
 from bido_back.rfqs import service as rfq_service
@@ -195,6 +197,14 @@ async def world(app_engine: AsyncEngine, award_rows: People) -> World:
     return await World(app_engine, award_rows).setup()
 
 
+async def tenant_name(world: World) -> str:
+    """Who signs: no buyer contact exists, so the company (as in production)."""
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        tenant = await session.get(Tenant, world.people.tenant)
+    assert tenant is not None
+    return tenant.name
+
+
 async def _four_eyes(migrator_engine: AsyncEngine, tenant_id: UUID) -> None:
     # The app role cannot UPDATE tenants: the policy is set by the migrator.
     async with tenant_session(migrator_engine, tenant_id) as session:
@@ -354,6 +364,9 @@ async def test_a_purchase_order_is_sent_in_the_thread_after_approval(world: Worl
         "PO-1",
     )
     assert "Bestellung PO-1" in item.thread_email.body  # Rhein writes German
+    company = await tenant_name(world)
+    assert item.thread_email.body.endswith(f"Mit freundlichen Grüßen\n{company}")
+    assert item.thread_email.body.count(company) == 1
     with pytest.raises(InvalidState):
         await service.request_po_send(world.engine, buyer(world.people), po.id, world.mailboxes)
 
@@ -401,6 +414,13 @@ async def test_suppliers_that_did_not_win_get_a_notice(world: World) -> None:
     with pytest.raises(InvalidState):  # not awarded yet
         await service.request_notices(world.engine, buyer(world.people), world.rfq.id, writer)
     await world.award()
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        invite = await session.get(Invite, world.invites["Lyon"])
+        assert invite is not None
+        # Edited after the RFQ email went out in French: the thread stays French.
+        await session.execute(
+            update(Supplier).where(Supplier.id == invite.supplier_id).values(language="it")
+        )
 
     result = await service.request_notices(world.engine, buyer(world.people), world.rfq.id, writer)
     [proposed] = result.proposed
@@ -415,12 +435,14 @@ async def test_suppliers_that_did_not_win_get_a_notice(world: World) -> None:
     notice_email = world.mailboxes.sender.sent[-1]
     assert notice_email.to == ("sales@lyon.example.test",)
     # Rendered by code in French (Lyon's RFQ email language): no prices, no winner, no
-    # reply-by, no legal line; signed once.
+    # reply-by, no legal line; signed once, by code: the company (no buyer contact exists).
     body = notice_email.text_body
     assert body.startswith(f"Bonjour,\n\nRésultat de la demande de prix – {world.rfq.ref}\n")
     assert "nous avons décidé de ne pas retenir votre offre" in body
     assert "€" not in body and "Rhein" not in body and "Merci de répondre" not in body
     assert body.count("Cordialement,") == 1
+    company = await tenant_name(world)
+    assert body.endswith(f"Cordialement,\n{company}\n") and body.count(company) == 1
     assert notice_email.html_body is not None and '<html lang="fr">' in notice_email.html_body
     queue = await rfq_service.list_approvals(world.engine, approver(world.people), "executed")
     [item] = [q for q in queue if q.id == proposed.approval_id]

@@ -2,8 +2,9 @@
 
 from datetime import UTC, date, datetime, timedelta
 
+from bido_back.db.models import Supplier
+from bido_back.rfqs.language import country_code, thread_language
 from bido_back.supplier_email.deadlines import reply_by_for
-from bido_back.supplier_email.language import rfq_email_language, thread_language, thread_locale
 from bido_back.supplier_email.locale import Locale
 from bido_back.supplier_email.subject import (
     first_subject,
@@ -119,43 +120,18 @@ def test_nothing_after_the_negotiation_deadline_and_one_cutoff_for_a_bafo() -> N
     assert other == bafo
 
 
-# --- The thread's language (stand-in for N1's per-invite language) ----------------------------
+# --- The thread's language and locale -------------------------------------------------------
 
 
 def test_the_thread_keeps_the_language_its_rfq_email_went_out_in() -> None:
-    sent = {"html_body": '<!doctype html><html lang="pt"><body>…'}
-    assert rfq_email_language(sent, None) == "pt"
-    assert rfq_email_language(None, "[RFQ-6] Angebotsanfrage: Lager") == "de"
-    assert rfq_email_language(None, "[RFQ-6] Lager") is None
-    # The supplier was edited to English after its RFQ email went out in Portuguese.
-    assert (
-        thread_language(
-            rfq_email_args=sent,
-            first_subject=None,
-            supplier_language="en",
-            supplier_country="GB",
-        )
-        == "pt"
-    )
-    # Nothing was sent through Bido: the supplier's language as resolved today.
-    assert (
-        thread_language(
-            rfq_email_args=None,
-            first_subject=None,
-            supplier_language="en",
-            supplier_country="Brasil",
-        )
-        == "pt"
-    )
+    # Decided once, at the RFQ email's first send, and read back from its approved document
+    # (`rfqs.language.thread_language`); the supplier's country is the number format's region.
+    supplier = Supplier(name="MetalNova Teste", language="en", country="GB")
+    sent: dict[str, object] = {"document": {"language": "pt"}}
+    language = thread_language(sent, supplier)
+    assert Locale.of(language, country_code(supplier.country)) == Locale("pt", "GB")
     # A language without a catalog: English, never half and half.
-    assert (
-        thread_language(
-            rfq_email_args={"html_body": '<html lang="zh">'},
-            first_subject=None,
-            supplier_language="zh",
-            supplier_country="CN",
-        )
-        == "en"
-    )
-    assert thread_locale("es", "Mexico") == Locale("es", "MX")
-    assert thread_locale("pt", None) == Locale("pt")
+    other: dict[str, object] = {"document": {"language": "zh"}}
+    assert Locale.of(thread_language(other, supplier)) == Locale("en")
+    assert Locale.of("es", country_code("Mexico")) == Locale("es", "MX")
+    assert Locale.of("pt", country_code(None)) == Locale("pt")

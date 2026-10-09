@@ -430,11 +430,11 @@ class FollowupItem(BaseModel):
 
 
 class FollowupEmailInput(BaseModel):
+    # No buyer name or company: the writer does not sign, code adds the signature
+    # (`bido_back.templates.signature`), so the name can never be printed twice.
     kind: FollowupKind
     rfq_ref: str
     rfq_title: str
-    buyer_company: str
-    buyer_name: str
     supplier_name: str
     supplier_language: str = Field(description="ISO 639-1, e.g. de, en, fr, pt")
     chase_number: int = Field(description="1 for the first reminder; 0 for a clarification")
@@ -474,11 +474,10 @@ class NegotiationLineAsk(BaseModel):
 
 
 class NegotiationEmailInput(BaseModel):
+    # No buyer name or company: code signs (see `FollowupEmailInput`).
     action: NegotiationAction
     rfq_ref: str
     rfq_title: str
-    buyer_company: str
-    buyer_name: str
     supplier_name: str
     supplier_language: str = Field(description="ISO 639-1, e.g. de, en, fr, it, pt")
     round: int = Field(description="1 for the first counter-offer")
@@ -497,10 +496,9 @@ class NegotiationEmailOutput(BaseModel):
 
 
 class AwardNoticeInput(BaseModel):
+    # No buyer name or company: code signs (see `FollowupEmailInput`).
     rfq_ref: str
     rfq_title: str
-    buyer_company: str
-    buyer_name: str
     supplier_name: str
     supplier_language: str = Field(description="ISO 639-1, e.g. de, en, fr, it, pt")
 

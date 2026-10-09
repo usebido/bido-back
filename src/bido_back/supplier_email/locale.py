@@ -28,6 +28,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Final
 
+from bido_back.decimals import format_decimal
+
 CATALOG_LANGUAGES: Final = ("pt", "en", "de", "fr", "it", "es")
 DEFAULT_LANGUAGE: Final = "en"
 
@@ -106,23 +108,9 @@ class Locale:
 # --- Numbers ---------------------------------------------------------------------------
 
 
-def plain_decimal(value: Decimal) -> str:
-    """The value as plain digits, never in exponent form, trailing zeros dropped.
-
-    STAND-IN (N1): workstream N1 adds the shared no-exponent decimal formatter;
-    switch this body to it at merge. `Decimal("9E+1")` is "90", never "9E+1".
-    """
-    if not value.is_finite():
-        raise ValueError("a decimal to show must be finite")
-    if value.is_zero():
-        return "0"
-    text = format(value.normalize(), "f")
-    return text
-
-
 def decimals_of(value: Decimal) -> int:
     """How many decimals the value needs to be shown exactly (trailing zeros not counted)."""
-    _, _, fraction = plain_decimal(abs(value)).partition(".")
+    _, _, fraction = format_decimal(abs(value)).partition(".")
     return len(fraction)
 
 
@@ -135,8 +123,12 @@ def _group(whole: str, separator: str) -> str:
 
 
 def number(value: Decimal, locale: Locale, *, min_decimals: int = 0) -> str:
-    """The value with the locale's separators, padded to `min_decimals`, never rounded."""
-    digits = plain_decimal(abs(value))
+    """The value with the locale's separators, padded to `min_decimals`, never rounded.
+
+    The digits are `bido_back.decimals.format_decimal`'s: trailing zeros dropped, never in
+    exponent form (`Decimal("9E+1")` is "90", never "9E+1").
+    """
+    digits = format_decimal(abs(value))
     whole, _, fraction = digits.partition(".")
     fraction = fraction.ljust(min_decimals, "0")
     decimal_sep, group_sep = locale.separators

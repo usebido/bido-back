@@ -5,7 +5,7 @@ import json
 from uuid import UUID, uuid4
 
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from bido_back.agents.context import ToolContext
@@ -147,6 +147,42 @@ async def test_tool_that_no_longer_reproduces_the_payload_is_refused(
     assert calls == []
 
 
+class OptionalMemoPayIn(BaseModel):
+    supplier_id: str
+    amount_cents: int
+    # Added after the proposal, absent means "none": the approval still stands.
+    memo: str | None = None
+
+
+@pytest.mark.db
+async def test_an_optional_field_added_after_the_proposal_keeps_the_approval_executable(
+    app_engine: AsyncEngine, people: People
+) -> None:
+    # Approved before the deploy that added `memo` (email audit F19): its stored
+    # args have no `memo`, and the executor must not refuse it.
+    approval_id = await approved(app_engine, people)
+    calls: list[OptionalMemoPayIn] = []
+
+    async def handler(ctx: ToolContext, args: OptionalMemoPayIn) -> PaidOut:
+        calls.append(args)
+        return PaidOut(paid=True)
+
+    widened = Tool(
+        name="pay_supplier",
+        description="Pay a supplier.",
+        input_model=OptionalMemoPayIn,
+        output_model=PaidOut,
+        kind="act",
+        handler=handler,
+    )
+
+    await ApprovalExecutor(app_engine, ActToolRegistry([widened]))(
+        approval_execute_envelope(people.tenant, approval_id)
+    )
+    assert [(c.supplier_id, c.amount_cents, c.memo) for c in calls] == [("sup_1", 125_000, None)]
+    assert (await load(app_engine, people.tenant, approval_id)).status == "executed"
+
+
 @pytest.mark.db
 async def test_failed_tool_rolls_back_and_the_retry_executes(
     app_engine: AsyncEngine, people: People
@@ -225,6 +261,47 @@ async def test_worker_routes_the_job_to_the_executor(
 
 
 # --- No database -------------------------------------------------------------
+
+
+class _Line(BaseModel):
+    sku: str
+    note: str | None = None
+
+
+class _Branding(BaseModel):
+    name: str
+    scale: float = 1.0
+
+
+class _OldArgs(BaseModel):
+    to: list[str]
+    lines: list[_Line]
+    branding: _Branding | None = None
+
+
+class _NewArgs(_OldArgs):
+    # Added later: None-by-default fields (top level and nested) do not count when absent.
+    html_body: str | None = None
+    cc: list[str] | None = None
+
+
+def test_the_executor_hash_ignores_only_absent_optional_fields() -> None:
+    from bido_back.approvals.integrity import approved_payload
+
+    stored: dict[str, JsonValue] = {
+        "to": ["a@example.test"],
+        "lines": [{"sku": "A"}, {"sku": "B", "note": None}],
+        "branding": {"name": "Voltwerk", "scale": 1.0},
+    }
+    # The new model reads the old payload back to exactly the old payload.
+    assert approved_payload(_NewArgs.model_validate(stored)) == stored
+    # Present values, None included, always count.
+    with_html: dict[str, JsonValue] = {**stored, "html_body": None}
+    assert approved_payload(_NewArgs.model_validate(with_html)) == with_html
+    # A new field with a real default would change what runs: it stays, so the hash differs.
+    old_branding: dict[str, JsonValue] = {**stored, "branding": {"name": "Voltwerk"}}
+    assert approved_payload(_NewArgs.model_validate(old_branding)) != old_branding
+    assert approved_payload(_OldArgs.model_validate(stored)) == stored
 
 
 def _job(**overrides: object) -> Envelope:

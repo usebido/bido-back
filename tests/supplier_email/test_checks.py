@@ -6,7 +6,12 @@ from decimal import Decimal
 
 import pytest
 
-from bido_back.supplier_email.checks import GateContext, email_problems, note_problems
+from bido_back.supplier_email.checks import (
+    GateContext,
+    email_problems,
+    note_problems,
+    number_tokens,
+)
 from bido_back.supplier_email.compose import Composed, Refused, compose
 from bido_back.supplier_email.locale import Locale
 from bido_back.supplier_email.model import Ask, Money, OfferedTerms, ReplyBy
@@ -54,6 +59,13 @@ def test_every_number_must_be_the_decisions() -> None:
     assert "iso_date" in _problems(text.replace("14/10/2026", "2026-10-14"))
     assert "bare_dollar" in _problems(text.replace("R$ 17,90", "$ 17,90"))
     assert "brl_code" in _problems(text.replace("R$ 17,90", "BRL 17,90"))
+
+
+def test_numbers_are_read_one_line_at_a_time() -> None:
+    # As in the draft checks: a value ending one line and a list number starting the next
+    # are two numbers ("R$ 18,00" then "2.", never 18,002), and a no-break space joins none.
+    assert number_tokens("Preço-alvo: R$\u00a018,00\n2. Eixo") == ["18,00", "2"]
+    assert number_tokens("18\u00a02") == ["18", "2"]
 
 
 def test_one_signature() -> None:
