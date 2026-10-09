@@ -2,6 +2,7 @@
 
     uv run python -m evals.journey --mock
     uv run python -m evals.journey --live -k 1 --workbook PATH [--report-dir DIR]
+    uv run python -m evals.journey --live --price-style code   # suppliers write "46,90 BRL"
 
 Each run is a fresh company inside `evals.world.World`: the real copilot tools,
 approval guard and executor, negotiation mandates, quote extraction, the
@@ -120,6 +121,7 @@ from evals.journey_suppliers import (
     EXTRA_PART,
     SCRIPT,
     Offer,
+    PriceStyle,
     Requested,
     SupplierEmail,
     expected_recommendations,
@@ -537,6 +539,7 @@ class Journey:
     due: date
     deadline: date
     today: Callable[[], date]
+    price_style: PriceStyle = "symbol"
     copilot: Copilot | None = None
     turns: list[Turn] = field(default_factory=list[Turn])
     rfq_id: UUID | None = None
@@ -1563,6 +1566,7 @@ async def deliver(j: Journey, email: SupplierEmail) -> str:
         thread_subject=received[0].subject,
         requested=requested(j),
         valid_until=world.today + timedelta(days=30),
+        style=j.price_style,
     )
     if j.model is not None:
         j.model.extraction[written.body.strip()] = written.truth
@@ -2069,7 +2073,12 @@ RUNNERS: Final[dict[str, StepRunner]] = {
 
 
 async def run_journey(
-    env: Env, *, run: int, workbook: Path | None, model: JourneyModel | None
+    env: Env,
+    *,
+    run: int,
+    workbook: Path | None,
+    model: JourneyModel | None,
+    price_style: PriceStyle = "symbol",
 ) -> JourneyRun:
     started = time.perf_counter()
     world = await World.create(env, f"journey {run}", model)
@@ -2086,6 +2095,7 @@ async def run_journey(
         upload_id=upload.id,
         due=world.today + timedelta(days=DUE_DAYS),
         deadline=world.today + timedelta(days=DEADLINE_DAYS),
+        price_style=price_style,
         today=(lambda: world.today) if env.mode == "mock" else (lambda: datetime.now(UTC).date()),
     )
     journey.copilot = MockCopilot(journey) if env.mode == "mock" else LiveCopilot(journey)
@@ -2110,6 +2120,7 @@ async def run_journey(
         "rfq": journey.rfq_ref,
         "today": journey.today().isoformat(),
         "need_by": case.need_by.isoformat(),
+        "price_style": price_style,
     }
     return JourneyRun(
         run=run,
@@ -2124,13 +2135,19 @@ async def run_journey(
     )
 
 
-async def run_journeys(env: Env, *, k: int, workbook: Path | None = None) -> list[JourneyRun]:
+async def run_journeys(
+    env: Env, *, k: int, workbook: Path | None = None, price_style: PriceStyle = "symbol"
+) -> list[JourneyRun]:
     model = JourneyModel() if env.mode == "mock" else None
     runs: list[JourneyRun] = []
 
     async def suite() -> None:
         for run in range(1, k + 1):
-            runs.append(await run_journey(env, run=run, workbook=workbook, model=model))
+            runs.append(
+                await run_journey(
+                    env, run=run, workbook=workbook, model=model, price_style=price_style
+                )
+            )
 
     if model is not None:
         with model.installed():
@@ -2252,6 +2269,12 @@ async def main(argv: Sequence[str] | None = None) -> int:
         help="the synthetic MTR-100 ERP export (live only); default: the generated one",
     )
     parser.add_argument("--report-dir", type=Path, help="where report.md/report.json go")
+    parser.add_argument(
+        "--price-style",
+        choices=("symbol", "code"),
+        default="symbol",
+        help='suppliers write "R$ 46,90" (default, as in Brazil) or "46,90 BRL"',
+    )
     args = parser.parse_args(argv)
     mode: Mode = "mock" if args.mock else "live"
     if args.workbook is not None and mode == "mock":
@@ -2275,7 +2298,9 @@ async def main(argv: Sequence[str] | None = None) -> int:
         today=date.today(),
     )
     try:
-        runs = await run_journeys(env, k=args.k, workbook=args.workbook)
+        runs = await run_journeys(
+            env, k=args.k, workbook=args.workbook, price_style=args.price_style
+        )
     finally:
         await engine.dispose()
     folder = write_journey_report(runs, mode, args.k, args.report_dir)

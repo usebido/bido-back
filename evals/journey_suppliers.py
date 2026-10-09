@@ -229,11 +229,19 @@ class Requested:
         return f"Item {self.position} - {self.part.part} {self.part.description}"
 
 
-def _line_text(item: Requested, offer: Offer) -> str:
+PriceStyle = Literal["symbol", "code"]
+
+
+def price_text(value: Decimal, style: PriceStyle) -> str:
+    """ "R$ 46,90" as Brazilian suppliers write it, or "46,90 BRL"."""
+    return f"R$ {money(value)}" if style == "symbol" else f"{money(value)} BRL"
+
+
+def _line_text(item: Requested, offer: Offer, style: PriceStyle) -> str:
     unit = item.part.unit
     return (
-        f"{item.label}: {quantity(item.part.to_buy)} {unit} a R$ {money(offer.price)} por {unit}, "
-        f"prazo de entrega de {offer.lead} dias."
+        f"{item.label}: {quantity(item.part.to_buy)} {unit} a {price_text(offer.price, style)} "
+        f"por {unit}, prazo de entrega de {offer.lead} dias."
     )
 
 
@@ -276,6 +284,7 @@ def write(
     thread_subject: str,
     requested: Sequence[Requested],
     valid_until: date,
+    style: PriceStyle = "symbol",
 ) -> Written:
     """The e-mail the supplier sends, and what a correct extraction reads from it.
 
@@ -302,8 +311,8 @@ def write(
             preserve = PRESERVE_LEAD
         else:
             change = (
-                f"{prefix}reduzimos o preço do {item.label.lower()} para R$ {money(offer.price)} "
-                f"por {item.part.unit}, {PRESERVE_PRICE}."
+                f"{prefix}reduzimos o preço do {item.label.lower()} para "
+                f"{price_text(offer.price, style)} por {item.part.unit}, {PRESERVE_PRICE}."
             )
             line = _draft(
                 item.position,
@@ -332,7 +341,7 @@ def write(
             if item.part.part in email.declined:
                 lines.append(f"{item.label}: não temos condições de fornecer este item.")
             continue
-        lines.append(_line_text(item, offer))
+        lines.append(_line_text(item, offer, style))
         unit = item.part.unit
         drafts.append(
             _draft(
