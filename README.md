@@ -306,7 +306,11 @@ caps; early close; deadline close and the recommendation with the broker
 rule; a committing draft held), `recipients` (a non-test domain held until
 confirmed, test domains pass, the guarded sender as the net) and `award`
 (purchase orders, PO email in the supplier's language, "not selected" notices
-without prices).
+without prices). After the send, the buyer records the order's life in Bido
+(`/v1/purchase-orders/{id}/acknowledge`, `/receipts`, `/close`, `/cancel`, or
+the Copilot's purchase-order tools): `fulfilment.state` goes sent ->
+acknowledged -> partially_received -> received -> closed (or cancelled), and
+the RFQ shows as `completed` once every order is closed or cancelled.
 
 ```bash
 uv run python -m evals.flow --mock     # scripted model: checks the harness (free)

@@ -39,15 +39,15 @@ TODAY = date(2026, 10, 7)
 
 
 def facts(
-    *statuses: str, pending: int = 0, awarded: bool = False, pos: tuple[int, int] = (0, 0)
+    *statuses: str, pending: int = 0, awarded: bool = False, pos: tuple[str, ...] = ()
 ) -> RfqFacts:
+    """`pos`: each PO's fulfilment state (not_sent = still to send)."""
     return RfqFacts(
         suppliers=[f"S{i}" for i in range(len(statuses))],
         invite_statuses=list(statuses),
         pending_approvals=pending,
         awarded=awarded,
-        pos_total=pos[0],
-        pos_sent=pos[1],
+        po_states=list(pos),
     )
 
 
@@ -62,8 +62,44 @@ def facts(
         ("open", "open", facts("responded", "sent", pending=2), "bidding", "approve"),
         ("open", "ready_to_close", facts("responded", "responded"), "review", "close negotiation"),
         ("open", "closed", facts("responded"), "review", "award"),
-        ("closed", "closed", facts("responded", awarded=True, pos=(2, 1)), "awarded", "send PO"),
-        ("closed", "closed", facts("responded", awarded=True, pos=(2, 2)), "completed", None),
+        (
+            "closed",
+            "closed",
+            facts("responded", awarded=True, pos=("sent", "not_sent")),
+            "awarded",
+            "send PO",
+        ),
+        # Sent is not done: goods are still expected.
+        (
+            "closed",
+            "closed",
+            facts("responded", awarded=True, pos=("sent", "sent")),
+            "awarded",
+            None,
+        ),
+        (
+            "closed",
+            "closed",
+            facts("responded", awarded=True, pos=("closed", "partially_received")),
+            "awarded",
+            None,
+        ),
+        (
+            "closed",
+            "closed",
+            facts("responded", awarded=True, pos=("closed", "closed")),
+            "completed",
+            None,
+        ),
+        (
+            "closed",
+            "closed",
+            facts("responded", awarded=True, pos=("cancelled", "closed")),
+            "completed",
+            None,
+        ),
+        # Everything cancelled, nothing closed: not completed.
+        ("closed", "closed", facts("responded", awarded=True, pos=("cancelled",)), "awarded", None),
         ("closed", "not_started", facts("responded"), "completed", None),
         ("cancelled", "not_started", facts("sent", pending=1), "cancelled", None),
     ],

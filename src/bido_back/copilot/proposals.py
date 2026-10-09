@@ -104,6 +104,38 @@ class QuotedLinePreview(BaseModel):
     issues: list[str] = Field(default_factory=list[str])
 
 
+class ProposedOrderLine(BaseModel):
+    """One PO line in a purchase-order action's preview: ordered vs received vs this time."""
+
+    position: int
+    description: str
+    unit: str
+    ordered: Decimal
+    received_so_far: Decimal
+    # The quantity this receipt would add; null for the other actions.
+    this_receipt: Decimal | None = None
+    remaining_after: Decimal
+
+
+class ProposedOrderAction(BaseModel):
+    """What a purchase-order action (acknowledge, receive, close, cancel) would record."""
+
+    ref: str
+    rfq_ref: str
+    supplier_name: str
+    state: str = Field(description="The order's fulfilment state now")
+    state_after: str = Field(description="What it would become")
+    lines: list[ProposedOrderLine] = Field(default_factory=list[ProposedOrderLine])
+    acknowledged_on: date | None = None
+    supplier_order_ref: str | None = None
+    received_on: date | None = None
+    invoice_number: str | None = None
+    invoice_date: date | None = None
+    short: bool = False
+    reason: str | None = None
+    note: str | None = None
+
+
 class ProposalPreview(BaseModel):
     """Exactly what the action would do: show all of it to the buyer and ask."""
 
@@ -130,6 +162,8 @@ class ProposalPreview(BaseModel):
     )
     # Positions of the lines that would start without a target and maximum unit price.
     lines_without_limits: list[int] = Field(default_factory=list[int])
+    # A purchase-order action (`copilot.order_tools`): the order and what would change.
+    purchase_order: ProposedOrderAction | None = None
     questions: list[str] = Field(default_factory=list[str])
     issues: list[str] = Field(
         default_factory=list[str], description="What would stop it, if anything"
