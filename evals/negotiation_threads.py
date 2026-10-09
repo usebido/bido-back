@@ -8,7 +8,7 @@ substituted. Each builder returns the email and the extraction a correct model
 returns for it under the current contract (`QuoteExtractionOutput`), which
 mock mode scripts; live mode reads the same email with the real model.
 
-"Correct" means what the contract (prompt v5) can express: a relative validity
+"Correct" means what the contract (prompt v6) can express: a relative validity
 ("valid for 15 days") is a `validity` period and code computes `valid_until`;
 "7 business days" is a lead time of 7 `business_days` with its source, and
 deterministic code decides what business days mean; a lead time given once for
@@ -124,7 +124,7 @@ def stated_lead(
     approximate: bool = False,
     risk_note: str | None = None,
 ) -> LeadTimeValue:
-    """A lead time as written (prompt v5): the number, its unit, what it counts from."""
+    """A lead time as written (prompt v6): the number, its unit, what it counts from."""
     return LeadTimeValue(
         value=str(value) if value is not None else None,
         source=SourceRef(kind="email_body", quote=quote) if quote is not None else None,
@@ -324,7 +324,7 @@ def pt_answers(t: Thread, *, valid_days: int, lead: int, positions: Sequence[int
 
     A correct extraction under the current contract reads it as an amendment (it changes
     no price), without the explicit preservation statement the supplier never wrote. An
-    answer to an earlier offer puts a lead time "for all items" on each line (prompt v5),
+    answer to an earlier offer puts a lead time "for all items" on each line (prompt v6),
     since only lines carry it into the offer."""
     valid_until = t.start + timedelta(days=valid_days)
     valid = f"a proposta é válida até {pt_date(valid_until)}"

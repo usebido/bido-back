@@ -20,10 +20,10 @@ None of them sends anything or awards anything.
 
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
-from typing import TYPE_CHECKING, Final, cast
+from typing import TYPE_CHECKING, Annotated, Final, cast
 from uuid import UUID
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, StringConstraints, ValidationError
 from sqlalchemy import func, select
 
 from bido_back.agents.catalog.contracts import ExtraOfferDraft, ModelDecimal
@@ -75,6 +75,7 @@ from bido_back.rfqs.errors import (
     ReplyByRequired,
     RfqError,
 )
+from bido_back.rfqs.language import DEFAULT_LANGUAGE, email_language
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest, EmailAddress
 from bido_back.rfqs.service import preliminary_hold, preliminary_title
 
@@ -167,10 +168,31 @@ class AnalyzeSourcesIn(BaseModel):
     )
 
 
+_COUNTRY_ARG = (
+    "The supplier's country, ISO 3166-1 alpha-2 (BR, DE, IT...). It decides the language of "
+    "the RFQ document they receive. Pass it when the buyer said it or when it is obvious from "
+    "the name or the email domain: 'Ltda', 'EIRELI', 'ME', '.com.br' are BR; 'GmbH', 'AG', "
+    "'.de' are DE; 'S.r.l.', 'S.p.A.', '.it' are IT; 'S.L.', '.es' are ES; 'SARL', 'SAS', "
+    "'.fr' are FR; 'S.A.' is Brazil only when the rest of the name is Portuguese. When it is "
+    "not obvious (an English name, a .com address), leave it empty and ASK the buyer which "
+    "country the supplier is in; never guess. Without it, documents go out in English."
+)
+_LANGUAGE_ARG = (
+    "ISO 639-1 (pt, de, it, es, fr, en), only when the buyer said which language to write to "
+    "this supplier in. Left empty, Bido uses the country's language."
+)
+
+
 class AddContactIn(BaseModel):
     supplier: str = Field(min_length=1, max_length=300, description="The supplier's name")
     email: EmailAddress
     name: str | None = Field(default=None, max_length=200, description="The person's name")
+    country: Annotated[str, StringConstraints(to_upper=True, pattern=r"^[A-Za-z]{2}$")] | None = (
+        Field(default=None, description=_COUNTRY_ARG)
+    )
+    language: Annotated[str, StringConstraints(to_lower=True, pattern=r"^[A-Za-z]{2}$")] | None = (
+        Field(default=None, description=_LANGUAGE_ARG)
+    )
 
 
 class AssessmentArg(BaseModel):
@@ -227,6 +249,18 @@ class AddContactOut(BaseModel):
     supplier: str
     supplier_created: bool
     email: str
+    country: str | None = Field(
+        default=None,
+        description="The supplier's country on file: given, or inferred from name or email",
+    )
+    document_language: str = Field(
+        description="The language of the RFQ document this supplier receives; tell the buyer"
+    )
+    question: str | None = Field(
+        default=None,
+        description="Set when the country is unknown: ask the buyer this, then call again "
+        "with the same supplier and email plus `country` to fix it",
+    )
 
 
 class QuantityOverride(BaseModel):
@@ -469,6 +503,25 @@ def _assessment_preview(
     )
 
 
+def _contact_out(
+    name: str, created: bool, email: str, country: str | None, language: str | None
+) -> AddContactOut:
+    question = None
+    if country is None and language in (None, DEFAULT_LANGUAGE):
+        question = (
+            f"Which country is {name} in? Its country or language is not on file, so its RFQ "
+            "documents would be in English."
+        )
+    return AddContactOut(
+        supplier=name,
+        supplier_created=created,
+        email=email,
+        country=country,
+        document_language=email_language(language, country),
+        question=question,
+    )
+
+
 def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
     db = deps.db
 
@@ -619,7 +672,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             supplier = await session.scalar(
                 select(Supplier).where(func.lower(Supplier.name) == args.supplier.strip().lower())
             )
-            exists = None
+            exists = country = language = None
             if supplier is not None:
                 exists = await session.scalar(
                     select(Contact.id)
@@ -630,17 +683,31 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
                         Contact.pseudonymized_at.is_(None),
                     )
                 )
+                # The buyer answered which country (or language) an existing supplier is
+                # in: that is the fix for a supplier saved without one.
+                if args.country is not None:
+                    supplier.country = args.country
+                if args.language is not None:
+                    supplier.language = args.language
+                country, language = supplier.country, supplier.language
             supplier_id = supplier.id if supplier else None
             name = supplier.name if supplier else args.supplier.strip()
         contact = ContactIn(email=args.email, name=args.name)
         if supplier_id is None:
-            await supplier_service.create_supplier(
-                db, principal, CreateSupplierRequest(name=name, contacts=[contact])
+            view = await supplier_service.create_supplier(
+                db,
+                principal,
+                CreateSupplierRequest(
+                    name=name,
+                    country=args.country,
+                    language=args.language or DEFAULT_LANGUAGE,
+                    contacts=[contact],
+                ),
             )
-            return AddContactOut(supplier=name, supplier_created=True, email=args.email)
+            return _contact_out(name, True, args.email, view.country, view.language)
         if exists is None:
             await supplier_service.add_contact(db, principal, supplier_id, contact)
-        return AddContactOut(supplier=name, supplier_created=False, email=args.email)
+        return _contact_out(name, False, args.email, country, language)
 
     async def refine_analysis(ctx: ToolContext, args: RefineAnalysisIn) -> RefineAnalysisOut:
         principal = _principal(ctx)
@@ -1031,7 +1098,9 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         Tool(
             "add_supplier_contact",
             "Save a supplier's contact email the buyer gave in the chat (creates the "
-            "supplier when new).",
+            "supplier when new), with its country when known: it decides the language of "
+            "the RFQ document the supplier receives. Called again with `country` for an "
+            "existing supplier, it records the country the buyer answered.",
             AddContactIn,
             AddContactOut,
             "draft",

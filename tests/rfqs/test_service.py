@@ -1,9 +1,11 @@
 """The RFQ services against Postgres, with fake agents and a fake mailbox."""
 
+import io
 from datetime import date, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
+import pdfplumber
 import pytest
 from pydantic import ValidationError
 from sqlalchemy import delete, select, update
@@ -33,6 +35,7 @@ from bido_back.db.models import (
     Tenant,
 )
 from bido_back.rfqs import service, suppliers
+from bido_back.rfqs.document import RfqDocument, document_problems, document_text
 from bido_back.rfqs.errors import (
     Duplicate,
     InvalidState,
@@ -67,6 +70,11 @@ from .conftest import FakeIntake, FakeMailboxes, FakeWriter, user_email
 pytestmark = pytest.mark.db
 
 EMAIL_DOMAIN = "quotes.example.test"
+
+
+def pdf_text_of(pdf: bytes) -> str:
+    with pdfplumber.open(io.BytesIO(pdf)) as doc:
+        return "\n".join(page.extract_text() or "" for page in doc.pages)
 
 
 def buyer(people: People) -> Principal:
@@ -224,30 +232,46 @@ async def test_prepare_send_records_pending_approvals_with_the_exact_email(
         "subject": f"[{rfq.ref}] Angebotsanfrage: {rfq.title}",
         "body": preview.text,  # the preview is exactly what goes to approval
         "html_body": preview.html,  # and its HTML twin
+        "language": "de",  # the thread's language, decided at this send
     }
     body = preview.text
     company = await _tenant_name(app_engine, rfq_rows.tenant)
-    assert body.startswith("<de> Olá, gostaríamos de receber a cotação")  # localized greeting
-    assert f"Unsere Referenz: {rfq.ref}." in body
-    assert "GRM188R71H104KA93D" in body and "4.000 / 10.000" in body
-    assert "Board-to-board connector 40 pin" in body
-    assert "Incoterm" in body and "DAP" in body
-    # The standard footer, localized, then the required questions it does not cover.
-    for ask in (
-        "- <de> Validade da proposta",
-        "- <de> Condição de pagamento",
-        "- Verpackungseinheit",
-        "- RoHS- und REACH-Erklärungen",
-        "- Lieferzeit",
-        "- Mindestbestellmenge (MOQ)",
-    ):
-        assert ask in body
-    assert "Gültigkeit des Angebots" not in body  # covered by "Validade da proposta"
+    # The email is a short cover note: what is attached, how many items, by when, how
+    # to reply. No item table, no questions: the PDF carries them.
+    assert body.startswith("Sehr geehrte Damen und Herren,\n\n")
+    assert f"anbei erhalten Sie unsere Angebotsanfrage {rfq.ref} ({rfq.title})." in body
+    assert "Sie umfasst 2 Positionen" in body
     assert "Bitte senden Sie Ihr Angebot bis 01.11.2099." in body
+    assert f"behalten Sie [{rfq.ref}] im Betreff bei" in body
+    assert "GRM188R71H104KA93D" not in body and "4000" not in body
+    assert "<table" not in preview.html and "GRM188R71H104KA93D" not in preview.html
     # No buyer name known: the company signs alone (never "<company> purchasing").
     assert body.endswith(f"\n{company}\n") and "purchasing" not in body
     assert preview.template_id is None and preview.template_version == 0
-    assert "<table" in preview.html and "GRM188R71H104KA93D" in preview.html
+    assert preview.attachment_name == f"{rfq.ref}-rhein.pdf"
+    # The PDF carries what the full email would: the buyer's greeting (localized), the
+    # items, the price instruction, the questions and the alternative-part policy.
+    pdf = RfqDocument.model_validate(document)
+    assert pdf.intro is not None and pdf.intro.startswith("<de> Olá, gostaríamos de receber")
+    text = document_text(pdf)
+    # Quantities as the supplier's locale writes them, as in every email of the thread.
+    assert "GRM188R71H104KA93D" in text and "4.000 / 10.000" in text
+    assert "Board-to-board connector 40 pin" in text
+    assert "Incoterm" in text and "DAP" in text
+    assert "Bitte nennen Sie den Stückpreis je Mengenstaffel mit Währung." in text
+    assert "Falls Sie einen alternativen Artikel anbieten" in text
+    # The standard template's supplier columns and footer, localized, then the required
+    # questions they do not cover.
+    for ask in (
+        "<de> Validade da proposta",
+        "<de> Condição de pagamento",
+        "Verpackungseinheit",
+        "RoHS- und REACH-Erklärungen",
+        "Mindestbestellmenge (MOQ)",
+    ):
+        assert ask in pdf.asks
+    assert "Gültigkeit des Angebots" not in pdf.asks  # covered by "Validade da proposta"
+    assert document_problems(pdf) == []
     assert invite.status == "pending_approval"
     async with tenant_session(app_engine, rfq_rows.tenant) as session:
         pinned = await session.get(Rfq, rfq.id)
@@ -371,34 +395,25 @@ async def test_prepare_send_renders_the_tenants_default_template_and_pins_its_ve
     assert writer.calls == []
     assert pinned is not None and (pinned.template_id, pinned.template_version) == (default_id, 1)
     [approval] = approvals
-    body = str(approval.args["body"])
+    pdf = RfqDocument.model_validate(approval.args["document"])
     # ...to version 2, but the RFQ is pinned: the second email still uses version 1.
-    assert body.startswith("Sehr geehrte Damen und Herren, bitte bieten Sie an:")
-    header = next(line for line in body.splitlines() if line.startswith("Pos."))
-    assert [h.strip() for h in header.split("|")] == [
-        "Pos.",
-        "Bezeichnung",
-        "Menge",
-        "Stückpreis",  # the supplier fills it
-        "Artikelnr.",  # the buyer's own code...
-        "MPN",  # ...and the manufacturer's, each in its own column
-        "Hersteller",
-        "Einheit",
-        "Incoterm",  # only one line has it, so per line rather than under the table
-    ]
-    assert "- Lieferzeit\n- Gültigkeit\n" in body
-    assert "Gültigkeit des Angebots" not in body  # "Gültigkeit" covers it
+    assert pdf.intro == "Sehr geehrte Damen und Herren, bitte bieten Sie an:"
+    # The column the supplier fills, then the footer, then what they leave out.
+    assert pdf.asks[:3] == ["Stückpreis", "Lieferzeit", "Gültigkeit"]
+    assert "Gültigkeit des Angebots" not in pdf.asks  # "Gültigkeit" covers it
 
 
-async def test_a_supplier_added_with_a_name_and_an_email_gets_the_buyers_language(
+async def test_a_supplier_added_with_a_name_and_an_email_gets_portuguese(
     app_engine: AsyncEngine, rfq_rows: People
 ) -> None:
-    """RFQ-6 (email audit F5): a Brazilian supplier added like the copilot adds one (no
-    country, the language column's default "en") got English. Its legal form and the
-    buyer's Portuguese template now decide, once, for the whole thread."""
+    """RFQ-6 (email audit F5): a Brazilian supplier added like the copilot adds one (a
+    name and an email, no country) kept the language column's default "en" and got
+    English. Creation now reads its legal form ("Ltda": Brazil, Portuguese); a supplier
+    whose name and address say nothing is decided at the send by the buyer's Portuguese
+    template. Either way the decision is taken once, for the whole thread."""
     principal = buyer(rfq_rows)
     rfq = await make_rfq(app_engine, principal)
-    supplier = await suppliers.create_supplier(
+    metalnova = await suppliers.create_supplier(
         app_engine,
         principal,
         CreateSupplierRequest(
@@ -406,23 +421,39 @@ async def test_a_supplier_added_with_a_name_and_an_email_gets_the_buyers_languag
             contacts=[ContactIn(email="vendas@metalnova.example.test")],
         ),
     )
-    assert supplier.language == "en"  # stored as created: never changed
-    invite = await service.add_invite(
-        app_engine, principal, rfq.id, supplier.id, supplier.contacts[0].id
+    unknown = await suppliers.create_supplier(
+        app_engine,
+        principal,
+        CreateSupplierRequest(
+            name="MetalNova Teste", contacts=[ContactIn(email="compras@mnt.example.test")]
+        ),
     )
-    preview = await service.preview_email(app_engine, principal, rfq.id, invite.id, FakeWriter())
-    assert preview.language == "pt"
-    assert preview.subject == f"[{rfq.ref}] Solicitação de cotação: {rfq.title}"
+    # Inferred on creation (`infer_supplier_locale`); nothing to infer for the other one.
+    assert (metalnova.country, metalnova.language) == ("BR", "pt")
+    assert (unknown.country, unknown.language) == (None, "en")
+    invites = [
+        await service.add_invite(app_engine, principal, rfq.id, s.id, s.contacts[0].id)
+        for s in (metalnova, unknown)
+    ]
+    for invite in invites:
+        preview = await service.preview_email(
+            app_engine, principal, rfq.id, invite.id, FakeWriter()
+        )
+        assert preview.language == "pt"
+        assert preview.subject == f"[{rfq.ref}] Solicitação de cotação: {rfq.title}"
 
     result = await service.prepare_send(
         app_engine, principal, rfq.id, FakeWriter(), FakeMailboxes()
     )
     async with tenant_session(app_engine, rfq_rows.tenant) as session:
-        approval = await session.get(Approval, result.approvals[0].approval_id)
-    assert approval is not None
-    assert approval.args["subject"] == preview.subject
-    # The approved document records the thread's language for every later email.
-    assert approval.args["document"]["language"] == "pt"
+        approvals = [await session.get(Approval, a.approval_id) for a in result.approvals]
+    assert len(approvals) == 2
+    for approval in approvals:
+        assert approval is not None
+        assert approval.args["subject"] == f"[{rfq.ref}] Solicitação de cotação: {rfq.title}"
+        # The approved send records the thread's language for every later email.
+        assert approval.args["language"] == "pt"
+        assert approval.args["document"]["language"] == "pt"
 
 
 async def test_with_nothing_known_about_a_supplier_the_buyers_language_decides(
@@ -812,15 +843,15 @@ async def test_payment_terms_and_quote_validity_are_stored_shown_and_emailed(
 
     assert (termed.payment_terms, termed.quote_validity_days) == ("28 DDL", 30)
     assert (shown.payment_terms, shown.quote_validity_days) == ("28 DDL", 30)
-    # The supplier writes German: fixed phrases in German, the buyer's terms verbatim.
-    for statement in (
-        "Unsere Zahlungsbedingungen: 28 DDL",
-        "Bitte halten Sie Ihr Angebot mindestens 30 Tage gültig.",
-    ):
-        assert statement in preview.text and statement in preview.html
-        assert statement not in plain.text
-    assert "Unsere Zahlungsbedingungen" not in plain.text
-    assert "mindestens" not in plain.text
+    # The terms go in the PDF (German labels, the buyer's terms verbatim), not the cover.
+    termed_pdf = await service.preview_document(
+        app_engine, principal, rfq.id, invite.id, FakeWriter()
+    )
+    pdf_text = pdf_text_of(termed_pdf.content)
+    assert "Zahlungsbedingungen 28 DDL" in pdf_text
+    assert "Angebotsgültigkeit 30 Tage" in pdf_text
+    assert "28 DDL" not in preview.text and "28 DDL" not in plain.text
+    assert preview.text == plain.text
 
     # Only what is passed changes; null clears.
     validity_only = await service.update_rfq(

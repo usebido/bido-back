@@ -5,13 +5,14 @@ from datetime import date
 from decimal import Decimal
 
 from bido_back.agents.catalog.contracts import RfqEmailInput, RfqEmailLine, RfqEmailOutput
-from bido_back.agents.catalog.definitions import rfq_email_problems
+from bido_back.agents.catalog.definitions import rfq_cover_problems, rfq_email_problems
 from bido_back.onboarding.standard import STANDARD_TEMPLATE, TemplateContent
 from bido_back.templates.render import (
     RenderedRfq,
     RenderInput,
     RenderLine,
     column_key,
+    render_cover,
     render_rfq,
 )
 
@@ -429,3 +430,79 @@ def test_the_subject_names_the_type_once_and_numbers_follow_the_suppliers_locale
     english = render_rfq(replace(base, language="en"))
     assert "Please send your quote by 20 Oct 2026." in english.text
     assert "2026-10-20" not in english.text
+
+
+def cover(language: str = "pt", **overrides: object) -> RenderedRfq:
+    data = RenderInput(
+        rfq_ref="RFQ-7",
+        rfq_title="BMS board rev C passives",
+        response_due=date(2026, 10, 20),
+        buyer_name="Carla Souza",
+        buyer_company="Voltwerk Ltda",
+        language=language,
+        template=BUYER_TEMPLATE,
+        display=BUYER_TEMPLATE,
+        lines=(THERMISTOR, CAPACITOR),
+    )
+    return render_cover(replace(data, **overrides))  # pyright: ignore[reportArgumentType]
+
+
+def test_the_cover_note_says_what_is_attached_by_when_and_how_to_reply() -> None:
+    pt = cover()
+    assert pt.subject == "[RFQ-7] Solicitação de cotação: BMS board rev C passives"
+    assert pt.text == (
+        "Prezados,\n\n"
+        "Segue em anexo nossa solicitação de cotação RFQ-7 (BMS board rev C passives). "
+        "A solicitação tem 2 itens; as quantidades, as condições e o que informar na "
+        "proposta estão no PDF anexo.\n\n"
+        "Por favor, envie sua proposta até 20/10/2026.\n\n"
+        "Por favor, responda a este e-mail mantendo [RFQ-7] no assunto e anexe sua proposta.\n\n"
+        "Atenciosamente,\nCarla Souza\nVoltwerk Ltda\n"
+    )
+    # No item table, no questions, no buyer greeting: those are in the PDF.
+    for absent in ("NCP18XH103F03RB", "10000", "Prazo de entrega", "Prezados, boa tarde"):
+        assert absent not in pt.text and absent not in pt.html
+    assert "<table" not in pt.html and "[RFQ-7]" in pt.html
+
+    en = cover("en", lines=(CAPACITOR,), response_due=None)
+    assert "It covers 1 item;" in en.text and "Please send your quote" not in en.text
+    assert "keeping [RFQ-7] in the subject" in en.text
+
+
+def test_every_language_has_the_cover_phrases_of_english() -> None:
+    from bido_back.templates.render import _COVER, _PHRASES  # pyright: ignore[reportPrivateUsage]
+
+    assert set(_COVER) == set(_PHRASES)
+    for language, words in _COVER.items():
+        assert set(words) == set(_COVER["en"]), language
+        text = cover(language).text
+        assert "RFQ-7" in text and "[RFQ-7]" in text and "2" in text
+
+
+def test_the_cover_passes_its_checks_and_a_listed_item_does_not() -> None:
+    task = RfqEmailInput(
+        rfq_ref="RFQ-7",
+        rfq_title="BMS board rev C passives",
+        buyer_company="Voltwerk Ltda",
+        buyer_name="Carla Souza",
+        supplier_name="Rhein",
+        supplier_language="de",
+        lines=[
+            RfqEmailLine(
+                position=1,
+                description="x",
+                mpn="NCP18XH103F03RB",
+                quantities=[Decimal(1)],
+                unit="pcs",
+            )
+        ],
+    )
+    good = cover("de")
+    assert rfq_cover_problems(task, RfqEmailOutput(subject=good.subject, body=good.text)) == []
+    listed = RfqEmailOutput(subject=good.subject, body=good.text + "NCP18XH103F03RB 0,05 EUR")
+    assert rfq_cover_problems(task, listed) == ["items_listed", "price_mentioned"]
+    unmarked = RfqEmailOutput(subject="Angebot", body=good.text.replace("[RFQ-7]", "RFQ-7"))
+    assert rfq_cover_problems(task, unmarked) == [
+        "rfq_ref_missing_in_subject",
+        "reply_marker_missing",
+    ]

@@ -18,6 +18,7 @@ from bido_back.settings import Settings
 from tests.approvals.conftest import People
 
 from .test_awards_db import World, buyer
+from .test_lifecycle import sent_po
 
 UNUSED_DB = "postgresql+asyncpg://app@localhost:5432/unused"
 
@@ -40,8 +41,13 @@ async def test_award_routes_require_authentication() -> None:
             await http.get("/v1/purchase-orders"),
             await http.get(f"/v1/purchase-orders/{uuid4()}.xlsx"),
             await http.post(f"/v1/purchase-orders/{uuid4()}/send"),
+            await http.post(f"/v1/purchase-orders/{uuid4()}/acknowledge", json={}),
+            await http.post(f"/v1/purchase-orders/{uuid4()}/receipts", json={"lines": []}),
+            await http.get(f"/v1/purchase-orders/{uuid4()}/receipts"),
+            await http.post(f"/v1/purchase-orders/{uuid4()}/close", json={}),
+            await http.post(f"/v1/purchase-orders/{uuid4()}/cancel", json={"reason": "x"}),
         ]
-    assert [r.status_code for r in responses] == [401] * 5
+    assert [r.status_code for r in responses] == [401] * 10
 
 
 @pytest_asyncio.fixture
@@ -49,11 +55,9 @@ async def world(app_engine: AsyncEngine, award_rows: People) -> World:
     return await World(app_engine, award_rows).setup()
 
 
-@pytest_asyncio.fixture
-async def http(app_engine: AsyncEngine, world: World) -> AsyncIterator[httpx.AsyncClient]:
+def client_for(app_engine: AsyncEngine, world: World, principal: Principal) -> httpx.AsyncClient:
     app = build_app()
     sessionmaker = create_sessionmaker(app_engine)
-    principal: Principal = buyer(world.people)
 
     def db() -> async_sessionmaker[AsyncSession]:
         return sessionmaker
@@ -67,8 +71,12 @@ async def http(app_engine: AsyncEngine, world: World) -> AsyncIterator[httpx.Asy
     app.dependency_overrides[get_db] = db
     app.dependency_overrides[get_principal] = current
     app.dependency_overrides[get_mailbox_senders] = mailboxes
-    transport = httpx.ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test")
+
+
+@pytest_asyncio.fixture
+async def http(app_engine: AsyncEngine, world: World) -> AsyncIterator[httpx.AsyncClient]:
+    async with client_for(app_engine, world, buyer(world.people)) as client:
         yield client
 
 
@@ -111,3 +119,98 @@ async def test_award_and_purchase_order_routes(http: httpx.AsyncClient, world: W
     assert detail["status"] == "pending_approval"
     assert detail["send_approval_id"] == sent.json()["approval_id"]
     assert (await http.get(f"/v1/purchase-orders/{uuid4()}")).status_code == 404
+
+
+@pytest.mark.db
+async def test_purchase_order_lifecycle_routes(
+    http: httpx.AsyncClient, app_engine: AsyncEngine, world: World
+) -> None:
+    po = await sent_po(world)
+    detail = (await http.get(f"/v1/purchase-orders/{po.id}")).json()
+    assert detail["status"] == "sent" and detail["fulfilment"]["state"] == "sent"
+    assert detail["fulfilment"]["open"] is True
+    mlcc, connectors = detail["lines"]
+    assert (mlcc["quantity"], mlcc["received_quantity"], mlcc["remaining_quantity"]) == (
+        "4000.0000",
+        "0",
+        "4000.0000",
+    )
+    listed = (await http.get("/v1/purchase-orders", params={"open": "true"})).json()
+    assert [(item["ref"], item["fulfilment"]["state"]) for item in listed] == [("PO-1", "sent")]
+    assert (await http.get("/v1/purchase-orders", params={"open": "false"})).json() == []
+    assert (await http.get("/v1/purchase-orders", params={"state": "nope"})).status_code == 422
+
+    acknowledged = await http.post(
+        f"/v1/purchase-orders/{po.id}/acknowledge",
+        json={"acknowledged_on": "2026-10-08", "supplier_order_ref": "AB-77"},
+    )
+    assert acknowledged.status_code == 200, acknowledged.text
+    assert acknowledged.json()["fulfilment"]["state"] == "acknowledged"
+    assert acknowledged.json()["fulfilment"]["supplier_order_ref"] == "AB-77"
+    again = await http.post(f"/v1/purchase-orders/{po.id}/acknowledge", json={})
+    assert again.status_code == 409
+
+    too_much = await http.post(
+        f"/v1/purchase-orders/{po.id}/receipts",
+        json={"lines": [{"line_id": mlcc["id"], "quantity": "4001"}]},
+    )
+    assert too_much.status_code == 422 and "exceed" in too_much.json()["detail"]
+    assert (await http.get(f"/v1/purchase-orders/{po.id}/receipts")).json() == []
+
+    partial = await http.post(
+        f"/v1/purchase-orders/{po.id}/receipts",
+        json={
+            "received_on": "2026-10-20",
+            "invoice_number": "INV-1",
+            "lines": [{"line_id": mlcc["id"], "quantity": "1500"}],
+        },
+    )
+    assert partial.status_code == 201, partial.text
+    assert partial.json()["fulfilment"]["state"] == "partially_received"
+    assert partial.json()["fulfilment"]["received_quantity"] == "1500.0000"
+    close_early = await http.post(f"/v1/purchase-orders/{po.id}/close", json={})
+    assert close_early.status_code == 409
+    no_reason = await http.post(f"/v1/purchase-orders/{po.id}/close", json={"short": True})
+    assert no_reason.status_code == 422
+
+    rest = await http.post(
+        f"/v1/purchase-orders/{po.id}/receipts",
+        json={
+            "received_on": "2026-10-28",
+            "lines": [
+                {"line_id": mlcc["id"], "quantity": "2500"},
+                {"line_id": connectors["id"], "quantity": "500"},
+            ],
+        },
+    )
+    assert rest.status_code == 201 and rest.json()["fulfilment"]["state"] == "received"
+    [first, second] = (await http.get(f"/v1/purchase-orders/{po.id}/receipts")).json()
+    assert first["invoice_number"] == "INV-1" and len(second["lines"]) == 2
+    assert [line["position"] for line in second["lines"]] == [1, 2]
+
+    cancel_late = await http.post(
+        f"/v1/purchase-orders/{po.id}/cancel", json={"reason": "too late"}
+    )
+    assert cancel_late.status_code == 409
+    closed = await http.post(f"/v1/purchase-orders/{po.id}/close", json={})
+    assert closed.status_code == 200 and closed.json()["fulfilment"]["state"] == "closed"
+    assert closed.json()["fulfilment"]["closed_short"] is False
+    assert (await http.get("/v1/purchase-orders", params={"open": "true"})).json() == []
+    assert (await http.post(f"/v1/purchase-orders/{uuid4()}/close", json={})).status_code == 404
+
+    # Another tenant sees nothing and changes nothing, even with the id.
+    outsider = Principal(
+        tenant_id=world.people.other_tenant, user_id=world.people.other_approver, role="approver"
+    )
+    async with client_for(app_engine, world, outsider) as other:
+        assert (await other.get("/v1/purchase-orders")).json() == []
+        assert (await other.get(f"/v1/purchase-orders/{po.id}/receipts")).status_code == 404
+        assert (
+            await other.post(f"/v1/purchase-orders/{po.id}/cancel", json={"reason": "mine"})
+        ).status_code == 404
+        assert (
+            await other.post(
+                f"/v1/purchase-orders/{po.id}/receipts",
+                json={"lines": [{"line_id": mlcc["id"], "quantity": "1"}]},
+            )
+        ).status_code == 404

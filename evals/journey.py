@@ -1481,10 +1481,12 @@ async def step_mandate(j: Journey, step: Step) -> None:
         f"sent to {dict(to)}, want one each to {sorted(want)}",
     )
     codes = [p.part for p in j.case.to_buy]
+    # The RFQ is the attached PDF (the body is a cover note); without one, the body.
     incomplete = [
-        f"{e.to[0]} lacks {[c for c in codes if c not in e.body]}"
+        f"{e.to[0]} lacks {[c for c in codes if c not in (e.attachment_text or e.body)]}"
         for e in sent
-        if any(c not in e.body for c in codes) or (j.rfq_ref or "") not in e.subject
+        if any(c not in (e.attachment_text or e.body) for c in codes)
+        or (j.rfq_ref or "") not in e.subject
     ]
     step.check("rfq_emails_complete", not incomplete, "; ".join(incomplete[:3]))
     languages = {e.to[0]: language_of(e.body) for e in sent if e.to}

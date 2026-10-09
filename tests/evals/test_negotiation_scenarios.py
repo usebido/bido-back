@@ -62,7 +62,7 @@ def test_suppliers_write_to_test_domains_only() -> None:
 
 def test_scripted_extractions_are_grounded_in_each_email() -> None:
     """What mock mode scripts is what a correct model returns: every value quoted from the
-    email, and nothing the validation would hold (prompt v5 states RFQ-6's business days
+    email, and nothing the validation would hold (prompt v6 states RFQ-6's business days
     and relative validity as data; code converts them)."""
     for scenario in SCENARIOS:
         requested = [RequestedLine(id=uuid4(), position=p.position) for p in scenario.parts]

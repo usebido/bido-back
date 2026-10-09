@@ -80,6 +80,7 @@ from bido_back.db.models import CopilotConversation, TemplateUpload
 from bido_back.documents import DocumentText, extract_text, render_documents
 from bido_back.logs import annotate
 from bido_back.purchasing.workbook import SheetMapper, default_sheet_mapper
+from bido_back.quotes.upload import QuoteExtractor, default_quote_extractor
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.storage import BlobStorage
@@ -114,6 +115,8 @@ class CopilotDeps:
     sheet_mapper: SheetMapper | None = None
     # Names conversations over their first turns; None = titles stay the first message.
     titler: Titler | None = None
+    # Reads a quote the buyer attached, for register_quote; None = the default agent.
+    quote_extractor: QuoteExtractor | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +286,7 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
             buyer_messages=own_words,
             storage=deps.storage,
             sheet_mapper=deps.sheet_mapper or default_sheet_mapper(deps.runner_config),
+            quote_extractor=deps.quote_extractor or default_quote_extractor(deps.runner_config),
             conversation_id=prepared.conversation_id,
         )
     )

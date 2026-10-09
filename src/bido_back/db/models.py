@@ -270,8 +270,10 @@ class Rfq(Base):
     negotiation_closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     negotiation_outcome: Mapped[list[Any] | None] = mapped_column(JSONB)
     # The one best-and-final cut-off for every supplier, set by the first
-    # best-and-final request (migration 0034).
+    # best-and-final request (migration 0036).
     negotiation_cutoff_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # Every PO of the RFQ closed or cancelled, at least one closed (migration 0035).
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     comparison_policy: Mapped[dict[str, JsonValue]] = mapped_column(
         JSONB, server_default=text("'{}'::jsonb")
     )
@@ -404,12 +406,15 @@ class Invite(Base):
         ForeignKey("proposals.id", ondelete="SET NULL")
     )
     # The negotiation planner's last recorded decision for this supplier: action,
-    # buyer-visible phase, reason code, offer version and when (migration 0034).
+    # buyer-visible phase, reason code, offer version and when (migration 0036).
     negotiation_decision: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     # The offer version whose holds the buyer released (negotiated as it is).
     negotiation_released_proposal_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("proposals.id", ondelete="SET NULL")
     )
+
+
+MESSAGE_ORIGINS = ("email", "copilot_upload")
 
 
 class Message(Base):
@@ -419,6 +424,9 @@ class Message(Base):
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
     invite_id: Mapped[UUID | None] = mapped_column(ForeignKey("invites.id"))
     direction: Mapped[str] = mapped_column(Text)
+    # How it reached Bido: the supplier's email ('email', the default) or a quote the
+    # buyer attached in the Copilot ('copilot_upload'). See migration 0034.
+    origin: Mapped[str] = mapped_column(Text, server_default=text("'email'"))
     message_id_header: Mapped[str | None] = mapped_column(Text)
     in_reply_to: Mapped[str | None] = mapped_column(Text)
     from_contact_id: Mapped[UUID | None] = mapped_column(ForeignKey("contacts.id"))
@@ -755,7 +763,7 @@ class FollowupMessage(Base):
 
 
 class NegotiationMessage(Base):
-    """A supplier email the negotiation planner decided (migrations 0013, 0034).
+    """A supplier email the negotiation planner decided (migrations 0013, 0036).
 
     The id is derived from (invite, sequence). The row is written when the
     email is decided (`decided`), before the email is rendered; then `proposed`
@@ -1158,6 +1166,52 @@ class IssuedPurchaseOrder(Base):
     message_id_header: Mapped[str | None] = mapped_column(Text)
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # The order after the send (migration 0035): not_sent, sent, acknowledged,
+    # partially_received, received, closed, cancelled. `status` stays the send's.
+    fulfilment_state: Mapped[str] = mapped_column(Text, server_default=text("'not_sent'"))
+    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    acknowledged_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    supplier_order_ref: Mapped[str | None] = mapped_column(Text)
+    acknowledgement_note: Mapped[str | None] = mapped_column(Text)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    closed_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    closed_short: Mapped[bool] = mapped_column(Boolean, server_default=false())
+    close_reason: Mapped[str | None] = mapped_column(Text)
+    cancelled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    cancelled_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    cancel_reason: Mapped[str | None] = mapped_column(Text)
+
+
+class PurchaseOrderReceipt(Base):
+    """One delivery against an issued PO (migration 0035); its lines say how much per PO line."""
+
+    __tablename__ = "purchase_order_receipts"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    purchase_order_id: Mapped[UUID] = mapped_column(
+        ForeignKey("issued_purchase_orders.id", ondelete="CASCADE")
+    )
+    received_on: Mapped[date] = mapped_column(Date)
+    invoice_number: Mapped[str | None] = mapped_column(Text)
+    invoice_date: Mapped[date | None] = mapped_column(Date)
+    note: Mapped[str | None] = mapped_column(Text)
+    recorded_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PurchaseOrderReceiptLine(Base):
+    __tablename__ = "purchase_order_receipt_lines"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    receipt_id: Mapped[UUID] = mapped_column(
+        ForeignKey("purchase_order_receipts.id", ondelete="CASCADE")
+    )
+    purchase_order_line_id: Mapped[UUID] = mapped_column(
+        ForeignKey("issued_purchase_order_lines.id", ondelete="CASCADE")
+    )
+    quantity: Mapped[Decimal] = mapped_column(Numeric(18, 4))
 
 
 class IssuedPurchaseOrderLine(Base):

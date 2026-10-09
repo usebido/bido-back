@@ -19,11 +19,12 @@ default; a second person in four-eyes tenants), and the worker executes it once.
 import logging
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from typing import Final, cast
 from uuid import UUID, uuid4
 
 from pydantic import JsonValue
-from sqlalchemy import ColumnElement, func, select
+from sqlalchemy import ColumnElement, and_, func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -35,6 +36,7 @@ from bido_back.approvals.errors import ApprovalConflict
 from bido_back.approvals.sink import PostgresApprovalSink
 from bido_back.auth import Principal
 from bido_back.awards.agents import NoticeWriter
+from bido_back.awards.lifecycle import fulfilment_view, quantities
 from bido_back.awards.orders import po_document, po_lines
 from bido_back.awards.render import (
     HTML_MEDIA_TYPE,
@@ -45,6 +47,7 @@ from bido_back.awards.render import (
     to_xlsx,
 )
 from bido_back.awards.schemas import (
+    OPEN_FULFILMENT_STATES,
     ApprovalRequested,
     AwardApprovalView,
     AwardLine,
@@ -52,6 +55,7 @@ from bido_back.awards.schemas import (
     AwardRequested,
     AwardRfqArgs,
     AwardView,
+    FulfilmentState,
     IssuedPurchaseOrderLineView,
     NoticeProposed,
     NoticesRequested,
@@ -234,13 +238,16 @@ async def _propose(
 async def _summaries(
     session: AsyncSession, where: ColumnElement[bool]
 ) -> list[PurchaseOrderSummary]:
-    rows = await session.execute(
-        select(IssuedPurchaseOrder, Rfq.ref, Supplier.name)
-        .join(Rfq, Rfq.id == IssuedPurchaseOrder.rfq_id)
-        .join(Supplier, Supplier.id == IssuedPurchaseOrder.supplier_id)
-        .where(where)
-        .order_by(IssuedPurchaseOrder.number)
+    rows = list(
+        await session.execute(
+            select(IssuedPurchaseOrder, Rfq.ref, Supplier.name)
+            .join(Rfq, Rfq.id == IssuedPurchaseOrder.rfq_id)
+            .join(Supplier, Supplier.id == IssuedPurchaseOrder.supplier_id)
+            .where(where)
+            .order_by(IssuedPurchaseOrder.number)
+        )
     )
+    totals = await quantities(session, [po.id for po, _, _ in rows])
     return [
         PurchaseOrderSummary(
             id=po.id,
@@ -253,6 +260,7 @@ async def _summaries(
             total=po.total,
             created_at=po.created_at,
             sent_at=po.sent_at,
+            fulfilment=fulfilment_view(po, totals[po.id]),
         )
         for po, rfq_ref, supplier_name in rows
     ]
@@ -474,13 +482,27 @@ async def request_notices(
 
 
 async def list_purchase_orders(
-    db: Db, principal: Principal, status: PurchaseOrderStatus | None = None
+    db: Db,
+    principal: Principal,
+    status: PurchaseOrderStatus | None = None,
+    *,
+    open: bool | None = None,
+    state: FulfilmentState | None = None,
+    rfq_id: UUID | None = None,
 ) -> list[PurchaseOrderSummary]:
+    """The tenant's POs by number; `open` = sent and still expecting goods (or not)."""
+    conditions: list[ColumnElement[bool]] = []
+    if status:
+        conditions.append(IssuedPurchaseOrder.status == status)
+    if open is not None:
+        is_open = IssuedPurchaseOrder.fulfilment_state.in_(list(OPEN_FULFILMENT_STATES))
+        conditions.append(is_open if open else ~is_open)
+    if state:
+        conditions.append(IssuedPurchaseOrder.fulfilment_state == state)
+    if rfq_id:
+        conditions.append(IssuedPurchaseOrder.rfq_id == rfq_id)
     async with tenant_session(db, principal.tenant_id) as session:
-        where = (
-            IssuedPurchaseOrder.status == status if status else IssuedPurchaseOrder.id.is_not(None)
-        )
-        return await _summaries(session, where)
+        return await _summaries(session, and_(IssuedPurchaseOrder.id.is_not(None), *conditions))
 
 
 async def _po(session: AsyncSession, po_id: UUID, *, lock: bool = False) -> IssuedPurchaseOrder:
@@ -499,6 +521,7 @@ async def get_purchase_order(db: Db, principal: Principal, po_id: UUID) -> Purch
         if rfq is None or supplier is None:
             raise NotFound(f"purchase order {po_id} not found")
         pending = await _open_approval(session, SEND_PURCHASE_ORDER, po_send_proposal_ids(po.id)[1])
+        totals = (await quantities(session, [po.id]))[po.id]
         return PurchaseOrderView(
             id=po.id,
             ref=po.ref,
@@ -515,8 +538,10 @@ async def get_purchase_order(db: Db, principal: Principal, po_id: UUID) -> Purch
             created_at=po.created_at,
             sent_at=po.sent_at,
             send_approval_id=pending.id if pending is not None else None,
+            fulfilment=fulfilment_view(po, totals),
             lines=[
                 IssuedPurchaseOrderLineView(
+                    id=line.id,
                     position=line.position,
                     rfq_line_id=line.rfq_line_id,
                     proposal_line_id=line.proposal_line_id,
@@ -528,6 +553,8 @@ async def get_purchase_order(db: Db, principal: Principal, po_id: UUID) -> Purch
                     line_total=line.line_total,
                     need_by=line.need_by,
                     lead_time_days=line.lead_time_days,
+                    received_quantity=totals.by_line.get(line.id, Decimal(0)),
+                    remaining_quantity=line.quantity - totals.by_line.get(line.id, Decimal(0)),
                 )
                 for line in await po_lines(session, po.id)
             ],
@@ -557,6 +584,8 @@ async def request_po_send(
     """Propose sending a draft PO to its supplier, in the RFQ thread."""
     async with tenant_session(db, principal.tenant_id) as session:
         po = await _po(session, po_id)
+        if po.fulfilment_state == "cancelled":
+            raise InvalidState(f"purchase order {po_id} is cancelled")
         if po.status != "draft":
             raise InvalidState(f"purchase order {po_id} is {po.status}")
         thread = await thread_of(session, po.invite_id)

@@ -18,7 +18,7 @@ from bido_back.templates.service import STANDARD, RequiredFieldsRemoved
 from tests.approvals.conftest import People
 
 from .test_api import Api, api
-from .test_service import buyer, make_rfq, make_supplier
+from .test_service import buyer, make_rfq, make_supplier, pdf_text_of
 
 pytestmark = pytest.mark.db
 
@@ -266,8 +266,13 @@ async def test_preview_and_template_routes_over_http(
     assert body["template_id"] == str(template_id) and body["template_version"] == 2
     assert body["language"] == "de"
     assert body["subject"].startswith(f"[{rfq['ref']}] Angebotsanfrage: ")
-    assert body["text"].startswith("<de> Olá, nova versão.")  # translated by the fake writer
-    assert "<table" in body["html"]
+    # A cover note; the template's greeting (translated by the fake writer) opens the PDF.
+    assert body["text"].startswith("Sehr geehrte Damen und Herren,")
+    assert "<table" not in body["html"]
+    assert body["attachment_name"] == f"{rfq['ref']}-rhein.pdf"
+    pdf = await http.get(f"/v1/rfqs/{rfq['id']}/invites/{invite.json()['id']}/document.pdf")
+    assert pdf.status_code == 200, pdf.text
+    assert "<de> Olá, nova versão." in pdf_text_of(pdf.content)
 
     missing = await http.get(f"/v1/rfqs/{rfq['id']}/invites/{template_id}/preview")
     assert missing.status_code == 404

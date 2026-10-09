@@ -75,7 +75,7 @@ _NAMESPACE: Final = UUID("5b0d8e3c-2a7f-4c61-9e84-7d1f3a6c2b95")
 def negotiation_message_id(invite_id: UUID, sequence: int) -> UUID:
     """The row id of the `sequence`-th negotiation email decided for an invite (stable).
 
-    Rows written before migration 0034 used their round number, equal to their sequence.
+    Rows written before migration 0036 used their round number, equal to their sequence.
     """
     return uuid5(_NAMESPACE, f"{invite_id}:{sequence}")
 

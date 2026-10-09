@@ -131,7 +131,7 @@ class EmailDecision(BaseModel):
 
 
 def decision_of(terms: Mapping[str, object]) -> EmailDecision | None:
-    """The typed decision stored in a negotiation email's terms (None before 0034)."""
+    """The typed decision stored in a negotiation email's terms (None before 0036)."""
     raw = terms.get("decision")
     if not isinstance(raw, dict):
         return None

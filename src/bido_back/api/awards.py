@@ -6,8 +6,11 @@
   every supplier that took part and did not win.
 - `/v1/purchase-orders`: list, detail, the document (.xlsx, or printable
   .html), and `POST .../send` to propose sending it in the RFQ thread.
+- After the send, the buyer records the order's life (`awards.lifecycle`):
+  `POST .../acknowledge`, `POST .../receipts` (+ `GET`), `POST .../close`,
+  `POST .../cancel`. These change Bido's records only; nothing is sent.
 
-Nothing here executes: approvers decide in `/v1/approvals`, the worker acts.
+Nothing here sends: approvers decide in `/v1/approvals`, the worker acts.
 """
 
 from datetime import UTC, datetime
@@ -18,18 +21,24 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 
 from bido_back.api.deps import get_mailbox_senders, get_notice_writer
 from bido_back.api.rfqs import CurrentPrincipal, Db, error_responses, rfq_http_error
-from bido_back.awards import service
+from bido_back.awards import lifecycle, service
 from bido_back.awards.agents import NoticeWriter
 from bido_back.awards.render import HTML_MEDIA_TYPE, XLSX_MEDIA_TYPE
 from bido_back.awards.schemas import (
+    AcknowledgeRequest,
     ApprovalRequested,
     AwardRequest,
     AwardRequested,
     AwardView,
+    CancelRequest,
+    CloseRequest,
+    FulfilmentState,
     NoticesRequested,
     PurchaseOrderStatus,
     PurchaseOrderSummary,
     PurchaseOrderView,
+    ReceiptRequest,
+    ReceiptView,
 )
 from bido_back.rfqs.errors import RfqError
 from bido_back.rfqs.mailbox import MailboxSenderFactory
@@ -44,7 +53,9 @@ _FILE_RESPONSE: dict[int | str, dict[str, Any]] = {
 
 
 def _http_error(exc: RfqError) -> HTTPException:
-    if isinstance(exc, service.ReasonRequired | service.AwardSelectionInvalid):
+    if isinstance(
+        exc, service.ReasonRequired | service.AwardSelectionInvalid | lifecycle.RefusedInput
+    ):
         return HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, str(exc))
     return rfq_http_error(exc)
 
@@ -99,8 +110,18 @@ def awards_router() -> APIRouter:
         principal: CurrentPrincipal,
         db: Db,
         status_filter: Annotated[PurchaseOrderStatus | None, Query(alias="status")] = None,
+        open: Annotated[
+            bool | None,
+            Query(description="true: sent and still expecting goods; false: everything else"),
+        ] = None,
+        state: Annotated[
+            FulfilmentState | None, Query(description="Only orders in this fulfilment state")
+        ] = None,
+        rfq_id: Annotated[UUID | None, Query(description="Only this RFQ's orders")] = None,
     ) -> list[PurchaseOrderSummary]:
-        return await service.list_purchase_orders(db, principal, status_filter)
+        return await service.list_purchase_orders(
+            db, principal, status_filter, open=open, state=state, rfq_id=rfq_id
+        )
 
     @router.get(
         "/purchase-orders/{po_id}.{fmt}",
@@ -145,6 +166,83 @@ def awards_router() -> APIRouter:
         """Propose sending the PO to its supplier; it goes out after approval."""
         try:
             return await service.request_po_send(db, principal, po_id, mailboxes)
+        except RfqError as exc:
+            raise _http_error(exc) from None
+
+    @router.post(
+        "/purchase-orders/{po_id}/acknowledge",
+        responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT),
+    )
+    async def acknowledge_purchase_order(  # pyright: ignore[reportUnusedFunction]
+        po_id: UUID, body: AcknowledgeRequest, principal: CurrentPrincipal, db: Db
+    ) -> PurchaseOrderView:
+        """Record that the supplier confirmed a sent order (date, their order number, a note)."""
+        try:
+            await lifecycle.acknowledge_purchase_order(db, principal, po_id, body)
+            return await service.get_purchase_order(db, principal, po_id)
+        except RfqError as exc:
+            raise _http_error(exc) from None
+
+    @router.post(
+        "/purchase-orders/{po_id}/receipts",
+        status_code=status.HTTP_201_CREATED,
+        responses=error_responses(
+            status.HTTP_404_NOT_FOUND,
+            status.HTTP_409_CONFLICT,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+        ),
+    )
+    async def record_receipt(  # pyright: ignore[reportUnusedFunction]
+        po_id: UUID, body: ReceiptRequest, principal: CurrentPrincipal, db: Db
+    ) -> PurchaseOrderView:
+        """Record a delivery: quantity per line, date, invoice. Over-receipt is refused (422)."""
+        try:
+            await lifecycle.receive_purchase_order(db, principal, po_id, body)
+            return await service.get_purchase_order(db, principal, po_id)
+        except RfqError as exc:
+            raise _http_error(exc) from None
+
+    @router.get(
+        "/purchase-orders/{po_id}/receipts",
+        responses=error_responses(status.HTTP_404_NOT_FOUND),
+    )
+    async def list_receipts(  # pyright: ignore[reportUnusedFunction]
+        po_id: UUID, principal: CurrentPrincipal, db: Db
+    ) -> list[ReceiptView]:
+        try:
+            return await lifecycle.list_receipts(db, principal, po_id)
+        except RfqError as exc:
+            raise _http_error(exc) from None
+
+    @router.post(
+        "/purchase-orders/{po_id}/close",
+        responses=error_responses(
+            status.HTTP_404_NOT_FOUND,
+            status.HTTP_409_CONFLICT,
+            status.HTTP_422_UNPROCESSABLE_CONTENT,
+        ),
+    )
+    async def close_purchase_order(  # pyright: ignore[reportUnusedFunction]
+        po_id: UUID, body: CloseRequest, principal: CurrentPrincipal, db: Db
+    ) -> PurchaseOrderView:
+        """Close a fully received order; or close it short (`short`, with a reason)."""
+        try:
+            await lifecycle.close_purchase_order(db, principal, po_id, body)
+            return await service.get_purchase_order(db, principal, po_id)
+        except RfqError as exc:
+            raise _http_error(exc) from None
+
+    @router.post(
+        "/purchase-orders/{po_id}/cancel",
+        responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT),
+    )
+    async def cancel_purchase_order(  # pyright: ignore[reportUnusedFunction]
+        po_id: UUID, body: CancelRequest, principal: CurrentPrincipal, db: Db
+    ) -> PurchaseOrderView:
+        """Cancel the order with a reason, at any point before it is fully received."""
+        try:
+            await lifecycle.cancel_purchase_order(db, principal, po_id, body)
+            return await service.get_purchase_order(db, principal, po_id)
         except RfqError as exc:
             raise _http_error(exc) from None
 

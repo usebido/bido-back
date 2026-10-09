@@ -39,12 +39,13 @@ The view (`get_negotiation`) runs the same planner read-only, so what the buyer
 sees per supplier is what the next sweep does.
 
 An email the send gate refuses (a code bug or an inconsistent decision) is
-never rendered again by the sweep: its row is `held` for a person (the problem
-codes in `held_reason`, an `rfq.negotiation_draft_held` audit event the activity
-feed shows), and the view says `draft_refused_requires_buyer`. A new offer, new
-limits, or a person asking for counter-offers (`evaluate_rfq(force=True)`)
-decide it again. The writer's note never holds an email: a note that fails or
-breaks a rule is left out.
+recorded once for a person and never rendered again by the sweep: its row ends
+`canceled` with reason `draft_refused` and the problem codes in its terms, an
+`rfq.negotiation_draft_held` audit event the activity feed shows, and the view
+says `draft_refused_requires_buyer` (the planner holds that offer: `held_reason`).
+A new offer, new limits, or a person asking for counter-offers
+(`evaluate_rfq(force=True)`) decide it again. The writer's note never holds an
+email: a note that fails or breaks a rule is left out.
 
 The writer does not sign: code renders the buyer's signature, once
 (`bido_back.templates.signature`). The email is in the language of the
@@ -206,6 +207,8 @@ _PLANNED: Final = frozenset(
 )
 # A decided email the send gate refused: held for a person, with the problem codes.
 _REFUSED: Final = "email_refused"
+# How a refused email is recorded (N1): `canceled`, this reason, the codes in its terms.
+DRAFT_REFUSED: Final = "draft_refused"
 DRAFT_REFUSED_REASON: Final = "draft_refused_requires_buyer"
 # Until the clarification ledger gives one: a clarification's nominal reply-by.
 _CLARIFICATION_REPLY_DAYS: Final = 2
@@ -451,7 +454,7 @@ def _clarification_wait(
 
 
 def stored_decision(row: NegotiationMessage) -> EmailDecision | None:
-    """The typed decision a negotiation email was written from (None before 0034)."""
+    """The typed decision a negotiation email was written from (None before 0036)."""
     return decision_of(cast(dict[str, object], row.terms))
 
 
@@ -498,7 +501,19 @@ def _legacy_asks(row: NegotiationMessage) -> tuple[LineAsk, ...]:
     return tuple(asks)
 
 
+def _refused_and_held(row: NegotiationMessage) -> bool:
+    """The send gate refused this email and it still waits for a person (until a new
+    offer, new limits or a person asking for counter-offers release it)."""
+    return (
+        row.status == "canceled"
+        and row.canceled_reason == DRAFT_REFUSED
+        and row.held_reason is not None
+    )
+
+
 def _state(row: NegotiationMessage) -> EmailState:
+    if _refused_and_held(row):
+        return "held"
     return cast(EmailState, row.status) if row.status in _EMAIL_STATES else "canceled"
 
 
@@ -529,7 +544,7 @@ def _record(row: NegotiationMessage, loaded: _Loaded) -> EmailRecord:
         reply_by, cutoff = decision.reply_by, decision.cutoff_at
         order_date: date | None = decision.order_date
     else:
-        # Written before typed decisions (0034): a request was answered within
+        # Written before typed decisions (0036): a request was answered within
         # `REPLY_BUSINESS_DAYS`, a best-and-final by the negotiation deadline.
         asks = _legacy_asks(row)
         kind = "bafo" if row.action == "bafo" else "revised_offer"
@@ -1030,7 +1045,11 @@ def _message_views(
     for row in rows:
         decision = stored_decision(row)
         state: EmailStateName = _state(row)
-        status: NegotiationMessageStatus = "proposed" if state in ("decided", "held") else state
+        # The legacy status: an email being prepared is "proposed"; one held for a person
+        # will not go out as it is ("canceled", with its reason).
+        status: NegotiationMessageStatus = (
+            "proposed" if state == "decided" else "canceled" if state == "held" else state
+        )
         asks = (
             [
                 MessageAskView(
@@ -2043,8 +2062,7 @@ async def _write_decided(
                 )
                 if row is not None and row.status == "decided":
                     row.attempts = item.attempts + 1
-                    reason = f"{_REFUSED}:{problems_text(composed.problems)}"
-                    await _hold_row(session, row, reason[:300])
+                    await _record_refusal(session, row, composed.problems)
                     result.held += 1
                 else:
                     # Canceled meanwhile (a newer offer): nothing to hold.
@@ -2063,32 +2081,60 @@ async def _write_decided(
     return result
 
 
-async def _hold_row(session: AsyncSession, row: NegotiationMessage, reason: str) -> None:
-    """The decided email cannot be proposed: it waits for the buyer, with the reason.
-
-    A send-gate refusal is audited as `rfq.negotiation_draft_held` (with its problem
-    codes), anything else (no thread, no sender) as `rfq.negotiation_held`."""
-    row.status = "held"
-    row.held_reason = reason
-    invite = await session.get(Invite, row.invite_id)
-    code, _, problems = reason.partition(":")
-    payload: dict[str, JsonValue] = {
-        "rfq_id": str(invite.rfq_id) if invite is not None else None,
+def _hold_payload(row: NegotiationMessage, rfq_id: UUID | None) -> dict[str, JsonValue]:
+    return {
+        "rfq_id": str(rfq_id) if rfq_id is not None else None,
         "invite_id": str(row.invite_id),
         "negotiation_message_id": str(row.id),
         "proposal_id": str(row.proposal_id),
         "action": row.action,
         "round": row.round,
-        "reason": code,
         "attempts": row.attempts,
     }
-    if code == _REFUSED:
-        payload["problems"] = [p for p in problems.split(",") if p]
+
+
+async def _record_refusal(
+    session: AsyncSession, row: NegotiationMessage, problems: Sequence[str]
+) -> None:
+    """The send gate refused the decided email: recorded once, for a person (N1's record).
+
+    The row ends `canceled` with reason `draft_refused` and the problem codes in its
+    terms (no approval: nothing was proposed); `held_reason` keeps it waiting for a
+    person, so the planner never decides that offer again on its own; an
+    `rfq.negotiation_draft_held` audit event puts it in the activity feed.
+    """
+    codes = sorted(set(problems))
+    row.status = "canceled"
+    row.canceled_reason = DRAFT_REFUSED
+    row.held_reason = f"{_REFUSED}:{','.join(codes)}"[:300]
+    row.terms = {**cast(dict[str, JsonValue], row.terms), "refused": list(codes)}
+    invite = await session.get(Invite, row.invite_id)
+    payload = _hold_payload(row, invite.rfq_id if invite is not None else None)
+    payload["problems"] = list(codes)
     session.add(
         AuditEvent(
             tenant_id=row.tenant_id,
             actor_user_id=None,
-            action="rfq.negotiation_draft_held" if code == _REFUSED else "rfq.negotiation_held",
+            action="rfq.negotiation_draft_held",
+            payload=payload,
+        )
+    )
+    await session.flush()
+
+
+async def _hold_row(session: AsyncSession, row: NegotiationMessage, reason: str) -> None:
+    """The decided email cannot be rendered (no thread, no sender, an unreadable
+    decision): it waits for the buyer, with the reason (`rfq.negotiation_held`)."""
+    row.status = "held"
+    row.held_reason = reason
+    invite = await session.get(Invite, row.invite_id)
+    payload = _hold_payload(row, invite.rfq_id if invite is not None else None)
+    payload["reason"] = reason.split(":", 1)[0]
+    session.add(
+        AuditEvent(
+            tenant_id=row.tenant_id,
+            actor_user_id=None,
+            action="rfq.negotiation_held",
             payload=payload,
         )
     )
@@ -2096,18 +2142,31 @@ async def _hold_row(session: AsyncSession, row: NegotiationMessage, reason: str)
 
 
 async def _release_held(session: AsyncSession, rfq_id: UUID, reason: str) -> int:
-    """Held emails of the RFQ end `canceled` (`reason`): the planner decides again."""
+    """A person released the RFQ's held emails: the planner decides those offers again.
+
+    A held row ends `canceled` (`reason`); a refused one keeps its record (`canceled`,
+    `draft_refused`) and stops waiting for a person."""
     rows = list(
         await session.scalars(
             select(NegotiationMessage)
             .join(Invite, Invite.id == NegotiationMessage.invite_id)
-            .where(Invite.rfq_id == rfq_id, NegotiationMessage.status == "held")
+            .where(
+                Invite.rfq_id == rfq_id,
+                (NegotiationMessage.status == "held")
+                | (
+                    (NegotiationMessage.canceled_reason == DRAFT_REFUSED)
+                    & NegotiationMessage.held_reason.is_not(None)
+                ),
+            )
             .with_for_update(of=NegotiationMessage)
         )
     )
     for row in rows:
-        row.status = "canceled"
-        row.canceled_reason = reason
+        if row.status == "held":
+            row.status = "canceled"
+            row.canceled_reason = reason
+        else:
+            row.held_reason = None
     await session.flush()
     return len(rows)
 

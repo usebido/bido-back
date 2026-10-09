@@ -102,7 +102,7 @@ BAFO_WINDOW: Final = timedelta(hours=24)
 BAFO_REPLY_BUSINESS_DAYS: Final = 2
 # No BAFO when its cut-off is closer than this: the supplier's offer stands.
 MIN_BAFO_NOTICE: Final = timedelta(hours=12)
-# Emails decided before typed decisions (0034) were answered within this many business
+# Emails decided before typed decisions (0036) were answered within this many business
 # days; new requests follow the email standard (`reply_by_date`).
 REPLY_BUSINESS_DAYS: Final = 2
 

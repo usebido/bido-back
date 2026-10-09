@@ -536,22 +536,25 @@ async def test_a_refused_email_is_held_once_for_a_person(
 ) -> None:
     """Email audit F3: a refused counter was written again every 15-minute sweep, unseen.
     The decision is stored before the email is rendered; code renders it, so only the send
-    gate refuses one (a rendering bug): it is held at once, with its codes, for a person."""
+    gate refuses one (a rendering bug): it is recorded once, with its codes, for a person."""
     await world.configure()
     await world.offer("rhein", ("0.050", "1.20"))
     gate_refuses(monkeypatch)
     writer = FakeNegotiationWriter()
     result = await world.sweep(writer)
     assert (result.held, result.proposed, result.skipped) == (1, 0, 0)
+    # Recorded once (no approval was proposed): canceled as refused, the codes in its terms;
+    # it waits for a person.
     [held] = await world.messages("rhein")
-    assert (held.sequence, held.round, held.status, held.attempts, held.approval_id) == (
+    assert (held.sequence, held.round, held.status, held.canceled_reason, held.approval_id) == (
         1,
         1,
-        "held",
-        1,
+        "canceled",
+        "draft_refused",
         None,
     )
-    assert held.held_reason == "email_refused:number_not_decided"
+    assert held.terms["refused"] == ["number_not_decided"]
+    assert held.held_reason == "email_refused:number_not_decided" and held.attempts == 1
     assert held.terms["decision"]["kind"] == "revised_offer"
     # Later sweeps (every 15 minutes) never decide or render it again; the model is never
     # asked for a note on an email the gate refused.
@@ -563,7 +566,7 @@ async def test_a_refused_email_is_held_once_for_a_person(
     assert rhein.strategy_reasons == ["draft_refused_requires_buyer"]
     assert rhein.state is not None
     assert (rhein.state.phase, rhein.state.reason) == ("needs_decision", "email_not_prepared")
-    assert rhein.messages[0].state == "held"
+    assert (rhein.messages[0].state, rhein.messages[0].status) == ("held", "canceled")
     feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
     [entry] = [a for a in feed if a.action == "rfq.negotiation_draft_held"]
     assert (entry.supplier_name, entry.actor) == ("Rhein", "Bido")
@@ -581,7 +584,8 @@ async def test_a_refused_email_is_held_once_for_a_person(
         (1, 1, "canceled"),
         (2, 1, "proposed"),
     ]
-    assert rows[0].canceled_reason == "retried_by_buyer"
+    # The refusal stays on record; it no longer waits for a person.
+    assert (rows[0].canceled_reason, rows[0].held_reason) == ("draft_refused", None)
     view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
     rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
     assert rhein.state is not None and rhein.state.phase == "held_for_approval"

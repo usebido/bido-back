@@ -12,21 +12,32 @@ any model:
 - the confidence is at least `REVIEW_CONFIDENCE`;
 - each line maps to a requested RFQ line; an offered MPN that differs from the
   requested one marks the line as an alternative;
-- required values are present and the quote is not already expired.
+- required values are present and the quote is not already expired;
+- the offer answers what the RFQ asked: a quoted quantity that is none of the
+  requested tiers (`quantity_mismatch`, on the line), an Incoterm, a delivery
+  location or a currency other than the RFQ's (`incoterm_mismatch`,
+  `delivery_location_mismatch`, `currency_mismatch`, on the proposal). These
+  are warnings for the buyer, never rejections: the quote still registers.
 
 Anything that fails marks the field, and through it the line or the proposal,
 `needs_review`. Nothing is dropped: the persisted provenance keeps the raw
 value, the source, the confidence and the reasons.
 
-Durations are data, not numbers (prompt v5):
+Durations are data, not numbers (prompt v6):
 
 - a lead time is an amount and a unit (calendar days, business days, weeks,
   months, or a date), a basis, an approximate flag and a risk note. The
   offer-level lead time applies to every line without its own. Code converts it
   to calendar days from the offer date with the supplier's holiday calendar
-  (`bido_back.quotes.lead_time`) and stores that in `lead_time_days`; the
-  statement itself is kept in the line's `lead_time_terms` field and, for the
-  offer-level one, in the header's `lead_time` field (`parsed` holds it as JSON);
+  (`bido_back.quotes.lead_time`) and stores that in `lead_time_days`, which is
+  always CALENDAR days; a unit other than calendar days leaves its conversion
+  (the number as written, the unit, the rule) in that field's provenance
+  (`conversion`). The statement itself is kept in the line's `lead_time_terms`
+  field and, for the offer-level one, in the header's `lead_time` field
+  (`parsed` holds it as JSON). A lead time written the older way, as a
+  `lead_time_days` number with its unit in the cited quote (prompts up to v5:
+  business days as written, weeks converted), is read as the same statement and
+  counted the same way;
 - a validity given as a duration ("valid for 15 days") becomes `valid_until`,
   counted from the supplier message's date (or its first offer's, when the text
   says so). The duration is kept in the `validity` header field.
@@ -50,7 +61,7 @@ Also deterministic, never the model's call:
 
 import re
 import unicodedata
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from decimal import Decimal
@@ -84,6 +95,7 @@ from bido_back.quotes.parsing import (
     INCOTERMS,
     ISO_CURRENCIES,
     DecimalSeparator,
+    business_days_to_calendar,
     dates_in,
     day_months_in,
     detect_currencies,
@@ -135,6 +147,7 @@ HEADER_FIELDS: Final[Mapping[str, FieldKind]] = {
     "currency": "currency",
     "valid_until": "date",
     "incoterm": "incoterm",
+    "delivery_location": "text",
     "payment_terms": "text",
     "validity": "validity",
     "lead_time": "lead_time",
@@ -157,7 +170,13 @@ LINE_FIELDS: Final[Mapping[str, FieldKind]] = {
     "lead_time_terms": "lead_time",
 }
 # Fields checked by `check_field`; the others are derived below.
-_GENERIC_HEADER: Final = ("currency", "valid_until", "incoterm", "payment_terms")
+_GENERIC_HEADER: Final = (
+    "currency",
+    "valid_until",
+    "incoterm",
+    "delivery_location",
+    "payment_terms",
+)
 _DERIVED_LINE: Final = frozenset({"lead_time_terms", "lead_time_days"})
 # A quantity the model could only have copied from the request.
 _UNVERIFIED: Final = frozenset({"not_grounded", "quote_not_found", "no_source"})
@@ -170,11 +189,16 @@ type Parsed = Decimal | int | date | str
 
 @dataclass(frozen=True, slots=True)
 class RequestedLine:
+    """What the RFQ asked for on one line: what a quoted line is compared against."""
+
     id: UUID
     position: int
     mpn: str | None = None
-    # The requested quantity tiers; a copied `min_quantity` is recognized by them.
+    # The requested quantity tiers: a quoted quantity must be one of them, and a
+    # copied `min_quantity` is recognized by them.
     quantities: tuple[Decimal, ...] = ()
+    incoterm: str | None = None
+    delivery_location: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,6 +229,10 @@ class FieldCheck:
     retained_by: tuple[dict[str, JsonValue], ...] = ()
     corrected: bool = False
     correction_id: str | None = None
+    # How `parsed` was derived from what the supplier wrote when the units differ (a
+    # lead time in business days, weeks, months or a date): the number as written,
+    # its unit and the rule applied (`_conversion`).
+    conversion: Mapping[str, JsonValue] | None = None
 
     @property
     def needs_review(self) -> bool:
@@ -220,6 +248,8 @@ class FieldCheck:
             "needs_review": self.needs_review,
             "issues": list(self.issues),
         }
+        if self.conversion is not None:
+            data["conversion"] = dict(self.conversion)
         if self.message_id is not None:
             data["message_id"] = str(self.message_id)
         if self.retained_by:
@@ -323,6 +353,7 @@ def validate_quote(
     offer_date: date | None = None,
     original_offer_date: date | None = None,
     country: str | None = None,
+    rfq_currency: str | None = None,
 ) -> ValidatedQuote:
     """Check an extraction against its sources and the RFQ.
 
@@ -334,6 +365,8 @@ def validate_quote(
     date of our original offer". `country` is the supplier's ISO country, whose
     public holidays business days skip; without it, the offer currency's country
     when only one country uses that currency (BRL: Brazil).
+    `rfq_currency` is the RFQ's base currency: a quote in another one is a
+    `currency_mismatch` (a warning, so the buyer sees it before comparing).
     """
 
     def check(name: str, kind: FieldKind, value: ExtractedValue) -> FieldCheck:
@@ -384,7 +417,7 @@ def validate_quote(
             for name, kind in LINE_FIELDS.items()
             if name not in _DERIVED_LINE
         }
-        fields.update(_line_lead_time(draft, offer_lead, output.lead_time, ctx, check))
+        fields.update(_line_lead_time(draft, offer_lead, output.lead_time, ctx))
         fields["min_quantity"], draft = _without_copied_quantity(
             fields["min_quantity"],
             draft,
@@ -414,6 +447,7 @@ def validate_quote(
     valid_until = header["valid_until"].parsed
     if isinstance(valid_until, date) and valid_until < today:
         issues.append("validity_expired")
+    issues.extend(_rfq_mismatches(header, lines, requested, rfq_currency))
     for conflict in output.conflicts:
         # Even an ungrounded alleged conflict is held; neither claim wins silently.
         issues.append(f"conflicting_sources:{conflict.field}")
@@ -472,6 +506,17 @@ def _check_line(
             is_alternative = True
     if is_alternative:
         notes.append("alternative_offered")
+    quantity = fields["min_quantity"].parsed
+    if (
+        requested is not None
+        and requested.quantities
+        and isinstance(quantity, Decimal)
+        and quantity not in requested.quantities
+    ):
+        # 50 pcs quoted for a 1,500 pcs request: the price may not hold for the
+        # quantity the buyer needs. A warning, never a rejection. (A quantity the
+        # model copied from the request is dropped before: it matches a tier anyway.)
+        issues.append("quantity_mismatch")
     tax = fields["tax_rate_percent"].parsed
     if isinstance(tax, Decimal) and tax > 100:
         issues.append("invalid_tax_rate")
@@ -486,6 +531,63 @@ def _check_line(
         issues=tuple(issues),
         notes=tuple(notes),
     )
+
+
+def _rfq_mismatches(
+    header: Mapping[str, FieldCheck],
+    lines: Sequence[LineCheck],
+    requested: Sequence[RequestedLine],
+    rfq_currency: str | None,
+) -> list[str]:
+    """The quote's terms against the RFQ's: Incoterm, delivery location, currency.
+
+    Compared with the requested lines the quote answers (every requested line
+    when none could be matched). Only parsed, grounded values are compared: a
+    value the quote does not state is not a mismatch.
+    """
+    issues: list[str] = []
+    matched = {line.rfq_line_id for line in lines if line.rfq_line_id is not None}
+    against = [line for line in requested if line.id in matched] or list(requested)
+
+    incoterm = _trusted(header["incoterm"])
+    if incoterm is not None and any(
+        line.incoterm and line.incoterm.upper() != incoterm for line in against
+    ):
+        issues.append("incoterm_mismatch")
+
+    location = _trusted(header["delivery_location"])
+    if location is not None and any(
+        line.delivery_location and not _same_place(location, line.delivery_location)
+        for line in against
+    ):
+        issues.append("delivery_location_mismatch")
+
+    currency = _trusted(header["currency"])
+    if currency is not None and rfq_currency and currency != rfq_currency.upper():
+        issues.append("currency_mismatch")
+    return issues
+
+
+def _trusted(check: FieldCheck) -> str | None:
+    """The value when the quote backs it; an unverified value is already on review."""
+    return check.parsed if isinstance(check.parsed, str) and not check.issues else None
+
+
+def _same_place(quoted: str, requested: str) -> bool:
+    """`Joinville/SC` is `Joinville-SC` and `Joinville`; `Curitiba` is not.
+
+    Place names are compared as sets of words without accents, case or
+    punctuation (Incoterm codes dropped): one must contain the other.
+    """
+    a, b = _place_words(quoted), _place_words(requested)
+    return not a or not b or a <= b or b <= a
+
+
+def _place_words(text: str) -> set[str]:
+    plain = "".join(
+        c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)
+    ).casefold()
+    return {w for w in re.split(r"[^0-9a-z]+", plain) if w and w.upper() not in INCOTERMS}
 
 
 def absent_field(name: str) -> FieldCheck:
@@ -504,6 +606,9 @@ class _LeadCheck:
     # None when the value cannot be used (no unit, not a number or a date).
     lead_time: LeadTime | None
     issues: tuple[str, ...]
+    # The model wrote the number itself in `lead_time_days` (prompts up to v5): that
+    # field keeps the value as written.
+    written: bool = False
 
 
 def _check_lead_time(
@@ -581,11 +686,7 @@ def _check_lead_time(
 
 
 def _line_lead_time(
-    draft: ProposalLineDraft,
-    offer: _LeadCheck | None,
-    offer_raw: LeadTimeValue,
-    ctx: _Context,
-    check: Callable[[str, FieldKind, ExtractedValue], FieldCheck],
+    draft: ProposalLineDraft, offer: _LeadCheck | None, offer_raw: LeadTimeValue, ctx: _Context
 ) -> dict[str, FieldCheck]:
     """The line's `lead_time_terms` and `lead_time_days`: its own lead time, else the
     offer's.
@@ -595,12 +696,14 @@ def _line_lead_time(
     additional days for the shafts" stays on the shafts' line.
     """
     own = _check_lead_time(draft.lead_time, ctx, scope="line")
+    if own is None:
+        # Prompts up to v5 wrote a line's lead time as a `lead_time_days` number.
+        own = _written_lead_time(draft.lead_time_days, ctx)
     chosen = own if own is not None else offer
     if chosen is None:
-        # Nothing in v5 terms: the model's calendar days, as prompts up to v4 wrote them.
         return {
             "lead_time_terms": absent_field("lead_time_terms"),
-            "lead_time_days": check("lead_time_days", "days", draft.lead_time_days),
+            "lead_time_days": absent_field("lead_time_days"),
         }
     lead = chosen.lead_time
     if lead is not None:
@@ -633,7 +736,10 @@ def _lead_time_field(
 
 
 def _lead_time_days_field(chosen: _LeadCheck, lead: LeadTime | None, ctx: _Context) -> FieldCheck:
-    """Calendar days from the offer date to the expected delivery: what comparisons use."""
+    """Calendar days from the offer date to the expected delivery: what comparisons use.
+
+    A lead time in another unit records how it was converted (`conversion`).
+    """
     issues = list(chosen.issues)
     days: int | None = None
     if lead is not None:
@@ -645,13 +751,135 @@ def _lead_time_days_field(chosen: _LeadCheck, lead: LeadTime | None, ctx: _Conte
     return FieldCheck(
         name="lead_time_days",
         extracted=ExtractedValue(
-            value=str(days) if days is not None else raw.value,
+            value=str(days) if days is not None and not chosen.written else raw.value,
             source=raw.source,
             confidence=raw.confidence,
         ),
         parsed=days,
         issues=tuple(dict.fromkeys(issues)),
+        conversion=(
+            _conversion(lead, days, ctx.reference)
+            if lead is not None and days is not None
+            else None
+        ),
     )
+
+
+# How `lead_time_days` (calendar days) is derived from a lead time in another unit.
+_CONVERSION_RULES: Final[Mapping[str, str]] = {
+    "business_days": (
+        "business days counted from the reference date, skipping weekends and the "
+        "holiday calendar's public holidays"
+    ),
+    "weeks": "weeks * 7",
+    "months": "calendar months from the reference date; part months 30 days each",
+    "date": "days from the reference date to the stated date",
+}
+
+
+def _conversion(lead: LeadTime, days: int, reference: date) -> dict[str, JsonValue] | None:
+    """What the supplier wrote and the rule that made it calendar days; None when it was
+    calendar days already."""
+    if lead.unit == "calendar_days":
+        return None
+    quoted: JsonValue = None
+    if lead.unit == "date":
+        quoted = lead.delivery_date.isoformat() if lead.delivery_date is not None else None
+    elif lead.amount is not None:
+        whole = lead.amount == lead.amount.to_integral_value()
+        quoted = int(lead.amount) if whole else format(lead.amount, "f")
+    conversion: dict[str, JsonValue] = {
+        "quoted": quoted,
+        "unit": lead.unit,
+        "calendar_days": days,
+        "reference_date": reference.isoformat(),
+        "rule": _CONVERSION_RULES[lead.unit],
+    }
+    if lead.unit == "business_days":
+        conversion["holiday_calendar"] = lead.holiday_calendar
+    return conversion
+
+
+def _written_lead_time(value: ExtractedValue, ctx: _Context) -> _LeadCheck | None:
+    """A line's lead time as prompts up to v5 wrote it: a `lead_time_days` number with
+    the supplier's unit in its cited quote (v5: business days as written, never
+    converted; v4: calendar days, weeks converted to days).
+
+    It is read as the statement prompt v6 writes, unit and all, and counted the same
+    way. A number the model converted itself (42 for "6 Wochen", 35 for "25 dias
+    úteis") is traced back to the number in the quote.
+    """
+    text = (value.value or "").strip()
+    if not text:
+        return None
+    issues = _evidence_issues(value, ctx)
+    parsed, value_issues = _parse("days", text, ctx.decimal)
+    source = value.source
+    quote = source.quote if source is not None else ""
+    if not isinstance(parsed, int):
+        raw = LeadTimeValue(value=value.value, source=source, confidence=value.confidence)
+        return _LeadCheck(raw, None, tuple(dict.fromkeys((*issues, *value_issues))), written=True)
+    unit: PeriodUnit = "calendar_days"
+    amount = Decimal(parsed)
+    approximate = False
+    if quote.strip():
+        header = _column_header(source, ctx.sources) if source is not None else None
+        unit, amount, grounding = _written_unit(parsed, quote, ctx.decimal, header=header)
+        issues.extend(grounding)
+        approximate = mentions_approximation(quote)
+        highs = [high for low, high in ranges_in(quote) if amount in (low, high)]
+        if highs:
+            # A range is approximate, and the buyer plans with its end.
+            approximate = True
+            amount = max(highs)
+    raw = LeadTimeValue(value=value.value, source=source, confidence=value.confidence, unit=unit)
+    if _rough_days(amount, unit) > MAX_LEAD_TIME_DAYS:
+        return _LeadCheck(raw, None, tuple(dict.fromkeys((*issues, "out_of_range"))), written=True)
+    lead = LeadTime(
+        unit=unit,
+        amount=amount,
+        approximate=approximate,
+        scope="line",
+        holiday_calendar=ctx.holiday_calendar,
+    )
+    return _LeadCheck(raw, lead, tuple(dict.fromkeys(issues)), written=True)
+
+
+def _written_unit(
+    written: int, quote: str, decimal: DecimalSeparator | None, *, header: str | None
+) -> tuple[PeriodUnit, Decimal, list[str]]:
+    """The unit and number a `lead_time_days` value stands for, read from its quote.
+
+    `header` is the column header of a cited sheet cell (`Lieferzeit (Wochen)`),
+    which may carry the unit the cell omits. Returns the unit, the number of those
+    units the quote states, and the grounding issues.
+    """
+    unit_text = quote if header is None else f"{quote}\n{header}"
+    business = mentions_working_days(unit_text)
+    weeks = mentions_weeks(unit_text) and not mentions_days(unit_text)
+    direct = find_number(Decimal(written), quote, decimal=decimal)
+    if direct.found:
+        issues = ["ambiguous_number"] if direct.ambiguous else []
+        if business:
+            return "business_days", Decimal(written), issues
+        if weeks:
+            return "weeks", Decimal(written), issues
+        return "calendar_days", Decimal(written), issues
+    # Not written as such: the model converted. The number it read must be there.
+    if business:
+        for raw in range(max(0, written * 5 // 7 - 1), written * 5 // 7 + 2):
+            if (
+                business_days_to_calendar(raw) == written
+                and find_number(Decimal(raw), quote, decimal=decimal).found
+            ):
+                return "business_days", Decimal(raw), []
+    if (
+        weeks
+        and written % 7 == 0
+        and find_number(Decimal(written // 7), quote, decimal=decimal).found
+    ):
+        return "weeks", Decimal(written // 7), []
+    return "calendar_days", Decimal(written), ["not_grounded"]
 
 
 def _describe(lead: LeadTime) -> str:
@@ -1132,9 +1360,7 @@ def check_field(
         return FieldCheck(name=name, extracted=extracted, parsed=parsed)
     issues.extend(value_issues)
     if parsed is not None and source is not None and source.quote.strip():
-        header = _column_header(source, sources) if kind == "days" else None
-        grounding = _grounding(kind, parsed, source.quote, decimal, header=header)
-        issues.extend(grounding)
+        issues.extend(_grounding(kind, parsed, source.quote, decimal))
     return FieldCheck(name=name, extracted=extracted, parsed=parsed, issues=tuple(issues))
 
 
@@ -1275,14 +1501,8 @@ def _parse(
 
 
 def _grounding(
-    kind: FieldKind,
-    parsed: Parsed,
-    quote: str,
-    decimal: DecimalSeparator | None,
-    *,
-    header: str | None = None,
+    kind: FieldKind, parsed: Parsed, quote: str, decimal: DecimalSeparator | None
 ) -> list[str]:
-    """`header` is the column header of a cited sheet cell (`Lieferzeit (Wochen)`)."""
     match kind:
         case "amount" if parsed == 0 and mentions_none(quote):
             return []  # "Werkzeugkosten: keine"
@@ -1290,20 +1510,7 @@ def _grounding(
             assert isinstance(parsed, Decimal)
             return _number_grounding(parsed, quote, decimal)
         case "days":
-            assert isinstance(parsed, int)
-            issues: list[str] = []
-            direct = find_number(Decimal(parsed), quote, decimal=decimal)
-            if direct.found:
-                issues.extend(["ambiguous_number"] if direct.ambiguous else [])
-            elif not (
-                parsed % 7 == 0
-                and (mentions_weeks(quote) or (header is not None and mentions_weeks(header)))
-                and find_number(Decimal(parsed // 7), quote, decimal=decimal).found
-            ):
-                issues.append("not_grounded")
-            if mentions_working_days(quote):
-                issues.append("working_days")  # calendar days depend on the supplier's calendar
-            return issues
+            raise AssertionError("lead times are read by _written_lead_time / _check_lead_time")
         case "currency":
             return [] if parsed in detect_currencies(quote) else ["not_grounded"]
         case "date":

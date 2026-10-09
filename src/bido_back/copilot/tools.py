@@ -12,8 +12,10 @@ from the model's arguments, and works in that tenant's RLS-scoped session.
 - `draft` tools change only drafts or the tenant's own settings: run a
   purchase analysis (stored, from the imported BOM, stock and purchase
   history), create an RFQ (draft, from text or from an analysis), invite
-  suppliers (draft invites), update the RFQ template, prepare sends, and
-  propose counter-offers. None of them sends anything: each records one
+  suppliers (draft invites), register a supplier's quote the buyer attached
+  (stored as an emailed reply would be, `bido_back.quotes.upload`), update the
+  RFQ template, prepare sends, and propose counter-offers. None of them sends
+  anything: each records one
   pending approval per email (`rfqs.service.prepare_send`,
   `negotiation.service.evaluate_rfq`), which a person decides on (by default
   the buyer themself; a second person in four-eyes tenants); the worker sends
@@ -52,12 +54,14 @@ from bido_back.comparison.loader import load_comparison
 from bido_back.comparison.policy import ComparisonPolicy
 from bido_back.copilot import proposals, queries
 from bido_back.copilot.journey_tools import journey_tools, reply_by_explained
+from bido_back.copilot.order_tools import order_tools
 from bido_back.copilot.proposals import (
     PROPOSAL_ARG,
     AwaitingConfirmation,
     ProposalPreview,
     ProposedLine,
     ProposedSupplier,
+    QuotedLinePreview,
 )
 from bido_back.db import tenant_session
 from bido_back.db.models import Analysis, Contact, Invite, Rfq, RfqLine, RfqTemplate, Supplier
@@ -74,6 +78,10 @@ from bido_back.purchasing.schemas import (
 )
 from bido_back.purchasing.sources.mapping import Mapper
 from bido_back.purchasing.workbook import SheetMapper
+from bido_back.quotes import upload as quote_upload
+from bido_back.quotes.state import restore_quote, store_quote
+from bido_back.quotes.upload import QuoteExtractor, default_quote_extractor
+from bido_back.quotes.validation import ValidatedQuote
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.currency import CurrencyChange, known_currency
@@ -84,6 +92,7 @@ from bido_back.rfqs.errors import (
     ReplyByRequired,
     RfqError,
 )
+from bido_back.rfqs.language import DEFAULT_LANGUAGE, email_language
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.schemas import (
     AddLineRequest,
@@ -133,6 +142,9 @@ class CopilotToolDeps:
     storage: BlobStorage | None = None
     sheet_mapper: SheetMapper | None = None
     source_mapper: Mapper | None = None
+    # Reads a quote the buyer attached, for register_quote; None = the default agent,
+    # the same `quote_extraction` the email reply path runs.
+    quote_extractor: QuoteExtractor | None = None
     today: Callable[[], date] = lambda: datetime.now(UTC).date()
     # The conversation, for the gated tools: a proposal made in it can only be
     # confirmed in it, from a later run (`bido_back.copilot.proposals`).
@@ -751,6 +763,39 @@ class InviteSuppliersOut(AwaitingConfirmation):
     results: list[InviteResult] = Field(default_factory=list[InviteResult])
 
 
+class RegisterQuoteIn(BaseModel):
+    rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
+    supplier: str = Field(
+        description=(
+            "The invited supplier the quote comes from: its name as get_rfq_status shows it, "
+            "or its supplier id or invite id"
+        )
+    )
+    upload_ids: list[UUID] = Field(
+        min_length=1,
+        max_length=quote_upload.MAX_FILES,
+        description=(
+            "The attached file(s) holding the quote: ids from attachment_ids or "
+            "earlier_attachment_ids"
+        ),
+    )
+    proposal_id: UUID | None = Field(default=None, description=PROPOSAL_ARG)
+
+
+class RegisterQuoteOut(AwaitingConfirmation):
+    ref: str
+    supplier_name: str
+    version: int | None = Field(
+        default=None, description="The stored proposal's version, once registered"
+    )
+    needs_review: bool = False
+    issues: list[str] = Field(
+        default_factory=list[str],
+        description="What a person must check: missing values, lines the RFQ does not have, "
+        "values the file does not back. The quote is stored with them marked for review",
+    )
+
+
 class PreparedApproval(BaseModel):
     invite_id: UUID
     approval_id: UUID
@@ -1121,6 +1166,108 @@ def _analysis_request(args: RfqFromAnalysisIn) -> RfqFromAnalysisRequest:
     except RfqError as exc:
         raise _service_error(exc) from None
     return RfqFromAnalysisRequest(currency=currency, pending_validation=args.pending_validation)
+
+
+def _invite_matching(rows: list[tuple[Invite, str]], wanted: str) -> tuple[Invite, str]:
+    """The RFQ's invite `wanted` names: by invite id, supplier id, or (part of) the name."""
+    key = wanted.strip()
+    try:
+        as_id: UUID | None = UUID(key)
+    except ValueError:
+        as_id = None
+    if as_id is not None:
+        for invite, name in rows:
+            if as_id in (invite.id, invite.supplier_id):
+                return invite, name
+        raise ToolError(f"no invited supplier {key} on this RFQ; use get_rfq_status")
+    folded = key.casefold()
+    exact = [(i, n) for i, n in rows if n.casefold() == folded]
+    partial = exact or [(i, n) for i, n in rows if folded and folded in n.casefold()]
+    if len(partial) == 1:
+        return partial[0]
+    if not partial:
+        raise ToolError(f"no invited supplier named {key!r} on this RFQ; use get_rfq_status")
+    names = ", ".join(n for _, n in partial)
+    raise ToolError(f"several invited suppliers match {key!r} ({names}); say which")
+
+
+def _conversation_uploads(
+    requested: list[UUID], current: tuple[UUID, ...], earlier: tuple[UUID, ...]
+) -> list[UUID]:
+    """The files a call means, each attached in this message or an earlier turn of it.
+
+    Models sometimes copy an id wrongly: one requested file with exactly one
+    file in this message means that file.
+    """
+    allowed = set(current) | set(earlier)
+    wanted = list(dict.fromkeys(requested))
+    if all(u in allowed for u in wanted):
+        return wanted
+    if len(wanted) == 1 and len(current) == 1:
+        return [current[0]]
+    raise ToolError("that id is not one of the files attached in this conversation")
+
+
+def _quote_preview(extracted: quote_upload.ExtractedUpload) -> ProposalPreview:
+    """What register_quote would store: the supplier, the terms and every quoted line."""
+    target, quote = extracted.target, extracted.validated
+    currency = quote.parsed("currency")
+    quoted: list[QuotedLinePreview] = []
+    issues = [
+        *quote.issues,
+        *(f"{name}:{issue}" for name, f in quote.header.items() for issue in f.issues),
+        *(f"missing:{f}" for f in quote.output.missing_fields),
+    ]
+    for line in quote.lines:
+        position = line.draft.rfq_line_position
+        line_issues = [
+            *line.issues,
+            *(f"{name}:{issue}" for name, f in line.fields.items() for issue in f.issues),
+        ]
+        quoted.append(
+            QuotedLinePreview(
+                rfq_line_position=position,
+                description=target.line_descriptions.get(position) if position else None,
+                offered_mpn=_text(line.parsed("offered_mpn")),
+                is_alternative=line.is_alternative,
+                quantity=_amount(line.parsed("min_quantity")),
+                unit=_text(line.parsed("unit")),
+                unit_price=_amount(line.parsed("unit_price")),
+                currency=_text(currency),
+                lead_time_days=_days(line.parsed("lead_time_days")),
+                issues=line_issues,
+            )
+        )
+        issues.extend(f"line {position if position else '?'}: {issue}" for issue in line_issues)
+    return ProposalPreview(
+        action="register_quote",
+        rfq=target.rfq_ref,
+        title=target.rfq_title,
+        currency=_text(currency),
+        suppliers=[ProposedSupplier(name=target.supplier_name, email=target.contact_email)],
+        files=[f.filename for f in extracted.files],
+        payment_terms=_text(quote.parsed("payment_terms")),
+        valid_until=_day(quote.parsed("valid_until")),
+        incoterm=_text(quote.parsed("incoterm")),
+        quoted=quoted,
+        issues=list(dict.fromkeys(issues)),
+    )
+
+
+def _text(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _amount(value: object) -> Decimal | None:
+    return value if isinstance(value, Decimal) else None
+
+
+def _days(value: object) -> int | None:
+    return value if isinstance(value, int) else None
+
+
+def _day(value: object) -> date | None:
+    return value if isinstance(value, date) else None
 
 
 def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
@@ -1661,12 +1808,15 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 rfq = await _rfq(session, args.rfq)
                 contacts = await queries.first_contacts(session, list(args.supplier_ids))
                 wanted = list(dict.fromkeys(args.supplier_ids))
-                names = {
-                    row.id: row.name
+                rows = {
+                    row.id: row
                     for row in await session.execute(
-                        select(Supplier.id, Supplier.name).where(Supplier.id.in_(wanted))
+                        select(
+                            Supplier.id, Supplier.name, Supplier.country, Supplier.language
+                        ).where(Supplier.id.in_(wanted))
                     )
                 }
+                names = {supplier_id: row.name for supplier_id, row in rows.items()}
                 emails = {
                     row.id: row.email
                     for row in await session.execute(
@@ -1678,6 +1828,14 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             missing = [str(s) for s in wanted if s not in names]
             if missing:
                 raise ToolError(f"unknown supplier ids: {', '.join(missing)}; use list_suppliers")
+            # A supplier with no country and the default language would get an English
+            # document: that is the buyer's call, not a guess (a Brazilian supplier saved
+            # from an English name and a .com address).
+            unknown_locale = [
+                rows[s].name
+                for s in wanted
+                if rows[s].country is None and rows[s].language in (None, DEFAULT_LANGUAGE)
+            ]
             preview = ProposalPreview(
                 action="invite_suppliers",
                 rfq=rfq.ref,
@@ -1686,8 +1844,15 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                     ProposedSupplier(
                         name=names[s],
                         email=emails.get(contacts[s]) if s in contacts else None,
+                        document_language=email_language(rows[s].language, rows[s].country),
                     )
                     for s in wanted
+                ],
+                questions=[
+                    f"{name}: no country or language on file, so its RFQ document would be in "
+                    "English. Which country is it in? (add_supplier_contact with `country` "
+                    "records the answer.)"
+                    for name in unknown_locale
                 ],
             )
             proposal_id = await _propose(
@@ -1721,6 +1886,91 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 continue
             results.append(InviteResult(supplier_id=supplier_id, ok=True, detail="invited"))
         return InviteSuppliersOut(ref=rfq.ref, results=results, proposal_id=args.proposal_id)
+
+    async def register_quote(ctx: ToolContext, args: RegisterQuoteIn) -> RegisterQuoteOut:
+        principal = _principal(ctx)
+        if args.proposal_id is not None:
+            return await _confirm_register_quote(ctx, args.proposal_id)
+        if deps.storage is None:
+            raise ToolError("the copilot cannot read files on this server")
+        upload_ids = _conversation_uploads(
+            args.upload_ids, deps.attachment_ids, deps.earlier_attachment_ids
+        )
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq = await _rfq(session, args.rfq)
+            invite, supplier_name = _invite_matching(
+                await queries.invites(session, rfq.id), args.supplier
+            )
+        try:
+            extracted = await quote_upload.extract_uploaded_quote(
+                db,
+                deps.storage,
+                principal,
+                rfq_id=rfq.id,
+                invite_id=invite.id,
+                upload_ids=upload_ids,
+                extractor=deps.quote_extractor or default_quote_extractor(),
+                context=ctx,
+                today=deps.today(),
+            )
+        except quote_upload.QuoteUploadError as exc:
+            raise ToolError(str(exc)) from None
+        preview = _quote_preview(extracted)
+        # The validated quote itself is stored: the confirmation registers exactly
+        # what the buyer saw instead of reading the file again (it could differ).
+        proposal_id = await _propose(
+            ctx,
+            "register_quote",
+            args.model_copy(
+                update={
+                    "rfq": str(rfq.id),
+                    "supplier": str(invite.id),
+                    "upload_ids": [f.upload_id for f in extracted.files],
+                }
+            ),
+            preview,
+            quote={"validated": store_quote(extracted.validated), "run_id": str(extracted.run_id)},
+        )
+        return RegisterQuoteOut(
+            ref=rfq.ref,
+            supplier_name=supplier_name,
+            awaiting_confirmation=True,
+            proposal_id=proposal_id,
+            preview=preview,
+            issues=preview.issues,
+        )
+
+    async def _confirm_register_quote(ctx: ToolContext, proposal_id: UUID) -> RegisterQuoteOut:
+        principal = _principal(ctx)
+        if deps.storage is None:
+            raise ToolError("the copilot cannot read files on this server")
+        claimed = await _claim(ctx, "register_quote", proposal_id)
+        stored = RegisterQuoteIn.model_validate(claimed.args)
+        quote = cast(dict[str, Any], claimed.preview["quote"])
+        validated: ValidatedQuote = restore_quote(quote["validated"])
+        try:
+            registered = await quote_upload.register_uploaded_quote(
+                db,
+                deps.storage,
+                principal,
+                rfq_id=UUID(stored.rfq),
+                invite_id=UUID(stored.supplier),
+                upload_ids=stored.upload_ids,
+                validated=validated,
+                run_id=UUID(str(quote["run_id"])),
+            )
+        except quote_upload.QuoteUploadError as exc:
+            await proposals.release(db, principal, proposal_id)
+            raise ToolError(str(exc)) from None
+        shown = ProposalPreview.model_validate(claimed.preview["shown"])
+        return RegisterQuoteOut(
+            ref=registered.rfq_ref,
+            supplier_name=registered.supplier_name,
+            proposal_id=proposal_id,
+            version=registered.version,
+            needs_review=registered.needs_review,
+            issues=shown.issues,
+        )
 
     async def prepare_send(ctx: ToolContext, args: RfqRef) -> PrepareSendOut:
         principal = _principal(ctx)
@@ -2326,6 +2576,23 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             invite_suppliers,
         ),
         Tool(
+            "register_quote",
+            "Register a supplier's quote the buyer attached in the chat (a PDF or sheet the "
+            "supplier sent them outside Bido) on the RFQ, for that invited supplier. The file "
+            "is read like an emailed reply and the quote stored the same way: it shows in the "
+            "comparison and the Quotes tab, marked as uploaded by the buyer. The preview "
+            "lists the supplier, the terms (currency, payment terms, validity, Incoterm), "
+            "each quoted line (price, quantity, lead time in calendar days) and `issues` to "
+            "check: values the file does not back, missing terms, and what differs from "
+            "the RFQ (quantity_mismatch, incoterm_mismatch, delivery_location_mismatch, "
+            "currency_mismatch). Show all of it, every issue by name; never say there are "
+            "none when the list is not empty. Nothing is sent." + _CONFIRM_FIRST,
+            RegisterQuoteIn,
+            RegisterQuoteOut,
+            "draft",
+            register_quote,
+        ),
+        Tool(
             "prepare_send",
             "Write the RFQ email for every draft invite and ask for approval. Nothing is "
             "sent: the buyer (or, if the company requires it, a second person) must approve "
@@ -2391,4 +2658,5 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             artifact_kind="approvals",
         ),
         *journey_tools(deps),
+        *order_tools(deps),
     )
