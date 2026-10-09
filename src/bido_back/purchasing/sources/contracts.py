@@ -266,6 +266,8 @@ class SupplierEvidence(BaseModel):
     lead_time_days: Decimal | None = None
     last_price_basis: Literal["purchase_order", "received_order"] = "purchase_order"
     qualification_status: str | None = None
+    # ISO 3166-1 alpha-2, when the buyer's supplier master names one recognizable country.
+    country: str | None = None
     evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
     # Measured by Bido from reconciled source orders and receipts, in the line's price
     # currency. otif_pct/quality_pct/lead_time_days above stay the source-REPORTED values.

@@ -48,6 +48,7 @@ from bido_back.purchasing.sources.pricing import (
     reconcile_order,
     reference_date,
 )
+from bido_back.rfqs.language import country_code
 
 _ZERO = Decimal(0)
 _PLANNING_KINDS = frozenset({"inventory", "material_requirement", "purchase_summary"})
@@ -461,6 +462,18 @@ def _supplier_matches(
     return matches if len(codes - {None}) <= 1 else []
 
 
+def supplier_country(masters: Sequence[Record]) -> str | None:
+    """The one country the supplier's master rows name (ISO alpha-2), else None.
+
+    Every written value must be a recognizable country and all must agree.
+    """
+    written = {value for record in masters if (value := _text(record, "country")) is not None}
+    codes = {country_code(value) for value in written}
+    if not codes or None in codes or len(codes) != 1:
+        return None
+    return next(iter(codes))
+
+
 def supplier_evidence(
     purchases: Sequence[Record],
     masters: Sequence[Record],
@@ -561,6 +574,7 @@ def supplier_evidence(
         last_price=_number(latest, "unit_price", issues, warning=True),
         currency=_currency(latest, issues),
         ordered_at=_day(latest, "ordered_at", issues),
+        country=supplier_country(matching),
         evidence=_refs(
             [
                 *(purchases if include_history_evidence else [latest or first]),

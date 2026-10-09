@@ -63,6 +63,46 @@ _COUNTRY_LANGUAGE: Final[dict[str, str]] = {
 }
 
 
+# Country names and ISO alpha-3 codes a buyer's files write -> ISO 3166-1 alpha-2.
+_COUNTRY_CODE: Final[dict[str, str]] = {
+    **dict.fromkeys(("br", "bra", "brasil", "brazil", "brasile", "bresil", "brasilien"), "BR"),
+    **dict.fromkeys(("pt", "prt", "portugal", "portogallo"), "PT"),
+    **dict.fromkeys(("ao", "ago", "angola"), "AO"),
+    **dict.fromkeys(("mz", "moz", "mocambique", "mozambique"), "MZ"),
+    **dict.fromkeys(("it", "ita", "italia", "italy", "italie", "italien"), "IT"),
+    **dict.fromkeys(
+        ("de", "deu", "deutschland", "germany", "alemanha", "allemagne", "germania", "alemania"),
+        "DE",
+    ),
+    **dict.fromkeys(("at", "aut", "austria", "osterreich", "autriche"), "AT"),
+    **dict.fromkeys(("fr", "fra", "france", "franca", "francia", "frankreich"), "FR"),
+    **dict.fromkeys(("es", "esp", "espana", "spain", "espanha", "spagna", "spanien"), "ES"),
+    **dict.fromkeys(("mx", "mex", "mexico"), "MX"),
+    **dict.fromkeys(("ar", "arg", "argentina"), "AR"),
+    **dict.fromkeys(("cl", "chl", "chile"), "CL"),
+    **dict.fromkeys(("co", "col", "colombia", "colombie", "kolumbien"), "CO"),
+    **dict.fromkeys(("pe", "per", "peru"), "PE"),
+    **dict.fromkeys(("uy", "ury", "uruguay", "uruguai"), "UY"),
+    **dict.fromkeys(("py", "pry", "paraguay", "paraguai"), "PY"),
+    **dict.fromkeys(
+        ("us", "usa", "united states", "united states of america", "estados unidos", "eua"),
+        "US",
+    ),
+    **dict.fromkeys(("gb", "gbr", "uk", "united kingdom", "reino unido"), "GB"),
+    **dict.fromkeys(("cn", "chn", "china", "chine"), "CN"),
+}
+
+
+def country_code(country: str | None) -> str | None:
+    """The ISO 3166-1 alpha-2 code of a country written as a code or a common name.
+
+    None for anything not in the table (a state, a city, a misspelling): never guessed.
+    """
+    if not country:
+        return None
+    return _COUNTRY_CODE.get(normalize(country))
+
+
 def country_language(country: str | None) -> str | None:
     """The language spoken in a country, when we know it; None otherwise."""
     if not country:

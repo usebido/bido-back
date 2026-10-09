@@ -6,7 +6,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 from bido_back.purchasing.importers import norm
-from bido_back.purchasing.sources.analysis import supplier_evidence
+from bido_back.purchasing.sources.analysis import supplier_country, supplier_evidence
 from bido_back.purchasing.sources.contracts import (
     Assessment,
     AssessmentLine,
@@ -446,6 +446,7 @@ def _listed_supplier(
         supplier_code=code,
         name=next(iter(names)) if len(names) == 1 else None,
         email=next(iter(emails)) if len(emails) == 1 and len(names) == 1 else None,
+        country=supplier_country(matching),
         evidence=source_refs(matching),
     )
 

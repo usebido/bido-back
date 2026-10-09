@@ -10881,6 +10881,17 @@
             ],
             "title": "Avg Price"
           },
+          "country": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Country"
+          },
           "currency": {
             "anyOf": [
               {

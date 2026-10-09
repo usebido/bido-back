@@ -387,6 +387,37 @@ def test_supplier_code_joins_master_history_and_performance_without_guessing_cur
     }
 
 
+@pytest.mark.parametrize(
+    ("countries", "expected"),
+    [
+        (("Brasil",), "BR"),
+        (("BR", "Brazil"), "BR"),  # Two rows, one country.
+        (("BR", "PT"), None),  # Disagreeing rows: none chosen.
+        (("BR", "SP"), None),  # A state is not a country: nothing guessed.
+        (("Atlantis",), None),
+        ((), None),
+    ],
+)
+def test_the_supplier_country_comes_from_its_master_rows_only_when_clear(
+    countries: tuple[str, ...], expected: str | None
+) -> None:
+    masters = [
+        record("supplier", row, supplier_code="001", name="Local Supply", country=country)
+        for row, country in enumerate(countries, 2)
+    ] or [record("supplier", supplier_code="001", name="Local Supply")]
+    purchase = record(
+        "purchase",
+        9,
+        part_number="00010",
+        supplier_code="001",
+        ordered_at="2026-09-01",
+        unit_price="76.20",
+        currency="BRL",
+    )
+    result = assess([inventory(), requirement(), summary(), *masters, purchase])
+    assert [s.country for s in result.lines[0].suppliers] == [expected]
+
+
 def test_conflicting_supplier_identity_does_not_erase_calculated_quantities() -> None:
     result = assess(
         [

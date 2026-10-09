@@ -16,7 +16,10 @@
   exact normalized company name. A supplier the buyer does not have yet is created
   with its contact through the supplier service, only when the evidence gives both
   its company name and one valid email. Names and addresses are never invented, and
-  `SupplierEvidence.name` is the company, never a contact person.
+  `SupplierEvidence.name` is the company, never a contact person. A new supplier is
+  written to in its country's language when the buyer's files give its country
+  (`SupplierEvidence.country`), else in the language of the buyer's default RFQ
+  template, else in English; an existing supplier keeps its own setting.
 - Each resolved supplier becomes a DRAFT invite. Nothing is sent: the approval guard
   or the negotiation mandate, with the confirmed-domain rules, decides every email.
 - Each RFQ line records which tenant supplier each of its assessment suppliers became
@@ -40,13 +43,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bido_back.auth import Principal
 from bido_back.comparison.compute import Rate
 from bido_back.comparison.loader import load_rates
-from bido_back.db.models import Contact, Invite, Rfq, RfqLine, Supplier, SupplierContact
+from bido_back.db.models import (
+    Contact,
+    Invite,
+    Rfq,
+    RfqLine,
+    RfqTemplate,
+    Supplier,
+    SupplierContact,
+)
 from bido_back.purchasing.analysis import PRICE_PLACES
 from bido_back.purchasing.importers import norm
 from bido_back.purchasing.schemas import InvitedSupplier
 from bido_back.purchasing.sources.contracts import AssessmentLine, PriceBenchmark, SupplierEvidence
 from bido_back.rfqs import suppliers as supplier_service
 from bido_back.rfqs.currency import fx_factor
+from bido_back.rfqs.language import DEFAULT_LANGUAGE, country_language
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest, EmailAddress
 from bido_back.rfqs.service import add_draft_invite
 
@@ -276,9 +288,15 @@ async def handoff(
     invited: dict[object, PlannedInvite] = {}
     skipped: list[AssessmentSkippedSupplier] = []
     linked: dict[tuple[str | None, str | None, str | None], UUID] = {}
+    buyer_language = await _buyer_language(session) if rfq is not None else None
     for entry in wanted_suppliers(lines, per_line):
         outcome = await _resolve(
-            session, principal.tenant_id, entry, created, create=rfq is not None
+            session,
+            principal.tenant_id,
+            entry,
+            created,
+            create=rfq is not None,
+            buyer_language=buyer_language,
         )
         if isinstance(outcome, AssessmentSkippedSupplier):
             skipped.append(outcome)
@@ -360,6 +378,26 @@ async def rfq_line_limits(
         position: (target, maximum) if target is not None and maximum is not None else None
         for position, target, maximum in rows
     }
+
+
+async def _buyer_language(session: AsyncSession) -> str | None:
+    """The language of the buyer's own general default RFQ template, if it has one."""
+    language = await session.scalar(
+        select(RfqTemplate.language)
+        .where(
+            RfqTemplate.is_default,
+            RfqTemplate.status == "ready",
+            RfqTemplate.category.is_(None),
+        )
+        .limit(1)
+    )
+    code = (language or "").strip().lower()
+    return code if len(code) == 2 and code.isalpha() else None
+
+
+def new_supplier_language(evidence: SupplierEvidence, buyer_language: str | None) -> str:
+    """A new supplier's email language: its country's, else the buyer's, else English."""
+    return country_language(evidence.country) or buyer_language or DEFAULT_LANGUAGE
 
 
 def _status(supplier: SupplierEvidence) -> str:
@@ -465,6 +503,7 @@ async def _resolve(  # noqa: C901 - one decision list, in the order it is applie
     created: _Created,
     *,
     create: bool,
+    buyer_language: str | None = None,
 ) -> _Resolved | AssessmentSkippedSupplier:
     """The buyer's supplier and contact for `entry`, or why it cannot be invited. A new
     supplier or contact is created only when `create`; otherwise it is only planned."""
@@ -548,7 +587,12 @@ async def _resolve(  # noqa: C901 - one decision list, in the order it is applie
     if name is None:
         return _skip(entry, "no_company_name")
     try:
-        request = CreateSupplierRequest(name=name, contacts=[ContactIn(email=email)])
+        request = CreateSupplierRequest(
+            name=name,
+            country=evidence.country,
+            language=new_supplier_language(evidence, buyer_language),
+            contacts=[ContactIn(email=email)],
+        )
     except ValidationError:
         return _skip(entry, "no_company_name")
     if create:

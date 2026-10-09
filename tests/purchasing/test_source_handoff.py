@@ -36,6 +36,7 @@ from bido_back.db.models import (
     ProcurementAssessment,
     Rfq,
     RfqLine,
+    RfqTemplate,
     Supplier,
     SupplierContact,
 )
@@ -48,7 +49,11 @@ from bido_back.purchasing.sources.contracts import (
     SourceRef,
     SupplierEvidence,
 )
-from bido_back.purchasing.sources.handoff import AssessmentSkippedSupplier, wanted_suppliers
+from bido_back.purchasing.sources.handoff import (
+    AssessmentSkippedSupplier,
+    new_supplier_language,
+    wanted_suppliers,
+)
 from bido_back.purchasing.sources.snapshots import (
     AssessmentRfqRequest,
     AssessmentRfqResult,
@@ -104,6 +109,10 @@ def supplier(
         orders=2 if history else 0,
         suggested=suggested,
     )
+
+
+def abroad(evidence: SupplierEvidence, country: str | None) -> SupplierEvidence:
+    return evidence.model_copy(update={"country": country})
 
 
 def estimate(currency: str, target: str, maximum: str) -> PriceBenchmark:
@@ -358,6 +367,94 @@ async def test_suggested_suppliers_are_invited_as_drafts_and_nothing_is_sent(
         record = await session.get(Supplier, created.supplier_id)
         # Created through the supplier service with the evidence's company name only.
         assert record is not None and record.name == "PrecisaoSul Teste"
+
+
+def test_a_new_suppliers_language_follows_evidence_never_a_guess() -> None:
+    brazilian = abroad(supplier("A", "a@a.example.test"), "BR")
+    unknown = supplier("B", "b@b.example.test")
+    assert new_supplier_language(brazilian, "es") == "pt"  # Its country wins.
+    assert new_supplier_language(unknown, "es") == "es"  # Else the buyer's language.
+    assert new_supplier_language(unknown, None) == "en"
+    assert new_supplier_language(abroad(unknown, "CN"), "pt") == "pt"  # No known language.
+
+
+async def test_new_suppliers_are_written_to_in_their_countrys_or_the_buyers_language(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = buyer(purchasing_rows)
+    known = await add_supplier(app_engine, who, "MetalNova Teste", "vendas@metalnova.example.test")
+    assessment_id = await saved(
+        app_engine,
+        who,
+        assessment(
+            line(
+                "000101",
+                suppliers=[
+                    # An existing supplier keeps its own setting.
+                    abroad(supplier("MetalNova Teste", "vendas@metalnova.example.test"), "BR"),
+                    abroad(supplier("PrecisaoSul Teste", "vendas@precisaosul.example.test"), "BR"),
+                    supplier("MultiPecas Teste", "vendas@multipecas.example.test"),
+                ],
+                price=estimate("BRL", "41.28", "43.34"),
+            ),
+        ),
+    )
+
+    result = await draft_from_snapshot(
+        app_engine, who, assessment_id, request(max_suppliers_per_line=3)
+    )
+
+    async with tenant_session(app_engine, who.tenant_id) as session:
+        rows = await session.execute(
+            select(Supplier.name, Supplier.country, Supplier.language).where(
+                Supplier.id.in_([s.supplier_id for s in result.invited])
+            )
+        )
+        got = {name: (country, language) for name, country, language in rows}
+    assert got == {
+        "MetalNova Teste": (None, "en"),
+        "PrecisaoSul Teste": ("BR", "pt"),
+        # No country in the files and no buyer template: the default, not a guess.
+        "MultiPecas Teste": (None, "en"),
+    }
+    assert known in {s.supplier_id for s in result.invited}
+
+
+async def test_without_a_country_a_new_supplier_gets_the_buyers_template_language(
+    app_engine: AsyncEngine, purchasing_rows: People
+) -> None:
+    who = buyer(purchasing_rows)
+    async with tenant_session(app_engine, who.tenant_id) as session:
+        session.add(
+            RfqTemplate(
+                tenant_id=who.tenant_id,
+                source="search",
+                status="ready",
+                language="pt",
+                greeting="Prezados, solicitamos cotação:",
+                columns=["Item", "Descrição", "Qtd."],
+                footer="Prazo",
+                fields=["Qtd.", "Prazo"],
+                is_default=True,
+            )
+        )
+    assessment_id = await saved(
+        app_engine,
+        who,
+        assessment(
+            line(
+                "000101",
+                suppliers=[supplier("PrecisaoSul Teste", "vendas@precisaosul.example.test")],
+                price=estimate("BRL", "41.28", "43.34"),
+            ),
+        ),
+    )
+
+    result = await draft_from_snapshot(app_engine, who, assessment_id, request())
+
+    async with tenant_session(app_engine, who.tenant_id) as session:
+        record = await session.get(Supplier, result.invited[0].supplier_id)
+    assert record is not None and (record.country, record.language) == (None, "pt")
 
 
 async def test_the_buyers_suppliers_are_found_by_email_or_normalized_name(
