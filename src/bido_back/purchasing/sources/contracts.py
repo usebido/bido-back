@@ -552,6 +552,10 @@ class TableProposal(BaseModel):
     constants: list[ConstantMapping] = Field(default_factory=list[ConstantMapping])
     value_maps: list[ValueMapping] = Field(default_factory=list[ValueMapping])
     date_order: DateOrder | None = None
+    # Fields every record of the section has. A row without them (a group heading, a
+    # note) is not a record; a value it holds in a fill_down column still applies to the
+    # rows below it.
+    required_fields: list[str] = Field(default_factory=list[str])
 
 
 class MappingProposal(BaseModel):
@@ -569,16 +573,79 @@ class TableManifest(BaseModel):
     sample_rows: list[int] = Field(default_factory=list[int])
 
 
+class ShownRow(BaseModel):
+    row: int
+    cells: list[str | None]
+
+
+class RowBand(BaseModel):
+    """Consecutive rows with content; blank rows separate bands."""
+
+    first_row: int
+    last_row: int
+
+
+class RowShape(BaseModel):
+    """Rows whose cells hold the same kinds of values in the same columns.
+
+    `pattern` has one letter per column, from the first: t text, n number, d date and
+    . blank (trailing blanks left out).
+    """
+
+    pattern: str
+    rows: int
+    examples: list[int]
+
+
+class SpellingCount(BaseModel):
+    value: str
+    rows: int
+
+
+class ColumnProfile(BaseModel):
+    """What one column holds over every row of the table."""
+
+    column: int
+    filled: int
+    numbers: int
+    dates: int
+    # Distinct spellings, ignoring case and spacing.
+    distinct: int
+    # A text column's spellings, most frequent first (all of them when they are few); a
+    # number or date column's most frequent ones, to show how it writes them.
+    values: list[SpellingCount]
+
+
+class TableSummary(BaseModel):
+    """A table too large to read whole: what code counted over every row, and the rows it
+    chose to show (by their row numbers)."""
+
+    rows: int
+    columns: int
+    shown: list[ShownRow]
+    bands: list[RowBand]
+    bands_left_out: int = 0
+    shapes: list[RowShape]
+    # Rows in shapes not listed.
+    shapes_left_out: int = 0
+    profiles: list[ColumnProfile]
+
+
 class MappingTask(BaseModel):
+    # What every call of an analysis shares comes first, so the prompt prefix is cached.
+    catalog: dict[str, list[str]]
+    # Closed canonical terms for value_maps: "<kind>.<field>" keys, and "unit" for units.
+    vocabulary: dict[str, list[str]] = Field(default_factory=dict[str, list[str]])
+    manifest: list[TableManifest]
     objective: str
     source_id: str
     table: str
     layout: Literal["table", "text"]
+    # The rows the task covers, 1-based and inclusive: the whole table, or a text page.
     first_row: int
     last_row: int
-    rows: list[list[str | None]]
-    previous_sections: list[TableProposal]
-    manifest: list[TableManifest]
-    catalog: dict[str, list[str]]
-    # Closed canonical terms for value_maps: "<kind>.<field>" keys, and "unit" for units.
-    vocabulary: dict[str, list[str]] = Field(default_factory=dict[str, list[str]])
+    # Every row from first_row to last_row; empty when `summary` stands for a table.
+    rows: list[list[str | None]] = Field(default_factory=list[list[str | None]])
+    summary: TableSummary | None = None
+    # A text page's previous page's sections.
+    previous_sections: list[TableProposal] = Field(default_factory=list[TableProposal])

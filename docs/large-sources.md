@@ -1,7 +1,7 @@
 # Large sources: bounded model context, deterministic reading, an analytical store
 
-Status: accepted direction, 2026-10-09. Step 0 ships with this document; steps 1–4 are
-planned.
+Status: accepted direction, 2026-10-09. Step 0 shipped with this document (#96); step 1's
+first part is done (the mapper reads summaries, not pages); the rest is planned.
 
 ## Problem
 
@@ -172,10 +172,27 @@ flowchart LR
    without cell references and source assessments within a budget: on the eval corpus,
    14–24% of the full output, every line kept. Agents without history keep no Agno run
    storage.
-1. **Mapper with specs.** Dossier, `MappingSpec`, the shared reader, reconciliation and
-   the layout registry (RLS); a new mapper prompt version. Done when no rows are paged,
-   the eval corpus passes at least as today, and a 100K-row sheet is mapped with one
-   model call per table.
+1. **Mapper with summaries** (first part done).
+   - Each table is one call: every row up to 48,000 characters, otherwise a summary
+     code computes over every row (chosen rows, bands, row shapes, column profiles). A
+     4,093-row register reads as about 15,000 characters, where paging took about 69
+     calls. Sections apply to every row; `required_fields` keeps group headings out of
+     the records while their fill-down values name the rows below them; rows repeating
+     the header are skipped. Text sources are still paged. Prompt `source_mapper.v5`.
+   - The analysis indexes purchases by supplier code once, instead of rescanning every
+     purchase for each supplier group, and builds its result without dumping and
+     re-validating it. Reading, mapping and the analysis run off the event loop.
+   - Reader limits doubled (200,000 cells, 2M characters per file, 50,000 rows per
+     sheet). Measured on a synthetic ERP export (a 10-column order register over 2,000
+     parts), without the model: 5,000 rows in 1.8 s and ~260 MB (before: 4.2 s, ~400
+     MB); 20,000 rows in 6.3 s and ~510 MB (before: 52 s, ~950 MB); 50,000 rows, past
+     the limits, in 18 s and ~1 GB. Memory, about 2 KB per mapped cell, is the next
+     limit; past these sizes the answer is step 2, not higher limits.
+   - Still to do in this step: the layout registry (a confirmed spec per tenant and
+     layout fingerprint, read without a model call), reconciling a source's own total
+     rows, sample checks per rule, and a repair round fed with aggregated errors. Done
+     when the eval corpus, its 4,000-line register (`long_history`) included, passes live
+     as today.
 2. **Ingestion task and store.** S3 Parquet, manifest, STS credentials per job,
    asynchronous jobs with checkpoints instead of mapping inside the request
    (infrastructure in `bido-infra`). Done when a 10M-row CSV lands in under 10 minutes on

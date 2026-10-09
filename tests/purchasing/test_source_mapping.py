@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+from typing import Literal
 from uuid import UUID, uuid4
 
 import pytest
@@ -18,10 +19,11 @@ from bido_back.purchasing.sources.contracts import (
     MappingProposal,
     MappingTask,
     RecordProposal,
+    RowBand,
     SourceRef,
     TableProposal,
 )
-from bido_back.purchasing.sources.mapping import map_sources, materialize
+from bido_back.purchasing.sources.mapping import map_sources, materialize, summarize
 from bido_back.purchasing.sources.readers import SourceDocument, read_source
 from tests.documents.fixtures import build_xlsx
 
@@ -119,9 +121,10 @@ async def test_every_row_beyond_preview_is_mapped_with_cross_sheet_context() -> 
     assert {record.values["part_number"] for record in needs} == {f"P-{i:03d}" for i in range(128)}
     assert needs[-1].values["quantity"] == "128"
     assert needs[-1].evidence["quantity"].row == 131
-    pages = [task for task in calls if task.table == "Demand"]
-    assert [(task.first_row, task.last_row) for task in pages] == [(1, 60), (61, 120), (121, 131)]
-    assert pages[1].previous_sections[0].header_row == 3
+    # A table is one task, never pages: this one is small enough to be shown whole.
+    [whole] = [task for task in calls if task.table == "Demand"]
+    assert (whole.first_row, whole.last_row) == (1, 131)
+    assert len(whole.rows) == 131 and whole.summary is None
     assert all(
         {part.name for part in task.manifest} == {"Demand", "Contacts", "Narrative"}
         for task in calls
@@ -447,12 +450,14 @@ async def test_mapper_failure_does_not_hide_other_source_results_or_leak_payload
     assert all("private" not in issue.message for issue in issues)
 
 
-@pytest.mark.parametrize("limit", ["pages", "row_chars"])
+@pytest.mark.parametrize("limit", ["text_pages", "row_chars"])
 async def test_interpretation_limits_reject_before_any_model_call(
     monkeypatch: pytest.MonkeyPatch, limit: str
 ) -> None:
-    tables = [EvidenceTable(source_id="S", name="T", rows=[["Part"], ["P-01"]])]
-    if limit == "pages":
+    # Only text is read in pages; a table is one task, but no row may exceed a page.
+    layout: Literal["table", "text"] = "text" if limit == "text_pages" else "table"
+    tables = [EvidenceTable(source_id="S", name="T", rows=[["Part"], ["P-01"]], layout=layout)]
+    if limit == "text_pages":
         monkeypatch.setattr(mapping, "PAGE_ROWS", 1)
         monkeypatch.setattr(mapping, "MAX_PAGES", 1)
     else:
@@ -605,3 +610,101 @@ async def test_many_empty_tables_cannot_bypass_the_interpretation_budget() -> No
     assert [issue.code for issue in issues] == ["source_limit"]
     assert len(coverage) == len(tables)
     assert all(not item.inspected and item.mapped_rows == 0 for item in coverage)
+
+
+def large_table(rows: int) -> EvidenceTable:
+    """A title, a blank row, a header, `rows` stock lines and a total line."""
+    return EvidenceTable(
+        source_id="S",
+        name="Estoque",
+        rows=[
+            ["Posição de estoque em 08/10/2026", None, None, None],
+            [None, None, None, None],
+            ["Material", "Descrição", "Saldo", "UM"],
+            *[
+                [f"M-{i:05d}", f"Peça número {i}", str(i % 400), "KG" if i % 10 == 0 else "UN"]
+                for i in range(rows)
+            ],
+            ["Total", None, str(sum(i % 400 for i in range(rows))), None],
+        ],
+    )
+
+
+async def test_a_large_table_is_read_through_its_summary_and_mapped_whole() -> None:
+    table = large_table(3000)
+    tasks: list[MappingTask] = []
+
+    async def mapper(task: MappingTask, _: ToolContext) -> MappingProposal:
+        tasks.append(task)
+        return MappingProposal(
+            sections=[
+                TableProposal(
+                    kind="inventory",
+                    header_row=3,
+                    first_row=4,
+                    last_row=task.last_row,
+                    columns=columns(
+                        {"part_number": 1, "description": 2, "available": 3, "unit": 4}
+                    ),
+                )
+            ]
+        )
+
+    records, issues, coverage = await map_sources([table], "Read", context(), mapper)
+
+    # One call; the model never sees the rows, only what code counted over all of them.
+    [task] = tasks
+    assert task.rows == [] and task.summary is not None
+    assert (task.first_row, task.last_row) == (1, 3004)
+    assert len(task.model_dump_json()) < 60_000
+    summary = task.summary
+    assert summary == summarize(table)
+    assert (summary.rows, summary.columns) == (3004, 4)
+    assert summary.bands == [RowBand(first_row=1, last_row=1), RowBand(first_row=3, last_row=3004)]
+    shown = {row.row: row.cells for row in summary.shown}
+    assert shown[1] == ["Posição de estoque em 08/10/2026"]
+    assert shown[3] == ["Material", "Descrição", "Saldo", "UM"]
+    assert shown[3004][0] == "Total"
+    assert sum(len(cell or "") + 8 for cells in shown.values() for cell in cells) <= (
+        mapping.SUMMARY_CHARS
+    )
+    assert summary.shapes[0].pattern == "ttnt" and summary.shapes[0].rows == 3000
+    unit = next(profile for profile in summary.profiles if profile.column == 4)
+    assert {(v.value, v.rows) for v in unit.values} == {("UN", 2700), ("KG", 300), ("UM", 1)}
+    # The section reaches every row; the total line is not a record.
+    assert len(records) == 3000
+    assert records[-1].evidence["part_number"].row == 3003
+    assert coverage[0].mapped_rows == 3000
+    assert "derived_rows_skipped" in {issue.code for issue in issues}
+    assert not any(issue.severity == "blocker" for issue in issues)
+
+
+async def test_a_table_at_the_limit_is_still_shown_whole() -> None:
+    small = large_table(10)
+    assert sum(len(v or "") + 8 for row in small.rows for v in row) <= mapping.WHOLE_TABLE_CHARS
+    tasks: list[MappingTask] = []
+
+    async def mapper(task: MappingTask, _: ToolContext) -> MappingProposal:
+        tasks.append(task)
+        return MappingProposal()
+
+    await map_sources([small], "Read", context(), mapper)
+
+    assert len(tasks[0].rows) == 14 and tasks[0].summary is None
+
+
+def test_a_wide_tables_summary_stays_within_its_budget() -> None:
+    header: list[str | None] = [f"Campo {c}" for c in range(120)]
+    data: list[list[str | None]] = [
+        [f"{c}-{r % 15}" if c % 2 else str(r * c) for c in range(120)] for r in range(400)
+    ]
+    table = EvidenceTable(source_id="S", name="ALV", rows=[header, *data])
+
+    summary = summarize(table)
+
+    assert summary.columns == 120 and len(summary.profiles) == 120
+    assert sum(len(p.model_dump_json()) for p in summary.profiles) <= mapping.PROFILE_CHARS
+    assert sum(len(r.model_dump_json()) for r in summary.shown) <= 2 * mapping.SUMMARY_CHARS
+    # The header is shown, and text columns keep listing spellings where they fit.
+    assert summary.shown[0].row == 1
+    assert any(p.values for p in summary.profiles if p.numbers == 0)

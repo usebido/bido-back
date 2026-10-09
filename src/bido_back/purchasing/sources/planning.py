@@ -7,6 +7,7 @@ from decimal import Decimal
 
 from bido_back.purchasing.importers import norm
 from bido_back.purchasing.sources.analysis import (
+    by_supplier_code,
     confidence,
     master_facts,
     supplier_country,
@@ -632,9 +633,10 @@ def _history(
                     issues=[],
                 )
             )
+    by_code = by_supplier_code(verified)
     suppliers = [
         supplier_evidence(
-            rows, masters, performance, verified, issues, include_history_evidence=False
+            rows, masters, performance, by_code, issues, include_history_evidence=False
         )
         for rows in grouped.values()
     ]

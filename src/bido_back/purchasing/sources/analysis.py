@@ -9,7 +9,8 @@ demand balance. Every issue retains the original evidence coordinates.
 import json
 import re
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -658,11 +659,42 @@ def supplier_country(masters: Sequence[Record]) -> str | None:
     return next(iter(codes))
 
 
+@dataclass(frozen=True, slots=True)
+class PurchasesByCode:
+    """Purchases by their exact supplier code, and the supplier names they write, built
+    once per assessment: a supplier's identity check is then a lookup, not a scan of
+    every purchase."""
+
+    records: Mapping[str, Sequence[Record]]
+    # Normalized name -> its last spelling, per code.
+    names: Mapping[str, Mapping[str, str]]
+
+
+def by_supplier_code(purchases: Sequence[Record]) -> PurchasesByCode:
+    records: dict[str, list[Record]] = defaultdict(list)
+    for record in purchases:
+        if (code := _text(record, "supplier_code")) is not None:
+            records[code].append(record)
+    return PurchasesByCode(
+        records=records, names={code: _names(rows) for code, rows in records.items()}
+    )
+
+
+def _names(records: Sequence[Record]) -> dict[str, str]:
+    """The supplier names records write: normalized name -> its last spelling."""
+    return {
+        _name(value): value
+        for record in records
+        if (value := _text(record, "supplier_name" if record.kind == "purchase" else "name"))
+        is not None
+    }
+
+
 def supplier_evidence(
     purchases: Sequence[Record],
     masters: Sequence[Record],
     performance: Sequence[Record],
-    all_purchases: Sequence[Record],
+    all_purchases: PurchasesByCode,
     issues: list[Issue],
     *,
     include_history_evidence: bool = True,
@@ -678,25 +710,17 @@ def supplier_evidence(
             code = next(iter(codes))
     metrics = _supplier_matches(performance, code, name)
     # Identity is shared across items, while latest prices remain item-specific.
-    identity_purchases = (
-        [record for record in all_purchases if _text(record, "supplier_code") == code]
-        if code is not None
-        else list(purchases)
-    )
-    identities = [*matching, *metrics, *purchases, *identity_purchases]
-    names = {
-        _name(value): value
-        for record in identities
-        if (value := _text(record, "supplier_name" if record.kind == "purchase" else "name"))
-        is not None
-    }
+    identity_purchases = all_purchases.records.get(code, ()) if code is not None else purchases
+    names = _names([*matching, *metrics, *purchases])
+    if code is not None:
+        names.update(all_purchases.names.get(code, {}))
     conflicted = len(names) > 1
     if conflicted:
         _issue(
             issues,
             "supplier_code_conflict",
             "A supplier identifier maps to multiple source names; no name was selected.",
-            identities,
+            [*matching, *metrics, *purchases, *identity_purchases],
             "supplier_code",
             "name",
             "supplier_name",
@@ -865,7 +889,7 @@ def assess(records: Sequence[Record]) -> Assessment:
     grouped = _groups(unique, result.issues)
     masters = [record for record in unique if record.kind == "supplier"]
     performance = [record for record in unique if record.kind == "supplier_performance"]
-    all_purchases = [record for record in unique if record.kind == "purchase"]
+    all_purchases = by_supplier_code([record for record in unique if record.kind == "purchase"])
     purchases: dict[str | None, list[Record]] = defaultdict(list)
     for record in unique:
         if record.kind == "purchase" and (part := _text(record, "part_number")) is not None:

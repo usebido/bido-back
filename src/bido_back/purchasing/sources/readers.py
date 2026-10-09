@@ -20,9 +20,12 @@ from typing import Protocol, cast
 from bido_back.documents.extract import Limits, extract_text
 from bido_back.purchasing.sources.contracts import EvidenceTable, Issue
 
-MAX_SOURCE_CELLS = 100_000
-MAX_SOURCE_CHARS = 1_000_000
-MAX_SOURCE_ROWS = 20_000
+# An assessment holds its sources and records in memory, about 2 KB per mapped cell: at
+# these limits one call peaks near 500 MB (measured 2026-10-09 on a 218,000-cell export).
+# Larger sources need a columnar store (docs/large-sources.md, step 3), not higher limits.
+MAX_SOURCE_CELLS = 200_000
+MAX_SOURCE_CHARS = 2_000_000
+MAX_SOURCE_ROWS = 50_000
 MAX_SOURCE_BYTES = 25 * 1024 * 1024
 
 _WORKBOOKS = frozenset({"xlsx", "xlsm", "xltx", "xltm"})
