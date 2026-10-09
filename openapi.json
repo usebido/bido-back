@@ -11667,6 +11667,16 @@
             "title": "Negotiation Holds",
             "type": "array"
           },
+          "origin": {
+            "default": "email",
+            "description": "How the latest proposal reached Bido: the supplier's email reply, or a document the buyer attached in the Copilot and registered (copilot_upload)",
+            "enum": [
+              "email",
+              "copilot_upload"
+            ],
+            "title": "Origin",
+            "type": "string"
+          },
           "payment_terms": {
             "anyOf": [
               {

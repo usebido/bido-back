@@ -156,7 +156,13 @@ async def rfq_activity(
                 (invite_id, occurred_at, count)
                 for invite_id, occurred_at, count in await session.execute(
                     select(Message.invite_id, Message.occurred_at, attachments)
-                    .where(Message.invite_id.in_(list(suppliers)), Message.direction == "in")
+                    # A quote the buyer uploaded is also stored as an inbound message;
+                    # its `quote.registered` event is the feed's line for it.
+                    .where(
+                        Message.invite_id.in_(list(suppliers)),
+                        Message.direction == "in",
+                        Message.origin == "email",
+                    )
                     .order_by(Message.occurred_at.desc())
                     .limit(limit)
                 )
@@ -236,6 +242,14 @@ def _event_item(
         case "rfq.invite_removed":
             supplier = supplier or _name(data)
             kind, summary = "user", f"Supplier removed: {supplier}"
+        case "quote.registered":
+            supplier = supplier or _name(data)
+            how = " from an uploaded document" if data.get("origin") == "copilot_upload" else ""
+            version = data.get("version")
+            kind = "user"
+            summary = f"Quote registered{how} for {supplier}" + (
+                f" (version {version})" if isinstance(version, int) else ""
+            )
         case "rfq.status_changed":
             kind = "system"
             summary = f"RFQ {data.get('to_status', '?')} (was {data.get('from_status', '?')})"
