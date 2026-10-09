@@ -384,7 +384,9 @@ async def test_a_purchase_order_is_sent_in_the_thread_after_approval(world: Worl
         "@supplier.example.test>"
     )
     assert po_email.subject.startswith("Re: ") and po_email.subject.endswith("PO-1")
-    [attachment] = po_email.attachments
+    pdf, attachment = po_email.attachments
+    assert (pdf.filename, pdf.content_type) == ("PO-1.pdf", "application/pdf")
+    assert pdf.data.startswith(b"%PDF")
     assert (attachment.filename, attachment.content_type) == ("PO-1.xlsx", XLSX_MEDIA_TYPE)
     from openpyxl import load_workbook  # pyright: ignore[reportMissingTypeStubs]
 

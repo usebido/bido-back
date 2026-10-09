@@ -7,6 +7,9 @@ a tier and optionally the invite (supplier); without an invite the
 recommendation is taken. The awarded price is the supplier's own unit price in
 the supplier's currency: that is what the purchase order states.
 
+Each line carries the buyer limits its offer breaks (`buyer_limit_issues`: above the
+maximum unit price or the lead-time limit): ordering it needs a reason.
+
 Anything that cannot be ordered is refused with a reason a buyer can act on:
 an unknown line, a line awarded twice, a supplier that did not price that
 tier, or a line with no recommendation and no supplier chosen.
@@ -15,10 +18,15 @@ tier, or a line with no recommendation and no supplier chosen.
 from collections.abc import Sequence
 from dataclasses import dataclass
 from decimal import Decimal
+from typing import Final
 from uuid import UUID
 
 from bido_back.awards.schemas import AwardLine, AwardSelection
 from bido_back.comparison.compute import Cell, Comparison, ComparisonLine, SupplierColumn
+
+# The comparison's buyer-limit flags that an order may only break with a reason
+# (`buyer_lead_time_unconfirmed` is shown, not refused: the lead time is unknown).
+BREAKS_LIMIT: Final = frozenset({"above_buyer_maximum", "above_buyer_lead_time_limit"})
 
 
 class SelectionError(ValueError):
@@ -29,6 +37,13 @@ class SelectionError(ValueError):
 class Selected:
     lines: list[AwardLine]
     differs_from_recommendation: bool
+
+    @property
+    def above_limits(self) -> list[AwardLine]:
+        """Lines whose offer breaks a buyer limit (price above the maximum, lead time)."""
+        return [
+            line for line in self.lines if BREAKS_LIMIT.intersection(line.buyer_limit_issues or ())
+        ]
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -98,6 +113,7 @@ def _award_line(
         currency=currency,
         lead_time_days=cell.lead_time_days,
         recommended_invite_id=recommended,
+        buyer_limit_issues=tuple(cell.buyer_limit_issues) or None,
     )
 
 

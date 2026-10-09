@@ -43,6 +43,7 @@ _TOOLS: Final[Mapping[str, str]] = {
     "award_rfq": "award",
     "send_purchase_order": "purchase order",
     "send_award_notice": "not-selected notice",
+    "send_po_cancellation": "purchase order cancellation",
     "approve_negotiation_mandate": "negotiation mandate",
 }
 _FOLLOWUP_KINDS: Final[Mapping[str, str]] = {
@@ -288,6 +289,15 @@ def _event_item(
                 summary = f"Purchase order {_po_ref(data)} closed"
         case "purchase_order.cancelled":
             kind, summary = "user", f"Purchase order {_po_ref(data)} cancelled"
+        case "purchase_order.supplier_response":
+            kind, actor = "agent", BIDO
+            summary = _supplier_response(data, supplier)
+        case "purchase_order.response_reviewed":
+            kind = "user"
+            verdict = "accepted" if data.get("accepted") else "not accepted"
+            summary = f"Supplier reply on purchase order {_po_ref(data)} reviewed: {verdict}"
+        case "purchase_order.cancellation_sent":
+            kind, summary = "email", f"Cancellation of purchase order {_po_ref(data)} sent{to}"
         case "rfq.completed":
             kind = "system"
             closed, cancelled = data.get("closed"), data.get("cancelled")
@@ -436,6 +446,45 @@ def _moment(value: object) -> str:
         return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M UTC")
     except ValueError:
         return ""
+
+
+_RESPONSE_KINDS: Final[Mapping[str, str]] = {
+    "confirmation": "confirmed",
+    "confirmation_with_changes": "confirmed with changes",
+    "rejection": "refused",
+    "question": "asked a question about",
+    "delivery_update": "sent a delivery update on",
+    "other": "replied about",
+    "unread": "replied (not read automatically) about",
+}
+_FIELDS: Final[Mapping[str, str]] = {
+    "delivery_date": "delivery date",
+    "unit_price": "unit price",
+    "quantity": "quantity",
+}
+
+
+def _supplier_response(data: Mapping[str, Any], supplier: str | None) -> str:
+    """`Atlantic confirmed with changes PO-3: line 2 delivery date 2026-11-20 -> 2026-12-04`."""
+    who = supplier or "The supplier"
+    what = _RESPONSE_KINDS.get(str(data.get("kind")), "replied about")
+    summary = f"{who} {what} purchase order {_po_ref(data)}"
+    changes = data.get("changes")
+    parts: list[str] = []
+    for change in cast(list[Any], changes) if isinstance(changes, list) else []:
+        if not isinstance(change, dict):
+            continue
+        item = cast(dict[str, Any], change)
+        field = _FIELDS.get(str(item.get("field")), str(item.get("field")))
+        parts.append(
+            f"line {item.get('position', '?')} {field} {item.get('ordered') or '—'} -> "
+            f"{item.get('stated') or '—'}"
+        )
+    if parts:
+        summary += ": " + "; ".join(parts)
+    if data.get("needs_review"):
+        summary += " (needs your review)"
+    return summary
 
 
 def _po_ref(data: Mapping[str, Any]) -> str:

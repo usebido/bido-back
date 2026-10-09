@@ -4,13 +4,13 @@ Agents are code-owned. The definition is data; `runner.run()` executes it.
 """
 
 import re
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, JsonValue
 
 from bido_back.agents.tools import AnyTool
 
@@ -21,6 +21,31 @@ PROMPTS_DIR = Path(__file__).resolve().parents[3] / "prompts"
 Effort = Literal["low", "medium", "high", "xhigh", "max"]
 
 _PROMPT_FILE = re.compile(r"^(?P<name>[a-z0-9_]+)\.v(?P<version>[1-9][0-9]*)\.md$")
+
+
+@dataclass(frozen=True, slots=True)
+class HandoffCall:
+    """A tool call of the run that handed its reply off: what was asked, and what the
+    agent's model read of the output (the tool's model view)."""
+
+    tool: str
+    args: dict[str, JsonValue]
+    output: JsonValue
+
+
+@dataclass(frozen=True, slots=True)
+class Handoff:
+    """Tools whose successful call ends the agent's turn; another agent writes the reply.
+
+    Once one of `tools` succeeds, the agent makes no further model request in
+    that run: `writer` gets every successful call of the run (in order) and
+    returns the writing agent and its input. That agent's streamed text is the
+    run's answer, so a turn has exactly one writer. Only for `stream_text`
+    agents; the writer must be one too.
+    """
+
+    tools: frozenset[str]
+    writer: Callable[[Sequence[HandoffCall]], Awaitable["tuple[AgentDefinition[Any], BaseModel]"]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +76,11 @@ class AgentDefinition[OutT: BaseModel]:
     # output. Only for conversational agents whose output model is one str
     # field (the copilot); agents whose output feeds code keep structured output.
     stream_text: bool = False
+    # Other prompt files appended to this one's, in order (shared rules kept in
+    # one versioned file). Each must look like `<name>.v<N>.md`.
+    prompt_includes: tuple[str, ...] = ()
+    # See Handoff. None: the agent always writes its own answer.
+    handoff: Handoff | None = None
 
     def __post_init__(self) -> None:
         match = _PROMPT_FILE.match(self.prompt_file)
@@ -70,6 +100,15 @@ class AgentDefinition[OutT: BaseModel]:
         names = [tool.name for tool in self.tools]
         if len(names) != len(set(names)):
             raise ValueError(f"duplicate tool names in agent {self.name!r}: {names}")
+        for include in self.prompt_includes:
+            if _PROMPT_FILE.match(include) is None:
+                raise ValueError(f"prompt include must look like 'name.v1.md': {include!r}")
+        if self.handoff is not None:
+            if not self.stream_text:
+                raise ValueError(f"agent {self.name!r}: a handoff needs stream_text")
+            unknown = sorted(self.handoff.tools - set(names))
+            if unknown:
+                raise ValueError(f"agent {self.name!r}: handoff tools not in its tools: {unknown}")
 
     def text_field(self) -> str:
         """The output model's single str field, which a streamed text answer fills."""
@@ -90,7 +129,9 @@ class AgentDefinition[OutT: BaseModel]:
         return None
 
     def load_prompt(self, prompts_dir: Path | None = None) -> str:
-        return _read_prompt((prompts_dir or PROMPTS_DIR) / self.prompt_file)
+        base = prompts_dir or PROMPTS_DIR
+        parts = [_read_prompt(base / name) for name in (self.prompt_file, *self.prompt_includes)]
+        return "\n\n".join(parts)
 
 
 @lru_cache(maxsize=128)

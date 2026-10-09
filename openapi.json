@@ -180,6 +180,61 @@
         "title": "AddLineRequest",
         "type": "object"
       },
+      "AffectedDemand": {
+        "description": "A demand the earliest new order cannot cover in time.",
+        "properties": {
+          "need_by": {
+            "format": "date",
+            "title": "Need By",
+            "type": "string"
+          },
+          "product_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Code"
+          },
+          "product_components": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Product Components",
+            "type": "array"
+          },
+          "product_description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Product Description"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "reference": {
+            "title": "Reference",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reference",
+          "need_by",
+          "quantity"
+        ],
+        "title": "AffectedDemand",
+        "type": "object"
+      },
       "AnalysisLineView": {
         "properties": {
           "avg_price": {
@@ -1194,6 +1249,13 @@
             "title": "Demand Contributions",
             "type": "array"
           },
+          "demand_schedule": {
+            "items": {
+              "$ref": "#/components/schemas/DatedQuantity"
+            },
+            "title": "Demand Schedule",
+            "type": "array"
+          },
           "demand_unit": {
             "anyOf": [
               {
@@ -1221,6 +1283,13 @@
               "$ref": "#/components/schemas/SourceRef"
             },
             "title": "Evidence",
+            "type": "array"
+          },
+          "expedite": {
+            "items": {
+              "$ref": "#/components/schemas/ExpediteAction"
+            },
+            "title": "Expedite",
             "type": "array"
           },
           "flags": {
@@ -1277,6 +1346,13 @@
               }
             ],
             "title": "Need By"
+          },
+          "need_schedule": {
+            "items": {
+              "$ref": "#/components/schemas/DatedQuantity"
+            },
+            "title": "Need Schedule",
+            "type": "array"
           },
           "net_requirement": {
             "anyOf": [
@@ -1375,12 +1451,32 @@
             ],
             "title": "Safety Stock"
           },
+          "sourcing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SourcingProposal"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "suppliers": {
             "items": {
               "$ref": "#/components/schemas/SupplierEvidence"
             },
             "title": "Suppliers",
             "type": "array"
+          },
+          "timing": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/TimingCheck"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "unit": {
             "anyOf": [
@@ -1862,6 +1958,20 @@
         "additionalProperties": false,
         "description": "One awarded line, exactly as the approver saw it.",
         "properties": {
+          "buyer_limit_issues": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Buyer Limit Issues"
+          },
           "currency": {
             "title": "Currency",
             "type": "string"
@@ -4060,6 +4170,26 @@
         "title": "CurrencyTotalView",
         "type": "object"
       },
+      "DatedQuantity": {
+        "properties": {
+          "need_by": {
+            "format": "date",
+            "title": "Need By",
+            "type": "string"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "need_by",
+          "quantity"
+        ],
+        "title": "DatedQuantity",
+        "type": "object"
+      },
       "DecisionOffer": {
         "properties": {
           "evidence_message_ids": {
@@ -4680,6 +4810,89 @@
           "reasons"
         ],
         "title": "ExcludedOffer",
+        "type": "object"
+      },
+      "ExpediteAction": {
+        "description": "Ask a supplier to bring an open order forward: before buying more, a late open\norder may cover the earliest needs.",
+        "properties": {
+          "current_date": {
+            "format": "date",
+            "title": "Current Date",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "po_line": {
+            "title": "Po Line",
+            "type": "string"
+          },
+          "po_number": {
+            "title": "Po Number",
+            "type": "string"
+          },
+          "quantity": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Quantity",
+            "type": "string"
+          },
+          "reason": {
+            "enum": [
+              "mrp_reschedule_in",
+              "mrp_reschedule_out",
+              "due_after_shortage",
+              "overdue"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "requested_date": {
+            "format": "date",
+            "title": "Requested Date",
+            "type": "string"
+          },
+          "supplier_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Code"
+          },
+          "supplier_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Name"
+          },
+          "would_cover": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Would Cover",
+            "type": "string"
+          }
+        },
+        "required": [
+          "po_number",
+          "po_line",
+          "quantity",
+          "current_date",
+          "requested_date",
+          "reason"
+        ],
+        "title": "ExpediteAction",
         "type": "object"
       },
       "FieldCorrectionView": {
@@ -5608,6 +5821,29 @@
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Quantity",
             "type": "string"
+          },
+          "reschedule_to": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reschedule To"
+          },
+          "supplier_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Code"
           }
         },
         "required": [
@@ -9061,6 +9297,13 @@
             "title": "Observations",
             "type": "integer"
           },
+          "outliers": {
+            "items": {
+              "$ref": "#/components/schemas/PriceOutlier"
+            },
+            "title": "Outliers",
+            "type": "array"
+          },
           "target_price": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Target Price",
@@ -9095,6 +9338,113 @@
           "max_price"
         ],
         "title": "PriceBenchmark",
+        "type": "object"
+      },
+      "PriceOutlier": {
+        "properties": {
+          "deviation_pct": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Deviation Pct",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "in_benchmark": {
+            "title": "In Benchmark",
+            "type": "boolean"
+          },
+          "lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lead Time Days"
+          },
+          "max_without": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Max Without"
+          },
+          "ordered_at": {
+            "format": "date",
+            "title": "Ordered At",
+            "type": "string"
+          },
+          "possible_emergency": {
+            "default": false,
+            "title": "Possible Emergency",
+            "type": "boolean"
+          },
+          "reference_lead_time_days": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reference Lead Time Days"
+          },
+          "reference_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Reference Price",
+            "type": "string"
+          },
+          "supplier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier"
+          },
+          "target_without": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Target Without"
+          },
+          "unit_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Unit Price",
+            "type": "string"
+          }
+        },
+        "required": [
+          "ordered_at",
+          "unit_price",
+          "reference_price",
+          "deviation_pct",
+          "in_benchmark"
+        ],
+        "title": "PriceOutlier",
         "type": "object"
       },
       "ProductView": {
@@ -9139,6 +9489,26 @@
           "next_need_by"
         ],
         "title": "ProductView",
+        "type": "object"
+      },
+      "ProjectedBalance": {
+        "properties": {
+          "balance": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Balance",
+            "type": "string"
+          },
+          "on": {
+            "format": "date",
+            "title": "On",
+            "type": "string"
+          }
+        },
+        "required": [
+          "on",
+          "balance"
+        ],
+        "title": "ProjectedBalance",
         "type": "object"
       },
       "ProposalLineView": {
@@ -9781,6 +10151,12 @@
             "title": "Id",
             "type": "string"
           },
+          "needs_review": {
+            "default": false,
+            "description": "A supplier reply to the order waits for the buyer",
+            "title": "Needs Review",
+            "type": "boolean"
+          },
           "ref": {
             "title": "Ref",
             "type": "string"
@@ -9843,6 +10219,23 @@
       },
       "PurchaseOrderView": {
         "properties": {
+          "cancellation_approval_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cancellation Approval Id"
+          },
+          "cancellation_sent": {
+            "default": false,
+            "title": "Cancellation Sent",
+            "type": "boolean"
+          },
           "created_at": {
             "format": "date-time",
             "title": "Created At",
@@ -9851,6 +10244,14 @@
           "currency": {
             "title": "Currency",
             "type": "string"
+          },
+          "document_gaps": {
+            "description": "What the PO document leaves blank (e.g. payment_terms, incoterm, line 2 delivery_date): fill it on the RFQ before sending, or send it as is",
+            "items": {
+              "type": "string"
+            },
+            "title": "Document Gaps",
+            "type": "array"
           },
           "fulfilment": {
             "$ref": "#/components/schemas/PurchaseOrderFulfilment",
@@ -9883,6 +10284,12 @@
             },
             "title": "Lines",
             "type": "array"
+          },
+          "needs_review": {
+            "default": false,
+            "description": "A supplier reply changes or questions the order: the buyer decides (acknowledge, cancel, or answer the supplier)",
+            "title": "Needs Review",
+            "type": "boolean"
           },
           "payment_terms": {
             "anyOf": [
@@ -9949,6 +10356,14 @@
           "supplier_name": {
             "title": "Supplier Name",
             "type": "string"
+          },
+          "supplier_responses": {
+            "description": "The supplier's replies to the order, newest first",
+            "items": {
+              "$ref": "#/components/schemas/SupplierResponseView"
+            },
+            "title": "Supplier Responses",
+            "type": "array"
           },
           "total": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
@@ -10815,6 +11230,35 @@
           "requirements"
         ],
         "title": "RequirementsView",
+        "type": "object"
+      },
+      "ReviewRequest": {
+        "additionalProperties": false,
+        "description": "The buyer's decision on a supplier reply that changed or questioned the order.",
+        "properties": {
+          "accepted": {
+            "description": "True: the buyer accepts what the supplier wrote (e.g. the new date); false: they do not, and answer the supplier themselves",
+            "title": "Accepted",
+            "type": "boolean"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          }
+        },
+        "required": [
+          "accepted"
+        ],
+        "title": "ReviewRequest",
         "type": "object"
       },
       "RfqActivityItem": {
@@ -13213,6 +13657,13 @@
             "title": "Status",
             "type": "string"
           },
+          "timing_alerts": {
+            "items": {
+              "$ref": "#/components/schemas/TimingAlert"
+            },
+            "title": "Timing Alerts",
+            "type": "array"
+          },
           "totals": {
             "items": {
               "$ref": "#/components/schemas/SpendTotal"
@@ -13276,6 +13727,50 @@
           "column"
         ],
         "title": "SourceRef",
+        "type": "object"
+      },
+      "SourcingProposal": {
+        "description": "No known supplier can be used: find one before buying.",
+        "properties": {
+          "action": {
+            "const": "rfq_new_suppliers",
+            "default": "rfq_new_suppliers",
+            "title": "Action",
+            "type": "string"
+          },
+          "candidates": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Candidates",
+            "type": "array"
+          },
+          "excluded": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Excluded",
+            "type": "array"
+          },
+          "material_group": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Material Group"
+          },
+          "reason": {
+            "const": "no_usable_supplier",
+            "default": "no_usable_supplier",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "title": "SourcingProposal",
         "type": "object"
       },
       "SpendTotal": {
@@ -13632,6 +14127,22 @@
       },
       "SupplierEvidence": {
         "properties": {
+          "arrival_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "meets",
+                  "meets_consuming_safety_stock",
+                  "does_not_meet"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Arrival Status"
+          },
           "avg_lead_time_days": {
             "anyOf": [
               {
@@ -13725,6 +14236,18 @@
             ],
             "title": "Country"
           },
+          "coverable_quantity": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Coverable Quantity"
+          },
           "currency": {
             "anyOf": [
               {
@@ -13735,6 +14258,17 @@
               }
             ],
             "title": "Currency"
+          },
+          "days_late": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Days Late"
           },
           "delivery_observations": {
             "default": 0,
@@ -13751,6 +14285,18 @@
               }
             ],
             "title": "Email"
+          },
+          "estimated_arrival": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Arrival"
           },
           "evidence": {
             "items": {
@@ -13803,6 +14349,23 @@
               }
             ],
             "title": "Lead Time Days"
+          },
+          "lead_time_source": {
+            "anyOf": [
+              {
+                "enum": [
+                  "agreement",
+                  "history",
+                  "reported",
+                  "material_master"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Lead Time Source"
           },
           "min_order_quantity": {
             "anyOf": [
@@ -13880,6 +14443,17 @@
             ],
             "title": "Otif Pct"
           },
+          "planned_lead_time_days": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Planned Lead Time Days"
+          },
           "purchase_blocked": {
             "default": false,
             "title": "Purchase Blocked",
@@ -13936,6 +14510,11 @@
               }
             ],
             "title": "Quantity"
+          },
+          "recommended": {
+            "default": false,
+            "title": "Recommended",
+            "type": "boolean"
           },
           "score_delivery": {
             "anyOf": [
@@ -14207,6 +14786,133 @@
           "decided_at"
         ],
         "title": "SupplierQuestionView",
+        "type": "object"
+      },
+      "SupplierResponseChange": {
+        "properties": {
+          "field": {
+            "description": "delivery_date, unit_price or quantity",
+            "title": "Field",
+            "type": "string"
+          },
+          "ordered": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the order says",
+            "title": "Ordered"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "stated": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the supplier wrote (a date or a number)",
+            "title": "Stated"
+          },
+          "unverified": {
+            "default": false,
+            "description": "Not readable as a date or number, or not found in the email",
+            "title": "Unverified",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "position",
+          "field",
+          "ordered",
+          "stated"
+        ],
+        "title": "SupplierResponseChange",
+        "type": "object"
+      },
+      "SupplierResponseView": {
+        "description": "A supplier's reply to the order, as Bido read it (`awards.responses`).",
+        "properties": {
+          "at": {
+            "format": "date-time",
+            "title": "At",
+            "type": "string"
+          },
+          "changes": {
+            "items": {
+              "$ref": "#/components/schemas/SupplierResponseChange"
+            },
+            "title": "Changes",
+            "type": "array"
+          },
+          "kind": {
+            "description": "confirmation, confirmation_with_changes, rejection, question, delivery_update, other, or unread (Bido could not read it)",
+            "title": "Kind",
+            "type": "string"
+          },
+          "message_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Message Id"
+          },
+          "needs_review": {
+            "title": "Needs Review",
+            "type": "boolean"
+          },
+          "other_dates": {
+            "items": {
+              "format": "date",
+              "type": "string"
+            },
+            "title": "Other Dates",
+            "type": "array"
+          },
+          "summary": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Summary"
+          },
+          "supplier_order_ref": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Order Ref"
+          }
+        },
+        "required": [
+          "at",
+          "message_id",
+          "kind",
+          "needs_review"
+        ],
+        "title": "SupplierResponseView",
         "type": "object"
       },
       "SupplierStatView": {
@@ -15005,6 +15711,183 @@
           "complete"
         ],
         "title": "TierTotal",
+        "type": "object"
+      },
+      "TimingAlert": {
+        "description": "A line that runs short before a new order can arrive, worded by code (the model\nonly translates it), with what to do in order: expedites first.",
+        "properties": {
+          "actions": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Actions",
+            "type": "array"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "outcome": {
+            "enum": [
+              "unavoidable_stockout",
+              "meets_consuming_safety_stock",
+              "unknown"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "part_number": {
+            "title": "Part Number",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          }
+        },
+        "required": [
+          "part_number",
+          "outcome",
+          "summary"
+        ],
+        "title": "TimingAlert",
+        "type": "object"
+      },
+      "TimingCheck": {
+        "description": "Whether a new order can arrive before the line runs short, from lead times.\n\nComputed by code over the projected balance without new orders (stock plus open\norders as counted, minus dated demand); the quantity to buy is unchanged by it.",
+        "properties": {
+          "affected_demand": {
+            "items": {
+              "$ref": "#/components/schemas/AffectedDemand"
+            },
+            "title": "Affected Demand",
+            "type": "array"
+          },
+          "first_shortage_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Shortage Date"
+          },
+          "first_stockout_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Stockout Date"
+          },
+          "involve": {
+            "items": {
+              "const": "production_planning",
+              "type": "string"
+            },
+            "title": "Involve",
+            "type": "array"
+          },
+          "order_date": {
+            "format": "date",
+            "title": "Order Date",
+            "type": "string"
+          },
+          "outcome": {
+            "enum": [
+              "meets",
+              "meets_consuming_safety_stock",
+              "unavoidable_stockout",
+              "unknown"
+            ],
+            "title": "Outcome",
+            "type": "string"
+          },
+          "projected": {
+            "items": {
+              "$ref": "#/components/schemas/ProjectedBalance"
+            },
+            "title": "Projected",
+            "type": "array"
+          },
+          "recommended_arrival": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommended Arrival"
+          },
+          "recommended_supplier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommended Supplier"
+          },
+          "safety_stock": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Safety Stock",
+            "type": "string"
+          },
+          "switched_from": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Switched From"
+          },
+          "uncovered_after_expedite": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Uncovered After Expedite"
+          },
+          "uncovered_quantity": {
+            "default": "0",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Uncovered Quantity",
+            "type": "string"
+          }
+        },
+        "required": [
+          "order_date",
+          "outcome"
+        ],
+        "title": "TimingCheck",
         "type": "object"
       },
       "UpdateBrandingRequest": {
@@ -22482,7 +23365,7 @@
     },
     "/v1/purchase-orders/{po_id}.{fmt}": {
       "get": {
-        "description": "The PO as .xlsx, or as printable HTML (print it to PDF from the browser).",
+        "description": "The PO as the supplier receives it (.pdf, .xlsx), or as printable HTML.",
         "operationId": "purchase_order_document_v1_purchase_orders__po_id___fmt__get",
         "parameters": [
           {
@@ -22502,7 +23385,8 @@
             "schema": {
               "enum": [
                 "xlsx",
-                "html"
+                "html",
+                "pdf"
               ],
               "title": "Fmt",
               "type": "string"
@@ -22530,6 +23414,12 @@
         "responses": {
           "200": {
             "content": {
+              "application/pdf": {
+                "schema": {
+                  "format": "binary",
+                  "type": "string"
+                }
+              },
               "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": {
                 "schema": {
                   "format": "binary",
@@ -22735,7 +23625,7 @@
     },
     "/v1/purchase-orders/{po_id}/cancel": {
       "post": {
-        "description": "Cancel the order with a reason, at any point before it is fully received.",
+        "description": "Cancel the order with a reason, at any point before it is fully received.\n\nA sent order also gets a cancellation email to the supplier, proposed for\napproval (`cancellation_approval_id` on the order).",
         "operationId": "cancel_purchase_order_v1_purchase_orders__po_id__cancel_post",
         "parameters": [
           {
@@ -23217,6 +24107,133 @@
           }
         ],
         "summary": "Record Receipt",
+        "tags": [
+          "awards"
+        ]
+      }
+    },
+    "/v1/purchase-orders/{po_id}/review": {
+      "post": {
+        "description": "Decide on the supplier's reply that changed or questioned the order\n(`needs_review`): accept it, or not (then answer the supplier).",
+        "operationId": "review_supplier_response_v1_purchase_orders__po_id__review_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "po_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Po Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReviewRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PurchaseOrderView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Review Supplier Response",
         "tags": [
           "awards"
         ]

@@ -125,9 +125,13 @@ tool loop, sessions and memory. Bido keeps everything that commits: auth,
 tenants, approvals, the outbox, and the business endpoints.
 
 - **Models:** OpenAI, through the Responses API (`OPENAI_API_KEY`).
-  `gpt-6-luna` by default, `gpt-6.1-sol` for quote extraction; each agent's
-  model is set in `agents/catalog/definitions.py`. Requests are stateless
-  (`store=False`): OpenAI keeps no conversation state between turns.
+  `gpt-6-luna` by default (the Copilot included); `gpt-6.1-sol` for quote
+  extraction, the sheet and source mappers, the template builder, and the reply
+  of a Copilot turn that ran the purchase analysis (`analysis_reply_writer`, a
+  handoff: the Copilot stops after the analysis tool and the writer answers).
+  Each agent's model is set in `agents/catalog/definitions.py` or
+  `copilot/agent.py`. Requests are stateless (`store=False`): OpenAI keeps no
+  conversation state between turns.
 - **Pinned exactly** (`agno==<version>` in `pyproject.toml`). Upgrades are
   deliberate, in their own PR, after reading the changelog.
 - **Contained:** Agno and OpenAI types live only in
@@ -304,13 +308,25 @@ best-and-final request equal the code-decided asks, never above the maximum,
 never revealing it or a competitor, no commitment language, round and daily
 caps; early close; deadline close and the recommendation with the broker
 rule; a committing draft held), `recipients` (a non-test domain held until
-confirmed, test domains pass, the guarded sender as the net) and `award`
+confirmed, test domains pass, the guarded sender as the net), `award`
 (purchase orders, PO email in the supplier's language, "not selected" notices
-without prices). After the send, the buyer records the order's life in Bido
-(`/v1/purchase-orders/{id}/acknowledge`, `/receipts`, `/close`, `/cancel`, or
-the Copilot's purchase-order tools): `fulfilment.state` goes sent ->
-acknowledged -> partially_received -> received -> closed (or cancelled), and
-the RFQ shows as `completed` once every order is closed or cancelled.
+without prices) and `po_lifecycle` (the order after the award, below).
+
+The purchase order goes out, after approval, as a reply in the RFQ thread with
+the PO as a PDF in the supplier's language (buyer and supplier, the offer it
+accepts, every line with part number, quantity, unit price, total, delivery
+date and place, Incoterm, payment terms, the approver) and as .xlsx
+(`/v1/purchase-orders/{id}.pdf|.xlsx`). The supplier's replies in that thread
+keep being read after the award (`awards.responses`, job `po.response`): a plain
+confirmation acknowledges the order with their order number; a new date, price
+or quantity, a refusal or a question is flagged (`needs_review`) and never
+applied, until the buyer decides (`POST .../review`, or acknowledges, closes or
+cancels). The buyer records the rest (`/acknowledge`, `/receipts`, `/close`,
+`/cancel`, or the Copilot's purchase-order tools): `fulfilment.state` goes
+sent -> acknowledged -> partially_received -> received -> closed (or
+cancelled); cancelling a sent order proposes the cancellation email to the
+supplier (`send_po_cancellation`, after approval). The RFQ shows as
+`completed` once every order is closed or cancelled.
 
 ```bash
 uv run python -m evals.flow --mock     # scripted model: checks the harness (free)

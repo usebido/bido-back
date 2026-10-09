@@ -199,7 +199,9 @@ async def test_acknowledge_close_and_cancel_ask_first(world: World) -> None:
     assert lyon.fulfilment_state == "sent"
     cancelled = await tools.confirm(ctx, "cancel_purchase_order", cancelling)
     assert cancelled.state == "cancelled" and cancelled.rfq_completed
-    assert await stage(world) == ("completed", None, True)
+    # PO-1 had been sent: the supplier's cancellation email now waits for approval.
+    assert cancelled.cancellation_approval_id is not None
+    assert await stage(world) == ("completed", "approve", True)
     with pytest.raises(ToolError, match="already cancelled"):
         await tools.call(ctx, "cancel_purchase_order", po="PO-1", reason="again")
 

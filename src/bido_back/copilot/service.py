@@ -40,11 +40,12 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
+from bido_back.agents.definition import AgentDefinition
 from bido_back.agents.events import Event, RunCompleted, RunFailed, ToolCalled, ToolResult
 from bido_back.agents.usage import UsageMeter
 from bido_back.approvals import PostgresApprovalSink
 from bido_back.auth import Principal
-from bido_back.copilot.agent import copilot_agent
+from bido_back.copilot.agent import analysis_handoff, copilot_agent
 from bido_back.copilot.contracts import (
     ATTACHMENTS_ONLY_MESSAGE,
     AnswerEvent,
@@ -117,6 +118,8 @@ class CopilotDeps:
     titler: Titler | None = None
     # Reads a quote the buyer attached, for register_quote; None = the default agent.
     quote_extractor: QuoteExtractor | None = None
+    # Writes the reply of a turn that ran the analysis; None = the default agent.
+    analysis_writer: AgentDefinition[CopilotReply] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -290,7 +293,16 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
             conversation_id=prepared.conversation_id,
         )
     )
-    agent = copilot_agent(tools)
+    agent = copilot_agent(
+        tools,
+        handoff=analysis_handoff(
+            prepared.input.message,
+            prepared.input.today,
+            prepared.input.attachments,
+            own_words,
+            deps.analysis_writer,
+        ),
+    )
     # Every later log line of this request names the conversation and the run.
     annotate(conversation_id=prepared.conversation_id, run_id=context.run_id)
     turn = _TurnLog(prepared, context.run_id, agent.prompt_version, agent.model)

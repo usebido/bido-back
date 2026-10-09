@@ -46,7 +46,9 @@ Both paths then:
        proposed follow-up; for an auto-reply, pause chases until the stated
        return date (`bido_back.followups.hooks`);
 3. after the commit, for a 'stored' reply, enqueue QUOTE_EXTRACT with
-   idempotency key `extract:<message row id>`.
+   idempotency key `extract:<message row id>`; or, when the invite has a sent
+   purchase order still open, PO_RESPONSE (`po-response:<message row id>`):
+   the reply answers the order (`bido_back.awards.responses`), not the RFQ.
 
 Delivery is at-least-once. A crash after the commit but before the enqueue is
 healed by the redelivery: the duplicate path enqueues the extraction again
@@ -66,14 +68,22 @@ from sqlalchemy import TextClause, func, select, text, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from bido_back.awards.schemas import RESPONDING_FULFILMENT_STATES
 from bido_back.db import create_sessionmaker, tenant_session
-from bido_back.db.models import Attachment, Contact, Invite, Message, Supplier
+from bido_back.db.models import (
+    Attachment,
+    Contact,
+    Invite,
+    IssuedPurchaseOrder,
+    Message,
+    Supplier,
+)
 from bido_back.email.addresses import address_domain, extract_reply_tokens, extract_rfq_refs
 from bido_back.email.inbound import InboundEmail, parse_inbound
 from bido_back.followups.hooks import cancel_on_reply, pause_on_auto_reply
 from bido_back.storage import BlobStorage
 from bido_back.worker.envelope import Envelope
-from bido_back.worker.job_types import QUOTE_EXTRACT
+from bido_back.worker.job_types import PO_RESPONSE, QUOTE_EXTRACT
 from bido_back.worker.jobs import JobQueue
 
 logger = logging.getLogger(__name__)
@@ -101,6 +111,8 @@ class IngestResult:
     reason: QuarantineReason | None = None
     matched_by: MatchedBy | None = None
     extraction_enqueued: bool = False
+    # The invite has a sent, open purchase order: the job read is `po.response`.
+    purchase_order_reply: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,9 +194,17 @@ class InboundService:
     ) -> IngestResult:
         result = await self._store(email, match, raw, raw_key)
         # _store decides whether extraction is due; the job goes out after the commit.
+        # A reply about a sent purchase order is read as such, not as a new offer.
         if result.extraction_enqueued and result.message_id is not None:
             await self._jobs.enqueue(
                 Envelope(
+                    type=PO_RESPONSE,
+                    tenant_id=match.tenant_id,
+                    idempotency_key=f"po-response:{result.message_id}",
+                    payload={"message_id": str(result.message_id)},
+                )
+                if result.purchase_order_reply
+                else Envelope(
                     type=QUOTE_EXTRACT,
                     tenant_id=match.tenant_id,
                     idempotency_key=f"extract:{result.message_id}",
@@ -238,6 +258,8 @@ class InboundService:
                     )
                 )
             ).one_or_none()
+            purchase_order_reply = await _has_open_purchase_order(session, match.invite_id)
+            matched = replace(matched, purchase_order_reply=purchase_order_reply)
             if existing is not None:
                 # Still 'stored' means the extraction may never have been
                 # enqueued (crash between commit and enqueue): enqueue again.
@@ -326,6 +348,20 @@ class InboundService:
             reason=reason,
             extraction_enqueued=reason is None,
         )
+
+
+async def _has_open_purchase_order(session: AsyncSession, invite_id: UUID) -> bool:
+    """The invite has a sent purchase order still open: its replies answer that order."""
+    found = await session.scalar(
+        select(IssuedPurchaseOrder.id)
+        .where(
+            IssuedPurchaseOrder.invite_id == invite_id,
+            IssuedPurchaseOrder.status == "sent",
+            IssuedPurchaseOrder.fulfilment_state.in_(list(RESPONDING_FULFILMENT_STATES)),
+        )
+        .limit(1)
+    )
+    return found is not None
 
 
 async def _lookup(

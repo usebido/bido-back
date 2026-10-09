@@ -51,6 +51,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
+from statistics import median
 from typing import Final, Literal
 
 from bido_back.purchasing.analysis import (
@@ -76,6 +77,7 @@ from bido_back.purchasing.sources.contracts import (
     Issue,
     LineFlag,
     PriceBenchmark,
+    PriceOutlier,
     Record,
     SourceRef,
     SpendTotal,
@@ -100,6 +102,13 @@ PARAMS: Final = Params()
 MIN_OBSERVATIONS: Final = 2
 ORDER_KEY: Final = ("po_number", "po_line", "location")
 _CENTS: Final = Decimal("0.01")
+# A completed purchase this far (in %) from the median of the item's other price
+# references is an outlier; judged only with at least this many other references.
+OUTLIER_PCT: Final = Decimal(25)
+OUTLIER_MIN_REFERENCES: Final = 2
+# An order delivered in at most this share of the median lead time of the item's other
+# completed orders is abnormally fast: a possible emergency purchase.
+EMERGENCY_LEAD_SHARE: Final = Decimal("0.5")
 _DAYS: Final = Decimal("0.1")
 
 
@@ -370,6 +379,119 @@ def _measure_supplier(
     _extend(supplier.evidence, source_refs(rejecting, "rejected"))
 
 
+def _outliers(
+    points: Sequence[PricePoint],
+    listed: Sequence[SupplierEvidence],
+    currency: str | None,
+    suppliers: Mapping[str, SupplierEvidence],
+) -> list[tuple[PricePoint, Decimal]]:
+    """Completed-purchase prices at least `OUTLIER_PCT` away from the median of the item's
+    other price references: the other completed purchases and current agreements in the
+    same currency. Needs `OUTLIER_MIN_REFERENCES` other references to judge."""
+    agreements = [
+        s.contract_price
+        for s in listed
+        if s.contract_price is not None
+        and s.contract_price > 0
+        and s.contract_expired is False
+        and (s.contract_currency or currency) == currency
+    ]
+    found: list[tuple[PricePoint, Decimal]] = []
+    for point in points:
+        others = [p.unit_price for p in points if p is not point] + agreements
+        if len(others) < OUTLIER_MIN_REFERENCES or point.supplier not in suppliers:
+            continue
+        reference = median(others)
+        if reference > 0 and abs(point.unit_price / reference - 1) * 100 >= OUTLIER_PCT:
+            found.append((point, reference))
+    return found
+
+
+def _flag_outliers(
+    line: AssessmentLine,
+    points: Sequence[PricePoint],
+    orders: Sequence[OrderFacts],
+    currency: str | None,
+    suppliers: Mapping[str, SupplierEvidence],
+    params: Params,
+    target: Decimal,
+) -> list[PriceOutlier]:
+    """Flag outlying completed-purchase prices; the benchmark keeps them (never dropped
+    silently), and each flag says what the target and maximum would be without it."""
+    # Lead times of every completed order of the item, not only the price window.
+    leads = {
+        tuple(source_text(o.order, field) or "" for field in ORDER_KEY): o.lead_time_days
+        for o in orders
+        if o.supplier in suppliers
+    }
+    found: list[PriceOutlier] = []
+    for point, reference in _outliers(points, line.suppliers, currency, suppliers):
+        lead = leads.get(point.order_key)
+        other_leads = [
+            Decimal(days)
+            for key, days in leads.items()
+            if key != point.order_key and days is not None
+        ]
+        typical = median(other_leads) if len(other_leads) >= OUTLIER_MIN_REFERENCES else None
+        rest = [p for p in points if p is not point]
+        rest_average = weighted_avg(rest)
+        without: tuple[Decimal, Decimal] | None = None
+        if rest and rest_average is not None:
+            without = price_limits(
+                round_price(latest(rest).unit_price),
+                round_price(rest_average),
+                params.max_over_pct,
+            )
+        outlier = PriceOutlier(
+            supplier=_label(suppliers[point.supplier]),
+            ordered_at=point.ordered_at,
+            unit_price=round_price(point.unit_price),
+            reference_price=round_price(reference),
+            deviation_pct=((point.unit_price / reference - 1) * 100).quantize(_DAYS),
+            in_benchmark=True,
+            target_without=without[0] if without else None,
+            max_without=without[1] if without else None,
+            lead_time_days=lead,
+            reference_lead_time_days=typical,
+            possible_emergency=lead is not None
+            and typical is not None
+            and Decimal(lead) <= typical * EMERGENCY_LEAD_SHARE,
+            evidence=list(point.evidence),
+        )
+        found.append(outlier)
+        effect = (
+            "it does not change the target"
+            if without is None or without[0] == target
+            else f"without it the target would be {without[0]:f}"
+        )
+        line.issues.append(
+            Issue(
+                code="price_outlier",
+                severity="warning",
+                message=f"The {outlier.unit_price:f} {currency} paid to "
+                f"{outlier.supplier or 'a supplier'} on {outlier.ordered_at.isoformat()} is "
+                f"{outlier.deviation_pct:+f}% from the median of the item's other price "
+                f"references ({outlier.reference_price:f}; rule: {OUTLIER_PCT}% or more). It "
+                f"stays in the internal average and maximum; {effect}"
+                + (
+                    f", and without it the maximum would be {without[1]:f}"
+                    if without is not None
+                    else ""
+                )
+                + "."
+                + (
+                    f" It was delivered in {lead} days against a median of {typical:f} for "
+                    "the other orders: possibly an emergency purchase (the evidence states no "
+                    "cause)."
+                    if outlier.possible_emergency and typical is not None
+                    else ""
+                ),
+                evidence=outlier.evidence,
+            )
+        )
+    return found
+
+
 def _rank_key(
     supplier: SupplierEvidence,
 ) -> tuple[bool, bool, bool, Decimal, bool, Decimal, bool, Decimal, str, str]:
@@ -463,6 +585,7 @@ def measure(
         evidence: list[SourceRef] = []
         for point in points:
             _extend(evidence, point.evidence)
+        found = _flag_outliers(line, points, orders, currency, suppliers, params, target)
         line.price = PriceBenchmark(
             currency=last.currency,
             observations=len(points),
@@ -477,6 +600,7 @@ def measure(
             max_price=maximum,
             estimated_cost_at_target=_cost(line.calculated_to_buy, target),
             estimated_cost_at_last=_cost(line.calculated_to_buy, last_price),
+            outliers=found,
             evidence=evidence,
         )
 

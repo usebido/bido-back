@@ -28,7 +28,7 @@ NUMBER_FIELDS: Final = frozenset(
 DATE_FIELDS: Final = frozenset(
     {
         "as_of", "receipt_date", "need_by", "ordered_at", "promised_at", "received_at",
-        "expected_at", "valid_from", "valid_to",
+        "expected_at", "valid_from", "valid_to", "reschedule_to",
     }
 )  # fmt: skip
 # Business identifiers matched across reports with `join_key`, by namespace.

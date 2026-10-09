@@ -1,7 +1,7 @@
 """What the copilot's model reads of tool outputs: no cell references, bounded assessments."""
 
 import json
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any, cast
 
@@ -18,11 +18,15 @@ from bido_back.copilot.model_views import (
 from bido_back.purchasing.sources.contracts import (
     AssessmentLine,
     Assumption,
+    DatedQuantity,
     Issue,
     PlanningCandidate,
+    ProjectedBalance,
     SourceAssessment,
     SourceRef,
     SupplierEvidence,
+    TimingAlert,
+    TimingCheck,
 )
 
 STOCK_DATE = Assumption(
@@ -216,3 +220,50 @@ def test_assessment_wide_assumptions_survive_many_line_assumptions() -> None:
 
     assert [a["code"] for a in view["assumptions"]] == ["as_of_from_stock"]
     assert "assumptions_left_out" not in view
+
+
+def test_a_lines_timing_is_read_with_its_lists_bounded() -> None:
+    long = line("P1", "40", suppliers=8)
+    # The recommended supplier is first and not suggested: a cut list still keeps it.
+    long.suppliers[0].recommended = True
+    long.timing = TimingCheck(
+        order_date=date(2026, 10, 8),
+        outcome="unavoidable_stockout",
+        projected=[
+            ProjectedBalance(on=date(2026, 10, 9) + timedelta(days=i), balance=Decimal(-i))
+            for i in range(40)
+        ],
+    )
+    long.need_schedule = [
+        DatedQuantity(need_by=date(2026, 10, 9) + timedelta(days=i), quantity=Decimal(1))
+        for i in range(30)
+    ]
+
+    view = cast(dict[str, Any], assessment_view(SourceAssessment(lines=[long])))
+
+    [read] = view["lines"]
+    assert read["timing"]["outcome"] == "unavoidable_stockout"
+    assert len(read["timing"]["projected"]) == 16
+    assert read["timing"]["projected_left_out"] == 24
+    assert (len(read["need_schedule"]), read["need_schedule_left_out"]) == (16, 14)
+    names = [s["name"] for s in read["suppliers"]]
+    assert "Fornecedor 0" in names and "Fornecedor 7" in names
+
+
+def test_timing_alerts_are_read_before_the_lines() -> None:
+    assessment = SourceAssessment(
+        lines=[line("P1", "40")],
+        timing_alerts=[
+            TimingAlert(
+                part_number="P1",
+                outcome="unavoidable_stockout",
+                summary="Unavoidable stockout from 2026-10-12.",
+                actions=["Ask S to move PO 1/10 from 2026-12-11 to 2026-10-12."],
+            )
+        ],
+    )
+
+    view = cast(dict[str, Any], assessment_view(assessment))
+
+    assert list(view)[:2] == ["timing_alerts", "lines"]
+    assert view["timing_alerts"][0]["summary"] == "Unavoidable stockout from 2026-10-12."

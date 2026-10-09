@@ -21,6 +21,11 @@ How our rules map onto Agno:
   `ApprovalRequested` and stop. If the proposed arguments do not validate,
   the error is fed back as the call's result and the run continues, so a
   person is never asked to approve an invalid payload.
+- A `Handoff` tool ends the model's turn once it succeeds (Agno's
+  `stop_after_tool_call`, set on that call only, so an invalid call still goes
+  back to the model). Another agent then writes the reply from the run's tool
+  results, streamed as this run's text, and that reply is stored as the run's
+  final assistant message, so the next turn's history reads like any other.
 - The model is OpenAI's, through the Responses API, stateless: `store=False`,
   so OpenAI keeps no conversation state, and each turn replays the full
   context, including the encrypted reasoning items of earlier turns.
@@ -40,18 +45,22 @@ How our rules map onto Agno:
 """
 
 import asyncio
+import json
 import logging
 import os
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from dataclasses import dataclass, field
+from contextlib import aclosing
+from dataclasses import dataclass, field, replace
 from functools import lru_cache
 from typing import Any, Final, Literal, cast
+from uuid import uuid4
 
 from agno.agent import Agent
 from agno.db.base import SessionType
 from agno.db.postgres import AsyncPostgresDb, create_async_postgres_engine
 from agno.exceptions import redact_secrets
+from agno.models.message import Message
 from agno.models.openai.responses import OpenAIResponses
 from agno.run.agent import (
     ModelRequestCompletedEvent,
@@ -78,7 +87,7 @@ from bido_back.agents import tracing
 from bido_back.agents.approvals import ApprovalProposal, ApprovalSink
 from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
-from bido_back.agents.definition import AgentDefinition
+from bido_back.agents.definition import AgentDefinition, HandoffCall
 from bido_back.agents.events import (
     ApprovalRequested,
     Artifact,
@@ -264,6 +273,10 @@ class _Outcome:
     status: Literal["ok", "error", "invalid_args"]
     output: dict[str, JsonValue] | None = None
     error: str | None = None
+    tool: str | None = None
+    args: dict[str, JsonValue] | None = None
+    # The JSON text the model read of the output (the tool's model view).
+    for_model: str | None = None
 
 
 @dataclass(slots=True)
@@ -274,6 +287,9 @@ class _RunState:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     # Where usage and traces go (the runner's; a fresh meter when called directly).
     scope: tracing.RunScope = field(default_factory=lambda: tracing.RunScope(UsageMeter()))
+    # The definition's handoff tools, and whether one succeeded in this run.
+    handoff_tools: frozenset[str] = frozenset()
+    handed_off: bool = False
 
 
 def _to_function(tool: AnyTool, context: ToolContext, state: _RunState) -> Function:
@@ -352,8 +368,21 @@ def _entrypoint(
                     _log_tool_call(tool, context, call_id, "ok", started)
                     dumped = output.model_dump(mode="json")
                     traced.finished("ok", output=dumped)
-                    state.outcomes[call_id] = _Outcome(status="ok", output=dumped)
-                    return tool.for_model(output)
+                    for_model = tool.for_model(output)
+                    state.outcomes[call_id] = _Outcome(
+                        status="ok",
+                        output=dumped,
+                        tool=tool.name,
+                        args=parsed.model_dump(mode="json"),
+                        for_model=for_model,
+                    )
+                    if tool.name in state.handoff_tools:
+                        # Read by Agno right after this call returns: the run stops
+                        # before its next model request. Per call: this run's
+                        # Function objects are its own (build_agent).
+                        fc.function.stop_after_tool_call = True
+                        state.handed_off = True
+                    return for_model
 
         state.outcomes[call_id] = _Outcome(status="error", error=message)
         return f"error: {message}"
@@ -406,6 +435,8 @@ def build_agent(
     """A fresh Agno Agent for one run. Never shared: Agno agents hold per-run state."""
     disable_agno_telemetry()
     state = state or _RunState()
+    if definition.handoff is not None:
+        state.handoff_tools = definition.handoff.tools
     # Only an agent that reads its earlier runs keeps them. A stateless agent's input
     # (spreadsheet rows, a supplier's email) is not copied into Agno's tables, which
     # have no row-level security.
@@ -802,6 +833,12 @@ async def _drive(
             continue
 
         if translator.completed:
+            if state.handed_off:
+                async for event in _write_handed_off_reply(
+                    definition, context, ids, config, emit, state, translator
+                ):
+                    yield event
+                return
             if definition.stream_text:
                 yield _finish_text(definition, translator, emit)
             else:
@@ -810,6 +847,101 @@ async def _drive(
 
         yield emit(RunFailed, code="internal_error", message="the run ended without a result")
         return
+
+
+async def _write_handed_off_reply(
+    definition: AgentDefinition[Any],
+    context: ToolContext,
+    ids: AgnoIds,
+    config: RunnerConfig,
+    emit: _Emitter,
+    state: _RunState,
+    translator: _Translator,
+) -> AsyncIterator[Event]:
+    """The handoff writer's reply, streamed as this run's text; then the terminal event."""
+    # Imported here: the runner imports this module.
+    from bido_back.agents import runner
+
+    assert definition.handoff is not None
+    # The writer reads what the agent read: each output's model view.
+    calls = [
+        HandoffCall(tool=o.tool, args=o.args or {}, output=json.loads(o.for_model))
+        for o in state.outcomes.values()
+        if o.status == "ok" and o.tool is not None and o.for_model is not None
+    ]
+    try:
+        writer, writer_input = await definition.handoff.writer(calls)
+    except Exception:
+        logger.exception("run %s: the handoff writer could not be prepared", context.run_id)
+        yield emit(RunFailed, code="internal_error", message="the reply could not be written")
+        return
+    # Text the agent streamed before handing off stays: the user saw it.
+    before = translator.text
+    separate = bool(before.strip())
+    written: list[str] = []
+    failed: RunFailed | None = None
+    # Closed on every exit, so the writer's run logs and ends its span now.
+    async with aclosing(
+        runner.run(
+            writer,
+            writer_input,
+            # Its own run id; no run storage (the reply is stored on this run below).
+            replace(context, run_id=uuid4()),
+            config=replace(config, agno_database_url=None),
+            parent=state.scope,
+        )
+    ) as events:
+        async for event in events:
+            if isinstance(event, TextDelta):
+                chunk = event.text
+                if separate:
+                    chunk = "\n\n" + chunk.lstrip("\n")
+                    separate = False
+                written.append(chunk)
+                yield emit(TextDelta, text=chunk)
+            elif isinstance(event, ReasoningDelta):
+                yield emit(ReasoningDelta, step_id=f"w{event.step_id}", text=event.text)
+            elif isinstance(event, ReasoningStep):
+                step_id = f"w{event.step_id}" if event.step_id is not None else None
+                yield emit(ReasoningStep, step_id=step_id, text=event.text)
+            elif isinstance(event, RunFailed):
+                failed = event
+    if failed is not None:
+        yield emit(RunFailed, code=failed.code, message=failed.message)
+        return
+    if not "".join(written).strip():
+        yield emit(RunFailed, code="invalid_output", message="the model returned no answer")
+        return
+    text = before + "".join(written)
+    try:
+        output = definition.output_model.model_validate({definition.text_field(): text})
+    except ValidationError as exc:
+        yield emit(RunFailed, code="invalid_output", message=validation_errors(exc))
+        return
+    await _store_reply(config, ids, translator.output, text)
+    yield emit(RunCompleted, output=output.model_dump(mode="json"))
+
+
+async def _store_reply(
+    config: RunnerConfig, ids: AgnoIds, run_output: RunOutput | None, text: str
+) -> None:
+    """Make the written reply the stored run's final assistant message and content.
+
+    Agno stored the run when it stopped after the handoff tool, ending with that
+    tool's result. With the reply appended, the next turn's history holds what
+    the user was told, as for any other run. A failure is logged: the user
+    already has the reply, and the history is still valid without it.
+    """
+    if not config.agno_database_url or run_output is None:
+        return
+    run_output.messages = [*(run_output.messages or []), Message(role="assistant", content=text)]
+    run_output.content = text
+    try:
+        await _agno_db(config.agno_database_url).upsert_run(
+            run_output, session_id=ids.session_id, user_id=ids.user_id
+        )
+    except Exception:
+        logger.exception("run %s: the handed-off reply was not stored", ids.run_id)
 
 
 class _UnexpectedPause(Exception):

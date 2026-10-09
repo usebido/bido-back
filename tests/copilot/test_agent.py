@@ -1,13 +1,22 @@
 """The copilot definition: prompt, tool set, and schemas OpenAI accepts."""
 
 import json
+from datetime import date
 from pathlib import Path
 from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from bido_back.agents.catalog.definitions import DEFAULT_MODEL
-from bido_back.copilot.agent import copilot_agent
+from bido_back.agents.definition import HandoffCall
+from bido_back.copilot.agent import (
+    ANALYSIS_REPLY_EFFORT,
+    ANALYSIS_REPLY_MODEL,
+    ANALYSIS_TOOLS,
+    AnalysisReplyInput,
+    analysis_handoff,
+    copilot_agent,
+)
 from bido_back.copilot.model_views import assessment_view, cell_free_view
 from bido_back.copilot.tools import CopilotToolDeps, copilot_tools
 from tests.rfqs.conftest import FakeMailboxes, fake_agents
@@ -96,7 +105,7 @@ def test_definition_and_tools() -> None:
     agent = copilot_agent(tools)
 
     assert agent.model == DEFAULT_MODEL
-    assert (agent.prompt_file, agent.prompt_version) == ("copilot.v26.md", 26)
+    assert (agent.prompt_file, agent.prompt_version) == ("copilot.v27.md", 27)
     # The copilot runs its newest prompt: a new version is never left unused.
     newest = max(int(p.stem.removeprefix("copilot.v")) for p in PROMPTS.glob("copilot.v*.md"))
     assert agent.prompt_version == newest
@@ -124,3 +133,43 @@ def test_the_model_reads_tool_outputs_without_cell_references() -> None:
         assert views[name] is assessment_view, name
     assert views["get_comparison"] is cell_free_view
     assert all(view is not None for view in views.values())
+
+
+async def test_analysis_turns_hand_their_reply_to_the_writer_on_the_stronger_model() -> None:
+    engine = create_async_engine("postgresql+asyncpg://app@localhost:5432/unused")
+    tools = copilot_tools(
+        CopilotToolDeps(db=engine, agents=fake_agents(), mailboxes=FakeMailboxes())
+    )
+
+    async def earlier() -> list[str]:
+        return ["analisa o motor"]
+
+    handoff = analysis_handoff("analisa o motor", date(2026, 10, 9), ["mb52.xlsx"], earlier)
+    agent = copilot_agent(tools, handoff=handoff)
+
+    # Luna stays the Copilot; only the analysis tools hand the reply off.
+    assert agent.model == DEFAULT_MODEL
+    assert agent.handoff is not None
+    assert agent.handoff.tools == ANALYSIS_TOOLS
+    assert ANALYSIS_TOOLS <= {tool.name for tool in agent.tools}
+    call = HandoffCall(tool="analyze_procurement_sources", args={"objective": "x"}, output={"a": 1})
+    writer, writer_input = await agent.handoff.writer([call])
+    assert (writer.model, writer.effort) == (ANALYSIS_REPLY_MODEL, ANALYSIS_REPLY_EFFORT)
+    assert writer.model != agent.model
+    assert writer.tools == () and writer.history_runs == 0 and writer.stream_text
+    assert isinstance(writer_input, AnalysisReplyInput)
+    assert writer_input.buyer_messages == ["analisa o motor"]
+    assert writer_input.tool_calls[0].output == {"a": 1}
+    # The writer's own rules first, then the Copilot's presentation rules, whole.
+    prompt = writer.load_prompt()
+    assert prompt.startswith("You write Bido's reply to the buyer")
+    assert prompt.endswith(agent.load_prompt())
+
+
+def test_without_analysis_tools_there_is_no_handoff() -> None:
+    async def earlier() -> list[str]:
+        return []
+
+    handoff = analysis_handoff("oi", date(2026, 10, 9), [], earlier)
+
+    assert copilot_agent((), handoff=handoff).handoff is None

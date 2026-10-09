@@ -20,12 +20,13 @@ from agno.agent import Agent
 from agno.db.postgres import AsyncPostgresDb
 from openai.types.responses import Response, ResponseReasoningItem
 from pydantic import BaseModel, Field, JsonValue
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents import agno_adapter
 from bido_back.agents.approvals import ApprovalProposal
 from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
-from bido_back.agents.definition import AgentDefinition
+from bido_back.agents.definition import AgentDefinition, Handoff, HandoffCall
 from bido_back.agents.events import (
     ApprovalRequested,
     Artifact,
@@ -39,6 +40,11 @@ from bido_back.agents.events import (
 )
 from bido_back.agents.runner import Completed, Failed, NeedsApproval, run, run_to_completion
 from bido_back.agents.tools import Tool, ToolError
+from bido_back.agents.usage import UsageMeter
+from tests.db.conftest import agno_engine
+
+# Fixtures used here and by modules that import this one.
+__all__ = ["agno_engine"]
 
 # --- Scripted OpenAI client -------------------------------------------------
 
@@ -938,3 +944,226 @@ async def test_stream_text_empty_answer_fails(script: Script) -> None:
 
     assert isinstance(result, Failed)
     assert result.failure.code == "invalid_output"
+
+
+# --- Handoff ---------------------------------------------------------------
+
+
+WRITER_MODEL = "gpt-6.1-sol"
+
+
+class WriterIn(BaseModel):
+    question: str
+    results: list[dict[str, JsonValue]]
+
+
+def writer_agent() -> AgentDefinition[Reply]:
+    return AgentDefinition(
+        name="writer",
+        prompt_file="example.v1.md",
+        prompt_version=1,
+        model=WRITER_MODEL,
+        output_model=Reply,
+        max_turns=1,
+        effort="medium",
+        stream_text=True,
+    )
+
+
+def handoff_agent(seen: list[Sequence[HandoffCall]] | None = None) -> AgentDefinition[Reply]:
+    async def write(calls: Sequence[HandoffCall]) -> tuple[AgentDefinition[Any], BaseModel]:
+        if seen is not None:
+            seen.append(calls)
+        results: list[dict[str, JsonValue]] = [
+            {"tool": c.tool, "args": c.args, "output": c.output} for c in calls
+        ]
+        return writer_agent(), WriterIn(question=TASK.question, results=results)
+
+    return AgentDefinition(
+        name="example",
+        prompt_file="example.v1.md",
+        prompt_version=1,
+        model=MODEL,
+        output_model=Reply,
+        tools=(LOOKUP, SEND),
+        effort="low",
+        stream_text=True,
+        handoff=Handoff(tools=frozenset({"lookup_price"}), writer=write),
+    )
+
+
+async def test_handoff_tool_ends_the_turn_and_the_writer_streams_the_reply(
+    script: Script,
+) -> None:
+    stub = script(
+        reply(thinking("I need the price."), tool_use("fc_1", "lookup_price", sku="SKU-1")),
+        reply(thinking("Write it up."), text("SKU-1 costs 12.50 euros per piece.")),
+    )
+    seen: list[Sequence[HandoffCall]] = []
+
+    events = [e async for e in run(handoff_agent(seen), TASK, ctx(), config=CONFIG)]
+
+    # One request by the agent, one by the writer: the agent never writes after the tool.
+    assert [c["model"] for c in stub.calls] == [MODEL, WRITER_MODEL]
+    assert not stub.calls[1].get("tools")
+    assert seen == [
+        [
+            HandoffCall(
+                tool="lookup_price",
+                args={"sku": "SKU-1"},
+                output={"sku": "SKU-1", "price_cents": 1250},
+            )
+        ]
+    ]
+    writer_input = json.dumps(input_of(stub.calls[1]))
+    assert "price_cents" in writer_input
+    deltas = "".join(e.text for e in events if isinstance(e, TextDelta))
+    assert deltas == "SKU-1 costs 12.50 euros per piece."
+    terminal = events[-1]
+    assert isinstance(terminal, RunCompleted)
+    assert terminal.output == {"answer": "SKU-1 costs 12.50 euros per piece."}
+    assert [e.seq for e in events] == list(range(len(events)))
+    assert {type(e) for e in events} >= {ToolCalled, ToolResult, ReasoningStep}
+    # The writer's reasoning steps keep ids apart from the agent's.
+    steps = [e.step_id for e in events if isinstance(e, ReasoningStep)]
+    assert len(steps) == len(set(steps)) == 2
+
+
+async def test_handoff_keeps_text_streamed_before_the_tool(script: Script) -> None:
+    script(
+        reply(text("Let me check."), tool_use("fc_1", "lookup_price", sku="SKU-1")),
+        reply(text("It is 12.50 euros.")),
+    )
+
+    result = await run_to_completion(handoff_agent(), TASK, ctx(), config=CONFIG)
+
+    assert isinstance(result, Completed)
+    assert result.output.answer == "Let me check.\n\nIt is 12.50 euros."
+    deltas = "".join(e.text for e in result.events if isinstance(e, TextDelta))
+    assert deltas == result.output.answer
+
+
+async def test_handoff_tool_with_invalid_args_goes_back_to_the_agent(script: Script) -> None:
+    stub = script(
+        reply(tool_use("fc_1", "lookup_price", item="SKU-1")),
+        reply(tool_use("fc_2", "lookup_price", sku="SKU-1")),
+        reply(text("It is 12.50 euros.")),
+    )
+
+    result = await run_to_completion(handoff_agent(), TASK, ctx(), config=CONFIG)
+
+    assert isinstance(result, Completed)
+    assert [c["model"] for c in stub.calls] == [MODEL, MODEL, WRITER_MODEL]
+    assert result.output.answer == "It is 12.50 euros."
+
+
+async def test_handoff_tool_error_still_hands_off_only_after_a_success(script: Script) -> None:
+    stub = script(
+        reply(tool_use("fc_1", "lookup_price", sku="missing")),
+        reply(text("That SKU does not exist.")),
+    )
+
+    result = await run_to_completion(handoff_agent(), TASK, ctx(), config=CONFIG)
+
+    # A failed call is not a handoff: the agent sees the error and answers itself.
+    assert isinstance(result, Completed)
+    assert [c["model"] for c in stub.calls] == [MODEL, MODEL]
+    assert result.output.answer == "That SKU does not exist."
+
+
+async def test_handoff_writer_failure_fails_the_run(script: Script) -> None:
+    script(
+        reply(tool_use("fc_1", "lookup_price", sku="SKU-1")),
+        RuntimeError("provider down"),
+    )
+
+    result = await run_to_completion(handoff_agent(), TASK, ctx(), config=CONFIG)
+
+    assert isinstance(result, Failed)
+
+
+async def test_handoff_writer_usage_counts_toward_the_run(script: Script) -> None:
+    script(
+        reply(tool_use("fc_1", "lookup_price", sku="SKU-1")),
+        reply(text("It is 12.50 euros.")),
+    )
+    meter = UsageMeter()
+
+    events = [e async for e in run(handoff_agent(), TASK, ctx(), config=CONFIG, usage=meter)]
+
+    assert isinstance(events[-1], RunCompleted)
+    assert meter.model_calls == 2
+
+
+def test_handoff_needs_stream_text_and_known_tools() -> None:
+    async def write(calls: Sequence[HandoffCall]) -> tuple[AgentDefinition[Any], BaseModel]:
+        raise AssertionError
+
+    with pytest.raises(ValueError, match="stream_text"):
+        AgentDefinition(
+            name="example",
+            prompt_file="example.v1.md",
+            prompt_version=1,
+            model=MODEL,
+            output_model=Answer,
+            tools=(LOOKUP,),
+            handoff=Handoff(tools=frozenset({"lookup_price"}), writer=write),
+        )
+    with pytest.raises(ValueError, match="not in its tools"):
+        AgentDefinition(
+            name="example",
+            prompt_file="example.v1.md",
+            prompt_version=1,
+            model=MODEL,
+            output_model=Reply,
+            tools=(LOOKUP,),
+            stream_text=True,
+            handoff=Handoff(tools=frozenset({"nope"}), writer=write),
+        )
+
+
+def _kind(item: object) -> str | None:
+    """A replayed input item's type, or a message's role."""
+    if isinstance(item, dict):
+        found = cast(dict[str, Any], item)
+        return found.get("type") or found.get("role")
+    return getattr(item, "type", None)
+
+
+@pytest.mark.db
+async def test_handoff_reply_is_the_stored_runs_answer_in_the_next_turns_history(
+    script: Script, agno_engine: AsyncEngine
+) -> None:
+    config = RunnerConfig(
+        openai_api_key="test-not-a-real-key",
+        agno_database_url=agno_engine.url.render_as_string(hide_password=False),
+    )
+    chat = replace(handoff_agent(), history_runs=4)
+    stub = script(
+        reply(thinking("Need the price.", "enc-agent"), tool_use("fc_1", "lookup_price", sku="S")),
+        reply(text("S costs 12.50 euros.")),
+        reply(text("You asked about S.")),
+    )
+    context = ctx()
+    session = f"handoff-{uuid4()}"
+
+    first = await run_to_completion(chat, TASK, context, session=session, config=config)
+    second = await run_to_completion(
+        chat,
+        Task(question="what did I ask?"),
+        replace(context, run_id=uuid4()),
+        session=session,
+        config=config,
+    )
+
+    assert isinstance(first, Completed) and isinstance(second, Completed)
+    assert [c["model"] for c in stub.calls] == [MODEL, WRITER_MODEL, MODEL]
+    replayed = input_of(stub.calls[2])
+    kinds = [_kind(i) for i in replayed]
+    # The first turn replays whole: the agent's reasoning and call, the tool's output,
+    # then the writer's reply as the assistant's answer, before the new question.
+    assert kinds[-5:] == ["reasoning", "function_call", "function_call_output", "assistant", "user"]
+    assert replayed[-2]["content"] == "S costs 12.50 euros."
+    stored = await agno_adapter.load_session_runs(context, session, config)
+    assert stored is not None
+    assert [r.output for r in stored] == ["S costs 12.50 euros.", "You asked about S."]

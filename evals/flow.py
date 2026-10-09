@@ -25,6 +25,13 @@ Scenarios (each case runs in a fresh company, inside `evals.world.World`):
   domains pass; the guarded sender is the net under every path.
 * `award`: award the recommendation -> purchase orders (lines, totals), the PO
   email in the supplier's language, "not selected" notices without prices.
+* `po_lifecycle`: the purchase orders after the award: each sent once in the
+  thread with the PDF (PO number, RFQ, buyer, supplier, lines, in the
+  supplier's language) and the .xlsx; a plain confirmation acknowledged from
+  the supplier's email; a confirmation with a later date flagged, not applied,
+  until the buyer reviews it; no reply becomes an offer; a partial and a full
+  receipt, an over-delivery refused, the close; a cancellation told to the
+  supplier once; the RFQ completed; the activity feed showing each step.
 
 Every supplier number is decided by code (`evals.personas`); the golden
 expectations below are written from the business rules, not read from the
@@ -47,11 +54,14 @@ from pathlib import Path
 from typing import Final
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from bido_back.agents.catalog.contracts import (
     EmailNoteOutput,
     NegotiationEmailInput,
+    PoResponseLine,
+    PoResponseOutput,
+    Quoted,
     RfqEmailInput,
     RfqEmailLine,
     RfqEmailOutput,
@@ -62,8 +72,18 @@ from bido_back.agents.catalog.definitions import rfq_cover_problems, rfq_email_p
 from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
 from bido_back.approvals import ApprovalRecipientsUnconfirmed
+from bido_back.awards import lifecycle
 from bido_back.awards import service as awards
-from bido_back.awards.schemas import AwardRequest
+from bido_back.awards.cancellation import request_cancellation_notice
+from bido_back.awards.schemas import (
+    AcknowledgeRequest,
+    AwardRequest,
+    CancelRequest,
+    CloseRequest,
+    ReceiptLineRequest,
+    ReceiptRequest,
+    ReviewRequest,
+)
 from bido_back.db import create_engine, tenant_session
 from bido_back.db.models import (
     Approval,
@@ -71,6 +91,7 @@ from bido_back.db.models import (
     Invite,
     MandateSend,
     NegotiationMandate,
+    Proposal,
     Rfq,
     RfqLine,
     RfqTemplate,
@@ -85,6 +106,7 @@ from bido_back.negotiation import service as negotiation
 from bido_back.negotiation.schemas import LineLimitsUpdate
 from bido_back.outbound.domains import RecipientDomainsNotConfirmed
 from bido_back.rfqs import service as rfq_service
+from bido_back.rfqs.activity import rfq_activity
 from bido_back.rfqs.document import document_text
 from bido_back.rfqs.errors import InvalidState
 from bido_back.rfqs.language import country_code
@@ -1165,9 +1187,246 @@ async def scenario_award(world: World, result: RunResult) -> None:
             result.check(f"no_notice_to_winner:{persona.key}", not notice, "winner noticed")
 
 
+# --- The purchase order after the award ---------------------------------------------------------
+#
+# Award -> PO-1 (atlantic, line 1) and PO-2 (alpen, line 2), each sent in the RFQ thread
+# with the PDF; atlantic confirms as ordered (acknowledged from its email); alpen confirms
+# with a later date for line 2 (flagged, not applied; the buyer reviews and acknowledges);
+# PO-1 is received in two deliveries and closed; PO-2 is cancelled and alpen is told.
+
+
+def _confirmation(order_ref: str, theirs: str) -> tuple[str, PoResponseOutput]:
+    words = f"we confirm your purchase order {order_ref} as ordered"
+    body = (
+        f"Dear Sir or Madam,\n\nThank you, {words}. Our order confirmation number is "
+        f"{theirs}; delivery as requested.\n\nBest regards,\nSiobhan Kelly\nAtlantic "
+        "Components Ltd"
+    )
+    return body, PoResponseOutput(
+        kind="confirmation",
+        confirmation=Quoted(value=None, quote=words),
+        supplier_order_ref=Quoted(value=theirs, quote=theirs),
+        summary=f"Confirms {order_ref} as ordered (their ref {theirs}).",
+    )
+
+
+def _changed_date(order_ref: str, position: int, new_date: date) -> tuple[str, PoResponseOutput]:
+    written = new_date.strftime("%d.%m.%Y")
+    body = (
+        "Sehr geehrte Damen und Herren,\n\nvielen Dank, wir bestätigen Ihre Bestellung "
+        f"{order_ref}. Liefertermin für Position {position}: {written}.\n"
+        "Auftragsbestätigung AB-9921.\n\nMit freundlichen Grüßen\nAlpen Bauteile AG"
+    )
+    return body, PoResponseOutput(
+        kind="confirmation_with_changes",
+        confirmation=Quoted(value=None, quote=f"wir bestätigen Ihre Bestellung {order_ref}"),
+        supplier_order_ref=Quoted(value="AB-9921", quote="Auftragsbestätigung AB-9921"),
+        lines=[
+            PoResponseLine(
+                position=position,
+                delivery_date=Quoted(value=written, quote=f"Position {position}: {written}"),
+            )
+        ],
+        summary=f"Confirms {order_ref}; line {position} delivery moved to {new_date}.",
+    )
+
+
+async def _proposal_count(world: World) -> int:
+    async with tenant_session(world.engine, world.tenant_id) as session:
+        return await session.scalar(select(func.count()).select_from(Proposal)) or 0
+
+
+async def scenario_po_lifecycle(world: World, result: RunResult) -> None:
+    need_by = world.today + timedelta(days=60)
+    rfq = await world.draft_rfq("MLCC and connectors", need_by)
+    for persona in AWARD_CAST:
+        await world.invite(rfq, persona)
+    await world.send_rfq(rfq)
+    world.at(world.now + timedelta(hours=2))
+    for persona in AWARD_CAST:
+        await world.quote(persona, rfq, 0)
+    await world.drain()
+    requested = await awards.request_award(
+        world.engine, world.principal, rfq.id, AwardRequest(), world.today
+    )
+    await world.approve(requested.approval_id)
+    names = {p.key: p for p in AWARD_CAST}
+    orders = {
+        next(k for k, p in names.items() if p.name == o.supplier_name): o
+        for o in await awards.list_purchase_orders(world.engine, world.principal, rfq_id=rfq.id)
+    }
+    result.check("po:opened", sorted(orders) == ["alpen", "atlantic"], f"{sorted(orders)}")
+    if sorted(orders) != ["alpen", "atlantic"]:
+        return
+
+    # 1. Send each PO: one email in the thread, the PDF (supplier's language) and the .xlsx.
+    for key, summary in orders.items():
+        persona = names[key]
+        before = len(world.outbox.to(persona.email))
+        approval = await awards.request_po_send(
+            world.engine, world.principal, summary.id, world.mailboxes
+        )
+        await world.approve(approval.approval_id)
+        sent = world.outbox.to(persona.email)
+        result.check(f"po_sent_once:{key}", len(sent) == before + 1, f"{len(sent) - before}")
+        email = sent[-1]
+        files = list(email.attachments)
+        result.check(
+            f"po_pdf_and_xlsx:{key}",
+            any(f.endswith(".pdf") for f in files) and any(f.endswith(".xlsx") for f in files),
+            f"{files}",
+        )
+        po = await awards.get_purchase_order(world.engine, world.principal, summary.id)
+        pdf = " ".join(email.attachment_text.split())
+        result.notes[f"pdf_{key}"] = pdf[:600]
+        words = {
+            "en": ("Order total", "Approved by:", "Attn."),
+            "de": ("Bestellsumme", "Freigegeben von:", "z. Hd."),
+        }[persona.language]
+        missing = [
+            what
+            for what, needle in (
+                ("po number", po.ref),
+                ("rfq", rfq.ref),
+                ("supplier", persona.name),
+                ("contact", persona.email),
+                ("total", words[0]),
+                ("approver", words[1]),
+                ("attention", words[2]),
+                ("incoterm", po.incoterm or ""),
+                *((f"line {line.position} mpn", line.mpn or "") for line in po.lines),
+                *(
+                    (f"line {line.position} quantity", format(line.quantity.normalize(), "f"))
+                    for line in po.lines
+                ),
+            )
+            if needle and needle not in pdf
+        ]
+        result.check(f"po_pdf_fields:{key}", not missing, f"missing {missing}")
+        try:
+            await awards.request_po_send(world.engine, world.principal, summary.id, world.mailboxes)
+            again = False
+        except InvalidState:
+            again = True
+        result.check(f"po_not_sent_twice:{key}", again, "a second send was proposed")
+
+    # 2. Atlantic confirms as ordered: acknowledged from its email, no new offer.
+    proposals = await _proposal_count(world)
+    body, reading = _confirmation(orders["atlantic"].ref, "AB-4711")
+    if world.model is not None:
+        world.model.po_responses[body.strip()] = reading
+    world.at(world.now + timedelta(hours=3))
+    await world.deliver(names["atlantic"], subject=f"Re: {orders['atlantic'].ref}", body=body)
+    await world.drain()
+    po1 = await awards.get_purchase_order(world.engine, world.principal, orders["atlantic"].id)
+    result.check(
+        "ack_from_email",
+        po1.fulfilment.state == "acknowledged" and po1.fulfilment.supplier_order_ref == "AB-4711",
+        f"{po1.fulfilment.state} {po1.fulfilment.supplier_order_ref}",
+    )
+    result.check("ack_no_review", not po1.needs_review, "flagged a plain confirmation")
+
+    # 3. Alpen confirms with a later date: flagged, the order unchanged until the buyer decides.
+    line2 = need_by + timedelta(days=14)
+    body, reading = _changed_date(orders["alpen"].ref, 2, line2)
+    if world.model is not None:
+        world.model.po_responses[body.strip()] = reading
+    await world.deliver(names["alpen"], subject=f"AW: {orders['alpen'].ref}", body=body)
+    await world.drain()
+    po2 = await awards.get_purchase_order(world.engine, world.principal, orders["alpen"].id)
+    changes = po2.supplier_responses[0].changes if po2.supplier_responses else []
+    result.check(
+        "change_flagged",
+        po2.needs_review
+        and po2.fulfilment.state == "sent"
+        and any(c.field == "delivery_date" and c.stated == line2.isoformat() for c in changes),
+        f"{po2.needs_review} {po2.fulfilment.state} {[c.model_dump() for c in changes]}",
+    )
+    result.check(
+        "replies_not_offers", await _proposal_count(world) == proposals, "a reply became an offer"
+    )
+    await lifecycle.review_purchase_order_response(
+        world.engine, world.principal, po2.id, ReviewRequest(accepted=True, note="New date ok")
+    )
+    await lifecycle.acknowledge_purchase_order(
+        world.engine,
+        world.principal,
+        po2.id,
+        AcknowledgeRequest(supplier_order_ref="AB-9921", note=f"line 2 on {line2}"),
+    )
+    po2 = await awards.get_purchase_order(world.engine, world.principal, po2.id)
+    result.check(
+        "review_settled",
+        not po2.needs_review and po2.fulfilment.state == "acknowledged",
+        f"{po2.needs_review} {po2.fulfilment.state}",
+    )
+
+    # 4. PO-1 arrives in two deliveries; an over-delivery is refused; then closed.
+    line = po1.lines[0]
+    half = (line.quantity / 2).quantize(Decimal(1))
+
+    async def receive(quantity: Decimal) -> str | None:
+        try:
+            await lifecycle.receive_purchase_order(
+                world.engine,
+                world.principal,
+                po1.id,
+                ReceiptRequest(lines=[ReceiptLineRequest(line_id=line.id, quantity=quantity)]),
+            )
+        except lifecycle.OverReceipt:
+            return "over"
+        state = await awards.get_purchase_order(world.engine, world.principal, po1.id)
+        return state.fulfilment.state
+
+    result.check("partial_receipt", await receive(half) == "partially_received", "")
+    result.check("over_receipt_refused", await receive(line.quantity) == "over", "")
+    result.check("full_receipt", await receive(line.quantity - half) == "received", "")
+    await lifecycle.close_purchase_order(world.engine, world.principal, po1.id, CloseRequest())
+
+    # 5. PO-2 is cancelled: the supplier is told, once, in the thread.
+    await lifecycle.cancel_purchase_order(
+        world.engine, world.principal, po2.id, CancelRequest(reason="Line 2 sourced elsewhere")
+    )
+    before = len(world.outbox.to(names["alpen"].email))
+    notice = await request_cancellation_notice(
+        world.engine, world.principal, po2.id, world.mailboxes
+    )
+    if notice is not None:
+        await world.approve(notice.approval_id)
+    sent = world.outbox.to(names["alpen"].email)
+    told = sent[-1] if len(sent) == before + 1 else None
+    result.check(
+        "cancellation_sent_once",
+        told is not None
+        and po2.ref in told.body
+        and not told.attachments
+        and told.in_reply_to is not None,
+        f"{len(sent) - before} emails",
+    )
+    if told is not None:
+        guessed = guess_language(told.body)
+        result.check("cancellation_language", guessed == "de", f"reads as {guessed}")
+    po2 = await awards.get_purchase_order(world.engine, world.principal, po2.id)
+    result.check("cancellation_recorded", po2.cancellation_sent, "")
+    async with tenant_session(world.engine, world.tenant_id) as session:
+        done = await session.scalar(select(Rfq.completed_at).where(Rfq.id == rfq.id))
+    result.check("rfq_completed", done is not None, "")
+    feed = [item.summary for item in await rfq_activity(world.engine, world.principal, rfq.id)]
+    for needle in ("acknowledged", "needs your review", "closed", "Cancellation of purchase order"):
+        result.check(f"activity:{needle}", any(needle in s for s in feed), f"{feed[:8]}")
+
+
 # --- The suite -------------------------------------------------------------------------------
 
-SCENARIOS: Final = ("intake", "rfq_email", "followups", "negotiation", "recipients", "award")
+SCENARIOS: Final = (
+    "intake",
+    "rfq_email",
+    "followups",
+    "negotiation",
+    "recipients",
+    "award",
+    "po_lifecycle",
+)
 Runner = Callable[[World, RunResult], Awaitable[None]]
 
 
@@ -1184,6 +1443,7 @@ def cases(today: date) -> list[tuple[str, str, Runner]]:
     for name in RECIPIENT_CASES:
         out.append(("recipients", name, lambda w, r, x=name: scenario_recipients(w, x, r)))
     out.append(("award", "recommend_and_po", lambda w, r: scenario_award(w, r)))
+    out.append(("po_lifecycle", "send_ack_change_receive_cancel", scenario_po_lifecycle))
     return out
 
 

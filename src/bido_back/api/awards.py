@@ -4,15 +4,19 @@
   the buyer's choice with a reason); `GET` shows where it stands and the POs.
 - `POST /v1/rfqs/{rfq_id}/award/notices` proposes a "not selected" email to
   every supplier that took part and did not win.
-- `/v1/purchase-orders`: list, detail, the document (.xlsx, or printable
-  .html), and `POST .../send` to propose sending it in the RFQ thread.
+- `/v1/purchase-orders`: list, detail, the document (.pdf and .xlsx as the
+  supplier receives them, or printable .html), and `POST .../send` to propose
+  sending it in the RFQ thread.
 - After the send, the buyer records the order's life (`awards.lifecycle`):
   `POST .../acknowledge`, `POST .../receipts` (+ `GET`), `POST .../close`,
-  `POST .../cancel`. These change Bido's records only; nothing is sent.
+  `POST .../cancel`. These change Bido's records; cancelling a sent order also
+  proposes the cancellation email to the supplier (`awards.cancellation`). The
+  supplier's replies to the order are read by the worker (`awards.responses`).
 
 Nothing here sends: approvers decide in `/v1/approvals`, the worker acts.
 """
 
+import logging
 from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -23,6 +27,8 @@ from bido_back.api.deps import get_mailbox_senders, get_notice_writer
 from bido_back.api.rfqs import CurrentPrincipal, Db, error_responses, rfq_http_error
 from bido_back.awards import lifecycle, service
 from bido_back.awards.agents import NoticeWriter
+from bido_back.awards.cancellation import request_cancellation_notice
+from bido_back.awards.document import PDF_MEDIA_TYPE
 from bido_back.awards.render import HTML_MEDIA_TYPE, XLSX_MEDIA_TYPE
 from bido_back.awards.schemas import (
     AcknowledgeRequest,
@@ -39,14 +45,21 @@ from bido_back.awards.schemas import (
     PurchaseOrderView,
     ReceiptRequest,
     ReceiptView,
+    ReviewRequest,
 )
 from bido_back.rfqs.errors import RfqError
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 
+logger = logging.getLogger(__name__)
+
 _BINARY: dict[str, Any] = {"schema": {"type": "string", "format": "binary"}}
 _FILE_RESPONSE: dict[int | str, dict[str, Any]] = {
     status.HTTP_200_OK: {
-        "content": {XLSX_MEDIA_TYPE: _BINARY, HTML_MEDIA_TYPE: {"schema": {"type": "string"}}},
+        "content": {
+            PDF_MEDIA_TYPE: _BINARY,
+            XLSX_MEDIA_TYPE: _BINARY,
+            HTML_MEDIA_TYPE: {"schema": {"type": "string"}},
+        },
         "description": "The purchase order document",
     }
 }
@@ -129,9 +142,9 @@ def awards_router() -> APIRouter:
         responses={**_FILE_RESPONSE, **error_responses(status.HTTP_404_NOT_FOUND)},
     )
     async def purchase_order_document(  # pyright: ignore[reportUnusedFunction]
-        po_id: UUID, fmt: Literal["xlsx", "html"], principal: CurrentPrincipal, db: Db
+        po_id: UUID, fmt: Literal["xlsx", "html", "pdf"], principal: CurrentPrincipal, db: Db
     ) -> Response:
-        """The PO as .xlsx, or as printable HTML (print it to PDF from the browser)."""
+        """The PO as the supplier receives it (.pdf, .xlsx), or as printable HTML."""
         try:
             doc = await service.render_purchase_order(db, principal, po_id, fmt)
         except RfqError as exc:
@@ -179,6 +192,21 @@ def awards_router() -> APIRouter:
         """Record that the supplier confirmed a sent order (date, their order number, a note)."""
         try:
             await lifecycle.acknowledge_purchase_order(db, principal, po_id, body)
+            return await service.get_purchase_order(db, principal, po_id)
+        except RfqError as exc:
+            raise _http_error(exc) from None
+
+    @router.post(
+        "/purchase-orders/{po_id}/review",
+        responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT),
+    )
+    async def review_supplier_response(  # pyright: ignore[reportUnusedFunction]
+        po_id: UUID, body: ReviewRequest, principal: CurrentPrincipal, db: Db
+    ) -> PurchaseOrderView:
+        """Decide on the supplier's reply that changed or questioned the order
+        (`needs_review`): accept it, or not (then answer the supplier)."""
+        try:
+            await lifecycle.review_purchase_order_response(db, principal, po_id, body)
             return await service.get_purchase_order(db, principal, po_id)
         except RfqError as exc:
             raise _http_error(exc) from None
@@ -237,11 +265,27 @@ def awards_router() -> APIRouter:
         responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT),
     )
     async def cancel_purchase_order(  # pyright: ignore[reportUnusedFunction]
-        po_id: UUID, body: CancelRequest, principal: CurrentPrincipal, db: Db
+        po_id: UUID,
+        body: CancelRequest,
+        principal: CurrentPrincipal,
+        db: Db,
+        mailboxes: Annotated[MailboxSenderFactory, Depends(get_mailbox_senders)],
     ) -> PurchaseOrderView:
-        """Cancel the order with a reason, at any point before it is fully received."""
+        """Cancel the order with a reason, at any point before it is fully received.
+
+        A sent order also gets a cancellation email to the supplier, proposed for
+        approval (`cancellation_approval_id` on the order).
+        """
         try:
             await lifecycle.cancel_purchase_order(db, principal, po_id, body)
+        except RfqError as exc:
+            raise _http_error(exc) from None
+        try:
+            await request_cancellation_notice(db, principal, po_id, mailboxes)
+        except RfqError:
+            # The order is cancelled either way; the notice can be proposed again.
+            logger.warning("po %s cancelled, but its cancellation email was not proposed", po_id)
+        try:
             return await service.get_purchase_order(db, principal, po_id)
         except RfqError as exc:
             raise _http_error(exc) from None

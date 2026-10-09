@@ -50,6 +50,7 @@ from bido_back.purchasing.sources.joins import (
     state,
 )
 from bido_back.purchasing.sources.pricing import ORDER_KEY, OrderFacts, measure, reconcile_order
+from bido_back.purchasing.sources.timing import check_timing
 from bido_back.purchasing.sources.vocabulary import built_in
 
 # Canonical production-order states (see `vocabulary`) that still consume components.
@@ -883,6 +884,9 @@ def assess_plan(records: Sequence[Record], scope: PlanningScope) -> Assessment:
             orders,
             scope.as_of,
         )
+        # When new orders would arrive against the dated balance: computed after the
+        # ranking, which it may override for timing; the quantity to buy is unchanged.
+        check_timing(line, as_of=scope.as_of, master=master, records=records)
         confidence(line, blocked=any(i.severity == "blocker" for i in result.issues))
         result.lines.append(line)
     result.assumptions.extend(a for a in found if not a.part_numbers)

@@ -595,6 +595,18 @@ def _logo_style(brand: DocumentBranding) -> str:
     )
 
 
+# The look other Bido documents share (the purchase order: `bido_back.awards.document`).
+DOCUMENT_CSS: Final = _CSS
+
+
+def accent_css(accent: str | None) -> str:
+    return _accent_css(accent)
+
+
+def logo_style(brand: DocumentBranding) -> str:
+    return _logo_style(brand)
+
+
 def _header(document: RfqDocument, words: dict[str, str]) -> str:
     brand = document.branding
     logo = brand.logo_base64

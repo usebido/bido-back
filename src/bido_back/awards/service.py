@@ -6,8 +6,9 @@ default; a second person in four-eyes tenants), and the worker executes it once.
 
 - `request_award`: builds the awarded lines from the comparison (the
   recommendation unless the buyer picks another supplier, in which case a
-  reason is required) and proposes `award_rfq`. Only an `open` RFQ with
-  answers can be awarded, once.
+  reason is required; a reason is also required for a line whose offer breaks
+  the buyer's limits, e.g. above the approved maximum) and proposes
+  `award_rfq`. Only an `open` RFQ with answers can be awarded, once.
 - `request_notices`: after the award, one polite "not selected" email per
   supplier that took part and did not win, rendered by code in the standard
   layout and the thread's language (`bido_back.supplier_email`; the notice
@@ -36,12 +37,25 @@ from bido_back.approvals.errors import ApprovalConflict
 from bido_back.approvals.sink import PostgresApprovalSink
 from bido_back.auth import Principal
 from bido_back.awards.agents import NoticeWriter
-from bido_back.awards.lifecycle import fulfilment_view, quantities
+from bido_back.awards.cancellation import (
+    SEND_PO_CANCELLATION,
+    SendPoCancellationArgs,
+    cancellation_proposal_ids,
+    cancellation_sent,
+)
+from bido_back.awards.document import PDF_MEDIA_TYPE, po_pdf, po_pdf_filename
+from bido_back.awards.lifecycle import (
+    awaiting_review,
+    fulfilment_view,
+    quantities,
+    supplier_responses,
+)
 from bido_back.awards.orders import po_document, po_lines
 from bido_back.awards.render import (
     HTML_MEDIA_TYPE,
     XLSX_MEDIA_TYPE,
     content_hash,
+    document_gaps,
     po_email_body,
     to_html,
     to_xlsx,
@@ -169,6 +183,13 @@ async def request_award(
     except SelectionError as exc:
         raise AwardSelectionInvalid(str(exc)) from None
     reason = body.reason or None
+    if selected.above_limits and not reason:
+        # The approved limits (the negotiation mandate's maximums) bind the order too.
+        positions = ", ".join(str(line.position) for line in selected.above_limits)
+        raise ReasonRequired(
+            f"say why: line(s) {positions} break the approved limits (maximum unit price "
+            "or lead time)"
+        )
     if selected.differs_from_recommendation and not reason:
         raise ReasonRequired("say why: the award differs from the recommendation")
 
@@ -248,6 +269,7 @@ async def _summaries(
         )
     )
     totals = await quantities(session, [po.id for po, _, _ in rows])
+    review = await awaiting_review(session, [po.id for po, _, _ in rows])
     return [
         PurchaseOrderSummary(
             id=po.id,
@@ -261,6 +283,7 @@ async def _summaries(
             created_at=po.created_at,
             sent_at=po.sent_at,
             fulfilment=fulfilment_view(po, totals[po.id]),
+            needs_review=po.id in review,
         )
         for po, rfq_ref, supplier_name in rows
     ]
@@ -522,6 +545,16 @@ async def get_purchase_order(db: Db, principal: Principal, po_id: UUID) -> Purch
             raise NotFound(f"purchase order {po_id} not found")
         pending = await _open_approval(session, SEND_PURCHASE_ORDER, po_send_proposal_ids(po.id)[1])
         totals = (await quantities(session, [po.id]))[po.id]
+        cancellation = await session.scalar(
+            select(Approval)
+            .where(
+                Approval.tool == SEND_PO_CANCELLATION,
+                Approval.tool_call_id == cancellation_proposal_ids(po.id)[1],
+            )
+            .order_by(Approval.created_at.desc())
+            .limit(1)
+        )
+        doc = await po_document(session, po, branded=False)
         return PurchaseOrderView(
             id=po.id,
             ref=po.ref,
@@ -558,6 +591,11 @@ async def get_purchase_order(db: Db, principal: Principal, po_id: UUID) -> Purch
                 )
                 for line in await po_lines(session, po.id)
             ],
+            needs_review=po.id in await awaiting_review(session, [po.id]),
+            supplier_responses=await supplier_responses(session, po.id),
+            cancellation_approval_id=cancellation.id if cancellation else None,
+            cancellation_sent=await cancellation_sent(session, po.id),
+            document_gaps=document_gaps(doc),
         )
 
 
@@ -575,6 +613,8 @@ async def render_purchase_order(
         doc = await po_document(session, await _po(session, po_id))
     if fmt == "xlsx":
         return RenderedDocument(to_xlsx(doc), XLSX_MEDIA_TYPE, f"{doc.ref}.xlsx")
+    if fmt == "pdf":
+        return RenderedDocument(po_pdf(doc), PDF_MEDIA_TYPE, po_pdf_filename(doc))
     return RenderedDocument(to_html(doc).encode(), HTML_MEDIA_TYPE, f"{doc.ref}.html")
 
 
@@ -656,10 +696,12 @@ async def queue_details(session: AsyncSession, approvals: list[Approval]) -> Que
                     reason=args.reason,
                     lines=list(args.lines),
                 )
-            elif approval.tool in (SEND_PURCHASE_ORDER, SEND_AWARD_NOTICE):
-                email: SendPurchaseOrderArgs | SendAwardNoticeArgs = (
+            elif approval.tool in (SEND_PURCHASE_ORDER, SEND_AWARD_NOTICE, SEND_PO_CANCELLATION):
+                email: SendPurchaseOrderArgs | SendAwardNoticeArgs | SendPoCancellationArgs = (
                     SendPurchaseOrderArgs.model_validate(approval.args)
                     if approval.tool == SEND_PURCHASE_ORDER
+                    else SendPoCancellationArgs.model_validate(approval.args)
+                    if approval.tool == SEND_PO_CANCELLATION
                     else SendAwardNoticeArgs.model_validate(approval.args)
                 )
                 row = (
@@ -672,7 +714,7 @@ async def queue_details(session: AsyncSession, approvals: list[Approval]) -> Que
                     )
                 ).one_or_none()
                 rfq_id, rfq_ref, supplier_name = row if row is not None else (None, None, None)
-                po = email if isinstance(email, SendPurchaseOrderArgs) else None
+                po = email if not isinstance(email, SendAwardNoticeArgs) else None
                 emails[approval.id] = ThreadEmailApprovalView(
                     kind="purchase_order" if po else "award_notice",
                     invite_id=email.invite_id,

@@ -25,6 +25,7 @@ from bido_back.agents.catalog.contracts import (
     FollowupEmailOutput,
     NegotiationEmailInput,
     NegotiationEmailOutput,
+    PoResponseOutput,
     QuoteExtractionOutput,
     RfqCandidateClassifierOutput,
     RfqEmailInput,
@@ -192,6 +193,27 @@ def award_notice_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[EmailNote
 
 
 AWARD_NOTICE_WRITER: Final = award_notice_writer()
+
+
+def po_response_reader(model: str = EXTRACTION_MODEL) -> AgentDefinition[PoResponseOutput]:
+    """A supplier's reply to a purchase order: a confirmation, a change, a refusal, a question.
+
+    The extraction model: what it reads becomes an acknowledgement on the order, or a
+    change the buyer must review. Code grounds every value in the email (`awards.responses`).
+    """
+    return AgentDefinition(
+        name="po_response_reader",
+        prompt_file="po_response_reader.v1.md",
+        prompt_version=1,
+        model=model,
+        output_model=PoResponseOutput,
+        max_turns=_MAX_TURNS,
+        thinking=False,
+        effort="medium",
+    )
+
+
+PO_RESPONSE_READER: Final = po_response_reader()
 
 
 def sheet_mapper(model: str = MAPPER_MODEL) -> AgentDefinition[SheetMappingOutput]:
