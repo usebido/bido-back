@@ -16,6 +16,7 @@ from bido_back.auth import Principal
 from bido_back.db import create_sessionmaker
 from bido_back.onboarding import service as onboarding
 from bido_back.purchasing.sources.contracts import (
+    PlanningScope,
     Record,
     ScopeRequest,
     SourceAssessment,
@@ -134,6 +135,64 @@ def test_an_unknown_product_lists_the_planned_products(update: dict[str, str]) -
     assert asked(resolved)["product_code"] == ["MTR-100"]
 
 
+PUMP = "BP-200 Bomba centrifuga"
+PUMP_SCOPE = ScopeRequest(as_of=date(2026, 10, 8), horizon_end=date(2026, 11, 24))
+
+
+def named_order(name: str, reference: str, row: int) -> Record:
+    """A production order of an ERP that identifies products by their name, at no plant."""
+    return fact(
+        "production_plan",
+        row,
+        reference=reference,
+        product_code=name,
+        quantity="80",
+        unit="pcs",
+        need_by="2026-11-24",
+        status="Planned",
+    )
+
+
+@pytest.mark.parametrize(
+    "update",
+    [
+        {"product_code": "BP-200"},
+        {"product_code": "bp 200"},
+        {"product": "BP-200"},
+        {"product": "a bomba BP-200"},
+        {"product": "bomba"},
+    ],
+)
+def test_the_part_of_a_product_name_the_buyer_wrote_identifies_the_only_product(
+    update: dict[str, str],
+) -> None:
+    records = [named_order(PUMP, "OP-2026-118", 2), named_order(PUMP, "OP-2026-119", 3)]
+    resolved = resolve(PUMP_SCOPE.model_copy(update=update), records)
+    assert resolved.resolution.questions == []
+    assert resolved.scope is not None and resolved.scope.product_code == PUMP
+    assert assumed(resolved)[0] == "product_from_partial_code"
+    assert resolved.resolution.assumptions[0].value == PUMP
+    assert {p.field: p.source for p in resolved.resolution.provenance}["product_code"] == "evidence"
+
+
+@pytest.mark.parametrize("update", [{"product_code": "BP-2"}, {"product": "BP-2"}])
+def test_part_of_a_word_in_a_product_name_is_not_the_product(update: dict[str, str]) -> None:
+    records = [named_order(PUMP, "OP-2026-118", 2)]
+    resolved = resolve(PUMP_SCOPE.model_copy(update=update), records)
+    assert resolved.scope is None
+    assert [q.code for q in resolved.resolution.questions] == ["unknown_product"]
+    assert asked(resolved)["product_code"] == [PUMP]
+
+
+@pytest.mark.parametrize("update", [{"product_code": "BP-200"}, {"product": "bomba"}])
+def test_a_name_part_shared_by_several_products_is_asked(update: dict[str, str]) -> None:
+    records = [named_order(PUMP, "OP-2026-118", 2), named_order("BP-200 Bomba axial", "OP-2", 3)]
+    resolved = resolve(PUMP_SCOPE.model_copy(update=update), records)
+    assert resolved.scope is None
+    assert [q.code for q in resolved.resolution.questions] == ["ambiguous_product"]
+    assert asked(resolved)["product_code"] == ["BP-200 Bomba axial", PUMP]
+
+
 def test_an_empty_request_asks_for_product_plant_and_horizon() -> None:
     resolved = resolve(ScopeRequest())
     assert resolved.scope is None
@@ -184,6 +243,72 @@ def test_an_unknown_plant_lists_the_products_plants() -> None:
 def test_the_plant_matches_without_case_accents_spacing_or_punctuation(location: str) -> None:
     resolved = resolve(BUYER.model_copy(update={"location": location}))
     assert resolved.scope is not None and resolved.scope.location == "Plant A"
+
+
+def single_site_records() -> list[Record]:
+    """The motor evidence as a single-factory ERP exports it: no plant column anywhere."""
+    records: list[Record] = []
+    for record in motor_records():
+        if record.values.get("location") == "Plant B":
+            continue
+        copy = record.model_copy(deep=True)
+        copy.values.pop("location", None)
+        copy.evidence.pop("location", None)
+        copy.canonical.pop("location", None)
+        records.append(copy)
+    return records
+
+
+LOCATION_ISSUES = {"missing_production_location", "missing_inventory_location"}
+
+
+def test_sources_that_name_no_plant_are_one_site_and_are_planned() -> None:
+    records = single_site_records()
+    resolved = resolve(BUYER.model_copy(update={"location": None}), records)
+    assert resolved.resolution.questions == []
+    assert resolved.scope == SCOPE.model_copy(update={"location": None})
+    assert assumed(resolved) == [
+        "location_single_site",
+        "as_of_latest_snapshot",
+        "horizon_from_days",
+    ]
+    assert resolved.resolution.assumptions[0].value is None
+    assert "location" not in {p.field for p in resolved.resolution.provenance}
+    assert resolved.scope is not None
+    plan = assess_plan(records, resolved.scope)
+    assert {line.part_number: line.calculated_to_buy for line in plan.lines} == EXPECTED
+    assert all(line.ready and line.location is None for line in plan.lines)
+    assert (
+        not {i.code for line in plan.lines for i in [*plan.issues, *line.issues]} & LOCATION_ISSUES
+    )
+    # Nothing to choose: only the product and the horizon are open questions.
+    assert set(asked(resolve(ScopeRequest(), records))) == {"product_code", "horizon_end"}
+
+
+def test_a_plant_the_buyer_names_applies_to_every_row_of_a_single_site() -> None:
+    records = single_site_records()
+    resolved = resolve(BUYER.model_copy(update={"location": "Planta Joinville"}), records)
+    assert resolved.resolution.questions == []
+    assert resolved.scope == SCOPE.model_copy(update={"location": "Planta Joinville"})
+    assert assumed(resolved)[0] == "location_applied_to_all"
+    assert resolved.resolution.assumptions[0].value == "Planta Joinville"
+    assert {p.field: p.source for p in resolved.resolution.provenance}["location"] == "buyer"
+    assert resolved.scope is not None
+    plan = assess_plan(records, resolved.scope)
+    assert {line.part_number: line.calculated_to_buy for line in plan.lines} == EXPECTED
+    assert all(line.ready and line.location == "Planta Joinville" for line in plan.lines)
+    assert (
+        not {i.code for line in plan.lines for i in [*plan.issues, *line.issues]} & LOCATION_ISSUES
+    )
+
+
+def test_a_single_site_without_production_plans_accepts_a_request_without_a_plant() -> None:
+    records = [r for r in single_site_records() if r.kind != "production_plan"]
+    request = ScopeRequest(area="Maintenance", as_of=date(2026, 10, 8), horizon_days=14)
+    assert direct_scope(records, request).scope == PlanningScope(
+        area="Maintenance", as_of=date(2026, 10, 8), horizon_end=date(2026, 10, 22)
+    )
+    assert direct_scope(motor_records(), request).scope is None
 
 
 def test_each_resolved_value_names_its_source() -> None:
@@ -395,6 +520,22 @@ async def test_the_buyers_words_are_resolved_and_planned_in_the_same_call() -> N
     assert warnings[:2] == ["as_of_latest_snapshot", "horizon_from_days"]
     # One mapping pass, as many model calls as an unscoped read: no second round trip.
     assert mapper.calls == unscoped.calls
+
+
+async def test_a_workbook_without_a_plant_column_is_planned_for_the_named_plant() -> None:
+    data, mapper = motor_workbook(single_site_records())
+    request = BUYER.model_copy(update={"location": "Planta Joinville"})
+    result = await _analyze(request, data, mapper)
+    assert result.status == "assessed", result.model_dump_json()
+    assert result.scope == SCOPE.model_copy(update={"location": "Planta Joinville"})
+    assert {line.part_number: line.calculated_to_buy for line in result.lines} == EXPECTED
+    assert result.scope_resolution is not None
+    assert [a.code for a in result.scope_resolution.assumptions] == [
+        "location_applied_to_all",
+        "as_of_latest_snapshot",
+        "horizon_from_days",
+    ]
+    assert {(c.product_code, c.location) for c in result.planning_candidates} == {("MTR-100", None)}
 
 
 async def test_a_missing_horizon_blocks_without_lines_and_offers_dates() -> None:
