@@ -90,8 +90,8 @@ def test_pdf_shows_the_rfq_in_the_suppliers_language() -> None:
         "15/10/2026",
         "AÇO CARBONO SAE 1020 CHAPA 3MM",
         "Código 100000101",
-        "7500",
-        "KG",
+        "7.500",  # the supplier's locale, as in the email
+        "kg",
         "31/10/2026",
         "DAP",
         "28 DDL",

@@ -1,7 +1,7 @@
 """Offer continuity is deterministic; language models supply evidence-bearing deltas."""
 
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -9,8 +9,10 @@ from bido_back.agents.catalog.contracts import (
     ExtraOfferDraft,
     OfferConflict,
     ProposalLineDraft,
+    QuoteExtractionOutput,
     SourceRef,
 )
+from bido_back.quotes.lead_time import decode_lead_time
 from bido_back.quotes.state import (
     OfferEvent,
     reconcile,
@@ -19,6 +21,7 @@ from bido_back.quotes.state import (
     store_quote,
 )
 from bido_back.quotes.validation import LINE_FIELDS, ValidatedQuote
+from tests.quotes import rfq6
 from tests.quotes.test_validation import BODY, NONE, ev, line, output, validate
 
 START = datetime(2026, 10, 6, 12, tzinfo=UTC)
@@ -371,3 +374,38 @@ def test_withdrawing_the_whole_offer_withdraws_its_extras() -> None:
     )
     state = reconcile([first, event(withdrawal, 1, parent=first)])
     assert state.quote.output.extra_offers == []
+
+
+def test_v5_lead_time_and_validity_survive_storage_and_price_only_amendments() -> None:
+    first = event(rfq6.validate(rfq6.first_reply(), rfq6.REPLY_1))
+    kept = "All other terms unchanged"
+    body = f"Revised: BRL 18.90 per piece for the bearings (000101). {kept}."
+    delta = rfq6.line(1, "000101", "18.90", "piece").model_copy(
+        update={"offered_mpn": rfq6.NONE, "unit": rfq6.NONE}
+    )
+    update = rfq6.validate(
+        QuoteExtractionOutput(
+            is_quote=True,
+            currency=rfq6.NONE,
+            valid_until=rfq6.NONE,
+            incoterm=rfq6.NONE,
+            payment_terms=rfq6.NONE,
+            lines=[delta],
+            reply_kind="amendment",
+            unchanged_terms=rfq6.ev(kept, kept),
+        ),
+        body,
+    )
+
+    state = reconcile([first, event(update, 1, parent=first)])
+
+    assert state.issues == ()
+    bearing, shaft, _ = state.quote.lines
+    assert bearing.parsed("unit_price") == Decimal("18.90")
+    # The lead time the price-only revision did not restate is inherited, as data.
+    assert bearing.parsed("lead_time_days") == 17
+    assert bearing.fields["lead_time_terms"].message_id == first.message_id
+    terms = decode_lead_time(shaft.fields["lead_time_terms"].parsed)
+    assert terms is not None and terms.risk_note == rfq6.SHAFT_RISK
+    assert state.quote.parsed("valid_until") == date(2026, 10, 24)
+    assert restore_quote(store_quote(state.quote)) == state.quote

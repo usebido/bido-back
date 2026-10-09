@@ -1,0 +1,151 @@
+===== 01-reminder
+Subject: Re: [RFQ-6] Request for quotation: Components for motor MTR-100
+
+Dear MetalNova Teste team,
+
+Reminder – RFQ-6
+Our request for quotation of 8 Oct 2026 is still open, and we have not received your offer yet.
+
+1. Can you send us your quotation? If you will not quote, please let us know.
+
+Please reply to this email by Tuesday, 20 Oct 2026.
+
+This message is not an order or an acceptance of your offer. Biduuuuu is only bound by a written order.
+
+Best regards,
+Biduuuuu
+
+===== 02-clarification-delivery
+Subject: Re: [RFQ-6] Request for quotation: Components for motor MTR-100
+
+Dear MetalNova Teste team,
+
+Request for clarification – RFQ-6
+Thank you for your offer of 8 Oct 2026. Before we evaluate it, we need to confirm delivery for two positions.
+
+Pos. 1 · Rolamento motor MTR-100 · part no. 000101 · 70 pcs
+   Lead time quoted: approx. 10 business days after order
+   Required delivery: by 22 Oct 2026
+Pos. 2 · Eixo motor MTR-100 · part no. 000102 · 15 pcs
+   Lead time quoted: approx. 10 business days + a few additional days after order
+   Required delivery: by 22 Oct 2026
+
+1. Can you deliver positions 1 and 2 by 22 Oct 2026? If not, please give the delivery date you can confirm for each.
+
+Please reply to this email by Tuesday, 13 Oct 2026, for example:
+   Pos. 1 – delivery by: ________
+   Pos. 2 – delivery by: ________
+
+This message is not an order or an acceptance of your offer. Biduuuuu is only bound by a written order.
+
+Best regards,
+Biduuuuu
+
+===== 03-clarification-missing
+Subject: Re: [RFQ-6] Request for quotation: Components for motor MTR-100
+
+Dear MetalNova Teste team,
+
+Request for clarification – RFQ-6
+Thank you for your offer of 8 Oct 2026. Before we evaluate it, we need the information below.
+
+Pos. 1 · Rolamento motor MTR-100 · part no. 000101 · 70 pcs
+   To confirm: lead time
+Pos. 2 · Eixo motor MTR-100 · part no. 000102 · 15 pcs
+   Missing: unit price, lead time
+
+1. Please state the validity of your offer.
+2. For each position above, please send the missing values and confirm the other values marked.
+
+Please reply to this email by Tuesday, 13 Oct 2026.
+
+This message is not an order or an acceptance of your offer. Biduuuuu is only bound by a written order.
+
+Best regards,
+Biduuuuu
+
+===== 04-revised-offer
+Subject: Re: [RFQ-6] Request for quotation: Components for motor MTR-100
+
+Dear MetalNova Teste team,
+
+Request for a revised offer – RFQ-6, round 1
+Thank you for your reply of 8 Oct 2026. We ask you to review your prices for the positions below. For these positions, your offer is not the most competitive we have received.
+
+Pos. 1 · Rolamento motor MTR-100 · part no. 000101 · 70 pcs
+   Your offer: BRL 19.50/pc
+   Target price: BRL 17.90/pc
+Pos. 3 · Fio de cobre esmaltado · part no. 000104 · 12.5 kg
+   Your offer: BRL 95.00/kg
+   Target price: BRL 90.00/kg
+
+1. Please send a revised offer for positions 1 and 3.
+
+Please reply to this email by Wednesday, 14 Oct 2026, for example:
+   Pos. 1 – revised unit price: ________
+   Pos. 3 – revised unit price: ________
+There is no need to resend the other positions.
+
+This message is not an order or an acceptance of your offer. Biduuuuu is only bound by a written order.
+
+Best regards,
+Biduuuuu
+
+===== 05-delivery-date
+Subject: Re: [RFQ-6] Request for quotation: Components for motor MTR-100
+
+Dear MetalNova Teste team,
+
+Delivery date request – RFQ-6
+Thank you for your reply of 8 Oct 2026. This request concerns position 2 only: the quoted lead time does not meet our required date.
+
+Pos. 2 · Eixo motor MTR-100 · part no. 000102 · 15 pcs
+   Your offer: BRL 89.00/pc · 12 business days after order
+   Required delivery: by 22 Oct 2026
+
+1. Can you deliver all 15 pcs by 22 Oct 2026? If not, what is the earliest date you can confirm?
+
+Please reply to this email by Wednesday, 14 Oct 2026. There is no need to resend the other positions.
+
+This message is not an order or an acceptance of your offer. Biduuuuu is only bound by a written order.
+
+Best regards,
+Biduuuuu
+
+===== 06-bafo
+Subject: Re: [RFQ-6] Request for quotation: Components for motor MTR-100
+
+Dear MetalNova Teste team,
+
+Request for best and final offer – RFQ-6
+Thank you for your reply of 14 Oct 2026. This is the final round of this request for quotation: we intend to decide without further negotiation.
+
+Pos. 1 · Rolamento motor MTR-100 · part no. 000101 · 70 pcs
+   Your offer: BRL 18.40/pc
+   Target price: BRL 17.90/pc
+Pos. 3 · Fio de cobre esmaltado · part no. 000104 · 12.5 kg
+   Your offer: BRL 92.00/kg
+   Target price: BRL 90.00/kg
+
+1. Please send your best and final offer for positions 1 and 3, or confirm that your current offer stands.
+
+Please reply to this email by Friday, 16 Oct 2026, 18:00 UTC, for example:
+   Pos. 1 – final unit price: ________
+   Pos. 3 – final unit price: ________
+There is no need to resend the other positions.
+
+This message is not an order or an acceptance of your offer. Biduuuuu is only bound by a written order.
+
+Best regards,
+Biduuuuu
+
+===== 07-not-selected
+Subject: Re: [RFQ-6] Request for quotation: Components for motor MTR-100
+
+Dear MetalNova Teste team,
+
+Outcome of request for quotation – RFQ-6
+Thank you for your offer of 8 Oct 2026 and for the time you dedicated to our request. After evaluating the offers received, we have decided not to proceed with your offer this time.
+
+Best regards,
+Biduuuuu

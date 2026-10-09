@@ -158,7 +158,15 @@ def test_provenance_keeps_value_source_confidence_and_reasons() -> None:
     assert isinstance(review, dict)
     assert review["needs_review"] is True
     header = result.provenance()
-    assert set(header) == {"currency", "valid_until", "incoterm", "payment_terms", "_review"}
+    assert set(header) == {
+        "currency",
+        "valid_until",
+        "incoterm",
+        "payment_terms",
+        "validity",
+        "lead_time",
+        "_review",
+    }
 
 
 # --- Grounding -----------------------------------------------------------------------

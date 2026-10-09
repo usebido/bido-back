@@ -35,7 +35,11 @@ from bido_back.mandates.schemas import (
     ProposeMandateRequest,
 )
 from bido_back.negotiation import service
-from bido_back.negotiation.schemas import NegotiationSettingsUpdate, RfqNegotiation
+from bido_back.negotiation.schemas import (
+    NegotiationSettingsUpdate,
+    ReleaseHoldRequest,
+    RfqNegotiation,
+)
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.errors import RfqError
 from bido_back.rfqs.mailbox import MailboxSenderFactory
@@ -70,15 +74,21 @@ def negotiation_router() -> APIRouter:
         responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT),
     )
     async def release_hold(  # pyright: ignore[reportUnusedFunction]
-        rfq_id: UUID, invite_id: UUID, principal: CurrentPrincipal, db: Db
+        rfq_id: UUID,
+        invite_id: UUID,
+        body: ReleaseHoldRequest,
+        principal: CurrentPrincipal,
+        db: Db,
     ) -> RfqNegotiation:
-        """Negotiate a supplier's current offer as it is, though it was held for review.
+        """Negotiate a supplier's offer as it is, though it was held for review.
 
-        The buyer's decision, audited. A newer offer from that supplier is held
-        again if it needs to be; a withdrawn offer stays closed.
+        `proposal_id` is the offer the buyer reviewed (`latest_proposal_id`); 409 when
+        a newer one arrived meanwhile. The buyer's decision, audited. A newer offer
+        from that supplier is held again if it needs to be; a withdrawn offer stays
+        closed.
         """
         try:
-            return await service.release_hold(db, principal, rfq_id, invite_id)
+            return await service.release_hold(db, principal, rfq_id, invite_id, body.proposal_id)
         except RfqError as exc:
             raise rfq_http_error(exc) from None
 

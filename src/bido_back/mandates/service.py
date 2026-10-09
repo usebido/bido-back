@@ -651,12 +651,18 @@ async def _rounds_problem(
     session: AsyncSession, args: SendNegotiationEmailArgs, terms: ApproveMandateArgs
 ) -> str | None:
     """Rounds are the negotiation emails SENT to the supplier: never more than the cap,
-    and one best-and-final request at most. Canceled and rejected emails do not count."""
+    and one best-and-final request at most. Canceled and rejected emails do not count,
+    except a canceled one whose send was interrupted after its Message-ID was claimed
+    (it may have reached the supplier)."""
     sent = list(
         await session.scalars(
             select(NegotiationMessage.action).where(
                 NegotiationMessage.invite_id == args.invite_id,
-                NegotiationMessage.status == "sent",
+                (NegotiationMessage.status == "sent")
+                | (
+                    (NegotiationMessage.status == "canceled")
+                    & NegotiationMessage.message_id_header.is_not(None)
+                ),
                 NegotiationMessage.id != args.negotiation_message_id,
             )
         )

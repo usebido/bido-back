@@ -14,11 +14,11 @@ planner decides (`bido_back.negotiation.planner`), written BEFORE the email:
   already SENT to that supplier, plus one. A canceled or rejected email never
   consumes a round. The old unique key on (invite, round) moves to (invite,
   sequence): a replacement email repeats the round of the one it replaces.
-* `kind`: what the email asks (`revised_offer`, `delivery_date`, `bafo`); NULL
-  only on rows written before this migration.
-* `attempts`, `held_reason`: a decided email whose draft is refused or fails is
-  retried (the same decision) a bounded number of times, then `held` with the
-  reason: it waits for the buyer and the planner never re-decides that offer.
+* `kind`: what the email asks (`revised_offer`, `delivery_date`, `bafo`);
+  existing rows get `bafo` or `revised_offer` from their action.
+* `attempts`, `held_reason`: a decided email the send gate refuses (or that
+  cannot be addressed) is `held` with the reason: it waits for the buyer and the
+  planner never re-decides that offer version.
 * `status` gains `decided` (persisted, the email not yet proposed for approval)
   and `held`.
 
@@ -35,6 +35,11 @@ held again if it needs to be.
 
 `rfqs.negotiation_max_rounds` defaults to 2: one revised-offer round, then one
 best-and-final request.
+
+Rolling deploys: code from before this revision cannot insert negotiation rows
+(it sets no `sequence`). Its sweep fails until the worker is replaced; at worst it
+leaves a pending approval without a row, which the executor refuses if approved
+(nothing is sent). Deploy the worker and the API together.
 
 All on tables that already have forced RLS; no new table. The backfill of
 existing rows (every tenant's) runs as the table owner with RLS briefly not

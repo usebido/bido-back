@@ -72,7 +72,6 @@ from bido_back.negotiation.strategy import (
     delivery_position,
     price_position,
     required_by,
-    round_to,
 )
 
 NextAction = Literal[
@@ -147,6 +146,13 @@ class LineQuote:
     blockers: tuple[str, ...] = ()
     # Another supplier's eligible offer is lower (we may say so, never the number).
     better_offer_exists: bool = False
+    # (order date, expected delivery) for the order dates of earlier emails' decisions:
+    # whether the supplier moved on a date is judged from the same order date.
+    deliveries_then: tuple[tuple[date, date], ...] = ()
+
+    def delivery_on(self, order_date: date | None) -> date | None:
+        """The expected delivery if ordered on `order_date` (None: not computed)."""
+        return dict(self.deliveries_then).get(order_date) if order_date is not None else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +209,8 @@ class EmailRecord:
     cutoff_at: datetime | None = None
     held_reason: str | None = None
     wait: EmailWait | None = None
+    # The order date the email's delivery dates were computed from.
+    order_date: date | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -310,6 +318,9 @@ class SupplierPlan:
     order_by: date | None = None
     valid_until: date | None = None
     detail: str | None = None
+    # The offer itself is on hold (a question, a withdrawal, something to review) and the
+    # buyer has not released it: none of its lines counts as accepted.
+    offer_held: bool = False
 
     @property
     def sends_email(self) -> bool:
@@ -522,7 +533,12 @@ def _clarification_phase(
 
 
 def _moved(offer: Offer, last: EmailRecord) -> bool:
-    """Whether the supplier improved on anything our last email asked for."""
+    """Whether the supplier improved on anything our last email asked for.
+
+    A price is compared with the price the supplier had then; a delivery with the date
+    the supplier offered then, both counted from the order date of that email (a lead
+    time cut from 20 to 17 days is a move, whatever day it arrives).
+    """
     for ask in last.asks:
         quote = offer.lines.get(ask.rfq_line_id)
         if quote is None or quote.unit_price is None:
@@ -536,7 +552,8 @@ def _moved(offer: Offer, last: EmailRecord) -> bool:
         if ask.deliver_by is not None and quote.delivery is not None:
             if quote.delivery <= ask.deliver_by:
                 return True
-            if ask.offered_delivery is not None and quote.delivery < ask.offered_delivery:
+            then = quote.delivery_on(last.order_date) or quote.delivery
+            if ask.offered_delivery is not None and then < ask.offered_delivery:
                 return True
     return False
 
@@ -657,18 +674,31 @@ def plan_supplier(
     # 3. The offer is on hold (unless the buyer released it: negotiate it as it is).
     if "offer_withdrawn" in offer.holds:
         return replace(
-            base, action="close", phase="closed", reason="offer_withdrawn", status="closed"
+            base,
+            action="close",
+            phase="closed",
+            reason="offer_withdrawn",
+            status="closed",
+            offer_held=True,
         )
     if not offer.holds_released:
         if offer.questions or (
             "supplier_clarification_requires_buyer" in offer.holds
             and "offer_state_requires_review" not in offer.holds
         ):
-            return replace(base, action="hold", phase="needs_answer", reason="supplier_question")
+            return replace(
+                base,
+                action="hold",
+                phase="needs_answer",
+                reason="supplier_question",
+                offer_held=True,
+            )
         if offer.holds:
             review = "offer_state_requires_review"
             reason = review if review in offer.holds else offer.holds[0]
-            return replace(base, action="hold", phase="needs_decision", reason=reason)
+            return replace(
+                base, action="hold", phase="needs_decision", reason=reason, offer_held=True
+            )
 
     # 4. Open questions first.
     clarification = supplier.clarification
@@ -843,9 +873,9 @@ def _position(plan: LinePlan, offer: Offer) -> PositionPlan:
         ask_price=price.ask if price is not None else None,
         best_price=price.best_price if price is not None else False,
         deliver_by=delivery.deliver_by if delivery is not None else None,
-        offered_price=round_to(plan.offered_price, quote.places)
-        if plan.offered_price is not None
-        else None,
+        # Unrounded: what the next offer is compared with (the email shows the quote as
+        # the supplier wrote it, see `decision.QuotedTerms`).
+        offered_price=plan.offered_price,
         lead_time_days=quote.lead_time_days,
         offered_delivery=quote.delivery,
         delivery_exact=quote.delivery_exact,
@@ -875,7 +905,11 @@ def ready_to_close(
         return False
     accepted: set[UUID] = set()
     for plan in plans:
-        if plan.phase in ("needs_answer", "held_for_approval") or plan.action == "clarify":
+        if (
+            plan.offer_held
+            or plan.phase in ("needs_answer", "held_for_approval")
+            or plan.action == "clarify"
+        ):
             continue
         if plan.reason in ("clarification_sent", "clarification_due") or _accept_blockers(
             plan.warnings

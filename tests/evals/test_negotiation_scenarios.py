@@ -23,10 +23,6 @@ from bido_back.agents.catalog.contracts import (
     NegotiationEmailInput,
     NegotiationLineAsk,
 )
-from bido_back.agents.catalog.definitions import (
-    followup_email_problems,
-    negotiation_email_problems,
-)
 from bido_back.agents.config import RunnerConfig
 from bido_back.quotes.parsing import decimal_separator_for
 from bido_back.quotes.validation import QuoteSources, RequestedLine, validate_quote
@@ -66,8 +62,8 @@ def test_suppliers_write_to_test_domains_only() -> None:
 
 def test_scripted_extractions_are_grounded_in_each_email() -> None:
     """What mock mode scripts is what a correct model returns: every value quoted from the
-    email, and nothing the validation would hold, except the business-day lead times of
-    RFQ-6 (the code decides what business days mean)."""
+    email, and nothing the validation would hold (prompt v5 states RFQ-6's business days
+    and relative validity as data; code converts them)."""
     for scenario in SCENARIOS:
         requested = [RequestedLine(id=uuid4(), position=p.position) for p in scenario.parts]
         for step in scenario.steps:
@@ -97,8 +93,7 @@ def test_scripted_extractions_are_grounded_in_each_email() -> None:
                     for i in check.issues
                 }
                 issues |= set(validated.issues)
-                allowed = {"working_days"} if scenario.name == "rfq6_replay" else set[str]()
-                assert issues <= allowed, (where, issues)
+                assert not issues, (where, issues)
 
 
 def test_language_signature_dates_and_amounts() -> None:
@@ -151,8 +146,9 @@ def test_business_days_skip_brazilian_holidays() -> None:
 
 
 @pytest.mark.parametrize("language", ["pt", "de", "en"])
-def test_mock_writers_pass_the_products_draft_checks(language: str) -> None:
-    """The scripted writers keep every number as given, like a correct model must."""
+def test_mock_writers_follow_the_v2_prompts(language: str) -> None:
+    """Code renders every email; the writers may only add a note, empty by default, and the
+    scripted writers (like a correct model) add none."""
     followup = FollowupEmailInput(
         kind="clarification",
         rfq_ref="RFQ-1",
@@ -167,9 +163,7 @@ def test_mock_writers_pass_the_products_draft_checks(language: str) -> None:
             FollowupItem(position=2, line="Eixo", field="lead_time", problem="unclear"),
         ],
     )
-    draft = followup_writer(followup)
-    assert not followup_email_problems(followup, draft)
-    assert language_of(draft.body) == language
+    assert followup_writer(followup).note == ""
     negotiation = NegotiationEmailInput(
         action="bafo",
         rfq_ref="RFQ-1",
@@ -204,10 +198,7 @@ def test_mock_writers_pass_the_products_draft_checks(language: str) -> None:
             ),
         ],
     )
-    written = negotiation_writer(negotiation)
-    assert not negotiation_email_problems(negotiation, written)
-    assert language_of(written.body) == language
-    assert date(2026, 10, 20) in written_dates(written.body, date(2026, 10, 9))
+    assert negotiation_writer(negotiation).note == ""
 
 
 def test_every_expected_failure_is_diagnosed() -> None:

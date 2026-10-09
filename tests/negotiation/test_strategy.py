@@ -321,3 +321,30 @@ def test_a_target_with_more_than_three_decimals_is_read_whole() -> None:
     assert negotiation_email_problems(task, NegotiationEmailOutput(body=reais)) == [
         "unknown_amount"
     ]
+
+
+def test_an_old_ask_stored_in_exponent_notation_is_read_plainly() -> None:
+    ask = price_position(
+        offered=Decimal("60"),
+        target=Decimal("45"),
+        max_price=Decimal("70"),
+        places=2,
+        previous_ask=Decimal("5E+1"),
+        previous_offer=Decimal("60"),
+    )
+    assert ask.ask == Decimal(50) and "E" not in str(ask.ask)
+
+
+def test_a_last_ask_above_a_lowered_maximum_is_no_anchor() -> None:
+    # Our last ask was 95; the buyer then lowered the maximum to 90.
+    lowered = price_position(
+        offered=Decimal("94"),
+        target=Decimal("80"),
+        max_price=Decimal("90"),
+        places=2,
+        previous_ask=Decimal("95"),
+        previous_offer=Decimal("100"),
+    )
+    assert (lowered.status, lowered.ask) == ("above_max", Decimal("80.00"))
+    # An offer meeting that old ask is above the maximum now: not "ask met".
+    assert lowered.status != "ask_met"

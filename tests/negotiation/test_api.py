@@ -37,7 +37,10 @@ async def test_negotiation_routes_require_authentication() -> None:
             await http.get(f"/v1/rfqs/{uuid4()}/negotiation"),
             await http.put(f"/v1/rfqs/{uuid4()}/negotiation", json={}),
             await http.post(f"/v1/rfqs/{uuid4()}/negotiation/close"),
-            await http.post(f"/v1/rfqs/{uuid4()}/negotiation/suppliers/{uuid4()}/release-hold"),
+            await http.post(
+                f"/v1/rfqs/{uuid4()}/negotiation/suppliers/{uuid4()}/release-hold",
+                json={"proposal_id": str(uuid4())},
+            ),
         ]
     assert [r.status_code for r in responses] == [401, 401, 401, 401]
 
@@ -98,9 +101,11 @@ async def test_set_up_read_and_close(
     defaults = await http.put(url, json={})
     assert defaults.json()["settings"]["max_rounds"] == 2
     assert defaults.json()["cutoff_at"] is None and defaults.json()["warnings"] == []
-    # No supplier yet: a release has nobody to release.
-    missing = await http.post(f"{url}/suppliers/{uuid4()}/release-hold")
+    # No supplier yet: a release has nobody to release; it must name the offer reviewed.
+    release = f"{url}/suppliers/{uuid4()}/release-hold"
+    missing = await http.post(release, json={"proposal_id": str(uuid4())})
     assert missing.status_code == 404
+    assert (await http.post(release, json={})).status_code == 422
 
     closed = await http.post(f"{url}/close")
     assert closed.status_code == 200

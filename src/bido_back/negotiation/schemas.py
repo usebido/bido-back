@@ -188,6 +188,15 @@ class NegotiationDecisionView(BaseModel):
     decided_at: datetime
 
 
+class ReleaseHoldRequest(BaseModel):
+    """The offer the buyer reviewed (`latest_proposal_id`): released only if it is still
+    the supplier's latest."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    proposal_id: UUID
+
+
 class InviteNegotiation(BaseModel):
     invite_id: UUID
     supplier_name: str

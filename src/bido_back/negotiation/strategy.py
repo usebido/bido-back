@@ -178,6 +178,12 @@ def price_position(
     """
     if target is not None and max_price is not None and target > max_price:
         target = None  # never disclose more than the ceiling (the schema forbids it)
+    if previous_ask is not None:
+        # As stored by older code too ("5E+1"): the same value, written plainly.
+        previous_ask = plain(previous_ask)
+        if max_price is not None and previous_ask >= max_price:
+            # The buyer lowered the maximum below our last ask: it is no anchor any more.
+            previous_ask = previous_offer = None
     if target is not None and offered <= target:
         return PriceAsk("in_target")
     if previous_ask is not None and offered <= previous_ask:

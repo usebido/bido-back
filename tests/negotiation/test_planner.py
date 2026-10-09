@@ -762,3 +762,83 @@ def test_every_phase_reads_as_the_buyer_expects() -> None:
     for text in texts.values():
         # Codes and dates only: never a price.
         assert "45.67" not in text and "48.90" not in text
+
+
+# --- Comparing like with like -----------------------------------------------------------------
+
+
+def test_the_decision_keeps_the_suppliers_price_unrounded() -> None:
+    # A price in a finer precision than the ask (an exchange rate, a price per 100): the
+    # stored offer is the price itself, so the same price again is no movement.
+    fine = offer(quote(L1, "48.905"), quote(L2, "229.00", 12), quote(L3, "112.00", 14))
+    first = plan(facts(fine), max_rounds=3)
+    assert first.email is not None
+    [position] = first.email.positions
+    assert position.offered_price == Decimal("48.905")
+    sent = email(
+        sequence=1,
+        round=1,
+        version=1,
+        asks=[asked(L1, str(position.ask_price), str(position.offered_price))],
+    )
+    again = plan(facts(replace(fine, proposal_id=P2, version=2), sent), max_rounds=3)
+    assert (again.action, again.reason) == ("hold", "no_progress")
+
+
+def test_a_shorter_lead_time_is_progress_from_the_order_date_it_was_asked_on() -> None:
+    need_by = TODAY + timedelta(days=14)
+    asked_then = replace(
+        email(
+            sequence=1,
+            round=1,
+            version=1,
+            asks=[
+                LineAsk(
+                    rfq_line_id=L1,
+                    ask_price=Decimal("45.67"),
+                    deliver_by=need_by,
+                    offered_price=Decimal("48.90"),
+                    offered_delivery=TODAY + timedelta(days=20),
+                )
+            ],
+        ),
+        order_date=TODAY,
+    )
+    later = NOW + timedelta(days=4)
+    # Four days later the supplier cuts its lead time from 20 to 17 days, same price: from
+    # today it arrives a day later than the first offer did, from the day we asked it is
+    # three days earlier.
+    shorter = LineQuote(
+        rfq_line_id=L1,
+        unit_price=Decimal("48.90"),
+        lead_time_days=17,
+        delivery=later.date() + timedelta(days=17),
+        deliveries_then=((TODAY, TODAY + timedelta(days=17)),),
+    )
+    moved = Offer(
+        proposal_id=P2,
+        version=2,
+        lines={L1: shorter, L2: quote(L2, "229.00", 12), L3: quote(L3, "112.00", 14)},
+        valid_until=TODAY + timedelta(days=45),
+    )
+    result = plan(facts(moved, asked_then), now=later, max_rounds=3)
+    assert result.reason != "no_progress" and result.action in ("revised_offer", "bafo")
+    # Without the earlier order date's delivery the move cannot be seen: the buyer decides.
+    unknown = replace(moved, lines={**moved.lines, L1: replace(shorter, deliveries_then=())})
+    assert plan(facts(unknown, asked_then), now=later, max_rounds=3).reason == "no_progress"
+
+
+def test_an_offer_on_hold_never_makes_the_rfq_ready_to_close() -> None:
+    ids = [t.rfq_line_id for t in MTR]
+    withdrawn = plan(facts(replace(WITHIN, holds=("offer_withdrawn",))))
+    assert (withdrawn.phase, withdrawn.offer_held) == ("closed", True)
+    assert not ready_to_close(line_ids=ids, waiting_suppliers=0, plans=[withdrawn])
+    review = plan(facts(replace(WITHIN, holds=("offer_state_requires_review",))))
+    assert (review.phase, review.offer_held) == ("needs_decision", True)
+    assert not ready_to_close(line_ids=ids, waiting_suppliers=0, plans=[review])
+    # Released by the buyer: negotiated (here accepted) as it is.
+    released = plan(
+        facts(replace(WITHIN, holds=("offer_state_requires_review",), holds_released=True))
+    )
+    assert released.phase == "accepted_internally" and not released.offer_held
+    assert ready_to_close(line_ids=ids, waiting_suppliers=0, plans=[released])

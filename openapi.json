@@ -7226,6 +7226,17 @@
             "title": "Cc",
             "type": "array"
           },
+          "html_body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Html Body"
+          },
           "invite_id": {
             "format": "uuid",
             "title": "Invite Id",
@@ -9517,6 +9528,22 @@
           "requirement_code"
         ],
         "title": "RecordDocumentRequest",
+        "type": "object"
+      },
+      "ReleaseHoldRequest": {
+        "additionalProperties": false,
+        "description": "The offer the buyer reviewed (`latest_proposal_id`): released only if it is still\nthe supplier's latest.",
+        "properties": {
+          "proposal_id": {
+            "format": "uuid",
+            "title": "Proposal Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "proposal_id"
+        ],
+        "title": "ReleaseHoldRequest",
         "type": "object"
       },
       "RenameConversationRequest": {
@@ -13261,6 +13288,17 @@
             },
             "title": "Cc",
             "type": "array"
+          },
+          "html_body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Html Body"
           },
           "invite_id": {
             "format": "uuid",
@@ -25000,7 +25038,7 @@
     },
     "/v1/rfqs/{rfq_id}/negotiation/suppliers/{invite_id}/release-hold": {
       "post": {
-        "description": "Negotiate a supplier's current offer as it is, though it was held for review.\n\nThe buyer's decision, audited. A newer offer from that supplier is held\nagain if it needs to be; a withdrawn offer stays closed.",
+        "description": "Negotiate a supplier's offer as it is, though it was held for review.\n\n`proposal_id` is the offer the buyer reviewed (`latest_proposal_id`); 409 when\na newer one arrived meanwhile. The buyer's decision, audited. A newer offer\nfrom that supplier is held again if it needs to be; a withdrawn offer stays\nclosed.",
         "operationId": "release_hold_v1_rfqs__rfq_id__negotiation_suppliers__invite_id__release_hold_post",
         "parameters": [
           {
@@ -25042,6 +25080,16 @@
             }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseHoldRequest"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
           "200": {
             "content": {

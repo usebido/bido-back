@@ -63,6 +63,7 @@ import holidays
 from pydantic import JsonValue, ValidationError
 from sqlalchemy import select, update
 
+from bido_back.agents.catalog.contracts import FollowupEmailInput, NegotiationEmailInput
 from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
 from bido_back.agents.tools import AnyTool, ToolError
@@ -296,6 +297,8 @@ class SentEmail:
     round: int | None = None
     price_asks: dict[int, Decimal] = field(default_factory=dict[int, Decimal])
     lead_asks: dict[int, int] = field(default_factory=dict[int, int])
+    # The date a delivery ask names ("deliver by"), when the decision has one.
+    lead_dates: dict[int, date] = field(default_factory=dict[int, date])
     # A clarification's open items, (position, field, problem), from its writer task.
     items: list[tuple[int | None, str, str]] = field(
         default_factory=list[tuple[int | None, str, str]]
@@ -862,24 +865,41 @@ async def classify(run: Run, captured: Sequence[Captured], step: str) -> list[Se
     lines = [(p.position, p.description, p.part_number) for p in run.scenario.parts]
     positions = {line_id: position for position, line_id in run.lines.items()}
     async with tenant_session(world.engine, world.tenant_id) as session:
-        followups = {
-            row.message_id_header: row
-            for row in await session.scalars(
-                select(FollowupMessage).where(FollowupMessage.message_id_header.is_not(None))
+        followup_rows = list(
+            await session.scalars(
+                select(FollowupMessage).order_by(FollowupMessage.created_at, FollowupMessage.id)
             )
-        }
-        negotiations = {
-            row.message_id_header: row
-            for row in await session.scalars(
-                select(NegotiationMessage).where(NegotiationMessage.message_id_header.is_not(None))
+        )
+        negotiation_rows = list(
+            await session.scalars(
+                select(NegotiationMessage).order_by(
+                    NegotiationMessage.created_at, NegotiationMessage.id
+                )
             )
-        }
-    followup_drafts = {
-        out.body.strip(): task for task, out in world.followup_writer.calls if out is not None
-    }
-    negotiation_drafts = {
-        out.body.strip() for _, out in world.negotiation_writer.calls if out is not None
-    }
+        )
+    followups = {r.message_id_header: r for r in followup_rows if r.message_id_header}
+    negotiations = {r.message_id_header: r for r in negotiation_rows if r.message_id_header}
+    # Code renders every email; the writer is asked for its optional note once per proposed
+    # email, just before the proposal is recorded. So a supplier's n-th writer call (per
+    # follow-up kind) is the task of its n-th proposed row.
+    names = {invite_id: run.names[key] for key, invite_id in run.invites.items()}
+    followup_queues: dict[tuple[str, str], list[FollowupEmailInput]] = defaultdict(list)
+    for task, _ in world.followup_writer.calls:
+        followup_queues[(task.supplier_name, task.kind)].append(task)
+    followup_tasks: dict[UUID, FollowupEmailInput] = {}
+    for row in followup_rows:
+        queue = followup_queues.get((names.get(row.invite_id, ""), row.kind))
+        if queue:
+            followup_tasks[row.id] = queue.pop(0)
+    negotiation_queues: dict[str, list[NegotiationEmailInput]] = defaultdict(list)
+    for task, _ in world.negotiation_writer.calls:
+        negotiation_queues[task.supplier_name].append(task)
+    negotiation_tasks: set[UUID] = set()
+    for row in negotiation_rows:
+        queue = negotiation_queues.get(names.get(row.invite_id, ""))
+        if queue:
+            queue.pop(0)
+            negotiation_tasks.add(row.id)
     result: list[SentEmail] = []
     for item in captured:
         key = next((by_address[a] for a in item.to if a in by_address), "")
@@ -899,7 +919,7 @@ async def classify(run: Run, captured: Sequence[Captured], step: str) -> list[Se
         body = item.body.strip()
         if followup is not None:
             email.kind = followup.kind
-            task = followup_drafts.get(body)
+            task = followup_tasks.get(followup.id)
             email.drafted = task is not None
             if task is not None:
                 email.items = [(i.position, i.field, i.problem) for i in task.open_items]
@@ -908,7 +928,7 @@ async def classify(run: Run, captured: Sequence[Captured], step: str) -> list[Se
         elif negotiation is not None:
             email.kind = negotiation.action
             email.round = negotiation.round
-            email.drafted = body in negotiation_drafts
+            email.drafted = negotiation.id in negotiation_tasks
             raw = cast(dict[str, JsonValue], negotiation.terms).get("lines")
             for entry in raw if isinstance(raw, list) else []:
                 if not isinstance(entry, dict):
@@ -926,6 +946,12 @@ async def classify(run: Run, captured: Sequence[Captured], step: str) -> list[Se
                 lead = entry.get("ask_lead_days")
                 if isinstance(lead, int) and not isinstance(lead, bool):
                     email.lead_asks[position] = lead
+                deliver_by = entry.get("deliver_by")
+                if isinstance(deliver_by, str):
+                    try:
+                        email.lead_dates[position] = date.fromisoformat(deliver_by)
+                    except ValueError:
+                        pass
         elif not earlier and not [e for e in result if e.supplier == key]:
             email.kind = "rfq"
         result.append(email)
@@ -1087,7 +1113,15 @@ def grade_emails(view: View, step: StepResult) -> None:
         if email.kind in ("counter", "bafo"):
             asked = norm(email.price_asks.values())
             missing = [str(a) for a in asked if a not in written]
-            missing += [f"{d} days" for d in email.lead_asks.values() if Decimal(d) not in written]
+            dated = written_dates(email.body, email.at.date())
+            for position, days in email.lead_asks.items():
+                by = email.lead_dates.get(position)
+                if by is not None:
+                    # A delivery ask names the date ("deliver by"), not a day count.
+                    if by not in dated:
+                        missing.append(f"by {by}")
+                elif Decimal(days) not in written:
+                    missing.append(f"{days} days")
             allowed = asked | own
             unknown = [r for r in money if not r & allowed]
             if missing or unknown:
@@ -1276,6 +1310,14 @@ def check_asks(
             if offer is not None and offer.price is not None and ask >= offer.price:
                 problems.append(f"{email.tag} asks {ask}, not below the offer {offer.price}")
         for position, days in email.lead_asks.items():
+            by = email.lead_dates.get(position)
+            if by is not None:
+                if by > view.run.need_by(position):
+                    late.append(
+                        f"{email.tag} asks delivery by {by} on line {position}: after the "
+                        f"need-by date {view.run.need_by(position)}"
+                    )
+                continue
             left = (view.run.need_by(position) - email.at.date()).days
             if days > left:
                 late.append(
@@ -2678,39 +2720,25 @@ def diagnosis(scenario: str, check: str) -> tuple[str, ...]:
 
 
 # Checks that fail on the current code in mock mode (scenario, step, check): the tests
-# mark them non-strict xfail. Remove an entry when its gap is fixed.
-_RFQ6_EVERY_EMAIL: Final = ("email:language", "email:single_signature", "email:reply_by_date")
+# mark them non-strict xfail. Remove an entry when its gap is fixed. Fixed by the code-
+# rendered layout (`bido_back.supplier_email`): double_signature, clarification_reply_by.
+# Fixed by the negotiation planner (`bido_back.negotiation.planner`): the per-supplier
+# state the buyer reads (visible_*), status_matches_emails, canceled_round_numbers,
+# refused_drafts and the lead-time ask as a date from the need-by date.
 EXPECTED_MOCK_FAILURES: Final[frozenset[tuple[str, str, str]]] = frozenset(
     {
-        ("rfq6_replay", "rfq", "email:language"),
         *(
-            ("rfq6_replay", step, check)
-            for step in ("first_reply", "second_reply", "shaft_on_time")
-            for check in _RFQ6_EVERY_EMAIL
+            ("rfq6_replay", step, "email:language")
+            for step in ("rfq", "first_reply", "second_reply")
         ),
-        ("rfq6_replay", "first_reply", "no_validity_asked"),
         ("rfq6_replay", "first_reply", "no_quantity_tier_asked"),
-        ("rfq6_replay", "first_reply", "no_answered_lead_time_asked"),
-        ("rfq6_replay", "second_reply", "nothing_asked_twice"),
-        ("rfq6_replay", "second_reply", "late_line_lead_time_asked"),
-        ("rfq6_replay", "shaft_on_time", "nothing_sent"),
-        ("rfq6_replay", "shaft_on_time", "visible_accepted"),
-        ("rfq6_replay", "shaft_on_time", "outcome_every_line"),
-        ("rfq6_replay", "shaft_on_time", "ready_to_close"),
-        ("partial_quote", "two_of_three", "email:reply_by_date"),
-        ("partial_quote", "third_line", "email:reply_by_date"),
         ("partial_quote", "third_line", "offer_completed"),
         ("partial_quote", "third_line", "offer_usable"),
         ("partial_quote", "third_line", "nothing_to_ask"),
         ("partial_quote", "third_line", "ready_to_close"),
         ("partial_quote", "third_line", "visible_accepted"),
-        ("multi_language", "first_offer", "email:reply_by_date"),
         # One request per supplier: the validity question first, the counter after it.
         ("multi_language", "first_offer", "asks_above_target_only"),
-        *(
-            ("clarification_answered", step, "email:reply_by_date")
-            for step in ("incomplete_offer", "answers")
-        ),
         *(
             ("clarification_answered", "answers", check)
             for check in (
@@ -2800,18 +2828,7 @@ async def run_scenario(env: Env, scenario: Scenario, number: int, model: Scenari
     if result.steps:
         result.steps[-1].check("only_test_recipients", not leaked, f"{leaked}", owner="core")
     world = run.world
-    sent = {c.body.strip() for c in world.outbox.sent}
-    # Drafts that never went out: refused by the draft checks, canceled (a newer offer),
-    # or still waiting (daily cap) when the scenario ended.
-    unsent = [
-        f"{task.action} r{task.round} to {task.supplier_name}: {' '.join(out.body.split())}"[:900]
-        for task, out in world.negotiation_writer.calls
-        if out is not None and out.body.strip() not in sent
-    ] + [
-        f"{task.kind} to {task.supplier_name}: {' '.join(out.body.split())}"[:900]
-        for task, out in world.followup_writer.calls
-        if out is not None and out.body.strip() not in sent
-    ]
+    unsent = await _unsent(run)
     result.notes = {
         "rfq": run.ref,
         "start": str(run.start),
@@ -2824,6 +2841,36 @@ async def run_scenario(env: Env, scenario: Scenario, number: int, model: Scenari
     }
     result.seconds = round(time.perf_counter() - started, 1)
     return result
+
+
+async def _unsent(run: Run) -> list[str]:
+    """Proposed emails that never went out: canceled (a newer offer), rejected, or still
+    waiting (daily cap, a mandate hold) when the scenario ended."""
+    names = {invite_id: run.names[key] for key, invite_id in run.invites.items()}
+    async with tenant_session(run.world.engine, run.world.tenant_id) as session:
+        negotiation = list(
+            await session.scalars(
+                select(NegotiationMessage)
+                .where(NegotiationMessage.status != "sent")
+                .order_by(NegotiationMessage.created_at)
+            )
+        )
+        followup = list(
+            await session.scalars(
+                select(FollowupMessage)
+                .where(FollowupMessage.status != "sent")
+                .order_by(FollowupMessage.created_at)
+            )
+        )
+    return [
+        f"{r.action} r{r.round} to {names.get(r.invite_id, '?')}: {r.status}"
+        + (f" ({r.canceled_reason})" if r.canceled_reason else "")
+        for r in negotiation
+    ] + [
+        f"{r.kind} to {names.get(r.invite_id, '?')}: {r.status}"
+        + (f" ({r.canceled_reason})" if r.canceled_reason else "")
+        for r in followup
+    ]
 
 
 class UsageLog(logging.Handler):

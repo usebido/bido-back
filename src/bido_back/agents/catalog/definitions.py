@@ -20,6 +20,7 @@ from typing import Final
 from bido_back.agents.catalog.contracts import (
     AwardNoticeInput,
     AwardNoticeOutput,
+    EmailNoteOutput,
     FollowupEmailInput,
     FollowupEmailOutput,
     NegotiationEmailInput,
@@ -86,10 +87,15 @@ def rfq_email_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[RfqEmailLoca
 
 
 def quote_extraction(model: str = EXTRACTION_MODEL) -> AgentDefinition[QuoteExtractionOutput]:
+    """v5: lead times as data (amount, unit, basis, approximate, risk note) with an
+    offer-level lead time for every line; a validity given as a duration; a price
+    without tiers keeps `min_quantity` empty; `conditional_terms` only for conditions
+    on one line's price or availability (general terms go to `offer_notes`); the
+    supplier's final-offer statement, declined lines and questions as grounded signals."""
     return AgentDefinition(
         name="quote_extraction",
-        prompt_file="quote_extraction.v4.md",
-        prompt_version=4,
+        prompt_file="quote_extraction.v5.md",
+        prompt_version=5,
         model=model,
         output_model=QuoteExtractionOutput,
         max_turns=_MAX_TURNS,
@@ -124,28 +130,32 @@ def rfq_template_builder(model: str = TEMPLATE_MODEL) -> AgentDefinition[RfqTemp
     )
 
 
-def rfq_followup_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[FollowupEmailOutput]:
+# The thread writers (follow-ups, negotiation, "not selected" notices), v2: code renders
+# the whole email (`bido_back.supplier_email`) and the model may add only an optional
+# note, empty by default (`EmailNoteOutput`). v1 wrote the whole email and is kept only as
+# the released prompt it was, with its `*EmailOutput` contract and draft checks below.
+
+
+def rfq_followup_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[EmailNoteOutput]:
     return AgentDefinition(
         name="rfq_followup_writer",
-        prompt_file="rfq_followup_writer.v1.md",
-        prompt_version=1,
+        prompt_file="rfq_followup_writer.v2.md",
+        prompt_version=2,
         model=model,
-        output_model=FollowupEmailOutput,
+        output_model=EmailNoteOutput,
         max_turns=_MAX_TURNS,
         thinking=False,
         effort="low",
     )
 
 
-def rfq_negotiation_writer(
-    model: str = DEFAULT_MODEL,
-) -> AgentDefinition[NegotiationEmailOutput]:
+def rfq_negotiation_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[EmailNoteOutput]:
     return AgentDefinition(
         name="rfq_negotiation_writer",
-        prompt_file="rfq_negotiation_writer.v1.md",
-        prompt_version=1,
+        prompt_file="rfq_negotiation_writer.v2.md",
+        prompt_version=2,
         model=model,
-        output_model=NegotiationEmailOutput,
+        output_model=EmailNoteOutput,
         max_turns=_MAX_TURNS,
         thinking=False,
         effort="low",
@@ -161,13 +171,13 @@ RFQ_FOLLOWUP_WRITER: Final = rfq_followup_writer()
 RFQ_NEGOTIATION_WRITER: Final = rfq_negotiation_writer()
 
 
-def award_notice_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[AwardNoticeOutput]:
+def award_notice_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[EmailNoteOutput]:
     return AgentDefinition(
         name="award_notice_writer",
-        prompt_file="award_notice_writer.v1.md",
-        prompt_version=1,
+        prompt_file="award_notice_writer.v2.md",
+        prompt_version=2,
         model=model,
-        output_model=AwardNoticeOutput,
+        output_model=EmailNoteOutput,
         max_turns=_MAX_TURNS,
         thinking=False,
         effort="low",
@@ -229,8 +239,11 @@ _MAX_FOLLOWUP_CHARS: Final = 4000
 
 
 def followup_email_problems(task: FollowupEmailInput, draft: FollowupEmailOutput) -> list[str]:
-    """What is wrong with a chase or clarification draft, as codes. Empty means it may go
-    to approval: the RFQ reference is in the body, no prices, and it stays short."""
+    """What is wrong with a v1 chase or clarification draft, as codes. Empty means it may go
+    to approval: the RFQ reference is in the body, no prices, and it stays short.
+
+    v1 drafts only: since v2 code renders the email and `bido_back.supplier_email.checks`
+    gates it (the reference, prices and length are checked there, structurally)."""
     problems: list[str] = []
     body = draft.body.strip()
     if not body:
@@ -273,8 +286,9 @@ def _readings(text: str) -> set[Decimal]:
 def negotiation_email_problems(
     task: NegotiationEmailInput, draft: NegotiationEmailOutput
 ) -> list[str]:
-    """What is wrong with a counter-offer or BAFO draft, as codes. Empty means it may go
-    to approval.
+    """What is wrong with a v1 counter-offer or BAFO draft, as codes. Empty means it may go
+    to approval. v1 drafts only: since v2 code renders the numbers and
+    `bido_back.supplier_email.checks` holds every number to the decision.
 
     Code decided the numbers; this checks the model kept them: the RFQ
     reference is in the body, every target price appears, and every amount
@@ -311,8 +325,9 @@ _MAX_NOTICE_CHARS: Final = 2000
 
 
 def award_notice_problems(task: AwardNoticeInput, draft: AwardNoticeOutput) -> list[str]:
-    """What is wrong with a "not selected" draft, as codes. Empty means it may go to
-    approval: the RFQ reference is in the body, no prices, and it stays short."""
+    """What is wrong with a v1 "not selected" draft, as codes. Empty means it may go to
+    approval: the RFQ reference is in the body, no prices, and it stays short. v1 drafts
+    only (see `followup_email_problems`)."""
     problems: list[str] = []
     body = draft.body.strip()
     if not body:

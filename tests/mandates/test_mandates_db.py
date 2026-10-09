@@ -12,8 +12,8 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.catalog.contracts import (
+    EmailNoteOutput,
     NegotiationEmailInput,
-    NegotiationEmailOutput,
 )
 from bido_back.agents.context import ToolContext
 from bido_back.approvals import (
@@ -60,13 +60,11 @@ DEADLINE = datetime.now(UTC) + timedelta(days=7)
 
 
 class CommittingWriter(FakeNegotiationWriter):
-    """A writer whose draft commits the buyer: must never go out on its own."""
+    """A writer whose note commits the buyer: it must never go out."""
 
-    async def __call__(
-        self, task: NegotiationEmailInput, context: ToolContext
-    ) -> NegotiationEmailOutput:
-        draft = await super().__call__(task, context)
-        return NegotiationEmailOutput(body=draft.body + " We accept your offer.")
+    async def __call__(self, task: NegotiationEmailInput, context: ToolContext) -> EmailNoteOutput:
+        await super().__call__(task, context)
+        return EmailNoteOutput(note="We accept your offer and will place the order.")
 
 
 class MandateWorld(World):
@@ -249,10 +247,30 @@ async def test_counteroffers_within_bounds_go_out_without_another_approval(
     assert "max" not in " ".join(NegotiationEmailInput.model_fields)
 
 
-async def test_a_draft_outside_the_mandate_is_held_for_a_person(world: MandateWorld) -> None:
+async def test_a_committing_note_never_reaches_the_supplier(world: MandateWorld) -> None:
     await world.start()
     await world.offer("rhein", ("0.050", "1.20"))
     await world.sweep(CommittingWriter())
+
+    result = await world.auto()
+
+    # The note was left out before the proposal: the email, rendered by code, is in bounds.
+    assert len(result.approved) == 1
+    sent = world.mailboxes.sender.sent[-1]
+    assert "accept" not in sent.text_body.casefold()
+    assert "place the order" not in sent.text_body
+
+
+async def test_an_email_outside_the_mandate_is_held_for_a_person(world: MandateWorld) -> None:
+    # The buyer's own title reads as a commitment: the subject of every reply carries it, and
+    # the mandate's check (subject and body) holds the email for a person.
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        await session.execute(
+            update(Rfq).where(Rfq.id == world.rfq_id).values(title="Contract for MLCC")
+        )
+    await world.start()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.sweep(FakeNegotiationWriter())
     sent_before = len(world.mailboxes.sender.sent)
 
     result = await world.auto()
@@ -417,9 +435,14 @@ async def test_the_activity_feed_of_a_mandated_negotiation_reads_every_decision(
 async def test_a_held_email_names_its_supplier_and_reason_in_the_feed(
     world: MandateWorld,
 ) -> None:
+    # The buyer's own title reads as a commitment: the mandate holds the email.
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        await session.execute(
+            update(Rfq).where(Rfq.id == world.rfq_id).values(title="Contract for MLCC")
+        )
     await world.start()
     await world.offer("rhein", ("0.050", "1.20"))
-    await world.sweep(CommittingWriter())
+    await world.sweep(FakeNegotiationWriter())
     await world.auto()
     feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
     held = next(i for i in feed if i.action == "mandate.held")

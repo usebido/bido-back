@@ -88,6 +88,8 @@ class Captured:
     references: tuple[str, ...]
     attachments: tuple[str, ...]
     at: datetime
+    # The HTML part, when the email has one.
+    html: str | None = None
 
 
 class _Recorder:
@@ -112,6 +114,7 @@ class _Recorder:
                 references=email.references,
                 attachments=tuple(a.filename for a in email.attachments),
                 at=self._outbox.clock(),
+                html=email.html_body,
             )
         )
         return SentEmail(message_id=message_id, raw=b"")

@@ -9,7 +9,8 @@ from datetime import date
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, WithJsonSchema
+from pydantic import BaseModel, BeforeValidator, Field, WithJsonSchema
+from pydantic.json_schema import SkipJsonSchema
 
 LineCategory = Literal["catalog", "drawing", "cell", "material"]
 
@@ -153,6 +154,78 @@ def _absent_value() -> ExtractedValue:
     return ExtractedValue(value=None, source=None, confidence=0)
 
 
+# How a supplier states a lead time; code turns it into a delivery date
+# (`bido_back.quotes.lead_time`). Business days are never calendar days.
+LeadTimeUnit = Literal["calendar_days", "business_days", "weeks", "months", "date"]
+# When the lead time starts (or, for `ex_works`, that it ends when the goods are
+# ready at the supplier, transport not included).
+LeadTimeBasis = Literal["order", "payment", "approval", "ex_works", "unspecified"]
+ValidityUnit = Literal["calendar_days", "business_days", "weeks", "months"]
+
+
+class LeadTimeValue(ExtractedValue):
+    """A lead time as written: `value` is the number of `unit`s (or, for unit `date`,
+    the ISO delivery date). The evidence rules of `ExtractedValue` apply."""
+
+    unit: LeadTimeUnit | None = Field(
+        default=None,
+        description="calendar_days, business_days, weeks, months, or date; null when no value",
+    )
+    basis: LeadTimeBasis | None = Field(
+        default=None,
+        description=(
+            "order: from the order / PO confirmation; payment: from receipt of payment; "
+            "approval: from drawing or sample approval; ex_works: until ready at the "
+            "supplier, transport not included; unspecified: not stated"
+        ),
+    )
+    approximate: bool = Field(
+        default=False,
+        description="True for 'approximately', 'about', 'ca.', 'cerca de', or a range",
+    )
+    risk_note: str | None = Field(
+        default=None,
+        description=(
+            "The supplier's exact words when it says this lead time may slip or need extra "
+            "days, copied character for character; else null"
+        ),
+    )
+
+
+class ValidityValue(ExtractedValue):
+    """An offer validity given as a duration: `value` is the number of `unit`s."""
+
+    unit: ValidityUnit | None = Field(
+        default=None, description="calendar_days, business_days, weeks or months; null if none"
+    )
+
+
+def _absent_lead_time() -> LeadTimeValue:
+    return LeadTimeValue(value=None, source=None, confidence=0)
+
+
+def _absent_validity() -> ValidityValue:
+    return ValidityValue(value=None, source=None, confidence=0)
+
+
+def _lead_time_input(value: object) -> object:
+    # Reconciliation copies plain `ExtractedValue`s back into drafts; read them as a
+    # lead time without unit rather than rejecting the whole draft.
+    if isinstance(value, ExtractedValue) and not isinstance(value, LeadTimeValue):
+        return value.model_dump()
+    return value
+
+
+def _validity_input(value: object) -> object:
+    if isinstance(value, ExtractedValue) and not isinstance(value, ValidityValue):
+        return value.model_dump()
+    return value
+
+
+LeadTimeField = Annotated[LeadTimeValue, BeforeValidator(_lead_time_input)]
+ValidityField = Annotated[ValidityValue, BeforeValidator(_validity_input)]
+
+
 class ProposalLineDraft(BaseModel):
     rfq_line_position: int | None = Field(
         description="Which requested line this answers; None if unclear"
@@ -164,7 +237,9 @@ class ProposalLineDraft(BaseModel):
     unit: ExtractedValue
     tooling_cost: ExtractedValue
     moq: ExtractedValue
-    lead_time_days: ExtractedValue
+    # Calendar days. Since prompt v5 the model writes `lead_time` and code computes
+    # this value from it, so it is not part of the model's output schema.
+    lead_time_days: SkipJsonSchema[ExtractedValue] = Field(default_factory=_absent_value)
     origin_country: ExtractedValue
     # The automotive qualification the supplier states for this offer, e.g. AEC-Q200.
     # No Field(description=...): next to a $ref, OpenAI's strict schema rejects it.
@@ -174,6 +249,12 @@ class ProposalLineDraft(BaseModel):
     freight_cost: ExtractedValue = Field(default_factory=_absent_value)
     tax_rate_percent: ExtractedValue = Field(default_factory=_absent_value)
     conditional_terms: ExtractedValue = Field(default_factory=_absent_value)
+    # This line's own lead time; absent when only the offer-level one applies.
+    lead_time: LeadTimeField = Field(default_factory=_absent_lead_time)
+    # Set by code, never by the model: the lead time that applies to this line (its
+    # own or the offer's), validated, as a plain value. Reconciliation copies field
+    # values back into drafts, so this is not `lead_time` itself.
+    lead_time_terms: SkipJsonSchema[ExtractedValue] = Field(default_factory=_absent_value)
 
 
 class PriorSupplierOffer(BaseModel):
@@ -200,6 +281,9 @@ class QuoteExtractionInput(BaseModel):
     email_body: str
     attachments_text: str = Field(description="Extracted text with [file p.N] / [sheet!A1] markers")
     prior_supplier_offer: PriorSupplierOffer | None = None
+    # When the supplier sent the message (prompt v5): only to complete a date written
+    # without a year. Code, not the model, counts durations from it.
+    message_date: date | None = None
 
 
 class ExtraOfferDraft(BaseModel):
@@ -216,6 +300,29 @@ class ExtraOfferDraft(BaseModel):
         description="Validity, minimums or other conditions as written, or null"
     )
     quote: str = Field(description="The exact text the offer was read from")
+
+
+QuestionTopic = Literal["technical", "commercial"]
+
+
+class DeclinedLine(BaseModel):
+    """A requested line the supplier explicitly says it will not or cannot quote."""
+
+    rfq_line_position: int
+    quote: str = Field(description="The exact text of the refusal, copied character for character")
+
+
+class SupplierQuestion(BaseModel):
+    """A question the supplier asks the buyer, copied exactly."""
+
+    quote: str = Field(description="The question exactly as written, character for character")
+    topic: QuestionTopic = Field(
+        description="technical: specification, drawing, material, part; commercial: price, "
+        "quantity, delivery, payment, terms"
+    )
+    rfq_line_position: int | None = Field(
+        description="The requested line the question concerns; null for the whole request"
+    )
 
 
 class QuoteExtractionOutput(BaseModel):
@@ -237,7 +344,23 @@ class QuoteExtractionOutput(BaseModel):
     update_evidence: ExtractedValue = Field(default_factory=_absent_value)
     withdrawn_line_positions: list[int] = Field(default_factory=list[int])
     conflicts: list[OfferConflict] = Field(default_factory=list[OfferConflict])
+    # Code adds the text of every `supplier_questions` entry here: a question holds the offer.
     technical_questions: list[str] = Field(default_factory=list[str])
+    # Since prompt v5. A validity given as a duration; code computes `valid_until`.
+    validity: ValidityField = Field(default_factory=_absent_validity)
+    # The lead time stated for the whole offer: it applies to every line without its own.
+    lead_time: LeadTimeField = Field(default_factory=_absent_lead_time)
+    # The supplier says this is its final or best offer; `value` is that statement.
+    final_offer: ExtractedValue = Field(default_factory=_absent_value)
+    declined_lines: list[DeclinedLine] = Field(default_factory=list[DeclinedLine])
+    supplier_questions: list[SupplierQuestion] = Field(default_factory=list[SupplierQuestion])
+    offer_notes: list[str] = Field(
+        default_factory=list[str],
+        description=(
+            "Exact sentences with general conditions of the whole offer that have no field "
+            "of their own (packaging, warranty, taxes...); never prices"
+        ),
+    )
 
 
 # --- rfq_candidate_classifier: sent-mail metadata -> is it an RFQ the buyer sent?
@@ -384,6 +507,23 @@ class AwardNoticeInput(BaseModel):
 
 class AwardNoticeOutput(BaseModel):
     body: str = Field(description="Plain text. The subject is set by code (Re: the RFQ email).")
+
+
+# --- The thread writers since their v2 prompts: an optional note, nothing else ------------
+#
+# Code renders every follow-up, negotiation and notice email (`bido_back.supplier_email`):
+# salutation, positions, questions, numbers, dates, reply-by, legal line, closing and
+# signature. The writers keep their input contracts above and return only this note;
+# the v1 output contracts stay for the released v1 prompts.
+
+
+class EmailNoteOutput(BaseModel):
+    note: str = Field(
+        description=(
+            "Empty by default. At most two short sentences in the supplier's language: no "
+            "digits, numbers, amounts, dates, names, links, greeting, list or signature."
+        )
+    )
 
 
 # --- sheet_mapper: an arbitrary workbook -> import sections ------------------------------
