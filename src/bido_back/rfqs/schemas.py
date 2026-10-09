@@ -82,6 +82,33 @@ class CreateRfqRequest(BaseModel):
     )
 
 
+class RfqLineAssumption(BaseModel):
+    """A reading or default the line's quantity rests on (from its procurement
+    assessment): shown to the buyer and the approver, never sent to suppliers."""
+
+    code: str
+    message: str
+    # What changes if the assumption is wrong.
+    alternative: str | None = None
+    # low: an inconsistency or ambiguity was settled by the most plausible reading.
+    confidence: Literal["medium", "low"] = "medium"
+
+
+LineConfidence = Literal["high", "medium", "low"]
+
+
+class RfqLineReview(BaseModel):
+    """One RFQ line whose quantity rests on assumptions, for the send approval."""
+
+    position: int
+    part_number: str | None
+    description: str
+    quantities: list[Decimal]
+    unit: str
+    confidence: LineConfidence
+    assumptions: list[RfqLineAssumption]
+
+
 class RfqLineView(BaseModel):
     id: UUID
     position: int
@@ -98,6 +125,10 @@ class RfqLineView(BaseModel):
     delivery_location: str | None
     qualification: str | None
     source_evidence: dict[str, JsonValue] = Field(default_factory=dict[str, JsonValue])
+    # From the procurement assessment the line was drafted from (None: not drafted from
+    # one): how reliable its quantity is, and the assumptions it rests on.
+    confidence: LineConfidence | None = None
+    assumptions: list[RfqLineAssumption] = Field(default_factory=list[RfqLineAssumption])
 
 
 class InviteView(BaseModel):
@@ -379,6 +410,9 @@ class RfqEmailDraft(BaseModel):
     # File name of the RFQ document PDF attached to this email, when there is
     # one (`GET /v1/rfqs/{rfq_id}/invites/{invite_id}/document.pdf` renders it).
     attachment_name: str | None = None
+    # The RFQ's lines whose quantities rest on assumptions (low or medium confidence),
+    # to highlight before approving. Internal: never part of the email.
+    line_assumptions: list[RfqLineReview] = Field(default_factory=list[RfqLineReview])
 
 
 class NegotiationEmailDraft(BaseModel):

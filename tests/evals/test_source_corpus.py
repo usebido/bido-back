@@ -99,7 +99,7 @@ async def test_the_layouts_without_a_known_gap_are_exact() -> None:
     assert grid.outcome == "review" and grid.passed
 
 
-async def test_gross_stock_read_as_available_is_flagged_false_ready() -> None:
+async def test_gross_stock_read_as_available_fails_the_run() -> None:
     corpus = render("scattered_pt")
     wrong = {
         key: [
@@ -116,8 +116,8 @@ async def test_gross_stock_read_as_available_is_flagged_false_ready() -> None:
         for key, sections in corpus.sections.items()
     }
     result = await evaluate("scattered_pt", mapper=scripted_mapper(replace(corpus, sections=wrong)))
-    assert result.false_ready and result.outcome == "false_ready" and not result.passed
-    # Free stock 25 instead of 20 for 000101: 45 to buy instead of 50, marked ready.
+    assert result.outcome in ("false_ready", "estimate") and not result.passed
+    # Free stock 25 instead of 20 for 000101: 45 to buy instead of 50.
     bearing = next(p for p in result.parts if p.part == "000101")
     assert bearing.ready and bearing.to_buy == Decimal(45) and bearing.available == Decimal(25)
     assert any("extra available -> col 5 'Físico bruto'" in note for note in result.mapping)

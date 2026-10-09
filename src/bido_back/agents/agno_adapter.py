@@ -353,7 +353,7 @@ def _entrypoint(
                     dumped = output.model_dump(mode="json")
                     traced.finished("ok", output=dumped)
                     state.outcomes[call_id] = _Outcome(status="ok", output=dumped)
-                    return output.model_dump_json()
+                    return tool.for_model(output)
 
         state.outcomes[call_id] = _Outcome(status="error", error=message)
         return f"error: {message}"
@@ -406,8 +406,12 @@ def build_agent(
     """A fresh Agno Agent for one run. Never shared: Agno agents hold per-run state."""
     disable_agno_telemetry()
     state = state or _RunState()
-    db = _agno_db(config.agno_database_url) if config.agno_database_url else None
-    history = definition.history_runs > 0 and db is not None
+    # Only an agent that reads its earlier runs keeps them. A stateless agent's input
+    # (spreadsheet rows, a supplier's email) is not copied into Agno's tables, which
+    # have no row-level security.
+    stored = config.agno_database_url if definition.history_runs > 0 else None
+    db = _agno_db(stored) if stored else None
+    history = db is not None
     return Agent(
         model=build_model(definition, config),
         name=definition.name,

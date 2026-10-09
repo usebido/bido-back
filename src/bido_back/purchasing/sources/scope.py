@@ -28,6 +28,7 @@ from datetime import date, timedelta
 from bido_back.purchasing.importers import norm
 from bido_back.purchasing.sources.contracts import (
     Issue,
+    PlanningCandidate,
     PlanningScope,
     Record,
     ScopeAssumption,
@@ -39,9 +40,19 @@ from bido_back.purchasing.sources.contracts import (
     ScopeResolution,
     SourceRef,
 )
-from bido_back.purchasing.sources.evidence import source_date, source_refs, source_text
+from bido_back.purchasing.sources.evidence import (
+    categorical,
+    source_date,
+    source_refs,
+    source_text,
+)
 from bido_back.purchasing.sources.joins import CANCELLED, CLOSED, state
-from bido_back.purchasing.sources.planning import code_key, same_code, same_place
+from bido_back.purchasing.sources.planning import (
+    code_key,
+    planning_context,
+    same_code,
+    same_place,
+)
 
 MAX_OPTIONS = 12
 MAX_REFS = 10
@@ -146,6 +157,218 @@ def direct_scope(records: Sequence[Record], request: ScopeRequest) -> ResolvedSc
             provenance=_provenance(request, scope, assumptions, {}),
         ),
     )
+
+
+def mrp_scopes(
+    records: Sequence[Record], request: ScopeRequest | None, today: date
+) -> list[ResolvedScope]:
+    """Without production plans, an MRP list (a material with several dated requirements
+    at a plant) is planned for every required material of each plant, in date order.
+
+    The buyer's product, plant, dates and safety stock apply when given; otherwise the
+    reference date is the plant's latest stock snapshot (today when none is dated) and
+    the horizon runs to the plant's last requirement, each a disclosed assumption.
+    """
+    request = request or ScopeRequest()
+    dated: dict[str, list[date]] = defaultdict(list)
+    counts: Counter[tuple[str, str]] = Counter()
+    for record in records:
+        if record.kind != "material_requirement":
+            continue
+        if categorical(record, "element_type") not in (None, "requirement"):
+            continue
+        part, plant = source_text(record, "part_number"), source_text(record, "location")
+        need = source_date(record, "need_by", [])
+        if part is None or plant is None or need is None:
+            continue
+        dated[norm(plant)].append(need)
+        counts[norm(part), norm(plant)] += 1
+    if not any(count > 1 for count in counts.values()):
+        return []
+    spellings = _plant_spellings(records)
+    wanted = _wanted_plants(request.location, list(dated))
+    result: list[ResolvedScope] = []
+    for plant, needs in sorted(dated.items()):
+        if wanted and plant not in wanted:
+            continue
+        stock = [
+            (day, record)
+            for record in records
+            if record.kind == "inventory"
+            and norm(source_text(record, "location") or "") == plant
+            and (day := source_date(record, "as_of", [])) is not None
+        ]
+        assumptions: list[ScopeAssumption] = []
+        as_of = request.as_of
+        if as_of is None and stock:
+            as_of = max(day for day, _ in stock)
+            assumptions.append(
+                ScopeAssumption(
+                    code="as_of_latest_snapshot",
+                    field="as_of",
+                    value=as_of.isoformat(),
+                    message=f"Reference date {as_of}: the plant's latest stock snapshot.",
+                    evidence=source_refs([r for day, r in stock if day == as_of], "as_of")[
+                        :MAX_REFS
+                    ],
+                )
+            )
+        elif as_of is None:
+            as_of = today
+            assumptions.append(
+                ScopeAssumption(
+                    code="as_of_today",
+                    field="as_of",
+                    value=as_of.isoformat(),
+                    message=f"No stock snapshot is dated: the reference date is today, {as_of}.",
+                )
+            )
+        end = request.horizon_end
+        if end is None and request.horizon_days is not None:
+            end = as_of + timedelta(days=request.horizon_days)
+            assumptions.append(_horizon_assumption(as_of, request.horizon_days, end))
+        if end is None:
+            end = max(max(needs), as_of)
+            assumptions.append(
+                ScopeAssumption(
+                    code="horizon_whole_mrp_list",
+                    field="horizon_end",
+                    value=end.isoformat(),
+                    message=f"Horizon: every requirement the list gives, through {end}.",
+                )
+            )
+        scope = PlanningScope(
+            product_code=request.product_code,
+            area=request.area,
+            location=spellings.get(plant, plant),
+            as_of=as_of,
+            horizon_end=end,
+            safety_stock=request.safety_stock,
+            production_lead_days=request.production_lead_days,
+            all_materials=request.product_code is None and request.area is None,
+        )
+        result.append(
+            ResolvedScope(
+                scope,
+                ScopeResolution(
+                    request=request,
+                    assumptions=assumptions,
+                    provenance=_provenance(request, scope, assumptions, {}),
+                ),
+            )
+        )
+    return result
+
+
+MAX_CANDIDATES = 5
+
+
+def candidate_scopes(
+    records: Sequence[Record], request: ScopeRequest, today: date
+) -> tuple[list[ResolvedScope], list[str]]:
+    """When the request leaves production boundaries open, plan each candidate separately.
+
+    Every product/plant with production orders that the buyer's words do not rule out is
+    a candidate (those they point to first, at most `MAX_CANDIDATES`); an open horizon
+    covers all of the candidate's orders and an undated stock position uses today. Each
+    choice is an assumption. Returns the planned scopes and the candidates left out, by
+    name with their order counts.
+    """
+    candidates, _ = planning_context(records)
+    words = " ".join(w for w in (request.product, request.product_code) if w)
+
+    def pointed(candidate: PlanningCandidate) -> bool:
+        text = norm(f"{candidate.product_code} {candidate.description or ''}")
+        return bool(words) and (
+            code_key(candidate.product_code) in code_key(words)
+            or all(w in text.split() for w in norm(words).split() if w not in _FILLER)
+        )
+
+    if words and any(pointed(c) for c in candidates):
+        candidates = [c for c in candidates if pointed(c)]
+    if request.location is not None:
+        candidates = [c for c in candidates if same_place(c.location, request.location)]
+    candidates.sort(key=lambda c: (not pointed(c), c.product_code, c.location or ""))
+    planned: list[ResolvedScope] = []
+    left: list[str] = []
+    for candidate in candidates:
+        label = f"{candidate.product_code} at {candidate.location or 'no plant'}"
+        if len(planned) >= MAX_CANDIDATES:
+            left.append(f"{label} ({len(candidate.need_dates)} order date(s))")
+            continue
+        sub = request.model_copy(
+            update={
+                "product_code": candidate.product_code,
+                "product": None,
+                "area": None,
+                "location": request.location or candidate.location,
+            }
+        )
+        resolved = resolve_scope(records, sub)
+        extra: list[ScopeAssumption] = []
+        fields = {q.field for q in resolved.resolution.questions}
+        if resolved.scope is None and fields <= {"as_of", "horizon_end"}:
+            update: dict[str, object] = {}
+            if "as_of" in fields:
+                update["as_of"] = today
+                extra.append(
+                    ScopeAssumption(
+                        code="as_of_today",
+                        field="as_of",
+                        value=today.isoformat(),
+                        message=f"No stock snapshot is dated: the reference date is today, "
+                        f"{today}.",
+                    )
+                )
+            if "horizon_end" in fields and candidate.need_dates:
+                update["horizon_end"] = max(candidate.need_dates)
+                update["horizon_days"] = None
+                extra.append(
+                    ScopeAssumption(
+                        code="horizon_all_orders",
+                        field="horizon_end",
+                        value=max(candidate.need_dates).isoformat(),
+                        message=f"No horizon was given: every production order of {label} "
+                        f"is included, through {max(candidate.need_dates)}.",
+                    )
+                )
+            if update:
+                resolved = resolve_scope(records, sub.model_copy(update=update))
+        if resolved.scope is None:
+            left.append(label)
+            continue
+        if len(candidates) > 1:
+            extra.append(
+                ScopeAssumption(
+                    code="planned_each_candidate",
+                    field="product_code",
+                    value=candidate.product_code,
+                    message=f"The request does not settle one product and plant: {label} is "
+                    f"planned on its own ({len(candidates)} candidates, each separately). If "
+                    "you meant another one, ignore these lines.",
+                    evidence=candidate.evidence[:MAX_REFS],
+                )
+            )
+        resolution = resolved.resolution.model_copy(
+            update={
+                "request": request,
+                "assumptions": [*resolved.resolution.assumptions, *extra],
+            }
+        )
+        planned.append(ResolvedScope(resolved.scope, resolution))
+    return planned, left
+
+
+def _wanted_plants(location: str | None, plants: Sequence[str]) -> set[str]:
+    """The plants the buyer's words name ("planta 1000" names 1000); none named: all."""
+    if location is None:
+        return set()
+    words = norm(location)
+    exact = {plant for plant in plants if plant == words}
+    if exact:
+        return exact
+    tokens = set(words.split())
+    return {plant for plant in plants if set(plant.split()) <= tokens}
 
 
 def scope_issues(resolved: ResolvedScope, *, planned: bool) -> list[Issue]:

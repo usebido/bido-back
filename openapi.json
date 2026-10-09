@@ -1123,6 +1123,13 @@
       },
       "AssessmentLine": {
         "properties": {
+          "assumptions": {
+            "items": {
+              "$ref": "#/components/schemas/Assumption"
+            },
+            "title": "Assumptions",
+            "type": "array"
+          },
           "available": {
             "anyOf": [
               {
@@ -1146,6 +1153,16 @@
               }
             ],
             "title": "Calculated To Buy"
+          },
+          "confidence": {
+            "default": "high",
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "title": "Confidence",
+            "type": "string"
           },
           "currency": {
             "anyOf": [
@@ -1260,6 +1277,18 @@
               }
             ],
             "title": "Need By"
+          },
+          "net_requirement": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Net Requirement"
           },
           "netting": {
             "items": {
@@ -1669,6 +1698,59 @@
           "line_count"
         ],
         "title": "AssessmentSnapshotSummary",
+        "type": "object"
+      },
+      "Assumption": {
+        "description": "A reading or default the assessment settled on instead of stopping: disclosed with\nthe reply, the RFQ draft and the approval, never hidden. `alternative` states what\nchanges if the assumption is wrong.",
+        "properties": {
+          "alternative": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alternative"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "confidence": {
+            "default": "medium",
+            "enum": [
+              "medium",
+              "low"
+            ],
+            "title": "Confidence",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "part_numbers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Part Numbers",
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "Assumption",
         "type": "object"
       },
       "AttachedFile": {
@@ -8686,6 +8768,11 @@
       "PlanningScope-Input": {
         "description": "Buyer-supplied planning boundaries, kept separate from extracted evidence.",
         "properties": {
+          "all_materials": {
+            "default": false,
+            "title": "All Materials",
+            "type": "boolean"
+          },
           "area": {
             "anyOf": [
               {
@@ -8764,6 +8851,11 @@
       "PlanningScope-Output": {
         "description": "Buyer-supplied planning boundaries, kept separate from extracted evidence.",
         "properties": {
+          "all_materials": {
+            "default": false,
+            "title": "All Materials",
+            "type": "boolean"
+          },
           "area": {
             "anyOf": [
               {
@@ -10204,6 +10296,40 @@
         "title": "RecipientCheck",
         "type": "object"
       },
+      "RecognizedReport": {
+        "description": "A table read by a deterministic report pack instead of the source mapper.",
+        "properties": {
+          "pack": {
+            "title": "Pack",
+            "type": "string"
+          },
+          "report": {
+            "title": "Report",
+            "type": "string"
+          },
+          "rows": {
+            "title": "Rows",
+            "type": "integer"
+          },
+          "source_id": {
+            "title": "Source Id",
+            "type": "string"
+          },
+          "table": {
+            "title": "Table",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id",
+          "table",
+          "pack",
+          "report",
+          "rows"
+        ],
+        "title": "RecognizedReport",
+        "type": "object"
+      },
       "Recommendation": {
         "properties": {
           "advisories": {
@@ -11166,6 +11292,13 @@
             "title": "Kind",
             "type": "string"
           },
+          "line_assumptions": {
+            "items": {
+              "$ref": "#/components/schemas/RfqLineReview"
+            },
+            "title": "Line Assumptions",
+            "type": "array"
+          },
           "rfq_id": {
             "anyOf": [
               {
@@ -11454,8 +11587,117 @@
         "title": "RfqFromAnalysisRequest",
         "type": "object"
       },
+      "RfqLineAssumption": {
+        "description": "A reading or default the line's quantity rests on (from its procurement\nassessment): shown to the buyer and the approver, never sent to suppliers.",
+        "properties": {
+          "alternative": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Alternative"
+          },
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "confidence": {
+            "default": "medium",
+            "enum": [
+              "medium",
+              "low"
+            ],
+            "title": "Confidence",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message"
+        ],
+        "title": "RfqLineAssumption",
+        "type": "object"
+      },
+      "RfqLineReview": {
+        "description": "One RFQ line whose quantity rests on assumptions, for the send approval.",
+        "properties": {
+          "assumptions": {
+            "items": {
+              "$ref": "#/components/schemas/RfqLineAssumption"
+            },
+            "title": "Assumptions",
+            "type": "array"
+          },
+          "confidence": {
+            "enum": [
+              "high",
+              "medium",
+              "low"
+            ],
+            "title": "Confidence",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "part_number": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Part Number"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "quantities": {
+            "items": {
+              "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+              "type": "string"
+            },
+            "title": "Quantities",
+            "type": "array"
+          },
+          "unit": {
+            "title": "Unit",
+            "type": "string"
+          }
+        },
+        "required": [
+          "position",
+          "part_number",
+          "description",
+          "quantities",
+          "unit",
+          "confidence",
+          "assumptions"
+        ],
+        "title": "RfqLineReview",
+        "type": "object"
+      },
       "RfqLineView": {
         "properties": {
+          "assumptions": {
+            "items": {
+              "$ref": "#/components/schemas/RfqLineAssumption"
+            },
+            "title": "Assumptions",
+            "type": "array"
+          },
           "category": {
             "enum": [
               "catalog",
@@ -11465,6 +11707,22 @@
             ],
             "title": "Category",
             "type": "string"
+          },
+          "confidence": {
+            "anyOf": [
+              {
+                "enum": [
+                  "high",
+                  "medium",
+                  "low"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Confidence"
           },
           "delivery_location": {
             "anyOf": [
@@ -12852,6 +13110,13 @@
             ],
             "title": "Assessment Id"
           },
+          "assumptions": {
+            "items": {
+              "$ref": "#/components/schemas/Assumption"
+            },
+            "title": "Assumptions",
+            "type": "array"
+          },
           "coverage": {
             "items": {
               "$ref": "#/components/schemas/Coverage"
@@ -12891,6 +13156,13 @@
             },
             "title": "Record Counts",
             "type": "object"
+          },
+          "reports": {
+            "items": {
+              "$ref": "#/components/schemas/RecognizedReport"
+            },
+            "title": "Reports",
+            "type": "array"
           },
           "rfq_id": {
             "anyOf": [
@@ -13384,6 +13656,64 @@
             ],
             "title": "Avg Price"
           },
+          "contract_currency": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Currency"
+          },
+          "contract_expired": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Expired"
+          },
+          "contract_lead_time_days": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Lead Time Days"
+          },
+          "contract_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Price"
+          },
+          "contract_valid_to": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Contract Valid To"
+          },
           "country": {
             "anyOf": [
               {
@@ -13474,6 +13804,18 @@
             ],
             "title": "Lead Time Days"
           },
+          "min_order_quantity": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Order Quantity"
+          },
           "min_price": {
             "anyOf": [
               {
@@ -13538,6 +13880,11 @@
             ],
             "title": "Otif Pct"
           },
+          "purchase_blocked": {
+            "default": false,
+            "title": "Purchase Blocked",
+            "type": "boolean"
+          },
           "qualification_status": {
             "anyOf": [
               {
@@ -13589,6 +13936,66 @@
               }
             ],
             "title": "Quantity"
+          },
+          "score_delivery": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score Delivery"
+          },
+          "score_overall": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score Overall"
+          },
+          "score_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score Price"
+          },
+          "score_quality": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score Quality"
+          },
+          "score_service": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Score Service"
           },
           "suggested": {
             "default": false,

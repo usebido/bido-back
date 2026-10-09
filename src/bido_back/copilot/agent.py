@@ -1,15 +1,17 @@
 """The copilot agent definition: a prompt, a model, this request's tools, a reply."""
 
 from collections.abc import Sequence
+from dataclasses import replace
 from typing import Final
 
 from bido_back.agents.catalog.definitions import DEFAULT_MODEL
 from bido_back.agents.definition import AgentDefinition
 from bido_back.agents.tools import AnyTool
 from bido_back.copilot.contracts import CopilotReply
+from bido_back.copilot.model_views import cell_free_view
 
-COPILOT_PROMPT_FILE: Final = "copilot.v25.md"
-COPILOT_PROMPT_VERSION: Final = 25
+COPILOT_PROMPT_FILE: Final = "copilot.v26.md"
+COPILOT_PROMPT_VERSION: Final = 26
 # Earlier turns of the same conversation the model sees (needs Agno storage).
 HISTORY_RUNS: Final = 10
 # Model requests per message: a few lookups, maybe a draft action, the answer.
@@ -25,7 +27,12 @@ def copilot_agent(
         prompt_version=COPILOT_PROMPT_VERSION,
         model=model,
         output_model=CopilotReply,
-        tools=tuple(tools),
+        # Cell references are for code and the buyer's screen: the model reads every
+        # tool's output without them, unless the tool bounds its output further.
+        tools=tuple(
+            tool if tool.model_view is not None else replace(tool, model_view=cell_free_view)
+            for tool in tools
+        ),
         max_turns=MAX_TURNS,
         effort="low",
         history_runs=HISTORY_RUNS,

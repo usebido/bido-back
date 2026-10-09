@@ -115,6 +115,51 @@ _SYNONYMS: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "suspendu", "suspendue", "inactif",
         ),
     },
+    "supplier.purchase_block": {
+        # An ERP supplier master's purchasing block flag ("X"); blank is not blocked.
+        "blocked": (
+            "x", "sim", "s", "yes", "y", "true", "blocked", "bloqueado", "bloqueada",
+            "bloqueio", "bloqueio de compras", "purchasing block", "purchase block", "gesperrt",
+            "einkaufssperre", "bloccato", "bloccata", "bloqueo", "bloqué", "bloquée",
+        ),
+    },
+    "material_requirement.element_type": {
+        # MRP list elements (SAP MD04/MD05 abbreviations in pt, en, de, es).
+        "requirement": (
+            "requirement", "dependent requirement", "necdep", "necessidade dependente", "necind",
+            "necpri", "necprim", "necessidade independente", "necessidade primaria", "reserv",
+            "reserva", "reservation", "ordres", "depreq", "indreq", "cusord", "sales order",
+            "ordven", "ordem de venda", "pedcli", "pedido de cliente", "sekbed", "primbd",
+            "kdauft", "necesidad", "necesidad secundaria", "pedido cliente", "demanda",
+            "demand", "consumo", "forecast req", "prev",
+        ),
+        "receipt": (
+            "pedcpa", "pedido de compra", "item de pedido", "poitem", "po item",
+            "purchase order", "bs-pos", "bestpo", "bestellung", "ped. compra", "avrem",
+            "aviso de remessa", "shpgnt", "shipping notification", "ordprd", "ordpro",
+            "ordem de produção", "prdord", "production order", "fertauf",
+        ),
+        "proposal": (
+            "reqcpa", "reqc", "solcom", "requisição de compra", "requisicao de compra",
+            "purrqs", "purchase requisition", "banf", "ordpl", "ordpla", "ordem planejada",
+            "plord", "plord.", "planned order", "plauf", "solped", "orden planificada",
+        ),
+        "stock": (
+            "est.cen", "estcen", "estoque centro", "estoque do centro", "plnt stock",
+            "plant stock", "stock", "werkbest", "werksbestand", "estoque", "existencias",
+        ),
+        "safety_stock": (
+            "estseg", "estoque de segurança", "estoque seguranca", "safest", "safety stock",
+            "sichbe", "sicherheitsbestand", "stock de seguridad",
+        ),
+    },
+    "material_requirement.sign_convention": {
+        "negative": (
+            "negative", "negativo", "negativa", "negatives", "negative requirements",
+            "requirements are negative", "necessidades negativas",
+        ),
+        "positive": ("positive", "positivo", "positiva", "positives"),
+    },
     "receipt.movement": {
         "receipt": (
             "101", "receipt", "goods receipt", "gr", "entrada", "entrada de mercadoria",

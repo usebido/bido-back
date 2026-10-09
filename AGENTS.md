@@ -121,6 +121,27 @@ no duplicate side effects are the properties every change must preserve.
 - Prompts are versioned files under `prompts/` (`<name>.v<N>.md`). Change a
   prompt by adding a new version, not by editing a released one.
 
+## Large data
+
+Buyers' sources reach ERP scale; the direction is in
+[`docs/large-sources.md`](docs/large-sources.md).
+
+- **A model reads a bounded view of a table, never the table:** structure, column
+  profiles over every row, distinct values and a sample code chose, within a fixed
+  budget whatever the row count. Code reads, transforms, joins and computes every
+  row. The source mapper's row paging is being replaced; never add a path that pages
+  rows through a model.
+- **A model emits typed plans, never values, SQL or code**, and code validates a plan
+  against the data before running it. Never execute model-written SQL or code.
+- **Per-row meaning is decided per distinct value**, cached per tenant: deterministic
+  keys and rules first, a model only for what they leave open, a person for what
+  stays doubtful.
+- **Tool results a model reads are bounded.** Give a tool whose output grows with the
+  data a `Tool.model_view`: no cell references, a stated budget, what was left out
+  counted. Events and artifacts keep the whole output for the buyer's screen.
+- **Only an agent that reads its earlier runs keeps run storage.** A stateless
+  agent's input (spreadsheet rows, a supplier's email) never lands in Agno's tables.
+
 ## Observability
 
 - Traces go out through OpenTelemetry (OTLP/HTTP to an ADOT collector, then

@@ -134,15 +134,18 @@ async def evaluate(case: str, *, live: bool = False) -> EvalResult:
         )
         passed = complete and quantities == EXPECTED and correct_history
         false_ready = any(
-            line.ready and line.calculated_to_buy != EXPECTED.get(line.part_number)
+            line.ready
+            and line.confidence == "high"
+            and line.calculated_to_buy != EXPECTED.get(line.part_number)
             for line in result.lines
         )
     else:
+        # Problems are estimates, never certain: an affected line must not be high confidence.
         affected = [line for line in result.lines if line.part_number == "000101"]
         false_ready = (
-            any(line.ready for line in affected)
+            any(line.confidence == "high" for line in affected)
             if case == "conflicting_stock"
-            else any(line.ready for line in result.lines)
+            else any(line.confidence == "high" for line in result.lines)
         )
         required_code = (
             "conflicting_inventory_snapshot"

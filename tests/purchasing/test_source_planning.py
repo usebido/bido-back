@@ -85,7 +85,7 @@ def test_area_scope_resolves_the_same_product_via_the_master() -> None:
         ("purchase", "status", "Unknown", "unknown_order_status"),
     ],
 )
-def test_inconsistent_evidence_blocks_the_affected_quantity(
+def test_inconsistent_evidence_is_not_netted_and_lowers_the_confidence(
     kind: str,
     field: str,
     replacement: str | None,
@@ -106,7 +106,13 @@ def test_inconsistent_evidence_blocks_the_affected_quantity(
         row.values[field] = replacement
     line = assess_plan(rows, SCOPE).lines[0]
     assert code in {i.code for i in line.issues}
-    assert line.calculated_to_buy is None and not line.ready
+    # The quantity is a best estimate that leaves out what does not reconcile, and says so.
+    assert line.ready and line.calculated_to_buy is not None and line.confidence == "low"
+    assert {a.code for a in line.assumptions} & {
+        "stock_not_netted",
+        "open_orders_not_counted",
+        "older_stock_snapshot_used",
+    }
 
 
 def test_conflicting_current_snapshot_is_not_summed_or_arbitrarily_selected() -> None:
@@ -117,7 +123,8 @@ def test_conflicting_current_snapshot_is_not_summed_or_arbitrarily_selected() ->
     rows.append(duplicate)
     line = assess_plan(rows, SCOPE).lines[0]
     assert "conflicting_inventory_snapshot" in {i.code for i in line.issues}
-    assert not line.ready
+    assert line.confidence == "low"
+    assert "stock_not_netted" in {a.code for a in line.assumptions}
 
 
 def test_available_stock_is_not_reduced_by_reservations_twice() -> None:
@@ -130,8 +137,10 @@ def test_available_stock_is_not_reduced_by_reservations_twice() -> None:
 def test_explicit_pending_balance_is_required_before_subtracting_an_open_order() -> None:
     rows = [r for r in motor_records() if r.kind != "delivery_schedule"]
     result = assess_plan(rows, SCOPE)
-    assert not result.lines[0].ready
-    assert "missing_pending_confirmation" in {i.code for i in result.lines[0].issues}
+    line = result.lines[0]
+    assert "missing_pending_confirmation" in {i.code for i in line.issues}
+    assert line.confidence == "low"
+    assert "open_orders_not_counted" in {a.code for a in line.assumptions}
 
 
 def test_partial_physical_receipts_are_not_added_again_to_stock() -> None:
@@ -210,13 +219,15 @@ def test_ambiguous_bom_revision_and_repeated_demand_are_blocked() -> None:
     )
     result = assess_plan(rows, SCOPE)
     assert "unreconciled_component_requirement" in {i.code for i in result.issues}
-    assert not any(line.ready for line in result.lines)
+    assert all(line.confidence == "low" for line in result.lines)
 
 
 def test_safety_stock_is_an_explicit_policy_and_not_an_implicit_zero() -> None:
     result = assess_plan(motor_records(), SCOPE.model_copy(update={"safety_stock": None}))
-    assert all(not line.ready for line in result.lines)
     assert all("missing_safety_stock" in {i.code for i in line.issues} for line in result.lines)
+    # No policy keeps none, and says so: a default, not a hidden zero.
+    assert all("no_safety_stock" in {a.code for a in line.assumptions} for line in result.lines)
+    assert all(line.ready and line.confidence != "high" for line in result.lines)
 
 
 def test_planning_scope_rejects_reversed_horizons_and_missing_product_or_area() -> None:
@@ -304,7 +315,8 @@ def test_pending_deliveries_cannot_disappear_when_the_purchase_join_fails(varian
     else:
         order.values["status"] = "Closed"
     line = assess_plan(rows, SCOPE).lines[0]
-    assert not line.ready and line.calculated_to_buy is None
+    assert line.confidence == "low"
+    assert "open_orders_not_counted" in {a.code for a in line.assumptions}
     assert {i.code for i in line.issues} & {
         "orphan_delivery_schedule",
         "closed_order_has_pending_delivery",
@@ -338,7 +350,7 @@ def test_missing_plant_on_relevant_production_cannot_silently_remove_demand() ->
     rows.append(other)
     result = assess_plan(rows, SCOPE)
     assert "missing_production_location" in {i.code for i in result.issues}
-    assert not any(line.ready for line in result.lines)
+    assert all(line.confidence == "low" for line in result.lines)
 
 
 def test_invalid_unrelated_maintenance_date_does_not_block_motor_planning() -> None:

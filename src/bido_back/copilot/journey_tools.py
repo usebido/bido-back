@@ -34,6 +34,7 @@ from bido_back.comparison.compute import DecisionOffer, ExcludedOffer, OfferAlte
 from bido_back.comparison.loader import load_comparison
 from bido_back.comparison.policy import ComparisonPolicy, SupplierPerformance
 from bido_back.copilot import proposals, queries
+from bido_back.copilot.model_views import assessment_view
 from bido_back.copilot.proposals import (
     PROPOSAL_ARG,
     AwaitingConfirmation,
@@ -438,25 +439,13 @@ def _assessment_preview(
     (`rfq_lines`) with their default limits, and the suppliers it would invite or skip
     (`plan_from_snapshot`). The same rules as `draft_from_snapshot`, which checks again
     when it runs."""
-    preliminary = args.pending_validation is not None
     lines, skipped = rfq_lines(assessment)
     limits = {limit.position: limit for limit in plan.limits}
-    open_issues = [issue.message for issue in assessment.issues if issue.severity == "blocker"]
-    if assessment.status != "assessed":
-        open_issues.insert(0, "the assessment still needs review")
-    for line in assessment.lines:
-        if not line.ready or not line.unit or line.calculated_to_buy is None:
-            open_issues.append(f"{line.part_number}: quantity, unit or evidence not validated")
-        open_issues.extend(
-            f"{line.part_number}: {issue.message}"
-            for issue in line.issues
-            if issue.severity == "blocker"
-        )
-    # Open issues stop a complete RFQ; a preliminary one carries them (its mark keeps it
-    # from being prepared for sending), so for it they are what the buyer still settles.
-    issues = [] if preliminary else open_issues
+    # Assumptions and problems never stop the draft: each line carries its own, shown
+    # with it, and the send approval shows them again.
+    issues: list[str] = []
     if not lines:
-        issues.append("the assessment has no validated positive purchase requirements")
+        issues.append("the assessment has no positive purchase quantities")
     issues.extend(plan.issues)
     return ProposalPreview(
         action="create_rfq_from_assessment",
@@ -480,6 +469,8 @@ def _assessment_preview(
                 target_unit_price=found.target_unit_price if found else None,
                 max_unit_price=found.max_unit_price if found else None,
                 limits_basis=found.basis if found else None,
+                confidence=line.confidence,
+                assumptions=[a.message for a in line.assumptions],
             )
             for position, line in enumerate(lines, start=1)
             if line.calculated_to_buy is not None
@@ -495,10 +486,9 @@ def _assessment_preview(
             )
             for supplier in plan.invited
         ],
-        skipped=skipped if preliminary else [],
+        skipped=skipped,
         skipped_suppliers=plan.skipped_suppliers,
         lines_without_limits=plan.lines_without_limits,
-        questions=open_issues if preliminary else [],
         issues=issues,
     )
 
@@ -1020,6 +1010,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             SourceAssessment,
             "draft",
             save_procurement_assessment,
+            model_view=assessment_view,
         ),
         Tool(
             "get_procurement_assessment",
@@ -1028,6 +1019,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             SourceAssessment,
             "read",
             get_procurement_assessment,
+            model_view=assessment_view,
         ),
         Tool(
             "list_procurement_assessments",
@@ -1078,11 +1070,15 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             '"as_of": "2026-10-08", "horizon_end": "2026-10-22"}; "tudo da área de Manutenção '
             'até 20/10/2026, a montagem leva 2 dias" -> {"area": "Manutenção", "horizon_end": '
             '"2026-10-20", "production_lead_days": 2}; "analisa o motor" -> {"product": '
-            '"motor"}.',
+            '"motor"}. A large result is cut for you: `lines` are read in full (lines to '
+            "buy first), `more_lines` are one-row summaries of the others and `lines_left_out` "
+            "counts the lines not shown; cell references are only counted (`evidence_cells`). "
+            "Never present the lines shown as all of them.",
             AnalyzeSourcesIn,
             SourceAssessment,
             "read",
             analyze_procurement_sources,
+            model_view=assessment_view,
         ),
         Tool(
             "import_spreadsheet",

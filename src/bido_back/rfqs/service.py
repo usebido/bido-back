@@ -91,6 +91,7 @@ from bido_back.onboarding.standard import TemplateContent
 from bido_back.outbound.domains import RecipientCheck, check_recipients, recipients_in_args
 from bido_back.rfqs import audit
 from bido_back.rfqs.agents import EmailWriterAgent, IntakeAgent
+from bido_back.rfqs.assumptions import line_assumptions
 from bido_back.rfqs.currency import CurrencyChange, change_currency, resolve_currency
 from bido_back.rfqs.document import (
     DocumentBranding,
@@ -129,6 +130,7 @@ from bido_back.rfqs.schemas import (
     RfqCreated,
     RfqDetail,
     RfqEmailDraft,
+    RfqLineReview,
     RfqLineView,
     RfqStatus,
     UpdateLineRequest,
@@ -195,6 +197,7 @@ def _new_reply_token() -> str:
 
 
 def _line_view(line: RfqLine) -> RfqLineView:
+    confidence, assumptions = line_assumptions(line.source_evidence)
     return RfqLineView(
         id=line.id,
         position=line.position,
@@ -210,7 +213,30 @@ def _line_view(line: RfqLine) -> RfqLineView:
         delivery_location=line.delivery_location,
         qualification=line.qualification,
         source_evidence=line.source_evidence,
+        confidence=confidence,
+        assumptions=assumptions,
     )
+
+
+def _line_reviews(lines: Sequence[RfqLine]) -> list[RfqLineReview]:
+    """The RFQ lines whose quantity rests on assumptions, in position order."""
+    reviews: list[RfqLineReview] = []
+    for line in sorted(lines, key=lambda line: line.position):
+        confidence, assumptions = line_assumptions(line.source_evidence)
+        if confidence is None or (confidence == "high" and not assumptions):
+            continue
+        reviews.append(
+            RfqLineReview(
+                position=line.position,
+                part_number=line.part_number,
+                description=line.description,
+                quantities=quantities_from_json(line.quantities),
+                unit=line.unit,
+                confidence=confidence,
+                assumptions=assumptions,
+            )
+        )
+    return reviews
 
 
 def _invite_view(invite: Invite, supplier: Supplier, document_language: str) -> InviteView:
@@ -1539,6 +1565,7 @@ async def list_approvals(
             args.invite_id for args in negotiations.values()
         }
         context: dict[UUID, tuple[UUID, str, str]] = {}
+        reviewed: dict[UUID, list[RfqLineReview]] = {}
         if invite_ids:
             rows = await session.execute(
                 select(Invite.id, Rfq.id, Rfq.ref, Supplier.name)
@@ -1547,6 +1574,13 @@ async def list_approvals(
                 .where(Invite.id.in_(invite_ids))
             )
             context = {invite_id: (rfq_id, ref, name) for invite_id, rfq_id, ref, name in rows}
+        # What each RFQ's quantities rest on, highlighted in the send review.
+        rfq_ids = {rfq_id for rfq_id, _, _ in context.values()}
+        if rfq_ids:
+            by_rfq: dict[UUID, list[RfqLine]] = {}
+            for line in await session.scalars(select(RfqLine).where(RfqLine.rfq_id.in_(rfq_ids))):
+                by_rfq.setdefault(line.rfq_id, []).append(line)
+            reviewed = {rfq_id: _line_reviews(found) for rfq_id, found in by_rfq.items()}
         # Imported here: the award service builds on this module.
         from bido_back.awards.service import queue_details
 
@@ -1599,6 +1633,7 @@ async def list_approvals(
                 cc=list(args.cc),
                 subject=args.subject,
                 body=args.body,
+                line_assumptions=reviewed.get(rfq_id, []) if rfq_id is not None else [],
                 **_rfq_email_extras(args),
             )
         negotiation: NegotiationEmailDraft | None = None
