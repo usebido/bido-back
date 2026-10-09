@@ -174,7 +174,7 @@ async def analyze_uploads(
     source_key = hashlib.sha256(
         json.dumps(
             {
-                "version": 3,
+                "version": 4,
                 "objective": objective,
                 "scope": request.model_dump(mode="json") if request is not None else None,
                 "sources": sorted(

@@ -39,10 +39,39 @@ class Issue(BaseModel):
     evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
 
 
+CanonicalBasis = Literal[
+    # The mapper interpreted the section's distinct spelling; code checked it.
+    "value_map",
+    # A spreadsheet number cell: no locale is involved in reading it.
+    "native_number",
+    # Other values of the same column, sheet or source prove the decimal separator.
+    "decimal_separator",
+    # Other dates of the same column, sheet or source prove the day/month order.
+    "date_order",
+    # The mapper declared the order from the source's language; no value contradicts it.
+    "declared_date_order",
+]
+
+
+class CanonicalValue(BaseModel):
+    """What code derived from a copied source value, and what decided it.
+
+    The source spelling stays in `Record.values` and its cell in `Record.evidence`.
+    `value` is a vocabulary term, a plain decimal or an ISO date; None means the
+    interpretations disagree and the value stays unresolved.
+    """
+
+    value: str | None
+    source: str
+    basis: CanonicalBasis
+    evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
+
+
 class Record(BaseModel):
     kind: RecordKind
     values: dict[str, str]
     evidence: dict[str, SourceRef]
+    canonical: dict[str, CanonicalValue] = Field(default_factory=dict[str, CanonicalValue])
 
 
 class PlanningScope(BaseModel):
@@ -342,6 +371,9 @@ class EvidenceTable(BaseModel):
     # Every value retains its source spelling; adapters preserve formatted identifiers.
     rows: list[list[str | None]]
     layout: Literal["table", "text"] = "table"
+    # 1-based (row, column) of cells the file stored as numbers, not text: their
+    # rendering has no locale, so they neither need nor prove a decimal separator.
+    numbers: set[tuple[int, int]] = Field(default_factory=set[tuple[int, int]])
 
 
 class Coverage(BaseModel):
@@ -394,11 +426,54 @@ class FieldMapping(BaseModel):
 class ColumnMapping(BaseModel):
     field: str
     column: int
+    # The header cell's text at that column, copied verbatim: code rejects the section
+    # when it does not match (an off-by-one column would map the wrong values).
+    header_text: str | None = None
+    # Repeat the value of the nearest row above when the source leaves a grouping key
+    # blank under its first row (identifier columns only; disclosed).
+    fill_down: bool = False
+
+
+DateOrder = Literal["day_first", "month_first"]
+
+
+class ConstantMapping(BaseModel):
+    """A report-level value (a title or header cell) that applies to a whole section.
+
+    `ref` may lie anywhere in the same table outside the section's data rows. `text`,
+    when given, is the exact part of that cell holding the value; code finds it there.
+    """
+
+    field: str
+    ref: CellRef
+    text: str | None = None
+
+
+VocabularyTerm = Literal[
+    "open", "closed", "cancelled", "pending", "received", "planned", "released", "approved",
+    "blocked", "receipt", "reversal", "return", "gross", "net", "available", "count", "kg",
+    "g", "t", "lb", "l", "ml", "m", "cm", "mm", "m2", "m3", "kit", "set", "pair", "box",
+    "pack", "roll",
+]  # fmt: skip
+
+
+class ValueMapping(BaseModel):
+    """The meaning of one distinct source spelling of a categorical column.
+
+    `source` must occur in the section; `canonical` must be a term of the task's
+    vocabulary for that kind and field. Code copies the spelling, never this text.
+    """
+
+    field: str
+    source: str
+    canonical: VocabularyTerm
 
 
 class RecordProposal(BaseModel):
     kind: RecordKind
     fields: list[FieldMapping]
+    # How the record's numeric dates are written, when the source's language establishes it.
+    date_order: DateOrder | None = None
 
 
 class TableProposal(BaseModel):
@@ -409,6 +484,9 @@ class TableProposal(BaseModel):
     # Lists keep the model's strict output schema closed while fields vary by kind.
     # Each assignment names a 1-based column; values are always copied by code.
     columns: list[ColumnMapping]
+    constants: list[ConstantMapping] = Field(default_factory=list[ConstantMapping])
+    value_maps: list[ValueMapping] = Field(default_factory=list[ValueMapping])
+    date_order: DateOrder | None = None
 
 
 class MappingProposal(BaseModel):
@@ -437,3 +515,5 @@ class MappingTask(BaseModel):
     previous_sections: list[TableProposal]
     manifest: list[TableManifest]
     catalog: dict[str, list[str]]
+    # Closed canonical terms for value_maps: "<kind>.<field>" keys, and "unit" for units.
+    vocabulary: dict[str, list[str]] = Field(default_factory=dict[str, list[str]])

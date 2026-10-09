@@ -23,7 +23,14 @@ from decimal import Decimal
 from functools import cache
 from typing import Final, Literal, Protocol, cast
 
-from bido_back.purchasing.sources.contracts import ColumnMapping, RecordKind, TableProposal
+from bido_back.purchasing.sources.contracts import (
+    CellRef,
+    ColumnMapping,
+    ConstantMapping,
+    DateOrder,
+    RecordKind,
+    TableProposal,
+)
 from bido_back.purchasing.sources.readers import SourceDocument
 from evals.source_locales import DE, EN, ES, INJECTION, IT, PT, SAP_UNITS, Locale
 from evals.source_scenario import (
@@ -77,6 +84,12 @@ class Block:
     title: list[list[Value]] = field(default_factory=list[list[Value]])
     # Why a correct mapper reports this table instead of mapping it.
     unsupported: str | None = None
+    # Report-level values in the title: (kind, field, 0-based title row, exact text).
+    constants: list[tuple[RecordKind, str, int, str]] = field(
+        default_factory=list[tuple[RecordKind, str, int, str]]
+    )
+    # 1-based sheet row of the first title row, set when the sheet is laid out.
+    title_row: int = 0
 
 
 @dataclass(slots=True)
@@ -219,15 +232,15 @@ def _po_block(s: Scenario, loc: Locale, style: Style, title: Title) -> Block:
             return p.quantity - sum((q for _, q, _ in received[p.po_number]), Decimal(0))
 
         columns += [
-            Column(h["received_at"], "date", last_receipt),
-            Column(h["received"], "qty", quantity_in),
-            Column(h["rejected"], "qty", rejected),
-            Column(h["open_quantity"], "qty", open_quantity, _f("delivery_schedule", "quantity")),
+            Column(h["received_at"], "date", last_receipt, _f("purchase", "received_at")),
+            Column(h["received"], "qty", quantity_in, _f("purchase", "received_quantity")),
+            Column(h["rejected"], "qty", rejected, _f("purchase", "rejected_quantity")),
+            Column(h["open_quantity"], "qty", open_quantity, _f("purchase", "open_quantity")),
         ]
     block = _block(columns, s.purchases, title=title)
-    if not style.inline_receipts:
-        # Without an open-quantity column the register is read as purchases only.
-        block.mappings = [(kind, fields) for kind, fields in block.mappings if kind == "purchase"]
+    # The register is read as purchase lines; its own receipt and balance columns, when
+    # present, are purchase fields (the delivery_schedule readings are not used).
+    block.mappings = [(kind, fields) for kind, fields in block.mappings if kind == "purchase"]
     return block
 
 
@@ -679,14 +692,15 @@ def scattered(
 
     stock_title = _report(loc, t["stock"], "sel_stock")
     previous_title = sub("stock_previous")
+    current_date, previous_date = AS_OF.strftime("%d/%m/%Y"), "19/09/2026"
     if style.stock_date_in_title:
         position = loc.words["position_at"]
         stock_title = [
             [t["stock"]],
-            [position.format(date=AS_OF.strftime("%d/%m/%Y"))],
+            [position.format(date=current_date)],
             [loc.words["selection"], loc.words["sel_stock"]],
         ]
-        previous_title = [[f"{t['stock_previous']} - {position.format(date='19/09/2026')}"]]
+        previous_title = [[f"{t['stock_previous']} - {position.format(date=previous_date)}"]]
     orders_title = _report(loc, t["grid" if grid else "production"], "sel_orders")
     sheets = [
         Sheet(loc.sheets["po"], [
@@ -694,8 +708,10 @@ def scattered(
             _params_block(loc, sub("params")),
         ]),
         Sheet(loc.sheets["stock"], [
-            _stock_block(s, loc, style, stock_title, current=True),
-            _stock_block(s, loc, style, previous_title, current=False),
+            _dated(_stock_block(s, loc, style, stock_title, current=True), style, 1,
+                   current_date),
+            _dated(_stock_block(s, loc, style, previous_title, current=False), style, 0,
+                   previous_date),
         ]),
         Sheet(loc.sheets["orders"], [
             (_grid_block if grid else _production_block)(s, loc, style, orders_title),
@@ -728,6 +744,13 @@ def scattered(
     if notes:
         sheets.append(Sheet(loc.sheets["notes"], [_notes_block(loc)]))
     return [SourceFile(filename, sheets, render=render)]
+
+
+def _dated(block: Block, style: Style, row: int, text: str) -> Block:
+    """A correct mapper reads a stock date written only in the title as a section constant."""
+    if style.stock_date_in_title:
+        block.constants.append(("inventory", "as_of", row, text))
+    return block
 
 
 def single_sheet(loc: Locale) -> list[SourceFile]:
@@ -820,6 +843,7 @@ def _layout(sheet: Sheet) -> tuple[Grid, list[tuple[Block, int]]]:
     for index, block in enumerate(sheet.blocks):
         if index:
             grid.extend([[], [], []])
+        block.title_row = len(grid) + 1
         for row in block.title:
             grid.append([(v, "date" if isinstance(v, date) else "text") for v in row])
         if block.title:
@@ -931,14 +955,25 @@ def _csv(file: SourceFile, loc: Locale) -> tuple[bytes, list[tuple[str, Block, i
     return buffer.getvalue().encode("latin-1"), [(file.filename, block, 1)]
 
 
-def _sections(block: Block, header: int) -> list[TableProposal]:
+def _sections(block: Block, header: int, date_order: DateOrder | None) -> list[TableProposal]:
     return [
         TableProposal(
             kind=kind,
             header_row=header,
             first_row=header + 1,
             last_row=header + len(block.rows),
-            columns=[ColumnMapping(field=name, column=col) for name, col in fields.items()],
+            columns=[
+                ColumnMapping(field=name, column=col, header_text=block.header[col - 1])
+                for name, col in fields.items()
+            ],
+            constants=[
+                ConstantMapping(
+                    field=name, ref=CellRef(row=block.title_row + row, column=1), text=text
+                )
+                for k, name, row, text in block.constants
+                if k == kind
+            ],
+            date_order=date_order,
         )
         for kind, fields in block.mappings
     ]
@@ -958,18 +993,17 @@ def render(name: str) -> Corpus:
         documents.append(SourceDocument(source_id, file.filename, content_type, data))
         for table, block, header in placed:
             if block.mappings:
-                sections.setdefault((source_id, table), []).extend(_sections(block, header))
+                # A correct mapper declares the order of a day-first locale's numeric dates.
+                order: DateOrder | None = (
+                    "day_first" if variant.locale.date_format.startswith("dd") else None
+                )
+                sections.setdefault((source_id, table), []).extend(_sections(block, header, order))
             if block.unsupported is not None:
                 unsupported[source_id, table] = Unsupported(header, block.unsupported)
     return Corpus(tuple(documents), sections, unsupported)
 
 
 # --- The variants --------------------------------------------------------------------------
-
-_DECIMALS: Final = (
-    "Quantities written as SAP text with three decimals ('80,000', '1.200,000') are "
-    "ambiguous without column-level decimal inference (invalid_number)."
-)
 
 VARIANTS: Final = (
     Variant(
@@ -998,9 +1032,6 @@ VARIANTS: Final = (
         "latin-1",
         PT,
         lambda: csv_bundle(PT),
-        known_gap="CSV is decoded as UTF-8, so latin-1 accents become U+FFFD and 'Não recebido' "
-        "is no known delivery status; '1.200' is ambiguous without column-level decimal "
-        "inference.",
     ),
     Variant(
         "stock_date_in_title",
@@ -1008,8 +1039,6 @@ VARIANTS: Final = (
         "title ('Posição em 08/10/2026')",
         PT,
         lambda: scattered(PT, Style(stock_date_in_title=True)),
-        known_gap="A report-level value (a date in a title) cannot be mapped to the rows it "
-        "describes: stock has no snapshot date.",
     ),
     Variant(
         "inline_receipts",
@@ -1017,9 +1046,6 @@ VARIANTS: Final = (
         "quantity; no separate receipts or delivery schedule",
         PT,
         lambda: scattered(PT, Style(inline_receipts=True)),
-        known_gap="Inline receipts cannot be expressed as receipt records (they need a movement "
-        "and a document), so no completed purchase is verified and the partly received open "
-        "order does not reconcile.",
     ),
     Variant(
         "german",
@@ -1027,8 +1053,6 @@ VARIANTS: Final = (
         "nicht geliefert",
         DE,
         lambda: scattered(DE),
-        known_gap="Status vocabularies are Portuguese/English only (erledigt, offen, geplant, "
-        "nicht geliefert).",
     ),
     Variant(
         "italian",
@@ -1036,23 +1060,18 @@ VARIANTS: Final = (
         "Non ricevuto",
         IT,
         lambda: scattered(IT),
-        known_gap="Status vocabularies are Portuguese/English only (Chiuso, Aperto, Pianificato, "
-        "Non ricevuto).",
     ),
     Variant(
         "spanish",
         "Spanish export: Centro, uds, Cerrado/Abierto/Cancelado, Planificada/Liberada, No recibido",
         ES,
         lambda: scattered(ES),
-        known_gap="Status vocabularies are Portuguese/English only (Cerrado, Abierto, "
-        "Planificada, No recibido).",
     ),
     Variant(
         "identifier_mismatch",
         "The BOM writes 000101, stock writes the number 101 and the order register ' 000101 '",
         PT,
         lambda: scattered(PT, Style(stock_ids_as_numbers=True, padded_po_ids=True)),
-        known_gap="Identifiers join by exact text: stock 101 does not match BOM 000101.",
     ),
     Variant(
         "formula_cache",
@@ -1060,7 +1079,6 @@ VARIANTS: Final = (
         "order value, accepted receipt quantity",
         PT,
         lambda: scattered(PT, Style(formulas=True)),
-        known_gap="Any formula raises a formula_cache blocker, even with cached results.",
     ),
     Variant(
         "prompt_injection",
@@ -1083,7 +1101,6 @@ VARIANTS: Final = (
         "dd.mm.yyyy dates, UN/KG units",
         PT,
         lambda: scattered(PT, Style(units=SAP_UNITS), render="text_sap"),
-        known_gap=_DECIMALS,
     ),
 )
 VARIANT: Final = {v.name: v for v in VARIANTS}
