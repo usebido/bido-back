@@ -66,6 +66,7 @@ from bido_back.db.models import (
     Approval,
     Contact,
     Invite,
+    MailboxConnection,
     Rfq,
     RfqLine,
     Supplier,
@@ -1218,6 +1219,22 @@ async def list_approvals(
 
         mandate_views = await _mandate_views(session, approvals)
 
+        # The mailbox each requester sends from: emails go out from the REQUESTER's
+        # connected mailbox (`rfqs.send`), so the review can name the From address.
+        requesters = {approval.requested_by for approval in approvals}
+        senders: dict[UUID, str] = {}
+        if requesters:
+            rows = await session.execute(
+                select(MailboxConnection.user_id, MailboxConnection.email_address)
+                .where(
+                    MailboxConnection.user_id.in_(requesters),
+                    MailboxConnection.status == "active",
+                )
+                .order_by(MailboxConnection.provider)
+            )
+            for user_id, address in rows:
+                senders.setdefault(user_id, address)
+
         checks: dict[UUID, list[RecipientCheck]] = {}
         if status == "pending":
             mx = resolver or default_resolver()
@@ -1272,6 +1289,7 @@ async def list_approvals(
                 status=cast(ApprovalStatus, approval.status),
                 requested_by=approval.requested_by,
                 requested_by_me=approval.requested_by == principal.user_id,
+                sender_email=senders.get(approval.requested_by),
                 created_at=approval.created_at,
                 decided_at=approval.decided_at,
                 rfq_email=email,

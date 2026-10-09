@@ -405,6 +405,9 @@ class ApprovalQueueItem(BaseModel):
     status: ApprovalStatus
     requested_by: UUID
     requested_by_me: bool
+    # The address the requester's emails go out from (their active connected
+    # mailbox), or None while they have none: sends then wait for a connection.
+    sender_email: str | None = None
     created_at: datetime
     decided_at: datetime | None
     # Set for `send_rfq_email` and `send_followup_email`; other tools show only their name.
