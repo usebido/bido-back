@@ -32,6 +32,11 @@ per tenant:
      and was never asked goes out in ONE clarification, asked once. Items asked
      before are never asked again: they need the buyer's decision. A held offer
      (its latest reply could not be applied) needs the buyer's decision first.
+     While the RFQ's negotiation is open, its planner decides: the clarification
+     goes out alone only when it says so (`clarify`); when the offer also has
+     something to negotiate, the negotiation's own email asks the items first,
+     with its asks (one email per supplier answer), and while one of its emails
+     is being prepared or waits, nothing else goes out.
 
 A due follow-up is rendered by code in the standard layout
 (`bido_back.supplier_email`, built by `bido_back.followups.emails`: a chase is
@@ -131,6 +136,7 @@ from bido_back.followups.send import (
     followup_proposal_ids,
     published_kind,
 )
+from bido_back.negotiation.service import planned_clarifications
 from bido_back.quotes.terms import line_terms
 from bido_back.rfqs.errors import AgentFailed, NotFound
 from bido_back.rfqs.language import country_code, thread_language
@@ -404,6 +410,8 @@ def _state_views(
                 asked_at=q.asked_at,
                 answer_followup_id=q.answer_followup_id,
                 decided_at=q.decided_at,
+                superseded_by_proposal_id=q.superseded_by_proposal_id,
+                note=q.note,
             )
             for q in state.questions
         ],
@@ -553,6 +561,8 @@ class _Due:
     reply_by: date | None = None
     # A reminder: our outbound email it is about.
     regarding_message_id: UUID | None = None
+    # The RFQ's negotiation is open: its planner decides whether a clarification goes alone.
+    negotiating: bool = False
 
 
 async def sweep_tenant(
@@ -568,6 +578,7 @@ async def sweep_tenant(
     async with tenant_session(db, tenant_id) as session:
         canceled = await _reconcile(session)
         due = await _due_followups(session, tenant_id, at, helper)
+    due = await _left_to_followups(db, tenant_id, due, at)
 
     proposed: dict[str, int] = {"chase": 0, "clarification": 0, "reminder": 0}
     skipped = 0
@@ -628,6 +639,33 @@ async def sweep_tenant(
             result.held,
         )
     return result
+
+
+async def _left_to_followups(
+    db: Db, tenant_id: UUID, due: Sequence[_Due], now: datetime
+) -> list[_Due]:
+    """The due follow-ups this sweep writes. While an RFQ's negotiation is open, its
+    planner decides whether what an offer lacks goes out alone (a clarification, written
+    here) or in the negotiation's own next email with its asks (one email per supplier
+    answer, `negotiation.service.planned_clarifications`); a clarification it did not
+    decide is left to it. A planner that cannot run leaves that RFQ's clarifications for
+    the next sweep (never two emails for one answer); the other follow-ups go on."""
+    rfq_ids = list(
+        dict.fromkeys(d.rfq_id for d in due if d.kind == "clarification" and d.negotiating)
+    )
+    if not rfq_ids:
+        return list(due)
+    alone: set[UUID] = set()
+    for rfq_id in rfq_ids:
+        try:
+            alone |= await planned_clarifications(db, tenant_id, rfq_id, now=now)
+        except Exception:
+            logger.exception(
+                "followups: negotiation planner failed tenant=%s rfq=%s", tenant_id, rfq_id
+            )
+    return [
+        d for d in due if d.kind != "clarification" or not d.negotiating or d.invite_id in alone
+    ]
 
 
 async def _reconcile(session: AsyncSession) -> int:
@@ -904,7 +942,8 @@ async def _reminder(
         for ask in request.asks
     ]
     # The offer the clarification was about: what the reminder thanks for and restates.
-    asked_in = {f.id: f for f in mine}.get(request.asks[0].followup_id)
+    asked_by = {a.followup_id for a in request.asks}
+    asked_in = next((f for f in mine if f.id in asked_by), None)
     proposal = (
         await session.get(Proposal, asked_in.proposal_id)
         if asked_in is not None and asked_in.proposal_id is not None
@@ -1051,6 +1090,7 @@ async def _build(
         items=items,
         reply_by=reply_day,
         regarding_message_id=regarding_message_id,
+        negotiating=rfq.status == "open" and rfq.negotiation_status in ("open", "ready_to_close"),
     )
 
 

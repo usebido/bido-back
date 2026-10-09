@@ -17,6 +17,13 @@ in it; neither is any other supplier's name or price.
 `terms["lines"]` keeps the flat per-line shape older readers use (the mandate
 check reads `ask` against the maximum; `ask_lead_days` is the deliver-by date
 as days from the order date).
+
+One email per supplier answer: when the answer also left items of the
+clarification ledger open, the decision carries them (`questions`) and the
+email asks them first, then its own asks (at most three numbered asks; a price
+ask that did not fit is `deferred_lines`, asked by the next email). The items
+are recorded as asked by this email when it goes out
+(`followups.ledger.record_sent_asks`).
 """
 
 from collections.abc import Mapping, Sequence
@@ -28,11 +35,23 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from bido_back.agents.catalog.contracts import NegotiationEmailInput, NegotiationLineAsk
+from bido_back.agents.catalog.contracts import (
+    FollowupField,
+    FollowupItem,
+    FollowupQuestion,
+    NegotiationEmailInput,
+    NegotiationLineAsk,
+)
 from bido_back.decimals import format_decimal
+from bido_back.followups.emails import clarification_of
 from bido_back.negotiation.planner import EmailPlan, LinePlan
 from bido_back.negotiation.strategy import plain
-from bido_back.supplier_email.builders import Header, RequestedLine, negotiation_email
+from bido_back.supplier_email.builders import (
+    Header,
+    RequestedLine,
+    negotiation_email,
+    with_questions,
+)
 from bido_back.supplier_email.builders import LineAsk as EmailLineAsk
 from bido_back.supplier_email.model import (
     Answered,
@@ -106,6 +125,28 @@ class PositionDecision(BaseModel):
     quoted_lead_approximate: bool = False
 
 
+class QuestionDecision(BaseModel):
+    """One item of the clarification ledger the email asks too, before its own asks.
+
+    The whole offer (no line: its currency or validity) or one requested line, the field,
+    whether it is missing or to confirm, and how it is asked (the ledger's `OpenItem`).
+    A delivery question shows the lead time the position's offer states (`quoted_lead_*`)
+    above the date needed (`need_by`).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rfq_line_id: UUID | None = None
+    position: int | None = None
+    field: FollowupField
+    problem: Literal["missing", "unclear"]
+    question: FollowupQuestion = "value"
+    need_by: date | None = None
+    quoted_lead_days: int | None = None
+    quoted_lead_basis: LeadBasis = "calendar"
+    quoted_lead_approximate: bool = False
+
+
 class EmailDecision(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -130,6 +171,10 @@ class EmailDecision(BaseModel):
     positions: list[PositionDecision]
     # A reminder of the request with this sequence: the same email, a new reply-by date.
     reminder_of: int | None = None
+    # The clarification ledger's items it asks too, first (one email per supplier answer).
+    questions: list[QuestionDecision] = Field(default_factory=list[QuestionDecision])
+    # Lines whose price ask did not fit (the questions first): the next email asks them.
+    deferred_lines: list[UUID] = Field(default_factory=list[UUID])
 
 
 def reminder_decision(original: EmailDecision, *, sequence: int, reply_by: date) -> EmailDecision:
@@ -175,8 +220,10 @@ def build_decision(
     language: str | None = None,
     lines: Mapping[UUID, DecisionLine],
     quoted: Mapping[UUID, QuotedTerms] | None = None,
+    questions: Sequence[QuestionDecision] = (),
 ) -> EmailDecision:
-    """The stored decision for an email the planner decided."""
+    """The stored decision for an email the planner decided; `questions` are the
+    clarification ledger's items it asks too (the planner's `EmailPlan.clarify`)."""
     positions: list[PositionDecision] = []
     for position in plan.positions:
         line = lines[position.rfq_line_id]
@@ -222,6 +269,10 @@ def build_decision(
         language=language,
         mention_competition=plan.mention_competition,
         positions=sorted(positions, key=lambda p: p.position),
+        questions=sorted(
+            questions, key=lambda q: (q.position is not None, q.position or 0, q.field)
+        ),
+        deferred_lines=list(plan.deferred),
     )
 
 
@@ -354,7 +405,55 @@ def supplier_email(
     the target price (in the RFQ's currency) and/or "deliver by" the date. A better
     price asked without a number (no target, `best_price`) is still a revised-offer
     request for that position. A best-and-final request carries the common cut-off.
+
+    With `questions`, the same email asks the clarification ledger's items first (one
+    email per supplier answer, `supplier_email.builders.with_questions`): the offer's
+    terms, the values missing under their positions, the delivery dates, then the
+    request's own ask.
     """
+    email = _request(decision, header=header, lines=lines)
+    if not decision.questions:
+        return email
+    quoted = {
+        q.position: lead
+        for q in decision.questions
+        if q.position is not None and (lead := _question_lead(q)) is not None
+    }
+    questions = clarification_of(
+        header,
+        answered=email.answered,
+        lines=lines,
+        items=[
+            FollowupItem(
+                position=q.position,
+                line=None,
+                field=q.field,
+                problem=q.problem,
+                question=q.question,
+                need_by=q.need_by,
+            )
+            for q in decision.questions
+        ],
+        reply_by=email.reply_by,
+        quoted=quoted,
+    )
+    return with_questions(email, questions, lines=lines)
+
+
+def _question_lead(question: QuestionDecision) -> LeadTime | None:
+    if question.quoted_lead_days is None or question.quoted_lead_days < 0:
+        return None
+    return LeadTime(
+        days=question.quoted_lead_days,
+        basis=question.quoted_lead_basis,
+        approximate=question.quoted_lead_approximate,
+    )
+
+
+def _request(
+    decision: EmailDecision, *, header: Header, lines: Sequence[RequestedLine]
+) -> SupplierEmail:
+    """The request itself: a revised offer, a delivery date or the best and final offer."""
     kind = email_type(decision)
     asks = [
         EmailLineAsk(

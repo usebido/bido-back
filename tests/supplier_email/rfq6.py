@@ -19,6 +19,7 @@ from bido_back.supplier_email.builders import (
     not_selected_email,
     position_of,
     reminder_email,
+    with_questions,
 )
 from bido_back.supplier_email.checks import GateContext
 from bido_back.supplier_email.locale import Locale
@@ -171,6 +172,20 @@ def revised_offer(language: str, region: str | None = "BR") -> SupplierEmail:
         mention_competition=True,
         reply_by=ReplyBy(date(2026, 10, 14)),
     )
+
+
+def revised_with_questions(language: str, region: str | None = "BR") -> SupplierEmail:
+    """One email for one answer: the offer lacks its validity and the lead time of position
+    2, and positions 1 and 3 are above target. The questions first, then the revised offer:
+    three asks, one reply-by date, the positions block covering both."""
+    questions = clarification_email(
+        header(language, region),
+        answered=Answered("offer", OFFER_DAY),
+        lines=LINES,
+        gaps=(Gap(None, "valid_until", "missing"), Gap(2, "lead_time", "missing")),
+        reply_by=ReplyBy(date(2026, 10, 14)),
+    )
+    return with_questions(revised_offer(language, region), questions, lines=LINES)
 
 
 def bafo(language: str, region: str | None = "BR") -> SupplierEmail:

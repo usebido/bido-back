@@ -771,12 +771,14 @@ class FollowupMessage(Base):
 
 
 class ClarificationAsk(Base):
-    """One thing a clarification email asked one supplier (migration 0036).
+    """One thing an email asked one supplier about its offer (migrations 0036, 0038).
 
     `rfq_line_id`/`position` are NULL for the whole offer. Each (invite, line,
     field) is asked at most once: a unique index keeps one row per item that is
     not `withdrawn`. Statuses: proposed, open, answered, unusable, withdrawn,
-    resolved (see `bido_back.followups.ledger`).
+    resolved (see `bido_back.followups.ledger`). The email that asked it is a
+    clarification (`followup_id`) or a negotiation email that asked it together
+    with its own asks (`negotiation_message_id`): exactly one of the two.
     """
 
     __tablename__ = "clarification_asks"
@@ -784,8 +786,11 @@ class ClarificationAsk(Base):
     id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
     invite_id: Mapped[UUID] = mapped_column(ForeignKey("invites.id", ondelete="CASCADE"))
-    followup_id: Mapped[UUID] = mapped_column(
+    followup_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("followup_messages.id", ondelete="CASCADE")
+    )
+    negotiation_message_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("negotiation_messages.id", ondelete="CASCADE")
     )
     rfq_line_id: Mapped[UUID | None] = mapped_column(ForeignKey("rfq_lines.id", ondelete="CASCADE"))
     position: Mapped[int | None] = mapped_column(Integer)
@@ -805,10 +810,13 @@ class ClarificationAsk(Base):
 
 
 class SupplierQuestion(Base):
-    """A question a supplier's reply asked the buyer (migration 0036).
+    """A question a supplier's reply asked the buyer (migrations 0036, 0038).
 
     `question` and `answer` are customer content: never logged. While a
-    question is `open`, no automatic email goes to that supplier.
+    question is `open`, no automatic email goes to that supplier. Statuses:
+    open, answered, dismissed, superseded_by_offer (a later complete offer
+    asking nothing made it moot: `superseded_by_proposal_id`; the buyer may
+    reopen it).
     """
 
     __tablename__ = "supplier_questions"
@@ -826,6 +834,9 @@ class SupplierQuestion(Base):
     )
     decided_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
     decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    superseded_by_proposal_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("proposals.id", ondelete="SET NULL")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -10,14 +10,19 @@ from bido_back.agents.catalog.contracts import FollowupField
 from bido_back.followups.ledger import AskStatus
 from bido_back.negotiation.decision import (
     DecisionLine,
+    EmailDecision,
+    QuestionDecision,
     QuotedTerms,
     build_decision,
+    decision_of,
     email_type,
+    reminder_decision,
     supplier_email,
     writer_task,
 )
 from bido_back.negotiation.planner import EmailKind, EmailPlan, PositionPlan
 from bido_back.negotiation.signals import (
+    ClarificationItem,
     ClarificationState,
     QuotedLeadTime,
     calendar_expected_delivery,
@@ -29,7 +34,7 @@ from bido_back.quotes.lead_time import LeadTime, encode_lead_time
 from bido_back.supplier_email.builders import Header, RequestedLine
 from bido_back.supplier_email.checks import GateContext, email_problems
 from bido_back.supplier_email.locale import Locale
-from bido_back.supplier_email.model import Signature
+from bido_back.supplier_email.model import Ask, Signature
 from bido_back.supplier_email.render import render
 
 FRIDAY = date(2026, 10, 9)
@@ -317,6 +322,61 @@ def test_a_best_and_final_request_carries_the_common_cut_off() -> None:
     assert "23:59" in rendered.text and "R$ 84,50" in rendered.text
 
 
+def test_a_decision_asks_the_ledger_items_first_in_one_email() -> None:
+    """One email per supplier answer: the validity and the shaft's delivery date (the
+    ledger's items), then the revised offer for the bearings; one reply-by date."""
+    questions = [
+        QuestionDecision(field="valid_until", problem="missing"),
+        QuestionDecision(
+            rfq_line_id=SHAFT,
+            position=2,
+            field="delivery_date",
+            problem="unclear",
+            question="deliver_by",
+            need_by=NEED_BY,
+            quoted_lead_days=10,
+            quoted_lead_basis="business",
+            quoted_lead_approximate=True,
+        ),
+    ]
+    decision = build_decision(
+        plan("revised_offer", position(BEARING, ask="20.00", offered="21.50")),
+        sequence=1,
+        currency="BRL",
+        offer_version=1,
+        offer_received_on=FRIDAY,
+        language="pt",
+        lines=LINES,
+        quoted=QUOTED,
+        questions=list(reversed(questions)),
+    )
+    # The offer's terms first, then by position.
+    assert decision.questions == questions
+    email = supplier_email(decision, header=HEADER, lines=REQUESTED)
+    assert (email.type, email.round, email.with_questions) == ("revised_offer", 1, True)
+    assert email.asks == (
+        Ask("offer_terms", fields=("valid_until",), confirm=False),
+        Ask("deliver_by", positions=(2,)),
+        Ask("revise_price", positions=(1,)),
+    )
+    rendered = render(email)
+    assert email_problems(email, rendered, GATE) == []
+    text = rendered.text
+    assert "Prazo informado: aprox. 10 dias úteis após o pedido" in text
+    assert "Entrega necessária: até 22/10/2026" in text
+    assert text.index("1. Por favor, informe a validade") < text.index("3. Por favor, envie")
+    # Stored and read back as JSON; a reminder repeats the same questions.
+    stored = decision_of({"decision": decision.model_dump(mode="json")})
+    assert stored == decision
+    again = reminder_decision(decision, sequence=2, reply_by=date(2026, 10, 19))
+    assert again.questions == decision.questions and again.reminder_of == 1
+    # Decisions stored before this change read as asking nothing else.
+    older = decision.model_dump(mode="json")
+    del older["questions"], older["deferred_lines"]
+    legacy = decision_of({"decision": older})
+    assert isinstance(legacy, EmailDecision) and legacy.questions == []
+
+
 # --- The clarification ledger, as the planner reads it ----------------------------------------
 
 
@@ -411,12 +471,16 @@ def test_the_ledger_maps_to_the_planners_clarification_state() -> None:
         problem="unclear",
         need_by=NEED_BY,
     )
-    # Not asked yet: clarify first.
+    # Not asked yet: clarify first (alone, or in the negotiation's next email).
     to_ask = state(to_ask=(validity, lead))
     assert (to_ask.to_ask, to_ask.lines, to_ask.blocking) == (
         ("valid_until", "pos2.delivery_date"),
         frozenset({SHAFT}),
         True,
+    )
+    assert to_ask.items == (
+        ClarificationItem(None, None, "valid_until"),
+        ClarificationItem(SHAFT, 2, "delivery_date"),
     )
     # Waiting for approval, then sent and unanswered: wait, until its (reminder's) reply-by.
     pending = state(
@@ -464,3 +528,6 @@ def test_the_ledger_maps_to_the_planners_clarification_state() -> None:
     # A counter-offer the supplier has not answered is the negotiation's, not a clarification.
     counter = state(request=replace(request, kind="counter", asks=()))
     assert not counter.blocking
+    # One that asked the ledger's items too: their lines wait for its answer.
+    asking = state(request=replace(request, kind="counter"))
+    assert (asking.blocking, asking.lines) == (False, frozenset({SHAFT}))

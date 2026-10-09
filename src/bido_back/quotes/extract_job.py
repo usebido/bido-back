@@ -28,7 +28,10 @@ open asks, so it is applied as an amendment of exactly those fields, and the
 asks are settled (answered, or unusable when still missing). The questions a
 reply asks the buyer (its signals) are stored, whatever else it says, even
 without an offer, and pause the automatic emails to that supplier: pending ones
-are canceled.
+are canceled. A later offer from the same supplier that is complete (every
+requested line priced or declined), applied cleanly and asking nothing makes
+the questions it left open moot: they become `superseded_by_offer` (audited,
+never "answered"; the buyer may reopen them) and the offer is negotiated.
 
 An agent-run failure marks the message `failed` and returns normally: the job
 is done, a retry is a deliberate re-enqueue (a `failed` message is extracted
@@ -38,7 +41,7 @@ Logs carry ids and codes only, never message or document content.
 """
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -907,6 +910,18 @@ async def persist_quote(
             still_missing=[item.key for item in still_missing],
             at=message.created_at,
         )
+    if open_questions:
+        await _supersede_questions(
+            session,
+            tenant_id=tenant_id,
+            invite=invite,
+            message=message,
+            proposal=proposal,
+            proposal_lines=proposal_lines,
+            validated=validated,
+            held=bool(state.issues),
+            today=today or datetime.now(UTC).date(),
+        )
     await session.flush()
     signals = validated.signals
     logger.info(
@@ -925,6 +940,53 @@ async def persist_quote(
         meta["run_id"],
     )
     return proposal
+
+
+async def _supersede_questions(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    invite: Invite,
+    message: Message,
+    proposal: Proposal,
+    proposal_lines: Sequence[ProposalLine],
+    validated: ValidatedQuote,
+    held: bool,
+    today: date,
+) -> None:
+    """The supplier went on without waiting for the buyer's answer: an offer that is
+    complete (every requested line priced or declined), applied cleanly and asking nothing
+    makes its earlier open questions moot. They are `superseded_by_offer`, never answered
+    (the buyer sees it and may reopen them), and the offer no longer waits for them."""
+    country = await session.scalar(
+        select(Supplier.country).where(Supplier.id == invite.supplier_id)
+    )
+    lacking = ledger.proposal_items(
+        proposal,
+        proposal_lines,
+        await ledger.requested_lines(session, invite.rfq_id),
+        country=country,
+        today=today,
+        expected_delivery=missing_rules.DEFAULT_EXPECTED_DELIVERY,
+    )
+    if not ledger.supersedes_questions(
+        lacking,
+        asks_questions=bool(validated.output.technical_questions),
+        offer_content=has_offer_content(validated),
+        held=held,
+        reply_kind=validated.output.reply_kind,
+    ):
+        return
+    superseded = await ledger.supersede_questions(
+        session,
+        tenant_id=tenant_id,
+        invite=invite,
+        message=message,
+        proposal=proposal,
+        at=message.created_at,
+    )
+    if superseded:
+        await ledger.sync_offer_questions(session, invite.id)
 
 
 def _proposal_line(

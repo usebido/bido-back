@@ -14,8 +14,16 @@ one is open, Bido sends that supplier nothing on its own. The buyer either:
 
 Either way the supplier's offer no longer waits for this question
 (`ledger.sync_offer_questions`), so automatic emails and the negotiation resume.
-Any member of the tenant may answer or dismiss; every change is audited (ids
-only, never the texts).
+
+Bido closes a question on its own only when the supplier's later offer is
+complete and asks nothing (`superseded_by_offer`, see the ledger): never as
+"answered". The buyer may reopen such a question, or one they dismissed: it is
+open again, the offer waits for it, and nothing automatic goes to the supplier
+meanwhile (proposed follow-ups and negotiation emails are canceled, as when a
+question arrives).
+
+Any member of the tenant may answer, dismiss or reopen; every change is audited
+(ids only, never the texts).
 """
 
 import logging
@@ -44,7 +52,8 @@ from bido_back.db.models import (
     Rfq,
     SupplierQuestion,
 )
-from bido_back.followups.ledger import sync_offer_questions
+from bido_back.followups.hooks import pause_on_question
+from bido_back.followups.ledger import REOPENABLE, sync_offer_questions
 from bido_back.followups.schemas import (
     AnsweredQuestions,
     AnswerQuestionsRequest,
@@ -58,6 +67,7 @@ from bido_back.followups.send import (
     followup_proposal_ids,
 )
 from bido_back.followups.service import rfq_sender, thread_subject
+from bido_back.negotiation.hooks import cancel_on_new_offer
 from bido_back.rfqs.errors import InvalidState, NotFound
 
 logger = logging.getLogger(__name__)
@@ -274,6 +284,67 @@ async def dismiss_question(
         "supplier question dismissed tenant=%s question=%s by=%s",
         principal.tenant_id,
         question_id,
+        principal.user_id,
+    )
+    return view
+
+
+async def reopen_question(
+    db: Db, principal: Principal, rfq_id: UUID, question_id: UUID
+) -> SupplierQuestionView:
+    """Open again a question Bido considered superseded by the supplier's later offer, or
+    one the buyer dismissed: it waits for the buyer's answer, and so does the offer."""
+    async with tenant_session(db, principal.tenant_id) as session:
+        invite_id = await session.scalar(
+            select(SupplierQuestion.invite_id).where(SupplierQuestion.id == question_id)
+        )
+        if invite_id is None:
+            raise NotFound(f"question {question_id} not found")
+        await _invite(session, rfq_id, invite_id)
+        question = await session.scalar(
+            select(SupplierQuestion).where(SupplierQuestion.id == question_id).with_for_update()
+        )
+        if question is None:
+            raise NotFound(f"question {question_id} not found")
+        if question.status not in REOPENABLE:
+            raise InvalidState(f"question {question_id} is {question.status}")
+        was = question.status
+        question.status = "open"
+        question.answer = None
+        question.decided_by = None
+        question.decided_at = None
+        question.superseded_by_proposal_id = None
+        await session.flush()
+        await sync_offer_questions(session, invite_id)
+        # Nothing automatic goes to the supplier while the buyer answers, as when it asked.
+        await pause_on_question(session, invite_id)
+        await cancel_on_new_offer(session, invite_id, reason="supplier_question")
+        session.add(
+            AuditEvent(
+                tenant_id=principal.tenant_id,
+                actor_user_id=principal.user_id,
+                action="rfq.supplier_question_reopened",
+                payload={
+                    "rfq_id": str(rfq_id),
+                    "invite_id": str(invite_id),
+                    "question_id": str(question_id),
+                    "was": was,
+                },
+            )
+        )
+        view = SupplierQuestionView(
+            id=question.id,
+            question=question.question,
+            status="open",
+            asked_at=question.created_at,
+            answer_followup_id=question.answer_followup_id,
+            decided_at=None,
+        )
+    logger.info(
+        "supplier question reopened tenant=%s question=%s was=%s by=%s",
+        principal.tenant_id,
+        question_id,
+        was,
         principal.user_id,
     )
     return view

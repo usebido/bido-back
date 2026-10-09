@@ -227,6 +227,20 @@ def _event_item(
             kind, summary = "user", f"Supplier's question answered{to} (email awaits approval)"
         case "rfq.supplier_question_dismissed":
             kind, summary = "user", f"Supplier's question closed without an email{_from(supplier)}"
+        case "rfq.supplier_question_superseded":
+            # Bido closed it on its own (never answered it): the buyer may reopen it.
+            kind, actor = "agent", BIDO
+            offer_date = data.get("offer_date")
+            offer = f"the supplier's offer of {offer_date}" if offer_date else "a later offer"
+            summary = (
+                f"Supplier's question{_from(supplier)} considered superseded by {offer} "
+                "— reopen if needed"
+            )
+        case "rfq.supplier_question_reopened":
+            kind, summary = (
+                "user",
+                f"Supplier's question reopened{_from(supplier)}: needs your answer",
+            )
         case "proposal.hold_released":
             kind, summary = "user", f"Offer{_from(supplier)} taken as shown: hold released"
         case "rfq.negotiation_sent":
@@ -362,7 +376,14 @@ def _event_item(
             kind, actor = "agent", BIDO
         case "rfq.negotiation_decided":
             what = _EMAIL_KINDS.get(str(data.get("kind")), "a negotiation email")
-            summary = f"Bido prepared {what} (round {data.get('round', '?')}){_for(supplier)}"
+            questions = data.get("questions")
+            # One email per supplier answer: it also asks what the offer lacks.
+            also = (
+                " that also asks for what the offer lacks"
+                if isinstance(questions, int) and questions > 0
+                else ""
+            )
+            summary = f"Bido prepared {what}{also} (round {data.get('round', '?')}){_for(supplier)}"
             kind, actor = "agent", BIDO
         case "rfq.negotiation_accepted":
             summary = f"Accepted internally – nothing to ask{_for(supplier)}"

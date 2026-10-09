@@ -12,11 +12,12 @@ clarification ledger, every negotiation email decided or sent to it) plus the
 buyer's limits and the deadlines, and decides ONE action:
 
 - `wait`: nothing to do now (until a date when there is one);
-- `clarify`: open questions come first (the ledger's items; the follow-up
-  sweep writes that email);
+- `clarify`: the ledger's open items go out alone (nothing to negotiate yet,
+  or no room for it: the follow-up sweep writes that email);
 - `revised_offer` / `delivery_date` / `bafo`: one email, decided here with
   every number and date (`EmailPlan`); the service persists it before the
-  email is rendered;
+  email is rendered. When the supplier's answer also left open items, the
+  same email asks them first (`EmailPlan.clarify`): one email per answer;
 - `reminder`: the one reminder of an unanswered revised-offer or delivery-date
   request (the same request, a new reply-by date);
 - `accept`: accepted internally, nothing to ask (no email);
@@ -33,8 +34,15 @@ First match wins:
 3. The offer is on hold: a supplier question (needs your answer), a withdrawal
    (close), anything else to review (needs your decision). The buyer may release
    an offer's holds (audited): it is then negotiated as it is.
-4. The clarification ledger: an open clarification (to ask, pending, sent and
-   unanswered) comes first.
+4. The clarification ledger: a clarification waiting for approval or for its
+   answer comes first (one open request per supplier). Items still to ask go
+   out in the next email: in the email steps 5–9 decide, asked first, when
+   there is one (one email per supplier answer: the blocking questions first,
+   then the negotiation's asks, at most `MAX_ASKS` numbered asks; a price ask
+   that does not fit waits for the next email and the decision says so);
+   otherwise alone (`clarify`), unless our last request is still unanswered
+   (they wait for its answer). Lines the open items concern are negotiated
+   once they are answered.
 5. Our last email is unanswered: wait for the supplier (until its reply-by
    date, or the cut-off of a BAFO; after a BAFO's cut-off the offer stands). A
    revised-offer or delivery-date request gets ONE reminder after its reply-by
@@ -48,8 +56,9 @@ First match wins:
    line, delivery known and on time, validity known and lasting until the
    decision, no MOQ or payment deviation; otherwise the buyer decides (reason).
 8. Something to ask, but the supplier did not move on anything we asked:
-   stop (needs your decision, `no_progress`). Round cap reached, or the RFQ's
-   final round closed: close.
+   stop (needs your decision, `no_progress`); a price ask our last email left
+   for later (its questions came first) is no repeat. Round cap reached, or
+   the RFQ's final round closed: close.
 9. The last allowed round, the RFQ already in its final round (a cut-off is
    set), or the deadline within `BAFO_WINDOW`: the BAFO (once, common
    cut-off; not when the cut-off leaves no time). Otherwise a revised-offer
@@ -69,7 +78,12 @@ from typing import Final, Literal
 from uuid import UUID
 
 from bido_back.followups.calendar import add_business_days
-from bido_back.negotiation.signals import ClarificationState, ClarificationWait
+from bido_back.negotiation.signals import (
+    OFFER_ITEM_FIELDS,
+    ClarificationItem,
+    ClarificationState,
+    ClarificationWait,
+)
 from bido_back.negotiation.strategy import (
     DeliveryAsk,
     DeliveryStatus,
@@ -80,6 +94,7 @@ from bido_back.negotiation.strategy import (
     required_by,
 )
 from bido_back.supplier_email.deadlines import reply_by_for
+from bido_back.supplier_email.model import MAX_ASKS
 
 NextAction = Literal[
     "wait",
@@ -231,6 +246,8 @@ class EmailRecord:
     reminder_of: int | None = None
     # It was decided as a typed decision (a reminder repeats one; not older emails).
     typed: bool = True
+    # Lines whose price ask did not fit in it (its questions came first): never asked by it.
+    deferred: frozenset[UUID] = frozenset()
 
 
 @dataclass(frozen=True, slots=True)
@@ -317,6 +334,12 @@ class EmailPlan:
     sets_cutoff: bool = False
     # A reminder of the request with this sequence: the same email, a new reply-by date.
     reminder_of: int | None = None
+    # The clarification ledger's items this email asks too, before its own asks (one email
+    # per supplier answer).
+    clarify: tuple[ClarificationItem, ...] = ()
+    # Lines whose price ask did not fit in this email (at most `MAX_ASKS` asks, the
+    # questions first): the next email asks them.
+    deferred: tuple[UUID, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -343,6 +366,9 @@ class SupplierPlan:
     # The offer itself is on hold (a question, a withdrawal, something to review) and the
     # buyer has not released it: none of its lines counts as accepted.
     offer_held: bool = False
+    # Items of the clarification ledger are open for this supplier (to ask, waiting for
+    # approval, or asked and unanswered): none of its lines counts as accepted yet.
+    questions_open: bool = False
 
     @property
     def sends_email(self) -> bool:
@@ -675,6 +701,7 @@ def plan_supplier(
         for t in lines
     )
     warnings = tuple(_warnings(lines, offer, ctx, plans))
+    clarification = supplier.clarification
     base = SupplierPlan(
         "wait",
         "waiting",
@@ -683,6 +710,7 @@ def plan_supplier(
         warnings=warnings,
         status="bafo_requested" if bafo_sent else "countered" if sent else "open",
         valid_until=offer.valid_until,
+        questions_open=clarification.blocking or bool(clarification.lines),
     )
 
     # 2. An email already decided and not sent; never a second one for the same offer.
@@ -735,8 +763,7 @@ def plan_supplier(
                 base, action="hold", phase="needs_decision", reason=reason, offer_held=True
             )
 
-    # 4. Open questions first.
-    clarification = supplier.clarification
+    # 4. One open request per supplier: a clarification waiting for approval or its answer.
     if clarification.pending:
         phase, reason, until = _clarification_phase(
             clarification.pending_wait, clarification.pending_until
@@ -749,8 +776,51 @@ def plan_supplier(
             reason="clarification_sent",
             until=clarification.awaiting_until,
         )
-    if clarification.to_ask:
-        return replace(base, action="clarify", phase="waiting", reason="clarification_due")
+    stage = _Stage(
+        lines=tuple(lines),
+        offer=offer,
+        emails=emails,
+        ctx=ctx,
+        last=last,
+        counted=counted,
+        sent=bool(sent),
+        bafo_sent=bafo_sent,
+        final_round=final_round,
+    )
+    planned = _negotiate(base, stage, clarification)
+    if not clarification.to_ask:
+        return planned
+    if planned.phase == "waiting_for_supplier" or planned.action == "reminder":
+        # Our request for this offer is unanswered: the items wait for its answer (one
+        # open request per supplier).
+        return planned
+    # What the offer still lacks goes out in the next email: with the negotiation's own
+    # asks when there are any (one email per supplier answer), else alone.
+    return _with_questions(planned, clarification, ctx) or _clarify(base, planned)
+
+
+@dataclass(frozen=True, slots=True)
+class _Stage:
+    """What the steps after the open questions read about one supplier."""
+
+    lines: tuple[LineTerms, ...]
+    offer: Offer
+    emails: tuple[EmailRecord, ...]
+    ctx: Context
+    last: EmailRecord | None
+    counted: int
+    sent: bool
+    bafo_sent: bool
+    final_round: bool
+
+
+def _negotiate(
+    base: SupplierPlan, stage: _Stage, clarification: ClarificationState
+) -> SupplierPlan:
+    """Steps 5 to 9: wait, accept, stop, or the next email (see the module docstring)."""
+    plans, warnings = base.lines, base.warnings
+    offer, emails, ctx, last = stage.offer, stage.emails, stage.ctx, stage.last
+    counted, bafo_sent, final_round = stage.counted, stage.bafo_sent, stage.final_round
 
     # 5. Our last email is not answered yet.
     if last is not None and offer.version <= last.proposal_version:
@@ -828,11 +898,13 @@ def plan_supplier(
             action="hold",
             phase="needs_decision",
             reason=_first_reason(plans, warnings),
-            status="closed" if sent else "open",
+            status="closed" if stage.sent else "open",
         )
 
-    # 8. Stop rules.
-    if last is not None and not _moved(offer, last):
+    # 8. Stop rules. A price ask our last email left for later (its questions came first)
+    # was never asked: asking it now is no repeat.
+    deferred = last is not None and any(p.rfq_line_id in last.deferred for p in asking)
+    if last is not None and not deferred and not _moved(offer, last):
         return replace(
             base, action="hold", phase="needs_decision", reason="no_progress", status="closed"
         )
@@ -856,7 +928,8 @@ def plan_supplier(
         if not final_round:
             # A repeated request becomes the final round: the asks move to its rules.
             plans = tuple(
-                plan_line(t, offer, emails, clarification, ctx, final_round=True) for t in lines
+                plan_line(t, offer, emails, clarification, ctx, final_round=True)
+                for t in stage.lines
             )
             positions = tuple(_position(p, offer) for p in plans if p.status == "priced" and p.asks)
         email = EmailPlan(
@@ -882,6 +955,103 @@ def plan_supplier(
         mention_competition=any(p.better_offer_exists for p in positions),
     )
     return replace(base, action=kind, phase="waiting", reason=f"{kind}_due", email=email)
+
+
+# --- The open questions in the next email ----------------------------------------------------
+
+AskSlot = Literal["offer_terms", "complete_positions", "deliver_by", "revise_price", "final"]
+
+
+def ask_slots(
+    items: Sequence[ClarificationItem], positions: Sequence[PositionPlan], kind: EmailKind
+) -> list[AskSlot]:
+    """The numbered asks of an email asking `items` (the ledger's) and `positions` (the
+    negotiation's), in the order the email numbers them (`supplier_email.builders.
+    with_questions`): the blocking questions first, then the negotiation's own ask.
+
+    - `offer_terms`: the offer's currency or validity;
+    - `complete_positions`: values missing or to confirm under the positions;
+    - `deliver_by`: "can you deliver by D?", for the delivery dates the clarification asks
+      and the late lines a revised-offer or delivery-date request asks, together;
+    - `revise_price`: the revised offer, one ask covering its positions;
+    - `final`: the best-and-final request (it covers its positions' dates too).
+    """
+    slots: list[AskSlot] = []
+    if any(i.position is None and i.field in OFFER_ITEM_FIELDS for i in items):
+        slots.append("offer_terms")
+    if any(i.position is not None and i.field != "delivery_date" for i in items):
+        slots.append("complete_positions")
+    dated = kind != "bafo" and any(p.deliver_by is not None for p in positions)
+    if dated or any(i.field == "delivery_date" for i in items):
+        slots.append("deliver_by")
+    if kind == "bafo":
+        slots.append("final")
+    elif any(p.ask_price is not None or p.best_price for p in positions):
+        slots.append("revise_price")
+    return slots
+
+
+def _with_questions(
+    planned: SupplierPlan, clarification: ClarificationState, ctx: Context
+) -> SupplierPlan | None:
+    """The negotiation's next email asking the open items too, or None: nothing to
+    negotiate now (or no room for it), so the questions go alone.
+
+    At most `MAX_ASKS` numbered asks, the questions first: a price ask that does not fit
+    is left for the next email (`EmailPlan.deferred`); a best-and-final request that does
+    not fit waits for the answers.
+    """
+    email = planned.email
+    items = clarification.items
+    if email is None or email.reminder_of is not None or not items:
+        return None
+    slots = ask_slots(items, email.positions, email.kind)
+    kept = slots[:MAX_ASKS]
+    if email.kind == "bafo":
+        if "final" not in kept:
+            return None
+        combined = replace(email, clarify=items)
+    elif "revise_price" in slots and "revise_price" not in kept:
+        deferred = tuple(
+            p.rfq_line_id for p in email.positions if p.ask_price is not None or p.best_price
+        )
+        positions = tuple(
+            replace(p, ask_price=None, best_price=False, better_offer_exists=False, conceded=False)
+            for p in email.positions
+            if p.deliver_by is not None
+        )
+        if not positions:
+            return None
+        combined = replace(
+            email,
+            kind="delivery_date",
+            reply_by=reply_by_date(ctx.now, ctx.deadline, ctx.country, "delivery_date"),
+            positions=positions,
+            mention_competition=False,
+            clarify=items,
+            deferred=deferred,
+        )
+    else:
+        combined = replace(email, clarify=items)
+    return replace(
+        planned,
+        action=combined.kind,
+        reason=f"{combined.kind}_with_questions_due",
+        email=combined,
+    )
+
+
+def _clarify(base: SupplierPlan, planned: SupplierPlan) -> SupplierPlan:
+    """The open items go alone (the follow-up sweep writes that email). When the
+    negotiation had an email to send, it waits for the answers (no room for it)."""
+    waiting = planned.email is not None and planned.email.reminder_of is None
+    return replace(
+        base,
+        action="clarify",
+        phase="waiting",
+        reason="clarification_due",
+        detail=f"{planned.email.kind}_after_answers" if waiting and planned.email else None,
+    )
 
 
 def _unanswered(
@@ -973,6 +1143,7 @@ def ready_to_close(
     for plan in plans:
         if (
             plan.offer_held
+            or plan.questions_open
             or plan.phase in ("needs_answer", "held_for_approval")
             or plan.action == "clarify"
         ):

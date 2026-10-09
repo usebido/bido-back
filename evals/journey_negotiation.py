@@ -52,7 +52,8 @@ for, or a shorter lead time on a line it asked a date for.
    <need-by>" in that request, rather than left silent; every date asked is the
    line's need-by date, once per line.
 9. `stops_without_progress`: a request after the first needs the supplier to have
-   moved on what the previous one asked. A supplier that answered a request
+   moved on what the previous one asked (or asks a price the previous one left for
+   later because its questions came first: a first ask). A supplier that answered a request
    without moving gets nothing in that sweep, and the buyer sees "Needs your
    decision" (or "Needs your answer" to its question, a clarification, or
    "Closed" because it declined, withdrew or the negotiation closed).
@@ -171,6 +172,10 @@ class Request:
     message_id: str | None = None
     # The sweep that decided it (its index in `Negotiation.sweeps`); None: not seen.
     sweep: int | None = None
+    # The clarification items it asks first, and the lines whose price ask did not fit
+    # (asked by the next email: asking them then is no repeat).
+    questions: int = 0
+    deferred: tuple[str, ...] = ()
 
     @property
     def sent(self) -> bool:
@@ -343,7 +348,17 @@ def describe(request: Request) -> str:
     head = f"r{request.round} {request.kind} {request.state} v{request.offer_version}"
     if request.cutoff_at is not None:
         head += f" cut-off {request.cutoff_at:%Y-%m-%d %H:%M}"
+    if request.questions:
+        asks.insert(0, f"{request.questions} question(s)")
+    if request.deferred:
+        asks.append(f"price deferred: {' '.join(request.deferred)}")
     return f"{head}: {', '.join(asks) or '-'}"
+
+
+def asks_deferred(previous: Request, current: Request) -> bool:
+    """Whether `current` asks a price `previous` left for later (its questions came first):
+    a first ask, never a repeat."""
+    return any(a.part in previous.deferred and a.asks_price for a in current.asks)
 
 
 def _new_asks(previous: Request, current: Request) -> bool:
@@ -646,7 +661,11 @@ def check_progress(n: Negotiation) -> list[str]:
         sent = n.sent(s)
         for previous, current in zip(sent, sent[1:], strict=False):
             offer = n.offers.get(s, {}).get(current.offer_version)
-            if offer is not None and not moved(previous, offer):
+            if (
+                offer is not None
+                and not moved(previous, offer)
+                and not asks_deferred(previous, current)
+            ):
                 problems.append(
                     f"{s}: round {current.round} ({current.kind}) although offer "
                     f"v{current.offer_version} improved nothing round {previous.round} asked"
@@ -657,10 +676,12 @@ def check_progress(n: Negotiation) -> list[str]:
                 continue
             decided = [r for r in n.decided_in(s, index) if not r.reminder]
             if decided:
-                problems.append(
-                    f"{s} day {sweep.day}: a {decided[0].kind} although its answer to round "
-                    f"{answer.request.round} improved nothing"
-                )
+                if not asks_deferred(answer.request, decided[0]):
+                    problems.append(
+                        f"{s} day {sweep.day}: a {decided[0].kind} although its answer to "
+                        f"round {answer.request.round} improved nothing"
+                    )
+                continue
             after = sweep.after.get(s)
             if after is not None and not (
                 after.phase in STOPPED
@@ -779,12 +800,17 @@ def _expected_status(sent: Sequence[Request]) -> str:
     return "countered" if sent else "open"
 
 
-def _asks_shown(view: SupplierView) -> set[tuple[str, Decimal | None, bool, date | None]]:
-    return {
-        (line.part, line.ask, line.best_price, line.deliver_by)
-        for line in view.lines
-        if line.ask is not None or line.best_price or line.deliver_by is not None
-    }
+def _asks_shown(
+    view: SupplierView, deferred: Sequence[str] = ()
+) -> set[tuple[str, Decimal | None, bool, date | None]]:
+    """The asks the buyer's view plans; a price ask left for the next email (`deferred`:
+    the questions came first) is not in this one."""
+    found: set[tuple[str, Decimal | None, bool, date | None]] = set()
+    for line in view.lines:
+        ask, best = (None, False) if line.part in deferred else (line.ask, line.best_price)
+        if ask is not None or best or line.deliver_by is not None:
+            found.add((line.part, ask, best, line.deliver_by))
+    return found
 
 
 def _asks_decided(request: Request) -> set[tuple[str, Decimal | None, bool, date | None]]:
@@ -814,9 +840,10 @@ def _predicts(day: str, view: SupplierView, decided: Sequence[Request]) -> list[
     if view.next_action in EMAIL_ACTIONS:
         if kinds != [view.next_action]:
             return [f"{day}: the buyer saw {view.label!r}; the sweep decided {kinds or 'nothing'}"]
-        if view.next_action != "reminder" and _asks_shown(view) != _asks_decided(decided[0]):
+        shown = _asks_shown(view, decided[0].deferred)
+        if view.next_action != "reminder" and shown != _asks_decided(decided[0]):
             return [
-                f"{day}: the buyer saw asks {sorted(map(str, _asks_shown(view)))}; the "
+                f"{day}: the buyer saw asks {sorted(map(str, shown))}; the "
                 f"{decided[0].kind} asks {sorted(map(str, _asks_decided(decided[0])))}"
             ]
         return []
@@ -897,7 +924,9 @@ def _email_problems(n: Negotiation, supplier: str, request: Request, email: Emai
     for readings in written:
         values |= readings
     dates = written_dates(body, email.at.date() - timedelta(days=1))
-    allowed: set[Decimal] = set()
+    # The supplier's own prices (a question may show a line's quote too) and our asks.
+    answered = n.offers.get(supplier, {}).get(request.offer_version, {})
+    allowed = {q.price.normalize() for q in answered.values() if q.price is not None}
     for ask in request.asks:
         if ask.price is not None:
             allowed.add(ask.price.normalize())

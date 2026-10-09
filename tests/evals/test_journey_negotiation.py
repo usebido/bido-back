@@ -294,3 +294,29 @@ def test_emails_show_only_decided_amounts() -> None:
     leaked = replace(n.emails["a"][1], body=n.emails["a"][1].body + " Outro: R$ 9,75.")
     found = rules.check_emails(replace(n, emails={"a": (n.emails["a"][0], leaked)}))
     assert any("amounts not decided" in p for p in found), found
+
+
+def test_a_price_left_for_the_next_email_is_no_repeat() -> None:
+    """Questions first: the first email asked only the date, its price ask waited; the
+    next email asks the price although the supplier did not move (a first ask)."""
+    n = with_offer(clean(), 2, "11.00")
+    counter, bafo = n.requests["a"]
+    dated = LineAsk("p1", Decimal("11.00"), 5, deliver_by=NEED_BY)
+    first = replace(counter, kind="delivery_date", asks=(dated,), questions=1)
+    ask = (replace(bafo.asks[0], offered=Decimal("11.00"), price=Decimal("10.00")),)
+    found = rules.check_progress(with_requests(n, first, replace(bafo, asks=ask)))
+    assert any("improved nothing" in p for p in found), found
+    deferred = replace(first, deferred=("p1",))
+    assert rules.check_progress(with_requests(n, deferred, replace(bafo, asks=ask))) == []
+    # The buyer's view plans the price ask; the email defers it: what was shown matches.
+    sweep = n.sweeps[0]
+    late = replace(sweep.before["a"].lines[0], delivery="late", deliver_by=NEED_BY)
+    before = replace(sweep.before["a"], next_action="delivery_date", lines=(late,))
+    shown = replace(n, sweeps=(replace(sweep, before={"a": before}), n.sweeps[1]))
+
+    def predicted(first: Request) -> list[str]:
+        found = rules.check_visible(with_requests(shown, first, replace(bafo, asks=ask)))
+        return [p for p in found if p.startswith("a day 0: the buyer saw")]
+
+    assert predicted(first)  # without the deferral the price ask was promised
+    assert predicted(deferred) == []

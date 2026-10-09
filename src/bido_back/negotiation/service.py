@@ -18,7 +18,12 @@ does, per tenant, per RFQ whose negotiation is open:
    code), from its current offer, the clarification ledger, the emails decided
    or sent, the limits and the deadlines. An email is stored FIRST, as a
    `decided` row holding its typed decision (`bido_back.negotiation.decision`);
-   accept, final and hold decisions are recorded on the invite, with an audit
+   when the supplier's answer also left items of the clarification ledger open,
+   the same email asks them first (one email per supplier answer: the decision
+   stores them, and they are recorded as asked by it when it goes out); the
+   follow-up sweep writes a clarification alone only when the planner says so
+   (`planned_clarifications`). Accept, final and hold decisions are recorded on
+   the invite (with the plan's detail code), with an audit
    event when they change; the first best-and-final request sets the RFQ's
    common cut-off (and every supplier asked in that sweep gets it).
 4. Write: each decided email is rendered by code from its stored decision, in
@@ -114,6 +119,7 @@ from bido_back.negotiation.agents import NegotiationWriter
 from bido_back.negotiation.decision import (
     DecisionLine,
     EmailDecision,
+    QuestionDecision,
     QuotedTerms,
     build_decision,
     decision_of,
@@ -170,6 +176,7 @@ from bido_back.negotiation.send import (
 )
 from bido_back.negotiation.signals import (
     NO_CLARIFICATION,
+    ClarificationItem,
     ClarificationState,
     ClarificationWait,
     ExpectedDelivery,
@@ -578,6 +585,7 @@ def _record(row: NegotiationMessage, loaded: _Loaded) -> EmailRecord:
         order_date=order_date,
         reminder_of=decision.reminder_of if decision is not None else None,
         typed=decision is not None,
+        deferred=frozenset(decision.deferred_lines) if decision is not None else frozenset(),
     )
 
 
@@ -604,7 +612,9 @@ def _clarification(item: _Supplier, loaded: _Loaded, now: datetime) -> Clarifica
       reminder's, once reminded);
     - exhausted: items answered unusably, asked before and still missing, never
       answered after the reminder, or whose clarification the send gate held: the
-      buyer decides on those lines; the rest of the offer is negotiated.
+      buyer decides on those lines; the rest of the offer is negotiated;
+    - asked by our unanswered negotiation email (it asked them with its own asks): their
+      lines wait for the answer (the planner waits for that email's answer anyway).
     """
     del now
     state = loaded.ledger.get(item.invite.id)
@@ -626,6 +636,11 @@ def _clarification(item: _Supplier, loaded: _Loaded, now: datetime) -> Clarifica
         exhausted += _item_codes(to_ask)
         exhausted_lines |= _item_lines(to_ask)
         to_ask = ()
+    if state.request is not None and state.request.kind != "clarification":
+        # Our counter-offer or best-and-final request also asked these: their lines wait.
+        settled_lines = _item_lines(state.request.asks)
+    else:
+        settled_lines = frozenset[UUID]()
     request = state.request if state.request and state.request.kind == "clarification" else None
     if request is not None and any(d.kind == "no_answer" for d in state.decisions):
         # Unanswered after its reminder: those items are the buyer's now.
@@ -635,6 +650,7 @@ def _clarification(item: _Supplier, loaded: _Loaded, now: datetime) -> Clarifica
     settled = ClarificationState(
         exhausted=tuple(dict.fromkeys(exhausted)),
         exhausted_lines=frozenset(exhausted_lines),
+        lines=settled_lines,
     )
     waiting = [p for p in state.pending if p.kind in ("clarification", "reminder")]
     if waiting:
@@ -654,7 +670,14 @@ def _clarification(item: _Supplier, loaded: _Loaded, now: datetime) -> Clarifica
             lines=_item_lines(request.asks),
         )
     if to_ask:
-        return replace(settled, to_ask=_item_codes(to_ask), lines=_item_lines(to_ask))
+        return replace(
+            settled,
+            to_ask=_item_codes(to_ask),
+            items=tuple(
+                dict.fromkeys(ClarificationItem(i.rfq_line_id, i.position, i.field) for i in to_ask)
+            ),
+            lines=settled_lines | _item_lines(to_ask),
+        )
     return settled
 
 
@@ -1255,6 +1278,28 @@ async def get_negotiation(
     )
 
 
+async def planned_clarifications(
+    db: Db,
+    tenant_id: UUID,
+    rfq_id: UUID,
+    *,
+    now: datetime,
+    history: PriceHistory = quoted_price_history,
+    expected_delivery: ExpectedDelivery = extraction_expected_delivery,
+) -> frozenset[UUID]:
+    """The invites whose next action is a clarification on its own (`clarify`): the only
+    ones the follow-up sweep writes one for while the RFQ's negotiation is open. When the
+    offer also has something to negotiate, the negotiation's own email asks the items
+    (one email per supplier answer), and while one of its emails is being prepared,
+    waits for approval or for its answer, nothing else goes out. Read-only: the same
+    planner the sweep and the view run."""
+    try:
+        planned, _ = await _planned(db, tenant_id, rfq_id, now, history, expected_delivery)
+    except NotFound:
+        return frozenset()
+    return frozenset(i for i, plan in planned.plans.items() if plan.action == "clarify")
+
+
 async def apply_settings(
     session: AsyncSession,
     *,
@@ -1691,13 +1736,17 @@ def _policy_hash(rfq: Rfq) -> str:
 def _decision_snapshot(
     plan: SupplierPlan, offer_version: int | None, now: datetime
 ) -> dict[str, JsonValue]:
-    return {
+    snapshot: dict[str, JsonValue] = {
         "action": plan.action,
         "phase": plan.phase,
         "reason": plan.reason,
         "proposal_version": offer_version,
         "decided_at": now.isoformat(),
     }
+    if plan.detail is not None:
+        # A code, never supplier text (e.g. the revised-offer request waits for the answers).
+        snapshot["detail"] = plan.detail
+    return snapshot
 
 
 def _changed(invite: Invite, plan: SupplierPlan, offer_version: int | None) -> bool:
@@ -1709,11 +1758,44 @@ def _changed(invite: Invite, plan: SupplierPlan, offer_version: int | None) -> b
         or previous.get("phase") != plan.phase
         or previous.get("reason") != plan.reason
         or previous.get("proposal_version") != offer_version
+        or previous.get("detail") != plan.detail
     )
 
 
 def _event(plan: SupplierPlan) -> str | None:
     return _EVENTS.get(plan.action) or _EVENTS.get(plan.phase)
+
+
+def _questions(
+    items: Sequence[ClarificationItem],
+    open_items: Sequence[OpenItem],
+    quoted: Mapping[UUID, QuotedTerms],
+) -> list[QuestionDecision]:
+    """The ledger's items an email asks too (the planner's `EmailPlan.clarify`), as its
+    decision stores them: how each is asked comes from the ledger's open item, a delivery
+    question shows the lead time the position's offer states."""
+    by_key = {(i.rfq_line_id, i.field): i for i in open_items}
+    found: list[QuestionDecision] = []
+    for item in items:
+        open_item = by_key.get((item.rfq_line_id, item.field))
+        if open_item is None:
+            continue
+        shown = quoted.get(open_item.rfq_line_id) if open_item.rfq_line_id else None
+        lead = shown if open_item.field == "delivery_date" and shown is not None else None
+        found.append(
+            QuestionDecision(
+                rfq_line_id=open_item.rfq_line_id,
+                position=open_item.position,
+                field=open_item.field,
+                problem=open_item.problem,
+                question=open_item.question,
+                need_by=open_item.need_by,
+                quoted_lead_days=lead.lead_days if lead is not None else None,
+                quoted_lead_basis=lead.lead_basis if lead is not None else "calendar",
+                quoted_lead_approximate=lead.lead_approximate if lead is not None else False,
+            )
+        )
+    return found
 
 
 async def _new_decision(
@@ -1724,9 +1806,12 @@ async def _new_decision(
     quoted: Mapping[UUID, QuotedTerms],
     sequence: int,
     rfq: Rfq,
+    open_items: Sequence[OpenItem] = (),
 ) -> tuple[EmailDecision, NegotiationMessage | None] | None:
     """The typed decision of an email the planner decided, and for a reminder the row of
-    the request it repeats (None: nothing typed to repeat, an email from before 0037)."""
+    the request it repeats (None: nothing typed to repeat, an email from before 0037).
+    `open_items` are what the offer lacks and nobody asked (the ledger's): the items the
+    email asks too are read from them."""
     if email.reminder_of is not None:
         original = next((r for r in item.rows if r.sequence == email.reminder_of), None)
         repeated = stored_decision(original) if original is not None else None
@@ -1745,6 +1830,7 @@ async def _new_decision(
         language=thread.language if thread is not None else None,
         lines={line.row.id: line.facts for line in lines},
         quoted=quoted,
+        questions=_questions(email.clarify, open_items, quoted),
     )
     return decision, None
 
@@ -1758,6 +1844,7 @@ async def _record_decision(
     correction_revision: int,
     now: datetime,
     quoted: Mapping[UUID, QuotedTerms],
+    open_items: Sequence[OpenItem] = (),
 ) -> NegotiationMessage | None:
     """Store what the planner decided for one supplier; a decided email as a row first."""
     invite = item.invite
@@ -1766,7 +1853,9 @@ async def _record_decision(
     row: NegotiationMessage | None = None
     if plan.email is not None and proposal is not None:
         sequence = max((r.sequence for r in item.rows), default=0) + 1
-        made = await _new_decision(session, item, plan.email, lines, quoted, sequence, rfq)
+        made = await _new_decision(
+            session, item, plan.email, lines, quoted, sequence, rfq, open_items
+        )
         if made is not None:
             decision, original = made
             row_id = negotiation_message_id(invite.id, sequence)
@@ -1818,6 +1907,10 @@ async def _record_decision(
                             "round": decision.round,
                             "sequence": sequence,
                             "proposal_version": proposal.version,
+                            # One email per answer: the ledger's items it asks too, and
+                            # the lines whose price ask waits for the next email (ids).
+                            "questions": len(decision.questions),
+                            "deferred_lines": [str(i) for i in decision.deferred_lines],
                         },
                     )
                 )
@@ -1898,6 +1991,7 @@ async def evaluate_rfq(
             if not planned.current(item):
                 # A newer offer arrived after the comparison was read: the next sweep plans it.
                 continue
+            ledger = loaded.ledger.get(item.invite.id)
             await _record_decision(
                 session,
                 rfq,
@@ -1907,6 +2001,7 @@ async def evaluate_rfq(
                 revisions.get(item.invite.id, 0),
                 at,
                 planned.shown.get(item.invite.id, {}),
+                ledger.to_ask if ledger is not None else (),
             )
         # Set by the first best-and-final decided; dropped when none carrying it is left.
         rfq.negotiation_cutoff_at = planned.cutoff

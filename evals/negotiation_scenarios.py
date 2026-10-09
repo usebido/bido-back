@@ -95,6 +95,7 @@ from bido_back.email.types import OutboundEmail
 from bido_back.followups.jobs import FollowupSweepHandler
 from bido_back.mandates import service as mandates
 from bido_back.mandates.schemas import ProposeMandateRequest
+from bido_back.negotiation.decision import decision_of
 from bido_back.negotiation.jobs import NegotiationSweepHandler
 from bido_back.negotiation.schemas import LineLimitsUpdate
 from bido_back.rfqs import service as rfq_service
@@ -299,7 +300,8 @@ class SentEmail:
     lead_asks: dict[int, int] = field(default_factory=dict[int, int])
     # The date a delivery ask names ("deliver by"), when the decision has one.
     lead_dates: dict[int, date] = field(default_factory=dict[int, date])
-    # A clarification's open items, (position, field, problem), from its writer task.
+    # A clarification's open items, (position, field, problem), from its writer task; a
+    # negotiation email's, from its decision (the ledger's items it asks too).
     items: list[tuple[int | None, str, str]] = field(
         default_factory=list[tuple[int | None, str, str]]
     )
@@ -929,6 +931,10 @@ async def classify(run: Run, captured: Sequence[Captured], step: str) -> list[Se
             email.kind = negotiation.action
             email.round = negotiation.round
             email.drafted = negotiation.id in negotiation_tasks
+            decision = decision_of(cast(dict[str, object], negotiation.terms))
+            if decision is not None:
+                # One email per answer: the ledger's items it asks with its own asks.
+                email.items = [(q.position, q.field, q.problem) for q in decision.questions]
             raw = cast(dict[str, JsonValue], negotiation.terms).get("lines")
             for entry in raw if isinstance(raw, list) else []:
                 if not isinstance(entry, dict):
@@ -1236,6 +1242,19 @@ def _negotiations(view: View, key: str) -> list[SentEmail]:
     return view.to(key, "counter", "bafo")
 
 
+def _clarifying(view: View, key: str, *kinds: str) -> list[SentEmail]:
+    """This step's emails that ask the supplier what its offer lacks: a clarification, or
+    a negotiation email that asks the ledger's items with its own asks (one email per
+    answer); plus any email of `kinds`."""
+    return [
+        e
+        for e in view.to(key)
+        if e.kind == "clarification"
+        or e.kind in kinds
+        or (e.kind in ("counter", "bafo") and bool(e.items))
+    ]
+
+
 def _asks_text(emails: Sequence[SentEmail]) -> str:
     return "; ".join(
         f"{e.tag} price={ {p: str(v) for p, v in e.price_asks.items()} } lead={e.lead_asks}"
@@ -1421,13 +1440,13 @@ RFQ6: Final = "metalnova"
 
 
 def rfq6_clarification_items(view: View) -> list[tuple[int | None, str, str]]:
-    return _items(view.to(RFQ6, "clarification"))
+    return _items(_clarifying(view, RFQ6))
 
 
 def rfq6_first(view: View, step: StepResult) -> None:
     check_offer(view, step, RFQ6, RFQ6_PRICES, name="offer_read")
     items = rfq6_clarification_items(view)
-    asked = f"clarification items {items}; undrafted {_undrafted(view.to(RFQ6, 'clarification'))}"
+    asked = f"clarification items {items}; undrafted {_undrafted(_clarifying(view, RFQ6))}"
     step.check(
         "no_validity_asked",
         not any(f == "valid_until" for _, f, _ in items),
@@ -1463,7 +1482,7 @@ def rfq6_first(view: View, step: StepResult) -> None:
 
 def rfq6_second(view: View, step: StepResult) -> None:
     check_offer(view, step, RFQ6, RFQ6_PRICES, name="offer_read")
-    clarifications = view.to(RFQ6, "clarification")
+    clarifications = _clarifying(view, RFQ6)
     step.check(
         "nothing_asked_twice",
         not clarifications,
@@ -1717,7 +1736,7 @@ def partial_two(view: View, step: StepResult) -> None:
     )
     asked = [e for e in _negotiations(view, FIOSSUL) if e.price_asks or e.lead_asks]
     step.check("quoted_lines_not_countered", not asked, _asks_text(asked), owner="negotiation")
-    followups = view.to(FIOSSUL, "clarification", "chase")
+    followups = _clarifying(view, FIOSSUL, "chase")
     items = _items(followups)
     step.check(
         "asks_only_missing_line",
@@ -2149,7 +2168,7 @@ def _de(lines: Sequence[Quoted], opening: str, valid: int | None) -> Callable[[T
 
 
 def german_first(view: View, step: StepResult) -> None:
-    clarifications = view.to(RHEIN, "clarification")
+    clarifications = _clarifying(view, RHEIN)
     items = _items(clarifications)
     step.check(
         "asks_only_validity",
@@ -2373,7 +2392,7 @@ ANSWER_LEAD: Final = 10
 
 
 def answered_asked(view: View, step: StepResult) -> None:
-    clarifications = view.to(LITORAL, "clarification")
+    clarifications = _clarifying(view, LITORAL)
     asked = {(p, f) for p, f, _ in _items(clarifications)}
     want = {(None, "valid_until"), (1, "lead_time"), (2, "lead_time"), (3, "lead_time")}
     step.check(
@@ -2652,8 +2671,8 @@ GAPS: Final[dict[str, Gap]] = {
     ),
     "questions_before_counter": Gap(
         "email rendering/followups",
-        "negotiation/planner.py (one request per supplier); negotiation/decision.py; "
-        "followups/service.py",
+        "negotiation/planner.py _with_questions (one request per supplier); "
+        "negotiation/decision.py supplier_email; followups/service.py _left_to_followups",
         "One request per supplier: when an answer leaves open questions (the validity) and a "
         "price above target, the planner asks the questions first and the revised-offer "
         "request follows the answer, never two emails for one answer. Asking both in ONE "
@@ -2663,7 +2682,8 @@ GAPS: Final[dict[str, Gap]] = {
     ),
     "question_answered_outside": Gap(
         "followups/visibility",
-        "followups/ledger.py supplier questions; followups/questions.py",
+        "quotes/extract_job.py _supersede_questions; followups/ledger.py "
+        "supersedes_questions; followups/questions.py reopen_question",
         "The buyer answered the supplier's question outside Bido: the question stays open in "
         "the ledger until the buyer answers or dismisses it in Bido, so the full quote that "
         "followed waits for the buyer ('needs your answer', every automatic email paused) "
@@ -2748,15 +2768,13 @@ def diagnosis(scenario: str, check: str) -> tuple[str, ...]:
 # code-rendered layout, `bido_back.supplier_email`: email:reply_by_date on every email).
 # Fixed by the negotiation planner (`bido_back.negotiation.planner`): the per-supplier
 # state the buyer reads (visible_*), status_matches_emails, canceled_round_numbers,
-# refused_drafts and the lead-time ask as a date from the need-by date.
-EXPECTED_MOCK_FAILURES: Final[frozenset[tuple[str, str, str]]] = frozenset(
-    {
-        # The question stays open in the ledger until the buyer closes it in Bido.
-        ("supplier_asks_question", "quote", "visible_accepted"),
-        # One request per supplier: the validity question first, the counter after it.
-        ("multi_language", "first_offer", "asks_above_target_only"),
-    }
-)
+# refused_drafts and the lead-time ask as a date from the need-by date;
+# questions_before_counter (one email per supplier answer: the ledger's open items asked
+# first in the negotiation's own email, multi_language first_offer
+# asks_above_target_only) and question_answered_outside (a later complete offer asking
+# nothing supersedes the supplier's open questions, `followups.ledger`;
+# supplier_asks_question quote visible_accepted).
+EXPECTED_MOCK_FAILURES: Final[frozenset[tuple[str, str, str]]] = frozenset()
 
 
 # --- Running ------------------------------------------------------------------------------------

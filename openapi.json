@@ -14123,7 +14123,7 @@
         "type": "object"
       },
       "SupplierQuestionView": {
-        "description": "A question the supplier asked the buyer. Automatic emails wait while one is open.",
+        "description": "A question the supplier asked the buyer. Automatic emails wait while one is open.\n\n`superseded_by_offer`: Bido closed it without an answer because the supplier's later\noffer was complete and asked nothing (`superseded_by_proposal_id`, the date in\n`note`); the buyer may reopen it (`POST .../questions/{id}/reopen`).",
         "properties": {
           "answer_followup_id": {
             "anyOf": [
@@ -14159,6 +14159,18 @@
             "title": "Id",
             "type": "string"
           },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What Bido decided about the question on its own, e.g. considered superseded by the supplier's later offer (reopen if needed)",
+            "title": "Note"
+          },
           "question": {
             "title": "Question",
             "type": "string"
@@ -14167,10 +14179,23 @@
             "enum": [
               "open",
               "answered",
-              "dismissed"
+              "dismissed",
+              "superseded_by_offer"
             ],
             "title": "Status",
             "type": "string"
+          },
+          "superseded_by_proposal_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Superseded By Proposal Id"
           }
         },
         "required": [
@@ -27988,6 +28013,133 @@
           }
         ],
         "summary": "Dismiss Question",
+        "tags": [
+          "followups"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/questions/{question_id}/reopen": {
+      "post": {
+        "description": "Open again a question considered superseded by the supplier's later offer (or\ndismissed): the offer waits for your answer, automatic emails pause.",
+        "operationId": "reopen_question_v1_rfqs__rfq_id__questions__question_id__reopen_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "question_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Question Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupplierQuestionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Reopen Question",
         "tags": [
           "followups"
         ]

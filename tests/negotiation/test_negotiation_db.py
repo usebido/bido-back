@@ -20,6 +20,7 @@ from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
+    ClarificationAsk,
     FollowupMessage,
     Invite,
     Message,
@@ -31,6 +32,7 @@ from bido_back.db.models import (
     Supplier,
     Tenant,
 )
+from bido_back.followups import ledger
 from bido_back.followups import service as followup_service
 from bido_back.followups.calendar import add_business_days
 from bido_back.followups.schemas import FollowupSettingsUpdate
@@ -1219,3 +1221,149 @@ async def test_an_unanswered_request_gets_one_reminder(world: World) -> None:
     rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
     assert rhein.state is not None and rhein.state.reason == "no_reply_after_reminder"
     assert len(await world.messages("rhein")) == 2
+
+
+# --- One email per supplier answer -----------------------------------------------------------
+
+
+async def _without_validity(world: World, *proposal_ids: UUID) -> None:
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        for proposal_id in proposal_ids:
+            proposal = await session.get(Proposal, proposal_id)
+            assert proposal is not None
+            proposal.valid_until = None
+
+
+async def _asks(world: World, name: str) -> list[ClarificationAsk]:
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        return list(
+            await session.scalars(
+                select(ClarificationAsk).where(ClarificationAsk.invite_id == world.invites[name])
+            )
+        )
+
+
+async def test_one_email_asks_what_the_offer_lacks_and_for_a_revised_offer(world: World) -> None:
+    """No validity and prices above target: ONE email asks the validity first, then for a
+    revised offer, and it is the round. The follow-up sweep writes no clarification of its
+    own for that supplier (only for one with nothing to negotiate), and the validity is
+    asked by that email, once, when it goes out."""
+    await world.configure()
+    rhein = await world.offer("rhein", ("0.050", "1.20"))
+    lyon = await world.offer("lyon", ("0.038", "0.95"))
+    await _without_validity(world, rhein, lyon)
+
+    followup_writer = FakeFollowupWriter()
+    swept = await followup_service.sweep_tenant(
+        world.engine, world.people.tenant, writer=followup_writer
+    )
+    # Lyon has nothing to negotiate: its validity goes out alone. Rhein's waits for the
+    # negotiation's email.
+    assert swept.clarifications == 1
+    assert [t.supplier_name for t in followup_writer.calls] == ["Lyon"]
+
+    writer = FakeNegotiationWriter()
+    assert (await world.sweep(writer)).proposed == 1
+    [row] = await world.messages("rhein")
+    decision = service.stored_decision(row)
+    assert decision is not None
+    assert (decision.kind, decision.round, row.round, row.action) == (
+        "revised_offer",
+        1,
+        1,
+        "counter",
+    )
+    assert [(q.position, q.field, q.problem) for q in decision.questions] == [
+        (None, "valid_until", "missing")
+    ]
+    assert decision.deferred_lines == []
+    assert await world.messages("lyon") == []
+    approval = await world.approval(row.approval_id)
+    body = str(approval.args["body"])
+    # The question first, then the revised offer: two numbered asks, one reply-by date.
+    first, second = body.index("\n1. "), body.index("\n2. ")
+    assert first < second and "\n3. " not in body
+    assert "Gültigkeit" in body[first:second]
+    assert "überarbeitetes Angebot" in body[second:]
+    assert body.count("bis ") >= 1 and "Bitte antworten Sie auf diese E-Mail bis" in body
+    # Nothing is asked before the email goes out (a rejected one never asked anything).
+    assert await _asks(world, "rhein") == []
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    assert any(
+        i.summary == "Bido prepared a request for a revised offer that also asks for what the "
+        "offer lacks (round 1) (Rhein)"
+        for i in feed
+    )
+
+    await world.approve(approval.id)
+    [asked] = await _asks(world, "rhein")
+    assert (asked.position, asked.field, asked.status) == (None, "valid_until", "open")
+    assert (asked.negotiation_message_id, asked.followup_id) == (row.id, None)
+    assert asked.reply_by == decision.reply_by
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        states = await ledger.supplier_followups(session, world.rfq_id, now=datetime.now(UTC))
+        state = states[world.invites["rhein"]]
+        assert state.request is not None and state.request.kind == "counter"
+        assert [a.id for a in state.request.asks] == [asked.id]
+        assert state.to_ask == ()
+        # The supplier's answer settles what that email asked.
+        later = datetime.now(UTC) + timedelta(minutes=5)
+        answered = await ledger.asks_answered_by(session, world.invites["rhein"], later)
+        assert [a.id for a in answered] == [asked.id]
+    # Nothing else goes to Rhein while that request waits for its answer.
+    followup_writer.calls.clear()
+    await followup_service.sweep_tenant(world.engine, world.people.tenant, writer=followup_writer)
+    assert "Rhein" not in [t.supplier_name for t in followup_writer.calls]
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    shown = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert shown.rounds_used == 1 and shown.status == "countered"
+    assert shown.state is not None and shown.state.reason == "revised_offer_sent"
+
+
+async def test_an_email_asks_the_ledger_once_and_the_database_says_which(world: World) -> None:
+    """Exactly one email asks an item: a clarification or a negotiation email."""
+    from sqlalchemy.exc import DBAPIError
+
+    await world.configure()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.sweep(FakeNegotiationWriter())
+    [row] = await world.messages("rhein")
+    for followup_id, negotiation_id in ((None, None), (uuid4(), row.id)):
+        with pytest.raises(DBAPIError, match="clarification_asks_email_check"):
+            async with tenant_session(world.engine, world.people.tenant) as session:
+                session.add(
+                    ClarificationAsk(
+                        tenant_id=world.people.tenant,
+                        invite_id=world.invites["rhein"],
+                        followup_id=followup_id,
+                        negotiation_message_id=negotiation_id,
+                        field="valid_until",
+                        question="value",
+                        status="proposed",
+                    )
+                )
+                await session.flush()
+
+
+async def test_a_planner_that_cannot_run_only_delays_its_clarifications(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await world.configure()
+    lyon = await world.offer("lyon", ("0.038", "0.95"))
+    await _without_validity(world, lyon)
+
+    async def broken(*_: object, **__: object) -> frozenset[UUID]:
+        raise RuntimeError("comparison unavailable")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(followup_service, "planned_clarifications", broken)
+        writer = FakeFollowupWriter()
+        swept = await followup_service.sweep_tenant(
+            world.engine, world.people.tenant, writer=writer
+        )
+    # Never two emails for one answer: the clarification waits for the next sweep.
+    assert (swept.clarifications, writer.calls) == (0, [])
+    swept = await followup_service.sweep_tenant(
+        world.engine, world.people.tenant, writer=FakeFollowupWriter()
+    )
+    assert swept.clarifications == 1

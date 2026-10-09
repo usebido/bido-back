@@ -1813,6 +1813,7 @@ def _request(
     version: int,
     parts: Mapping[int, str],
     sweep: int | None,
+    by_line: Mapping[UUID, str],
 ) -> rules.Request:
     """One decided negotiation e-mail as the rules read it (its typed decision)."""
     decision = decision_of(cast(dict[str, object], row.terms))
@@ -1849,6 +1850,8 @@ def _request(
         reminder_of=decision.reminder_of,
         message_id=row.message_id_header,
         sweep=sweep,
+        questions=len(decision.questions),
+        deferred=tuple(by_line.get(line_id, str(line_id)) for line_id in decision.deferred_lines),
     )
 
 
@@ -1872,6 +1875,7 @@ async def negotiation_record(j: Journey) -> rules.Negotiation:
     assert j.rfq_id is not None
     suppliers = {invite: key for key, invite in j.invites.items()}
     parts = {position: part for part, position in j.positions.items()}
+    by_line = {line_id: part for part, line_id in j.lines.items()}
     sweep_of = {row_id: index for index, s in enumerate(j.sweeps) for row_id in s.decided}
     requests: dict[str, list[rules.Request]] = defaultdict(list)
     offers: dict[str, dict[int, dict[str, rules.Quote]]] = defaultdict(dict)
@@ -1885,7 +1889,7 @@ async def negotiation_record(j: Journey) -> rules.Negotiation:
         ).all()
         for row, version in rows:
             key = suppliers[row.invite_id]
-            requests[key].append(_request(row, key, version, parts, sweep_of.get(row.id)))
+            requests[key].append(_request(row, key, version, parts, sweep_of.get(row.id), by_line))
         lines = (
             await session.execute(
                 select(Proposal.invite_id, Proposal.version, ProposalLine, RfqLine.part_number)

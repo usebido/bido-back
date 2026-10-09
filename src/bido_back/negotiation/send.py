@@ -22,6 +22,11 @@ Idempotency follows the follow-ups: the Message-ID is claimed and committed on
 the `negotiation_messages` row before sending and reused on a retry; the
 outbound `messages` row is unique per Message-ID; a row already `sent` is a
 no-op.
+
+An email that also asked items of the clarification ledger (one email per
+supplier answer, `EmailDecision.questions`) records them as asked by it, open,
+in the same transaction that marks it sent (`followups.ledger.record_sent_asks`):
+an email canceled or rejected before going out asked nothing.
 """
 
 import logging
@@ -57,6 +62,7 @@ from bido_back.db.models import (
 )
 from bido_back.email.addresses import make_message_id
 from bido_back.email.types import OutboundEmail
+from bido_back.followups.ledger import SentItem, record_sent_asks
 from bido_back.negotiation.decision import decision_of
 from bido_back.rfqs.errors import InvalidState, NotFound
 from bido_back.rfqs.schemas import EmailAddress
@@ -358,6 +364,22 @@ class _SendNegotiationEmail:
             row.status = "sent"
             row.sent_at = now
             row.message_id_header = message_id
+            decision = decision_of(cast(dict[str, object], row.terms))
+            if decision is not None and decision.questions and row.kind != "reminder":
+                # It asked the clarification ledger's items too (one email per answer):
+                # they are asked now, by this email, once each. A reminder repeats them.
+                await record_sent_asks(
+                    session,
+                    tenant_id=ctx.tenant_id,
+                    invite_id=args.invite_id,
+                    negotiation_message_id=row.id,
+                    items=[
+                        SentItem(q.rfq_line_id, q.position, q.field, q.question, q.need_by)
+                        for q in decision.questions
+                    ],
+                    reply_by=decision.reply_by,
+                    at=now,
+                )
             session.add(
                 AuditEvent(
                     tenant_id=ctx.tenant_id,

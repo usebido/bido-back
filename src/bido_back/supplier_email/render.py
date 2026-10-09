@@ -4,10 +4,11 @@ The blocks, in order (the Bido email standard, §2.2):
 
 1. salutation (company form; the trading name without its legal suffix in English);
 2. purpose line: `<type label> – RFQ-6` (revised offers add the round);
-3. context line: the message answered, by its date, and what is needed;
+3. context line: the message answered, by its date, and what is needed (a request that
+   also asks what the offer lacks names its positions and says so: one email per answer);
 4. positions block: only the positions concerned, each with the identity line it has in
    every email (`Pos. n · description · code · quantity unit`) and indented fact lines;
-5. numbered asks, at most three;
+5. numbered asks, at most three (the questions first in a combined email);
 6. reply-by (weekday and date; the exact cut-off with time and zone for a best and final
    offer) and 7. reply instructions (fill-in lines with two or more positions);
 8. the model's optional note (empty by default);
@@ -393,6 +394,23 @@ def _needs_dates(email: SupplierEmail, numbers: Sequence[int]) -> bool:
     return len(_facts(email, numbers, RequiredDelivery)) == len(numbers)
 
 
+def _negotiated(email: SupplierEmail) -> list[int]:
+    """The positions the request itself is about (not those shown only for its questions)."""
+    return [p.number for p in email.positions if p.number not in email.question_positions]
+
+
+def _revised_context(email: SupplierEmail, words: Phrases) -> str:
+    """ "We ask you to review your prices (and lead times) ...": for the positions below, or
+    named when the email also shows positions for its questions."""
+    if not email.with_questions:
+        lead_asked = any(a.kind in ("deliver_by", "meet_lead_time") for a in email.asks)
+        return words["context.revised.price_lead" if lead_asked else "context.revised.price"]
+    numbers = _negotiated(email)
+    dated = _facts(email, numbers, RequiredDelivery) or _facts(email, numbers, RequiredLeadTime)
+    key: Key = "context.combined.price_lead" if dated else "context.combined.price"
+    return _fill(words[key], positions=_positions_phrase(numbers, words))
+
+
 def _context(email: SupplierEmail, words: Phrases) -> tuple[str, ...]:
     locale = email.locale
     answered = email.answered
@@ -420,16 +438,14 @@ def _context(email: SupplierEmail, words: Phrases) -> tuple[str, ...]:
                 sentences.append(words["context.clarification.generic"])
         case "revised_offer":
             sentences.extend(_thanks(email, words))
-            lead_asked = any(a.kind in ("deliver_by", "meet_lead_time") for a in email.asks)
-            sentences.append(
-                words["context.revised.price_lead" if lead_asked else "context.revised.price"]
-            )
+            sentences.append(_revised_context(email, words))
             if email.mention_competition:
                 sentences.append(words["context.competition"])
         case "delivery_date":
             sentences.extend(_thanks(email, words))
-            numbers = [p.number for p in email.positions]
-            only = words["word.only"] if email.subset else ""
+            numbers = _negotiated(email)
+            # "Only" when the request names some positions alone (not with its questions).
+            only = words["word.only"] if email.subset and not email.with_questions else ""
             dated = _needs_dates(email, numbers)
             if len(numbers) == 1:
                 key: Key = "context.delivery.one.date" if dated else "context.delivery.one.lead"
@@ -456,6 +472,9 @@ def _context(email: SupplierEmail, words: Phrases) -> tuple[str, ...]:
                         _fill(words["context.not_selected.offer"], date=day(answered.on, locale))
                     )
                 sentences.append(words["context.not_selected.outcome"])
+    if email.with_questions and email.type in ("revised_offer", "delivery_date", "bafo"):
+        # The same email asks what the offer lacks: said once, after the request's purpose.
+        sentences.append(words["context.combined.questions"])
     return tuple(sentences)
 
 

@@ -34,8 +34,9 @@ def test_golden_negotiation_follows_the_buyer_rules() -> None:
     assert golden_actions(CHEAP_LATE) == [("counter", {1: (None, 42), 2: (None, 42)})]
     # Line 1 accepted after the first counter; line 2 moved: a quarter-step concession.
     assert golden_actions(EAGER)[1] == ("counter", {2: (Decimal("1.01"), None)})
-    # A line left unquoted is an open question first: no negotiation email yet.
-    assert golden_actions(DECLINER) == []
+    # A line left unquoted is an open question: the first request asks it too (one email
+    # per answer) and negotiates only the quoted line; unchanged after it, the requests stop.
+    assert golden_actions(DECLINER) == [("counter", {1: (Decimal("0.040"), None)})]
 
 
 def test_language_guess_reads_supplier_languages() -> None:
