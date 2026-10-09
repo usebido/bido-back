@@ -1,0 +1,785 @@
+"""The suppliers' side of the negotiation scenarios: their emails, and what a correct model reads.
+
+Every number a supplier writes is decided here, by code (`Quoted`: price and
+lead time per line); the words around it are fixed templates in the supplier's
+language, or, for `rfq6_*`, the exact text of the real RFQ-6 thread
+(`.context/negotiation/rfq6-thread.txt`, 2026-10-08) with the reference
+substituted. Each builder returns the email and the extraction a correct model
+returns for it under the current contract (`QuoteExtractionOutput`), which
+mock mode scripts; live mode reads the same email with the real model.
+
+"Correct" means what the contract (prompt v6) can express: a relative validity
+("valid for 15 days") is a `validity` period and code computes `valid_until`;
+"7 business days" is a lead time of 7 `business_days` with its source, and
+deterministic code decides what business days mean; a lead time given once for
+every item of a whole offer is the offer-level `lead_time`; questions, a final
+offer and general terms are the supplier's signals and notes.
+
+The mock writers (`followup_writer`, `negotiation_writer`) follow the v2
+writer prompts: code renders every email (`bido_back.supplier_email`) and the
+writers may only add an optional note, empty by default, so they return none.
+Mock mode therefore checks the harness and the deterministic code, never a
+model.
+"""
+
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import date, timedelta
+from decimal import Decimal
+from typing import Final
+
+from bido_back.agents.catalog.contracts import (
+    EmailNoteOutput,
+    ExtractedValue,
+    ExtraOfferDraft,
+    FollowupEmailInput,
+    LeadTimeBasis,
+    LeadTimeUnit,
+    LeadTimeValue,
+    NegotiationEmailInput,
+    ProposalLineDraft,
+    QuoteExtractionInput,
+    QuoteExtractionOutput,
+    SourceRef,
+    SupplierQuestion,
+    ValidityUnit,
+    ValidityValue,
+)
+from evals.scripted import ScriptedModel
+
+# --- What the buyer asks for -------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Part:
+    """One requested line and the buyer's limits for it (in the RFQ's currency)."""
+
+    position: int
+    part_number: str
+    description: str
+    quantity: Decimal
+    unit: str
+    need_by_days: int  # calendar days after the RFQ goes out
+    target: Decimal
+    maximum: Decimal
+
+
+@dataclass(frozen=True, slots=True)
+class Quoted:
+    """A supplier's answer for one line: decided by code."""
+
+    position: int
+    price: Decimal
+    lead: int  # days as the supplier writes them
+
+
+@dataclass(frozen=True, slots=True)
+class Thread:
+    """What a supplier knows when it writes: the RFQ reference, the day it was sent."""
+
+    ref: str
+    start: date
+    parts: tuple[Part, ...]
+    supplier: str
+    contact: str
+
+    def part(self, position: int) -> Part:
+        return next(p for p in self.parts if p.position == position)
+
+
+@dataclass(frozen=True, slots=True)
+class Email:
+    """A supplier email and its correct extraction."""
+
+    body: str
+    truth: QuoteExtractionOutput
+    # Added to the reply subject ("Re: [RFQ-1] ... - Revisão 2").
+    subject_suffix: str = ""
+
+
+def q(position: int, price: str, lead: int) -> Quoted:
+    return Quoted(position, Decimal(price), lead)
+
+
+# --- Evidence ----------------------------------------------------------------------------------
+
+NONE: Final = ExtractedValue(value=None, source=None, confidence=0)
+
+
+def ev(value: str, quote: str, confidence: float = 0.95) -> ExtractedValue:
+    return ExtractedValue(
+        value=value, source=SourceRef(kind="email_body", quote=quote), confidence=confidence
+    )
+
+
+NO_LEAD: Final = LeadTimeValue(value=None, source=None, confidence=0)
+
+
+def stated_lead(
+    value: int | None,
+    quote: str | None,
+    unit: LeadTimeUnit = "calendar_days",
+    *,
+    basis: LeadTimeBasis | None = None,
+    approximate: bool = False,
+    risk_note: str | None = None,
+) -> LeadTimeValue:
+    """A lead time as written (prompt v6): the number, its unit, what it counts from."""
+    return LeadTimeValue(
+        value=str(value) if value is not None else None,
+        source=SourceRef(kind="email_body", quote=quote) if quote is not None else None,
+        confidence=0.95 if value is not None else 0,
+        unit=unit if value is not None else None,
+        basis=basis,
+        approximate=approximate,
+        risk_note=risk_note,
+    )
+
+
+def validity(value: int, unit: ValidityUnit, quote: str) -> ValidityValue:
+    """A validity given as a duration; code computes the date from the message's."""
+    return ValidityValue(
+        value=str(value),
+        source=SourceRef(kind="email_body", quote=quote),
+        confidence=0.95,
+        unit=unit,
+    )
+
+
+def line_draft(
+    position: int,
+    *,
+    min_quantity: ExtractedValue = NONE,
+    unit_price: ExtractedValue = NONE,
+    unit: ExtractedValue = NONE,
+    lead_time: LeadTimeValue = NO_LEAD,
+    moq: ExtractedValue = NONE,
+    offered_mpn: ExtractedValue = NONE,
+    is_alternative: bool = False,
+) -> ProposalLineDraft:
+    """A line as a correct extraction reads it: what the email states, nothing else."""
+    return ProposalLineDraft(
+        rfq_line_position=position,
+        offered_mpn=offered_mpn,
+        is_alternative=is_alternative,
+        min_quantity=min_quantity,
+        unit_price=unit_price,
+        unit=unit,
+        tooling_cost=NONE,
+        moq=moq,
+        origin_country=NONE,
+        qualification=NONE,
+        lead_time=lead_time,
+    )
+
+
+def missing_quotes(email: Email) -> list[str]:
+    """Quotes of the truth that are not in the email body (a harness bug when not empty)."""
+    body = " ".join(email.body.split()).casefold()
+    truth = email.truth
+    values: list[ExtractedValue] = [
+        truth.currency,
+        truth.valid_until,
+        truth.validity,
+        truth.incoterm,
+        truth.payment_terms,
+        truth.lead_time,
+        truth.unchanged_terms,
+        truth.update_evidence,
+        truth.final_offer,
+    ]
+    notes = [n for n in (truth.lead_time.risk_note, *truth.offer_notes) if n is not None]
+    for line in truth.lines:
+        values += [
+            line.offered_mpn,
+            line.min_quantity,
+            line.unit_price,
+            line.unit,
+            line.moq,
+            line.lead_time,
+        ]
+        notes += [line.lead_time.risk_note] if line.lead_time.risk_note is not None else []
+    quotes = [v.source.quote for v in values if v.source is not None]
+    quotes += [o.quote for o in truth.extra_offers]
+    quotes += [q.quote for q in truth.supplier_questions]
+    quotes += [d.quote for d in truth.declined_lines]
+    quotes += notes
+    return [text for text in quotes if " ".join(text.split()).casefold() not in body]
+
+
+# --- Writing numbers and dates ---------------------------------------------------------------
+
+
+def pt_number(value: Decimal) -> str:
+    """Brazilian notation with two decimals for money: 1234.5 -> 1.234,50."""
+    text = f"{value:,.2f}"
+    return text.replace(",", "_").replace(".", ",").replace("_", ".")
+
+
+def pt_quantity(value: Decimal) -> str:
+    return format(value.normalize(), "f").replace(".", ",")
+
+
+def de_number(value: Decimal) -> str:
+    return f"{value:.2f}".replace(".", ",")
+
+
+def pt_date(value: date) -> str:
+    return value.strftime("%d/%m/%Y")
+
+
+def de_date(value: date) -> str:
+    return value.strftime("%d.%m.%Y")
+
+
+def plain_number(value: Decimal) -> str:
+    """Machine form for the truth: 19.50 -> "19.50", 12.5 -> "12.5"."""
+    return format(value, "f")
+
+
+# --- Brazilian suppliers (Portuguese) --------------------------------------------------------
+
+_PT_TERMS: Final = "Moeda: BRL. Pagamento em 28 dias após a NF."
+_PT_PAYMENT: Final = "Pagamento em 28 dias após a NF"
+
+
+def _pt_unit(part: Part) -> tuple[str, str]:
+    """(plural, singular) of the line's unit as Brazilian suppliers write it."""
+    return ("kg", "kg") if part.unit == "kg" else ("peças", "peça")
+
+
+def _pt_label(part: Part) -> str:
+    return f"Item {part.position} - {part.part_number} {part.description}"
+
+
+def _pt_line(t: Thread, quoted: Quoted, *, with_lead: bool = True) -> tuple[str, ProposalLineDraft]:
+    part = t.part(quoted.position)
+    plural, single = _pt_unit(part)
+    qty = f"{pt_quantity(part.quantity)} {plural}"
+    price = f"R$ {pt_number(quoted.price)}"
+    lead_text = f"{quoted.lead} dias"
+    text = f"{_pt_label(part)}: {qty} a {price} por {single}"
+    text += f", prazo de entrega de {lead_text}." if with_lead else "."
+    draft = line_draft(
+        part.position,
+        min_quantity=ev(plain_number(part.quantity), qty),
+        unit_price=ev(plain_number(quoted.price), price),
+        unit=ev(single, f"por {single}"),
+        lead_time=stated_lead(quoted.lead, lead_text) if with_lead else NO_LEAD,
+    )
+    return text, draft
+
+
+def _pt_signature(t: Thread) -> str:
+    return f"Atenciosamente,\n{t.contact}\n{t.supplier}"
+
+
+def pt_offer(
+    t: Thread,
+    lines: Sequence[Quoted],
+    *,
+    opening: str,
+    valid_days: int | None = 45,
+    with_lead: bool = True,
+    after: Sequence[str] = (),
+    extras: Sequence[ExtraOfferDraft] = (),
+) -> Email:
+    """A whole offer (a replacement): every line it prices, currency, payment, and (unless
+    left out) the lead times and validity."""
+    texts: list[str] = []
+    drafts: list[ProposalLineDraft] = []
+    for quoted in lines:
+        text, draft = _pt_line(t, quoted, with_lead=with_lead)
+        texts.append(text)
+        drafts.append(draft)
+    valid_until = t.start + timedelta(days=valid_days) if valid_days is not None else None
+    valid = f"Proposta válida até {pt_date(valid_until)}" if valid_until is not None else None
+    body = "\n\n".join(
+        [
+            f"Prezados,\n\n{opening.format(ref=t.ref)}",
+            "\n".join(texts),
+            *after,
+            f"{_PT_TERMS}\n{valid}." if valid is not None else _PT_TERMS,
+            _pt_signature(t),
+        ]
+    )
+    truth = QuoteExtractionOutput(
+        is_quote=True,
+        currency=ev("BRL", "Moeda: BRL"),
+        valid_until=ev(valid_until.isoformat(), valid)
+        if valid_until is not None and valid is not None
+        else NONE,
+        incoterm=NONE,
+        payment_terms=ev("28 dias após a NF", _PT_PAYMENT),
+        lines=drafts,
+        extra_offers=list(extras),
+        final_offer=ev(_FINAL_WORDS, _FINAL_WORDS) if opening == FINAL else NONE,
+    )
+    return Email(body, truth)
+
+
+def pt_answers(t: Thread, *, valid_days: int, lead: int, positions: Sequence[int]) -> Email:
+    """The answer to a clarification: the validity and one lead time for every line, and
+    nothing else. No 'other conditions unchanged': nothing else was asked or changed.
+
+    A correct extraction under the current contract reads it as an amendment (it changes
+    no price), without the explicit preservation statement the supplier never wrote. An
+    answer to an earlier offer puts a lead time "for all items" on each line (prompt v6),
+    since only lines carry it into the offer."""
+    valid_until = t.start + timedelta(days=valid_days)
+    valid = f"a proposta é válida até {pt_date(valid_until)}"
+    days = f"{lead} dias"
+    answer = f"{valid} e o prazo de entrega é de {days} para os três itens"
+    body = (
+        f"Prezados,\n\nRespondendo à sua mensagem sobre a {t.ref}: {answer}.\n\n{_pt_signature(t)}"
+    )
+    truth = QuoteExtractionOutput(
+        is_quote=True,
+        currency=NONE,
+        valid_until=ev(valid_until.isoformat(), valid),
+        incoterm=NONE,
+        payment_terms=NONE,
+        lines=[line_draft(p, lead_time=stated_lead(lead, days)) for p in positions],
+        reply_kind="amendment",
+        update_evidence=ev(answer, answer),
+    )
+    return Email(body, truth)
+
+
+OFFER: Final = "Obrigado pela solicitação {ref}. Segue nossa proposta:"
+REVISED: Final = "Sobre a {ref}, segue nossa proposta revisada:"
+SAME: Final = "Sobre a {ref}: não conseguimos reduzir os preços. Mantemos a mesma proposta:"
+FINAL: Final = "Sobre a {ref}, segue nossa melhor e última oferta:"
+_FINAL_WORDS: Final = "segue nossa melhor e última oferta"
+PRESERVE_PRICE: Final = "mantendo as demais condições"
+PRESERVE_ALL: Final = "As demais condições permanecem inalteradas"
+
+
+def pt_price_change(t: Thread, quoted: Quoted, *, revision: int | None = None) -> Email:
+    """An amendment: one line's new price, every other condition kept (stated)."""
+    part = t.part(quoted.position)
+    _, single = _pt_unit(part)
+    price = f"R$ {pt_number(quoted.price)}"
+    prefix = f"Revisão {revision}: " if revision is not None else ""
+    change = (
+        f"{prefix}reduzimos o preço do {_pt_label(part).lower()} para {price} por {single}, "
+        f"{PRESERVE_PRICE}."
+    )
+    body = f"Prezados,\n\nSobre a {t.ref}: {change}\n\n{_pt_signature(t)}"
+    truth = QuoteExtractionOutput(
+        is_quote=True,
+        currency=NONE,
+        valid_until=NONE,
+        incoterm=NONE,
+        payment_terms=NONE,
+        lines=[line_draft(part.position, unit_price=ev(plain_number(quoted.price), price))],
+        reply_kind="amendment",
+        unchanged_terms=ev(PRESERVE_PRICE, PRESERVE_PRICE),
+        update_evidence=ev(change, change),
+    )
+    return Email(body, truth, f" - Revisão {revision}" if revision is not None else "")
+
+
+def pt_lead_change(t: Thread, positions: Sequence[int], lead: int) -> Email:
+    """An amendment: a shorter lead time on the given lines, everything else kept (stated)."""
+    days = f"{lead} dias"
+    change = f"Conseguimos reduzir o prazo de entrega para {days} em todos os itens"
+    body = f"Prezados,\n\nSobre a {t.ref}: {change}. {PRESERVE_ALL}.\n\n{_pt_signature(t)}"
+    truth = QuoteExtractionOutput(
+        is_quote=True,
+        currency=NONE,
+        valid_until=NONE,
+        incoterm=NONE,
+        payment_terms=NONE,
+        lines=[line_draft(p, lead_time=stated_lead(lead, days)) for p in positions],
+        reply_kind="amendment",
+        unchanged_terms=ev(PRESERVE_ALL, PRESERVE_ALL),
+        update_evidence=ev(change, change),
+    )
+    return Email(body, truth)
+
+
+def pt_question(t: Thread) -> Email:
+    """No prices: two technical questions about the shaft, before quoting anything."""
+    first = "Vocês podem nos enviar o desenho técnico do eixo com as tolerâncias de usinagem?"
+    second = "O material do eixo deve ser aço SAE 1045 ou SAE 4140?"
+    body = (
+        f"Prezados,\n\nRecebemos a solicitação {t.ref}. Antes de cotar, precisamos esclarecer "
+        f"dois pontos sobre o item 2 (000102 Eixo motor MTR-100):\n\n1. {first}\n2. {second}\n\n"
+        "Assim que recebermos essas informações, enviaremos a cotação completa dos três itens."
+        f"\n\n{_pt_signature(t)}"
+    )
+    truth = QuoteExtractionOutput(
+        is_quote=False,
+        currency=NONE,
+        valid_until=NONE,
+        incoterm=NONE,
+        payment_terms=NONE,
+        reply_kind="clarification",
+        update_evidence=ev(first, first),
+        # Code copies the questions into `technical_questions` (they hold the offer).
+        supplier_questions=[
+            SupplierQuestion(quote=first, topic="technical", rfq_line_position=2),
+            SupplierQuestion(quote=second, topic="technical", rfq_line_position=2),
+        ],
+    )
+    return Email(body, truth)
+
+
+QUESTION_WORDS: Final = ("desenho", "SAE 4140")
+
+
+def pt_partial(t: Thread, lines: Sequence[Quoted], missing: int) -> Email:
+    """Two of three lines priced; the third promised for tomorrow."""
+    part = t.part(missing)
+    later = (
+        f"O {_pt_label(part).lower()} cotaremos amanhã: estamos confirmando a disponibilidade "
+        "com a produção."
+    )
+    return pt_offer(t, lines, opening=OFFER, after=[later])
+
+
+def pt_completion(t: Thread, quoted: Quoted) -> Email:
+    """The promised line, alone, everything else kept (stated): an amendment adding a line."""
+    text, draft = _pt_line(t, quoted)
+    opening = f"Conforme combinado, segue a cotação que faltava para a {t.ref}:"
+    body = f"Prezados,\n\n{opening}\n\n{text}\n\n{PRESERVE_ALL}.\n\n{_pt_signature(t)}"
+    truth = QuoteExtractionOutput(
+        is_quote=True,
+        currency=NONE,
+        valid_until=NONE,
+        incoterm=NONE,
+        payment_terms=NONE,
+        lines=[draft],
+        reply_kind="amendment",
+        unchanged_terms=ev(PRESERVE_ALL, PRESERVE_ALL),
+        update_evidence=ev(text, text),
+    )
+    return Email(body, truth)
+
+
+ALTERNATIVE_MPN: Final = "EX-4140-15"
+
+
+def pt_alternative(t: Thread, lines: Sequence[Quoted], alternative: Quoted) -> Email:
+    """The requested shaft declined; another part offered for it, said so plainly."""
+    part = t.part(alternative.position)
+    plural, single = _pt_unit(part)
+    qty = f"{pt_quantity(part.quantity)} {plural}"
+    price = f"R$ {pt_number(alternative.price)}"
+    days = f"{alternative.lead} dias"
+    decline = (
+        f"Não fabricamos o {_pt_label(part).lower()} conforme especificado. Como alternativa, "
+        f"oferecemos o eixo {ALTERNATIVE_MPN} (fabricante Metalúrgica Delta): {qty} a {price} "
+        f"por {single}, prazo de entrega de {days}."
+    )
+    email = pt_offer(t, lines, opening=OFFER, after=[decline])
+    alt = line_draft(
+        part.position,
+        offered_mpn=ev(ALTERNATIVE_MPN, ALTERNATIVE_MPN),
+        is_alternative=True,
+        min_quantity=ev(plain_number(part.quantity), qty),
+        unit_price=ev(plain_number(alternative.price), price),
+        unit=ev(single, f"por {single}"),
+        lead_time=stated_lead(alternative.lead, days),
+    )
+    truth = email.truth.model_copy(update={"lines": [*email.truth.lines, alt]})
+    return Email(email.body, truth)
+
+
+EXTRA_PART: Final = "000302"
+_EXTRA_TEXT: Final = (
+    "Aproveitando o contato, nosso departamento de manutenção também oferece a correia de "
+    f"equipamento cód. {EXTRA_PART}: 15 peças a R$ 77,00 por peça, entrega em 7 dias."
+)
+EXTRA_PRICE: Final = Decimal("77.00")
+
+
+def pt_offer_with_extra(t: Thread, lines: Sequence[Quoted]) -> Email:
+    """A whole offer plus another department's item nobody asked for."""
+    extra = ExtraOfferDraft(
+        description="Correia de equipamento (departamento de manutenção)",
+        mpn=EXTRA_PART,
+        quantity="15 peças",
+        unit_price="77,00",
+        currency="BRL",
+        conditions="entrega em 7 dias",
+        quote=_EXTRA_TEXT,
+    )
+    return pt_offer(t, lines, opening=OFFER, after=[_EXTRA_TEXT], extras=[extra])
+
+
+# --- RFQ-6, the real thread (English, from a Brazilian supplier) ------------------------------
+
+RFQ6_PRICES: Final = {1: Decimal("19.50"), 2: Decimal("89.00"), 3: Decimal("95.00")}
+RFQ6_MOQ: Final = {1: "10", 2: "10", 3: "5"}
+RFQ6_APPROX_DAYS: Final = 10
+# The second reply's lead times per line, in business days.
+RFQ6_BUSINESS_DAYS: Final = {1: 7, 2: 12, 3: 8}
+# The shafts' lead time after Bido's lead-time ask (business days).
+RFQ6_SHAFT_CONFIRMED: Final = 7
+RFQ6_VALIDITY_DAYS: Final = 15
+RFQ6_SHAFT_RISK: Final = (
+    "We may need a few additional days for the shafts, depending on production availability."
+)
+_RFQ6_SIGNATURE: Final = "Best regards,\nSales Team\nMetalNova Teste"
+
+
+def rfq6_first_reply(t: Thread) -> Email:
+    """The supplier's first answer, verbatim: per-unit prices, "valid for 15 days", Net 30,
+    MOQ, packaging, "approximately 10 business days" for all and "a few additional days"
+    for the shafts."""
+    p = {k: f"BRL {v:.2f}" for k, v in RFQ6_PRICES.items()}
+    lead = f"Lead time is approximately {RFQ6_APPROX_DAYS} business days after order confirmation"
+    body = (
+        "Hello,\n\nThank you for reaching out!\n\n"
+        f"We can supply the requested items. Our current prices are {p[1]} per piece for the "
+        f"bearings (000101), {p[2]} per piece for the shafts (000102), and {p[3]} per kg for "
+        "the copper wire (000104).\n\n"
+        f"Our standard payment terms are Net 30, and the quotation is valid for "
+        f"{RFQ6_VALIDITY_DAYS} days. The MOQ is {RFQ6_MOQ[1]} pieces for bearings and shafts, "
+        f"and {RFQ6_MOQ[3]} kg for copper wire. All items are supplied in standard industrial "
+        "packaging.\n\n"
+        f"{lead}. {RFQ6_SHAFT_RISK}\n\n"
+        f"Let us know if these conditions work for you.\n\n{_RFQ6_SIGNATURE}"
+    )
+    moq_pieces = f"The MOQ is {RFQ6_MOQ[1]} pieces for bearings and shafts"
+    moq_kg = f"{RFQ6_MOQ[3]} kg for copper wire"
+    lines = [
+        line_draft(
+            1,
+            offered_mpn=ev("000101", "bearings (000101)"),
+            unit_price=ev(plain_number(RFQ6_PRICES[1]), f"{p[1]} per piece"),
+            unit=ev("piece", f"{p[1]} per piece"),
+            moq=ev(RFQ6_MOQ[1], moq_pieces),
+        ),
+        line_draft(
+            2,
+            offered_mpn=ev("000102", "shafts (000102)"),
+            unit_price=ev(plain_number(RFQ6_PRICES[2]), f"{p[2]} per piece"),
+            unit=ev("piece", f"{p[2]} per piece"),
+            moq=ev(RFQ6_MOQ[2], moq_pieces),
+            # "a few additional days": no number of its own, a risk on the offer's lead time.
+            lead_time=stated_lead(None, None, risk_note=RFQ6_SHAFT_RISK),
+        ),
+        line_draft(
+            3,
+            offered_mpn=ev("000104", "copper wire (000104)"),
+            unit_price=ev(plain_number(RFQ6_PRICES[3]), f"{p[3]} per kg"),
+            unit=ev("kg", f"{p[3]} per kg"),
+            moq=ev(RFQ6_MOQ[3], moq_kg),
+        ),
+    ]
+    truth = QuoteExtractionOutput(
+        is_quote=True,
+        currency=ev("BRL", p[1]),
+        valid_until=NONE,
+        validity=validity(
+            RFQ6_VALIDITY_DAYS,
+            "calendar_days",
+            f"the quotation is valid for {RFQ6_VALIDITY_DAYS} days",
+        ),
+        incoterm=NONE,
+        payment_terms=ev("Net 30", "Our standard payment terms are Net 30"),
+        # One lead time for all items: approximate, in business days, from the order.
+        lead_time=stated_lead(
+            RFQ6_APPROX_DAYS, lead, "business_days", basis="order", approximate=True
+        ),
+        lines=lines,
+        offer_notes=["All items are supplied in standard industrial packaging."],
+    )
+    return Email(body, truth)
+
+
+def rfq6_second_reply(t: Thread) -> Email:
+    """The supplier's answer to the clarification, verbatim: validity relative to the
+    original offer, the requested quantities, and 7/12/8 business days per line."""
+    p = {k: f"BRL {v:.2f}" for k, v in RFQ6_PRICES.items()}
+    days = RFQ6_BUSINESS_DAYS
+    bearings = (
+        f"For the bearings (000101), {p[1]} per piece applies to the requested 70 pieces, with a "
+        f"lead time of {days[1]} business days."
+    )
+    shafts = (
+        f"For the shafts (000102), {p[2]} per piece applies to the requested 15 pieces, with a "
+        f"lead time of {days[2]} business days due to our current production schedule."
+    )
+    wire = (
+        f"For the copper wire (000104), {p[3]} per kg applies to the requested 12.5 kg, with a "
+        f"lead time of {days[3]} business days."
+    )
+    body = (
+        "Hello Biduuuuu,\n\nThank you for your follow-up.\n\n"
+        f"Our quotation is valid for {RFQ6_VALIDITY_DAYS} calendar days from the date of our "
+        "original offer.\n\n"
+        f"The quoted prices apply to the quantities requested in {t.ref}:\n\n"
+        f"{bearings}\n\n{shafts}\n\n{wire}\n\n"
+        "All lead times are counted from purchase order confirmation.\n\n"
+        f"Please let us know if you would like to proceed.\n\n{_RFQ6_SIGNATURE}"
+    )
+
+    def answered(position: int, part: str, unit: str, qty: str, quantity: str) -> ProposalLineDraft:
+        price = p[position]
+        return line_draft(
+            position,
+            offered_mpn=ev(part, f"({part})"),
+            min_quantity=ev(quantity, f"the requested {qty}"),
+            unit_price=ev(plain_number(RFQ6_PRICES[position]), f"{price} per {unit}"),
+            unit=ev(unit, f"{price} per {unit}"),
+            lead_time=stated_lead(
+                days[position], f"lead time of {days[position]} business days", "business_days"
+            ),
+        )
+
+    truth = QuoteExtractionOutput(
+        is_quote=True,
+        currency=ev("BRL", p[1]),
+        valid_until=NONE,
+        validity=validity(
+            RFQ6_VALIDITY_DAYS,
+            "calendar_days",
+            f"valid for {RFQ6_VALIDITY_DAYS} calendar days from the date of our original offer",
+        ),
+        incoterm=NONE,
+        payment_terms=NONE,
+        # "All lead times are counted from purchase order confirmation": the basis, once.
+        lead_time=LeadTimeValue(value=None, source=None, confidence=0, basis="order"),
+        lines=[
+            answered(1, "000101", "piece", "70 pieces", "70"),
+            answered(2, "000102", "piece", "15 pieces", "15"),
+            answered(3, "000104", "kg", "12.5 kg", "12.5"),
+        ],
+    )
+    return Email(body, truth)
+
+
+RFQ6_KEPT: Final = "All other conditions remain unchanged"
+
+
+def rfq6_shaft_lead_time(t: Thread) -> Email:
+    """After a lead-time ask: the shafts within 7 business days, everything else kept."""
+    change = (
+        f"we can now deliver the shafts (000102) within {RFQ6_SHAFT_CONFIRMED} business days "
+        "after purchase order confirmation"
+    )
+    body = (
+        f"Hello,\n\nRegarding {t.ref}: our production schedule was freed up and {change}. "
+        f"{RFQ6_KEPT}.\n\n{_RFQ6_SIGNATURE}"
+    )
+    truth = QuoteExtractionOutput(
+        is_quote=True,
+        currency=NONE,
+        valid_until=NONE,
+        incoterm=NONE,
+        payment_terms=NONE,
+        lines=[
+            line_draft(
+                2,
+                lead_time=stated_lead(
+                    RFQ6_SHAFT_CONFIRMED,
+                    f"within {RFQ6_SHAFT_CONFIRMED} business days after purchase order "
+                    "confirmation",
+                    "business_days",
+                    basis="order",
+                ),
+            )
+        ],
+        reply_kind="amendment",
+        unchanged_terms=ev(RFQ6_KEPT, RFQ6_KEPT),
+        update_evidence=ev(change, change),
+    )
+    return Email(body, truth)
+
+
+# --- A German supplier -------------------------------------------------------------------------
+
+_DE_SIGNATURE: Final = "Mit freundlichen Grüßen\nVertrieb\n{supplier}"
+_DE_TERMS: Final = "Alle Preise in EUR, Zahlungsziel 30 Tage netto"
+
+
+def de_offer(t: Thread, lines: Sequence[Quoted], *, opening: str, valid_days: int | None) -> Email:
+    """A whole offer in German; without `valid_days` it states no validity."""
+    texts: list[str] = []
+    drafts: list[ProposalLineDraft] = []
+    for quoted in lines:
+        part = t.part(quoted.position)
+        qty = f"{pt_quantity(part.quantity)} Stück"
+        price = f"{de_number(quoted.price)} EUR pro Stück"
+        lead = f"Lieferzeit {quoted.lead} Tage"
+        texts.append(
+            f"Pos. {part.position} {part.description} ({part.part_number}): {qty} zu {price}, "
+            f"{lead}."
+        )
+        drafts.append(
+            line_draft(
+                part.position,
+                min_quantity=ev(plain_number(part.quantity), qty),
+                unit_price=ev(plain_number(quoted.price), price),
+                unit=ev("Stück", "pro Stück"),
+                lead_time=stated_lead(quoted.lead, lead),
+            )
+        )
+    footer = [f"{_DE_TERMS}."]
+    valid_until = t.start + timedelta(days=valid_days) if valid_days is not None else None
+    valid = f"Angebot gültig bis {de_date(valid_until)}" if valid_until is not None else None
+    if valid is not None:
+        footer.append(f"{valid}.")
+    body = "\n\n".join(
+        [
+            f"Sehr geehrte Damen und Herren,\n\n{opening.format(ref=t.ref)}",
+            "\n".join(texts),
+            " ".join(footer),
+            _DE_SIGNATURE.format(supplier=t.supplier),
+        ]
+    )
+    truth = QuoteExtractionOutput(
+        is_quote=True,
+        currency=ev("EUR", _DE_TERMS),
+        valid_until=ev(valid_until.isoformat(), valid)
+        if valid_until is not None and valid is not None
+        else NONE,
+        incoterm=NONE,
+        payment_terms=ev("30 Tage netto", "Zahlungsziel 30 Tage netto"),
+        lines=drafts,
+        final_offer=ev(_DE_FINAL_WORDS, _DE_FINAL_WORDS) if opening == DE_FINAL else NONE,
+    )
+    return Email(body, truth)
+
+
+DE_OFFER: Final = "vielen Dank für Ihre Anfrage {ref}. Gerne bieten wir an:"
+DE_REVISED: Final = "vielen Dank für Ihre Rückmeldung zu {ref}. Unser überarbeitetes Angebot:"
+DE_FINAL: Final = "zu {ref} senden wir Ihnen unser bestes und letztes Angebot:"
+_DE_FINAL_WORDS: Final = "unser bestes und letztes Angebot"
+
+
+# --- Mock writers: the v2 prompts, followed literally ------------------------------------
+#
+# Code renders every follow-up and negotiation email (`bido_back.supplier_email`); the
+# writers may only add an optional note, empty by default. A correct model returns none.
+
+
+def followup_writer(task: FollowupEmailInput) -> EmailNoteOutput:
+    """The follow-up writer (v2 prompt): no note."""
+    return EmailNoteOutput(note="")
+
+
+def negotiation_writer(task: NegotiationEmailInput) -> EmailNoteOutput:
+    """The negotiation writer (v2 prompt): no note."""
+    return EmailNoteOutput(note="")
+
+
+class ScenarioModel(ScriptedModel):
+    """The flow evals' scripted model with these writers; counts extractions it had no
+    script for (a harness bug: the email changed after its truth was registered)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.unscripted: list[str] = []
+        self._scripts["rfq_followup_writer"] = followup_writer
+        self._scripts["rfq_negotiation_writer"] = negotiation_writer
+
+    def _extract(self, task: QuoteExtractionInput) -> QuoteExtractionOutput | None:
+        found = self.extraction.get(task.email_body.strip())
+        if found is None:
+            self.unscripted.append(task.email_subject)
+        return found

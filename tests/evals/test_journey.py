@@ -21,7 +21,6 @@ from evals.journey import (
     PENDING,
     STEPS,
     cannot_conclude,
-    golden_rounds,
     journey_markdown,
     language_of,
     quantity_shown,
@@ -80,11 +79,6 @@ def test_supplier_script_follows_the_business_rules() -> None:
     # An older revision delivered late changes nothing.
     assert states["multipecas.rev1"]["000102"].price == Decimal("238.00")
     assert "000104" not in states["multipecas.r0"]
-
-    targets = {p.part: p.target for p in REAL_PARTS if p.buy}
-    rounds = golden_rounds(targets, 3)
-    assert [a for a, _ in rounds["multipecas"]] == ["counter", "counter"]
-    assert [a for a, _ in rounds["metalnova"]] == ["counter", "counter", "bafo"]
 
     best = expected_recommendations(REAL_PARTS, 10, maxima={p.part: p.maximum for p in REAL_PARTS})
     assert {p: e.supplier for p, e in best.items()} == {

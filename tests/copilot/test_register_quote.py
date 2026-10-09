@@ -443,8 +443,9 @@ async def test_the_preview_lists_what_differs_from_the_rfq_and_business_day_lead
     preview = proposed.preview
     [quoted] = preview.quoted
     assert quoted.quantity == Decimal(50) and quoted.unit_price == Decimal("1284.50")
-    # 25 business days, stored as calendar days by the written rule (5 = 7, rounded up).
-    assert quoted.lead_time_days == 35
+    # 25 business days from 7 October 2026 in Brazil (a BRL quote), which skip 12 October
+    # and 2 November: 13 November, stored as 37 calendar days.
+    assert quoted.lead_time_days == 37
     assert quoted.issues == ["quantity_mismatch"]
     assert preview.incoterm == "CIF" and preview.currency == "BRL"
     # Never "none": the RFQ asked 1,500 pcs FOB; the file quotes 50 pcs CIF.
@@ -466,14 +467,16 @@ async def test_the_preview_lists_what_differs_from_the_rfq_and_business_day_lead
     assert proposal.fields["delivery_location"]["parsed"] == "Joinville/SC"
     assert line.needs_review is True and line.min_quantity == Decimal(50)
     assert "quantity_mismatch" in line.fields["_review"]["issues"]
-    assert line.lead_time_days == 35
+    assert line.lead_time_days == 37
     assert line.fields["lead_time_days"]["value"] == "25"
-    assert line.fields["lead_time_days"]["conversion"] == {
+    conversion = line.fields["lead_time_days"]["conversion"]
+    assert {k: conversion[k] for k in ("quoted", "unit", "calendar_days", "holiday_calendar")} == {
         "quoted": 25,
         "unit": "business_days",
-        "calendar_days": 35,
-        "rule": "ceil(business_days * 7 / 5)",
+        "calendar_days": 37,
+        "holiday_calendar": "BR",
     }
+    assert conversion["reference_date"] == "2026-10-07"
 
 
 async def test_the_same_file_registers_once_and_another_file_is_the_next_version(

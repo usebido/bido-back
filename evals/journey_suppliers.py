@@ -2,8 +2,11 @@
 
 Every number is decided here, by code; the text around it is a fixed Portuguese
 template, the way Brazilian suppliers write ("R$ 46,90 por pcs", "Moeda: BRL").
-`truth()` is what a correct quote extraction returns for each e-mail (mock mode
-scripts it; live mode reads the same e-mail with the real model).
+`write()` also returns what a correct quote extraction reads from each e-mail
+(mock mode scripts it; live mode reads the same e-mail with the real model): the
+prices and lead times, a line the supplier says it cannot supply ("não temos
+condições de fornecer este item": declined, not missing) and a final-offer
+statement ("melhor e última oferta").
 
 The script covers the buyer's flow after the RFQ e-mails go out:
 
@@ -14,9 +17,9 @@ The script covers the buyer's flow after the RFQ e-mails go out:
   rest (an amendment), then improves another line over two rounds.
 * MultiPecas cannot supply 000104, adds an offer from its maintenance department
   for an item nobody asked for (000302: an extra, never part of the comparison),
-  then repeats the same offer without improvement (the negotiation must stop
-  for it). At the end its "Revisão 2" arrives before its older "Revisão 1",
-  delayed in transit: the newer terms must stay.
+  then repeats the same offer without improvement (the negotiation stops for it
+  until it improves). At the end its "Revisão 2" (a lower price) arrives before
+  its older "Revisão 1", delayed in transit: the newer terms must stay.
 
 `expected_states()` is the state each e-mail must leave, from the business
 rules (an amendment changes only what it states; the newest written revision
@@ -30,6 +33,7 @@ from decimal import Decimal
 from typing import Final, Literal
 
 from bido_back.agents.catalog.contracts import (
+    DeclinedLine,
     ExtractedValue,
     ExtraOfferDraft,
     ProposalLineDraft,
@@ -190,11 +194,16 @@ def day_text(value: date) -> str:
     return value.strftime("%d/%m/%Y")
 
 
+# What a supplier writes to decline a line, and to say its offer is final.
+DECLINE: Final = "não temos condições de fornecer este item"
+FINAL: Final = "melhor e última oferta"
+# "We cannot go any lower" is a final position too (quote_extraction.v6 `final_offer`).
+NO_LOWER: Final = "não conseguimos reduzir os preços"
 _OPENING: Final[dict[ReplyKind, str]] = {
     "offer": "Obrigado pela solicitação {ref}. Segue nossa proposta:",
     "revised": "Sobre a {ref}, segue nossa proposta revisada:",
     "repeat": "Sobre a {ref}: não conseguimos reduzir os preços. Mantemos a mesma proposta:",
-    "final": "Sobre a {ref}, segue nossa melhor e última oferta:",
+    "final": "Sobre a {ref}, segue nossa " + FINAL + ":",
 }
 _CONTACT: Final = {
     METALNOVA.key: "Equipe comercial",
@@ -334,12 +343,14 @@ def write(
 
     parts = [f"Prezados,\n\n{_OPENING[email.kind].format(ref=rfq_ref)}"]
     drafts: list[ProposalLineDraft] = []
+    declined: list[DeclinedLine] = []
     lines: list[str] = []
     for item in requested:
         offer = email.lines.get(item.part.part)
         if offer is None:
             if item.part.part in email.declined:
-                lines.append(f"{item.label}: não temos condições de fornecer este item.")
+                lines.append(f"{item.label}: {DECLINE}.")
+                declined.append(DeclinedLine(rfq_line_position=item.position, quote=DECLINE))
             continue
         lines.append(_line_text(item, offer, style))
         unit = item.part.unit
@@ -381,6 +392,14 @@ def write(
         payment_terms=_ev("28 dias após a NF", "Pagamento em 28 dias após a NF"),
         lines=drafts,
         extra_offers=extras,
+        final_offer=(
+            _ev(FINAL, FINAL)
+            if email.kind == "final"
+            else _ev(NO_LOWER, NO_LOWER)
+            if email.kind == "repeat"
+            else _NONE
+        ),
+        declined_lines=declined,
     )
     return Written(subject, "\n\n".join(parts), truth)
 

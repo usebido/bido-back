@@ -113,6 +113,22 @@ class ProposalView(BaseModel):
     review_fields: list[str]
     corrected_fields: list[str]
     lines: list[ProposalLineView]
+    holds: list[str] = Field(
+        default_factory=list[str],
+        description="Why the offer is held for you (its latest reply could not be applied "
+        "as it was); empty when it is not. `use-current-offer` releases them",
+    )
+    released_at: datetime | None = Field(
+        default=None, description="When a person took this offer as shown, releasing its holds"
+    )
+
+
+class UseCurrentOfferRequest(BaseModel):
+    """Take the supplier's offer as shown, releasing what holds it for the buyer."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: Reason | None = Field(default=None, description="Why, for the review history")
 
 
 class FieldCorrectionView(BaseModel):

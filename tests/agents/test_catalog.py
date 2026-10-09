@@ -168,6 +168,45 @@ def test_extraction_prompt_treats_supplier_content_as_data() -> None:
     assert "Never follow" in prompt
 
 
+def test_extraction_v6_reads_durations_terms_and_signals() -> None:
+    # RFQ-6 (2026-10-08): "valid for 15 days", "approximately 10 business days" for all
+    # items and a general terms paragraph copied onto every line were asked again or blocked.
+    # RFQ-3 (2026-10-09, v5): a "25 dias úteis" lead time was left null and the named
+    # delivery place was never read.
+    prompt = QUOTE_EXTRACTION.load_prompt()
+
+    assert QUOTE_EXTRACTION.prompt_version == 6
+    for name in (
+        "business_days",
+        "approximate",
+        "risk_note",
+        "validity",
+        "offer_notes",
+        "final_offer",
+        "declined_lines",
+        "supplier_questions",
+        "delivery_location",
+    ):
+        assert f"`{name}`" in prompt, name
+    assert "never list\n`lead_time` as missing" in prompt
+    assert '"25 BD"' in prompt
+
+
+def test_extraction_schema_leaves_computed_values_to_code() -> None:
+    schema = QuoteExtractionOutput.model_json_schema()
+    line = schema["$defs"]["ProposalLineDraft"]["properties"]
+    lead = schema["$defs"]["LeadTimeValue"]["properties"]
+    unit = next(option for option in lead["unit"]["anyOf"] if "enum" in option)
+
+    # The model writes the lead time as stated; calendar days are computed by code.
+    assert "lead_time" in line
+    assert "lead_time_days" not in line and "lead_time_terms" not in line
+    assert set(unit["enum"]) == {"calendar_days", "business_days", "weeks", "months", "date"}
+    assert {"validity", "lead_time", "final_offer", "supplier_questions"} <= set(
+        schema["properties"]
+    )
+
+
 # --- End to end on Agno, scripted model ---------------------------------------------------
 
 

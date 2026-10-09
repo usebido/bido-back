@@ -167,6 +167,8 @@ def test_provenance_keeps_value_source_confidence_and_reasons() -> None:
         "incoterm",
         "delivery_location",
         "payment_terms",
+        "validity",
+        "lead_time",
         "_review",
     }
 
@@ -258,15 +260,22 @@ def test_lead_time_in_weeks_and_working_days() -> None:
     assert issues_of(weeks, "lead_time_days") == ()
     assert weeks.lines[0].parsed("lead_time_days") == 42
     assert issues_of(wrong, "lead_time_days") == ("not_grounded",)
-    # 30 business days are 6 business weeks: 42 calendar days, by the written rule.
+    # 30 business days from Tuesday 6 October are 6 business weeks: 42 calendar days (a
+    # EUR quote from a supplier without a country has no holiday calendar: weekends only).
     assert issues_of(working, "lead_time_days") == ()
     assert working.lines[0].parsed("lead_time_days") == 42
-    assert working.lines[0].fields["lead_time_days"].conversion == {
+    conversion = working.lines[0].fields["lead_time_days"].conversion
+    assert conversion is not None
+    assert {k: conversion[k] for k in ("quoted", "unit", "calendar_days", "holiday_calendar")} == {
         "quoted": 30,
         "unit": "business_days",
         "calendar_days": 42,
-        "rule": "ceil(business_days * 7 / 5)",
+        "holiday_calendar": None,
     }
+    assert conversion["reference_date"] == "2026-10-06"
+    # The number as written stays the field's value; the statement is the line's terms.
+    assert working.lines[0].fields["lead_time_days"].extracted.value == "30"
+    assert working.lines[0].fields["lead_time_terms"].extracted.value == "30 business_days"
 
 
 @pytest.mark.parametrize(
@@ -317,6 +326,20 @@ def test_a_lead_time_number_not_in_its_quote_is_not_grounded() -> None:
     assert issues_of(result, "lead_time_days") == ("not_grounded",)
     assert result.lines[0].parsed("lead_time_days") == 30
     assert result.lines[0].fields["lead_time_days"].conversion is None
+
+
+def test_a_part_code_is_not_evidence_for_a_lead_time() -> None:
+    # Live journey run: "Ímã cód. 000105 ... prazo de entrega de 4 dias" came back as
+    # 105 days, grounded on the part code. A number inside an identifier is no value.
+    quote = "Ímã cód. 000105: 220 pcs a R$ 21,90 por pcs, prazo de entrega de 4 dias"
+    body = BODY + quote + ".\n"
+
+    wrong = validate(output(line(lead_time_days=ev("105", quote))), body=body)
+    right = validate(output(line(lead_time_days=ev("4", quote))), body=body)
+
+    assert "not_grounded" in issues_of(wrong, "lead_time_days")
+    assert issues_of(right, "lead_time_days") == ()
+    assert right.lines[0].parsed("lead_time_days") == 4
 
 
 def test_header_values_are_checked_against_their_quotes() -> None:
@@ -642,7 +665,16 @@ def test_the_rfq3_quote_differs_from_the_request_in_quantity_and_incoterm() -> N
     assert checked.issues == ("quantity_mismatch",)
     assert result.issues == ("incoterm_mismatch",)
     assert result.needs_review
-    assert checked.parsed("lead_time_days") == 35
+    # 25 business days from Tuesday 6 October 2026 in Brazil (a BRL quote), which skip
+    # 12 October and 2 November: 12 November, 37 calendar days.
+    assert checked.parsed("lead_time_days") == 37
+    conversion = checked.fields["lead_time_days"].conversion
+    assert conversion is not None
+    assert (conversion["quoted"], conversion["unit"], conversion["holiday_calendar"]) == (
+        25,
+        "business_days",
+        "BR",
+    )
     assert issues_of(result, "lead_time_days") == ()
     assert result.parsed("delivery_location") == "Joinville/SC"
 

@@ -823,3 +823,6 @@ class MappingTask(BaseModel):
     summary: TableSummary | None = None
     # A text page's previous page's sections.
     previous_sections: list[TableProposal] = Field(default_factory=list[TableProposal])
+    # Set on a second attempt for the same table or page: why parts of the first answer
+    # were not read (code-checked problems, never source content). Empty at first.
+    retry_feedback: list[str] = Field(default_factory=list[str])

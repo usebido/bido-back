@@ -49,7 +49,7 @@ from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final
 from uuid import UUID
@@ -57,8 +57,8 @@ from uuid import UUID
 from sqlalchemy import func, select
 
 from bido_back.agents.catalog.contracts import (
+    EmailNoteOutput,
     NegotiationEmailInput,
-    NegotiationEmailOutput,
     PoResponseLine,
     PoResponseOutput,
     Quoted,
@@ -98,7 +98,7 @@ from bido_back.db.models import (
 )
 from bido_back.email.recipients import is_test_domain
 from bido_back.email.types import OutboundEmail
-from bido_back.followups.calendar import add_business_days
+from bido_back.followups.service import first_chase_due
 from bido_back.mandates import service as mandates
 from bido_back.mandates.policy import commitment_language
 from bido_back.mandates.schemas import ProposeMandateRequest
@@ -109,9 +109,11 @@ from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.activity import rfq_activity
 from bido_back.rfqs.document import document_text
 from bido_back.rfqs.errors import InvalidState
+from bido_back.rfqs.language import country_code
 from bido_back.rfqs.send import SendRfqEmailArgs
 from bido_back.settings import get_settings
-from bido_back.templates.render import format_date, format_quantity
+from bido_back.supplier_email.locale import Locale
+from bido_back.templates.render import display_quantity, format_date
 from bido_back.templates.required import REQUIRED_FIELDS, covered_keys
 from bido_back.templates.service import FOOTER_SEPARATOR
 from evals.harness import Env, MemoryStorage, Mode, RunResult, run_timed
@@ -387,8 +389,15 @@ async def scenario_rfq_email(world: World, language: str, result: RunResult) -> 
     result.check(
         "required_fields_asked", wanted <= covered, f"not asked: {sorted(wanted - covered)}"
     )
+    # Quantities as the supplier's locale writes them (10.000 in German), like every email.
+    locale = Locale.of(language, country_code(persona.country))
     missing = [
-        text for i in ITEMS for text in (i.mpn, format_quantity(i.quantity)) if text not in pdf
+        text
+        for i in ITEMS
+        for text in (i.mpn, display_quantity(i.quantity, locale))
+        # The PDF's text has its spaces normalized (French writes 10 000 with a narrow
+        # no-break space), as the document's own checks read it.
+        if " ".join(text.split()) not in pdf
     ]
     for text in (format_date(need_by, language), "DAP"):
         if text not in pdf:
@@ -463,10 +472,13 @@ def _check_followup_email(
     result: RunResult, prefix: str, email: Captured, persona: Persona, thread: Captured, ref: str
 ) -> None:
     result.check(f"{prefix}_to_supplier", email.to == (persona.email,), f"{email.to}")
+    # In the RFQ email's thread, replying to the latest message with the supplier.
     result.check(
         f"{prefix}_threaded",
-        email.in_reply_to == thread.message_id,
-        f"in_reply_to={email.in_reply_to}",
+        bool(email.references)
+        and email.references[0] == thread.message_id
+        and email.in_reply_to == email.references[-1],
+        f"in_reply_to={email.in_reply_to} references={email.references}",
     )
     guessed = guess_language(email.body)
     result.check(f"{prefix}_language", guessed == persona.language, f"reads as {guessed}")
@@ -485,8 +497,13 @@ async def scenario_followups(world: World, case: str, result: RunResult) -> None
     async with tenant_session(world.engine, world.tenant_id) as session:
         row = await session.get(Rfq, rfq.id)
     assert row is not None
-    first_after = row.followup_first_after_days
-    due = add_business_days(invite.sent_at, first_after, persona.country)
+    # The first chase: `first_after` business days after the RFQ, never before its reply-by.
+    due = first_chase_due(
+        sent_at=invite.sent_at,
+        first_after=row.followup_first_after_days,
+        response_due=row.response_due,
+        country=persona.country,
+    )
 
     if case == "chase":
         world.at(due - timedelta(hours=2))
@@ -551,7 +568,8 @@ async def scenario_followups(world: World, case: str, result: RunResult) -> None
 
     elif case == "out_of_office":
         world.at(world.now + timedelta(hours=2))
-        back = (world.now + timedelta(days=8)).date()
+        # Away past the day the first chase is due.
+        back = (due + timedelta(days=3)).date()
         subject, body = out_of_office(persona, subject=thread.subject, back=back)
         stored = await world.deliver(persona, subject=subject, body=body, auto_reply=True)
         result.check(
@@ -614,39 +632,87 @@ PER_DAY: Final = 2
 Asks = dict[int, tuple[Decimal | None, int | None]]
 
 
-def golden_asks(quote: Quote, items: Sequence[Item] = ITEMS) -> Asks:
-    """What the buyer asks next, from the buyer's rules: per line, the target price when the
-    offer is above it, the maximum lead time when the offer is later; nothing on a line
-    within target and on time, nothing on a line not offered."""
-    asks: Asks = {}
-    for item in items:
-        price = quote.prices.get(item.position)
-        if price is None:
-            continue
-        late = quote.lead > item.max_lead
-        ask_price = item.target if price > item.target else None
-        if ask_price is None and not late:
-            continue
-        asks[item.position] = (ask_price, item.max_lead if late else None)
-    return asks
+def _places(price: Decimal) -> int:
+    """Decimals an ask may use: cents, or the supplier's own finer precision (at most 4)."""
+    exponent = price.normalize().as_tuple().exponent
+    written = -exponent if isinstance(exponent, int) and exponent < 0 else 0
+    return max(2, min(written, 4))
 
 
-def golden_actions(persona: Persona) -> list[tuple[str, Asks]]:
-    """Expected sends, stopping after two unchanged supplier replies.
+def _down(value: Decimal, places: int) -> Decimal:
+    return value.quantize(Decimal(1).scaleb(-places), rounding=ROUND_FLOOR)
 
-    The final allowed productive round is best-and-final; stagnant negotiations
-    are held for the buyer rather than spending another automatic round.
+
+def golden_actions(persona: Persona, items: Sequence[Item] = ITEMS) -> list[tuple[str, Asks]]:
+    """The negotiation emails the buyer's rules send to a persona, in order.
+
+    - A first quote without a price for a requested line leaves an open question: the
+      first request asks it too, before its own asks (one email per supplier answer), and
+      that line is never negotiated without a price. (The quote extraction cannot yet say
+      that a line was declined.)
+    - Round 1 asks the target on every line above it, and delivery by the required date
+      (here the 42-day limit) on every late line.
+    - A later round concedes on a line where the supplier moved: a quarter of the gap
+      between our last ask and its price, half in the last allowed round (the best-and-
+      final request), rounded down to cents or the supplier's own finer precision, never
+      at or above its price; a line that did not move keeps its ask; a late line is asked
+      once.
+    - It stops when the supplier moved on nothing that was asked, after the best-and-final
+      request, or when nothing is left to ask.
     """
     actions: list[tuple[str, Asks]] = []
+    last_ask: dict[int, Decimal] = {}
+    asked_at: dict[int, Decimal] = {}
+    asked_lead: dict[int, int] = {}
     for round in range(1, MAX_ROUNDS + 1):
-        if round >= 3 and persona.quote(round - 1) == persona.quote(round - 2) == persona.quote(
-            round - 3
-        ):
-            break
-        asks = golden_asks(persona.quote(round - 1))
+        quote = persona.quote(round - 1)
+        if actions:
+            _, previous = actions[-1]
+            moved = False
+            for position, (ask, lead) in previous.items():
+                price = quote.prices.get(position)
+                if ask is not None and price is not None and price < asked_at[position]:
+                    moved = True
+                if lead is not None and quote.lead < asked_lead[position]:
+                    moved = True
+            if not moved:
+                break
+        final = round == MAX_ROUNDS
+        asks: Asks = {}
+        for item in items:
+            price = quote.prices.get(item.position)
+            if price is None:
+                continue
+            ask: Decimal | None = None
+            before = last_ask.get(item.position)
+            if price > item.target and not (before is not None and price <= before):
+                if before is None:
+                    ask = _down(item.target, _places(price))
+                else:
+                    ask = before
+                    if price < asked_at[item.position] and price <= item.max_price:
+                        share = Decimal("0.5") if final else Decimal("0.25")
+                        step = _down(before + (price - before) * share, _places(price))
+                        if before < step < price:
+                            ask = step
+            lead = (
+                item.max_lead
+                if quote.lead > item.max_lead and item.position not in asked_lead
+                else None
+            )
+            if ask is not None or lead is not None:
+                asks[item.position] = (ask, lead)
         if not asks:
             break
-        actions.append(("bafo" if round == MAX_ROUNDS else "counter", asks))
+        actions.append(("bafo" if final else "counter", asks))
+        for position, (ask, lead) in asks.items():
+            if ask is not None:
+                last_ask[position] = ask
+                asked_at[position] = quote.prices[position]
+            if lead is not None:
+                asked_lead[position] = quote.lead
+        if final:
+            break
     return actions
 
 
@@ -733,15 +799,12 @@ def _check_negotiation_emails(
     result: RunResult, world: World, cast: Sequence[Persona], *, rounds: dict[str, int]
 ) -> None:
     """Every negotiation email against the golden asks and the disclosure rules."""
-    drafts = {
-        (task.supplier_name, task.round): (task, out)
-        for task, out in world.negotiation_writer.calls
-    }
+    drafts = {(task.supplier_name, task.round): task for task, _ in world.negotiation_writer.calls}
     for persona in cast:
         emails = _negotiation_emails(world, persona)
         golden = golden_actions(persona)[: rounds.get(persona.key, MAX_ROUNDS)]
         tasks = sorted(
-            (t for (name, _), (t, _) in drafts.items() if name == persona.name),
+            (t for (name, _), t in drafts.items() if name == persona.name),
             key=lambda t: t.round,
         )
         got = [(t.action, _asked(t)) for t in tasks]
@@ -760,14 +823,15 @@ def _check_negotiation_emails(
         others = [p for p in NEGOTIATION_CAST + (WITHIN, ABOVE) if p.key != persona.key]
         own = {_n(v) for q in persona.quotes for v in q.prices.values()}
         own |= {_n(i.target) for i in ITEMS}
+        # What Bido decided to ask this supplier is its own number, whatever others quote.
+        own |= {a for t in tasks for a, _ in _asked(t).values() if a is not None}
         maxima = {_n(i.max_price) for i in ITEMS} - own
         rivals = {_n(v) for p in others for q in p.quotes for v in q.prices.values()} - own
         for index, email in enumerate(emails, 1):
             body = email.body
             tag = f"{persona.key}:e{index}"
-            drafted = [o.body.strip() for t, o in drafts.values() if t.supplier_name ==
-                       persona.name and o is not None]  # fmt: skip
-            result.check(f"as_drafted:{tag}", body.strip() in drafted, "sent text differs")
+            # Rendered by code: the same email as text and as HTML.
+            result.check(f"html_part:{tag}", email.html is not None, "no HTML part")
             numbers = written_numbers(body)
             result.check(f"no_max:{tag}", not numbers & maxima, f"{sorted(numbers & maxima)}")
             leaked = written_numbers(body, _DECIMAL) & rivals
@@ -811,7 +875,14 @@ async def _replies(
 
 async def scenario_negotiation(world: World, case: str, result: RunResult) -> None:
     need_by = world.today + timedelta(days=60)
-    rfq = await world.draft_rfq("MLCC and connectors for the pilot run", need_by)
+    # Held out of the mandate: the buyer's own title reads as a commitment ("contract"), so
+    # every reply's subject carries it and the mandate holds the email for a person.
+    title = (
+        "Contract for MLCC and connectors"
+        if case == "held_out_of_mandate"
+        else "MLCC and connectors for the pilot run"
+    )
+    rfq = await world.draft_rfq(title, need_by)
     cast: tuple[Persona, ...] = {
         "mandate_five": NEGOTIATION_CAST,
         "early_close": (WITHIN, ABOVE),
@@ -822,13 +893,10 @@ async def scenario_negotiation(world: World, case: str, result: RunResult) -> No
     if case == "held_out_of_mandate":
         inner = world.negotiation_writer.inner
 
-        async def committing(
-            task: NegotiationEmailInput, context: ToolContext
-        ) -> NegotiationEmailOutput:
-            draft = await inner(task, context)
-            return NegotiationEmailOutput(
-                body=draft.body + "\n\nWe accept your offer and will place the order."
-            )
+        async def committing(task: NegotiationEmailInput, context: ToolContext) -> EmailNoteOutput:
+            await inner(task, context)
+            # The writer's note commits: it is left out before anything is proposed.
+            return EmailNoteOutput(note="We accept your offer and will place the order.")
 
         world.negotiation_writer = Recording(committing)
 
@@ -861,6 +929,11 @@ async def scenario_negotiation(world: World, case: str, result: RunResult) -> No
                 "waits_for_a_person",
                 approval is not None and approval.status == "pending",
                 f"{approval.status if approval else None}",
+            )
+            result.check(
+                "committing_note_left_out",
+                approval is not None and "accept your offer" not in str(approval.args["body"]),
+                "the writer's committing note is in the email",
             )
         return
 
@@ -1074,8 +1147,13 @@ async def scenario_award(world: World, result: RunResult) -> None:
             continue
         email = sent[-1]
         thread = sent[0]
+        # In the RFQ email's thread, replying to the latest message with the supplier.
         result.check(
-            f"po_threaded:{key}", email.in_reply_to == thread.message_id, f"{email.in_reply_to}"
+            f"po_threaded:{key}",
+            bool(email.references)
+            and email.references[0] == thread.message_id
+            and email.in_reply_to == email.references[-1],
+            f"{email.in_reply_to} {email.references}",
         )
         result.check(f"po_attached:{key}", bool(email.attachments), "no PO document attached")
         result.check(f"po_ref:{key}", po.ref in email.subject, email.subject)

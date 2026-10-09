@@ -11,7 +11,9 @@ Per job, inside one transaction in the job's tenant:
 2. `executed` -> no-op (idempotent). Anything but `approved` -> refused.
 3. The stored args must still hash to `args_hash`, and the tool's input
    model must reproduce exactly those args, so what runs is byte-for-byte
-   what the approver saw.
+   what the approver saw. An optional field the tool gained after the
+   proposal, absent from the stored args and None, is not part of them
+   (`approved_payload`): deploying it does not strand pending approvals.
 4. The tool's handler runs with a `ToolContext` built from the approval:
    the approval's tenant, and the APPROVER (`decided_by`) as the acting user,
    because the approver is the person who authorized the commit (the
@@ -57,7 +59,7 @@ from bido_back.approvals.errors import (
     InvalidApprovalJob,
     UnknownActTool,
 )
-from bido_back.approvals.integrity import payload_matches
+from bido_back.approvals.integrity import approved_payload, payload_matches
 from bido_back.db import tenant_session
 from bido_back.db.models import Approval
 from bido_back.worker.envelope import Envelope
@@ -163,7 +165,7 @@ class ApprovalExecutor:
             raise ApprovalNotExecutable(
                 f"approval {approval.id}: stored args no longer validate for {tool.name!r}"
             ) from None
-        if args_hash(args.model_dump(mode="json")) != approval.args_hash:
+        if args_hash(approved_payload(args)) != approval.args_hash:
             raise ApprovalNotExecutable(
                 f"approval {approval.id}: {tool.name!r} no longer reproduces the approved args"
             )

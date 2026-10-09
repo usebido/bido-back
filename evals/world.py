@@ -92,6 +92,8 @@ class Captured:
     references: tuple[str, ...]
     attachments: tuple[str, ...]
     at: datetime
+    # The HTML part, when the email has one.
+    html: str | None = None
     # The text of the PDF attachments (the RFQ document), for checks on what it carries.
     attachment_text: str = ""
 
@@ -123,6 +125,7 @@ class _Recorder:
                 references=email.references,
                 attachments=tuple(a.filename for a in email.attachments),
                 at=self._outbox.clock(),
+                html=email.html_body,
                 attachment_text="\n".join(
                     _pdf_text(a.data)
                     for a in email.attachments
@@ -209,7 +212,12 @@ class World:
         self.mailboxes = guarded(self.outbox)
         self.jobs = MemoryQueue()
         self.registry = ActToolRegistry()
-        deps = RfqActDeps(db=self.engine, email_domain=EMAIL_DOMAIN, mailbox_senders=self.mailboxes)
+        deps = RfqActDeps(
+            db=self.engine,
+            email_domain=EMAIL_DOMAIN,
+            mailbox_senders=self.mailboxes,
+            clock=lambda: self.now,
+        )
         register_act_tools(self.registry, deps)
         register_followup_act_tools(self.registry, deps)
         register_negotiation_act_tools(self.registry, deps)

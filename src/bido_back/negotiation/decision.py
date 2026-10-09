@@ -1,0 +1,512 @@
+"""The typed decision behind every negotiation email: what the email renderer renders.
+
+The planner (`bido_back.negotiation.planner`) decides an email; the sweep
+stores it as an `EmailDecision` in `negotiation_messages.terms["decision"]`
+BEFORE the email exists, and the email is rendered from the stored decision
+(never a new decision for the same offer version).
+
+`supplier_email` turns a decision into the typed input of the code-rendered
+email standard (`bido_back.supplier_email`): the type, one entry per position
+concerned (the supplier's own offer as quoted, what we need, what we ask), the
+reply-by date and, for a best-and-final request, the common cut-off.
+`writer_task` gives the negotiation writer the same facts; it may only add an
+optional note. Every number and date is final here: quantized when decided,
+never above the buyer's maximum, never another supplier's. The maximum is not
+in it; neither is any other supplier's name or price.
+
+`terms["lines"]` keeps the flat per-line shape older readers use (the mandate
+check reads `ask` against the maximum; `ask_lead_days` is the deliver-by date
+as days from the order date).
+
+One email per supplier answer: when the answer also left items of the
+clarification ledger open, the decision carries them (`questions`) and the
+email asks them first, then its own asks (at most three numbered asks; a price
+ask that did not fit is `deferred_lines`, asked by the next email). The items
+are recorded as asked by this email when it goes out
+(`followups.ledger.record_sent_asks`).
+"""
+
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from typing import Literal
+from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
+
+from bido_back.agents.catalog.contracts import (
+    FollowupField,
+    FollowupItem,
+    FollowupQuestion,
+    NegotiationEmailInput,
+    NegotiationLineAsk,
+)
+from bido_back.decimals import format_decimal
+from bido_back.followups.emails import clarification_of
+from bido_back.negotiation.planner import EmailPlan, LinePlan
+from bido_back.negotiation.strategy import plain
+from bido_back.supplier_email.builders import (
+    Header,
+    RequestedLine,
+    negotiation_email,
+    with_questions,
+)
+from bido_back.supplier_email.builders import LineAsk as EmailLineAsk
+from bido_back.supplier_email.model import (
+    Answered,
+    Ask,
+    EmailType,
+    LeadTime,
+    Money,
+    ReplyBy,
+    SupplierEmail,
+)
+
+EmailKindName = Literal["revised_offer", "delivery_date", "bafo"]
+LeadBasis = Literal["calendar", "business"]
+
+
+@dataclass(frozen=True, slots=True)
+class QuotedTerms:
+    """One line of the supplier's offer as the supplier wrote it (shown, never compared).
+
+    The price in the supplier's currency and price basis (`per` units), and the lead
+    time as stated (days, calendar or business, approximate). None: not shown (a lead
+    time given in months or as a date is not restated as days).
+    """
+
+    unit_price: Decimal | None = None
+    currency: str | None = None
+    per: Decimal | None = None
+    lead_days: int | None = None
+    lead_basis: LeadBasis = "calendar"
+    lead_approximate: bool = False
+
+
+class PositionDecision(BaseModel):
+    """One position of the email: the supplier's own offer, our need, our ask."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rfq_line_id: UUID
+    position: int
+    description: str
+    part_number: str | None = None
+    mpn: str | None = None
+    quantity: Decimal
+    unit: str
+    currency: str
+    # The supplier's own offer for this position.
+    offered_unit_price: Decimal | None = None
+    offered_lead_time_days: int | None = None
+    # Its expected delivery if ordered on `EmailDecision.order_date` (estimated when
+    # `delivery_exact` is false: an approximate lead time).
+    offered_delivery: date | None = None
+    delivery_exact: bool = True
+    # The approved need-by date.
+    need_by: date | None = None
+    # What we ask: a unit price (quantized, disclosed), or a better price without a
+    # number (`best_price`), and/or delivery by a date.
+    target_unit_price: Decimal | None = None
+    best_price: bool = False
+    deliver_by: date | None = None
+    # True: the email may say a lower offer exists for this item (never whose or how much).
+    better_offer_exists: bool = False
+    # The ask moved from our previous one because the supplier moved (a labeled step).
+    conceded: bool = False
+    # The supplier's own offer as it wrote it (`QuotedTerms`), shown in the email: the
+    # price in its currency and price basis, the lead time as stated.
+    quoted_unit_price: Decimal | None = None
+    quoted_currency: str | None = None
+    quoted_per: Decimal | None = None
+    quoted_lead_days: int | None = None
+    quoted_lead_basis: LeadBasis = "calendar"
+    quoted_lead_approximate: bool = False
+
+
+class QuestionDecision(BaseModel):
+    """One item of the clarification ledger the email asks too, before its own asks.
+
+    The whole offer (no line: its currency or validity) or one requested line, the field,
+    whether it is missing or to confirm, and how it is asked (the ledger's `OpenItem`).
+    A delivery question shows the lead time the position's offer states (`quoted_lead_*`)
+    above the date needed (`need_by`).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    rfq_line_id: UUID | None = None
+    position: int | None = None
+    field: FollowupField
+    problem: Literal["missing", "unclear"]
+    question: FollowupQuestion = "value"
+    need_by: date | None = None
+    quoted_lead_days: int | None = None
+    quoted_lead_basis: LeadBasis = "calendar"
+    quoted_lead_approximate: bool = False
+
+
+class EmailDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    kind: EmailKindName
+    # The negotiation round (sent emails before it, plus one) and the email's sequence.
+    round: int = Field(ge=1)
+    sequence: int = Field(ge=1)
+    currency: str
+    # Delivery estimates count from this order date.
+    order_date: date
+    # Answer by this date (a best-and-final request: the cut-off's date).
+    reply_by: date
+    # The common best-and-final cut-off (date and time, UTC), for every supplier.
+    cutoff_at: datetime | None = None
+    # The offer this email answers.
+    offer_version: int
+    offer_received_on: date | None = None
+    # The email's language (ISO 639-1), fixed when decided: a retried draft never
+    # switches language. None on decisions stored before it was recorded.
+    language: str | None = None
+    mention_competition: bool = False
+    positions: list[PositionDecision]
+    # A reminder of the request with this sequence: the same email, a new reply-by date.
+    reminder_of: int | None = None
+    # The clarification ledger's items it asks too, first (one email per supplier answer).
+    questions: list[QuestionDecision] = Field(default_factory=list[QuestionDecision])
+    # Lines whose price ask did not fit (the questions first): the next email asks them.
+    deferred_lines: list[UUID] = Field(default_factory=list[UUID])
+
+
+def reminder_decision(original: EmailDecision, *, sequence: int, reply_by: date) -> EmailDecision:
+    """A reminder of a request the supplier has not answered: the same email (positions,
+    asks, the offer it answers), a new sequence and reply-by date, no round of its own."""
+    return original.model_copy(
+        update={"sequence": sequence, "reply_by": reply_by, "reminder_of": original.sequence}
+    )
+
+
+def decision_of(terms: Mapping[str, object]) -> EmailDecision | None:
+    """The typed decision stored in a negotiation email's terms (None before 0037)."""
+    raw = terms.get("decision")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return EmailDecision.model_validate(raw)
+    except ValueError:
+        return None
+
+
+class DecisionLine(BaseModel):
+    """The RFQ line facts a decision repeats (as requested, never translated)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    position: int
+    description: str
+    part_number: str | None = None
+    mpn: str | None = None
+    quantity: Decimal
+    unit: str
+    need_by: date | None = None
+
+
+def build_decision(
+    plan: EmailPlan,
+    *,
+    sequence: int,
+    currency: str,
+    offer_version: int,
+    offer_received_on: date | None,
+    language: str | None = None,
+    lines: Mapping[UUID, DecisionLine],
+    quoted: Mapping[UUID, QuotedTerms] | None = None,
+    questions: Sequence[QuestionDecision] = (),
+) -> EmailDecision:
+    """The stored decision for an email the planner decided; `questions` are the
+    clarification ledger's items it asks too (the planner's `EmailPlan.clarify`)."""
+    positions: list[PositionDecision] = []
+    for position in plan.positions:
+        line = lines[position.rfq_line_id]
+        shown = (quoted or {}).get(position.rfq_line_id) or QuotedTerms()
+        positions.append(
+            PositionDecision(
+                rfq_line_id=position.rfq_line_id,
+                position=line.position,
+                description=line.description,
+                part_number=line.part_number,
+                mpn=line.mpn,
+                quantity=plain(line.quantity),
+                unit=line.unit,
+                currency=currency,
+                offered_unit_price=position.offered_price,
+                offered_lead_time_days=position.lead_time_days,
+                offered_delivery=position.offered_delivery,
+                delivery_exact=position.delivery_exact,
+                need_by=line.need_by,
+                target_unit_price=position.ask_price,
+                best_price=position.best_price,
+                deliver_by=position.deliver_by,
+                better_offer_exists=position.better_offer_exists,
+                conceded=position.conceded,
+                quoted_unit_price=plain(shown.unit_price) if shown.unit_price is not None else None,
+                quoted_currency=shown.currency,
+                quoted_per=plain(shown.per) if shown.per is not None else None,
+                quoted_lead_days=shown.lead_days,
+                quoted_lead_basis=shown.lead_basis,
+                quoted_lead_approximate=shown.lead_approximate,
+            )
+        )
+    return EmailDecision(
+        kind=plan.kind,
+        round=plan.round,
+        sequence=sequence,
+        currency=currency,
+        order_date=plan.order_date,
+        reply_by=plan.reply_by,
+        cutoff_at=plan.cutoff_at,
+        offer_version=offer_version,
+        offer_received_on=offer_received_on,
+        language=language,
+        mention_competition=plan.mention_competition,
+        positions=sorted(positions, key=lambda p: p.position),
+        questions=sorted(
+            questions, key=lambda q: (q.position is not None, q.position or 0, q.field)
+        ),
+        deferred_lines=list(plan.deferred),
+    )
+
+
+def legacy_lines(decision: EmailDecision, plans: tuple[LinePlan, ...]) -> list[JsonValue]:
+    """The flat `terms["lines"]` entries: every RFQ line, what was decided and asked."""
+    asked: dict[UUID, PositionDecision] = {p.rfq_line_id: p for p in decision.positions}
+    entries: list[JsonValue] = []
+    for plan in plans:
+        position = asked.get(plan.rfq_line_id)
+        ask = position.target_unit_price if position is not None else None
+        deliver_by = position.deliver_by if position is not None else None
+        entry: dict[str, JsonValue] = {
+            "rfq_line_id": str(plan.rfq_line_id),
+            "decision": _line_decision(plan, position),
+            # Plain digits ("100", never "1E+2" or a stray "100.00").
+            "offered": format_decimal(plan.offered_price)
+            if plan.offered_price is not None
+            else None,
+            "ask": format_decimal(ask) if ask is not None else None,
+            "best_price": position.best_price if position is not None else False,
+            "ask_lead_days": (deliver_by - decision.order_date).days
+            if deliver_by is not None
+            else None,
+            "deliver_by": deliver_by.isoformat() if deliver_by is not None else None,
+            "offered_lead_days": position.offered_lead_time_days if position is not None else None,
+            "offered_delivery": position.offered_delivery.isoformat()
+            if position is not None and position.offered_delivery is not None
+            else None,
+        }
+        entries.append(entry)
+    return entries
+
+
+def _line_decision(plan: LinePlan, position: PositionDecision | None) -> str:
+    if plan.status != "priced":
+        return {"not_quoted": "no_offer", "declined": "no_offer"}.get(plan.status, "blocked")
+    if position is None:
+        return "accept" if plan.acceptable else "hold"
+    if plan.price_status == "above_max":
+        return "above_max"
+    return "counter"
+
+
+def writer_task(
+    decision: EmailDecision,
+    *,
+    rfq_ref: str,
+    rfq_title: str,
+    supplier_name: str,
+    language: str,
+) -> NegotiationEmailInput:
+    """What the negotiation writer reads before it may add its optional note.
+
+    No buyer name or company: code signs the email. `language` is the email's (the
+    thread's). A delivery-date ask becomes
+    `required_lead_time_days`: the days from the decision's order date to the
+    deliver-by date (the writer's contract has no date per line); the email
+    itself shows the date.
+    """
+    lines: list[NegotiationLineAsk] = []
+    for position in decision.positions:
+        label = position.description + (f" ({position.mpn})" if position.mpn else "")
+        lines.append(
+            NegotiationLineAsk(
+                position=position.position,
+                line=label,
+                quantity=position.quantity,
+                unit=position.unit,
+                currency=position.currency,
+                offered_unit_price=plain(position.offered_unit_price)
+                if position.offered_unit_price is not None
+                else None,
+                target_unit_price=plain(position.target_unit_price)
+                if position.target_unit_price is not None
+                else None,
+                offered_lead_time_days=position.offered_lead_time_days,
+                required_lead_time_days=(position.deliver_by - decision.order_date).days
+                if position.deliver_by is not None
+                else None,
+            )
+        )
+    return NegotiationEmailInput(
+        action="bafo" if decision.kind == "bafo" else "counter",
+        rfq_ref=rfq_ref,
+        rfq_title=rfq_title,
+        supplier_name=supplier_name,
+        supplier_language=language,
+        round=decision.round,
+        reply_by=decision.reply_by,
+        mention_competition=decision.mention_competition,
+        lines=lines,
+    )
+
+
+# --- The code-rendered email ----------------------------------------------------------------
+
+
+def email_type(decision: EmailDecision) -> EmailType:
+    """`bafo`; a revised-offer request when a price is asked (with or without a number);
+    else a delivery-date request."""
+    if decision.kind == "bafo":
+        return "bafo"
+    if any(p.target_unit_price is not None or p.best_price for p in decision.positions):
+        return "revised_offer"
+    return "delivery_date"
+
+
+def _offered(position: PositionDecision) -> Money | None:
+    if position.quoted_unit_price is None or not position.quoted_currency:
+        return None
+    return Money(position.quoted_unit_price, position.quoted_currency, position.quoted_per)
+
+
+def _offered_lead(position: PositionDecision) -> LeadTime | None:
+    if position.quoted_lead_days is None or position.quoted_lead_days < 0:
+        return None
+    return LeadTime(
+        days=position.quoted_lead_days,
+        basis=position.quoted_lead_basis,
+        approximate=position.quoted_lead_approximate,
+    )
+
+
+def supplier_email(
+    decision: EmailDecision, *, header: Header, lines: Sequence[RequestedLine]
+) -> SupplierEmail:
+    """The email standard's typed input for a stored decision (`bido_back.supplier_email`).
+
+    Every position asked shows the supplier's own offer as quoted and what we ask:
+    the target price (in the RFQ's currency) and/or "deliver by" the date. A better
+    price asked without a number (no target, `best_price`) is still a revised-offer
+    request for that position. A best-and-final request carries the common cut-off.
+
+    With `questions`, the same email asks the clarification ledger's items first (one
+    email per supplier answer, `supplier_email.builders.with_questions`): the offer's
+    terms, the values missing under their positions, the delivery dates, then the
+    request's own ask.
+    """
+    email = _request(decision, header=header, lines=lines)
+    if not decision.questions:
+        return email
+    quoted = {
+        q.position: lead
+        for q in decision.questions
+        if q.position is not None and (lead := _question_lead(q)) is not None
+    }
+    questions = clarification_of(
+        header,
+        answered=email.answered,
+        lines=lines,
+        items=[
+            FollowupItem(
+                position=q.position,
+                line=None,
+                field=q.field,
+                problem=q.problem,
+                question=q.question,
+                need_by=q.need_by,
+            )
+            for q in decision.questions
+        ],
+        reply_by=email.reply_by,
+        quoted=quoted,
+    )
+    return with_questions(email, questions, lines=lines)
+
+
+def _question_lead(question: QuestionDecision) -> LeadTime | None:
+    if question.quoted_lead_days is None or question.quoted_lead_days < 0:
+        return None
+    return LeadTime(
+        days=question.quoted_lead_days,
+        basis=question.quoted_lead_basis,
+        approximate=question.quoted_lead_approximate,
+    )
+
+
+def _request(
+    decision: EmailDecision, *, header: Header, lines: Sequence[RequestedLine]
+) -> SupplierEmail:
+    """The request itself: a revised offer, a delivery date or the best and final offer."""
+    kind = email_type(decision)
+    asks = [
+        EmailLineAsk(
+            position=p.position,
+            offered=_offered(p),
+            # The quoted lead time shows where a date is asked, or the email is about dates.
+            offered_lead=_offered_lead(p)
+            if p.deliver_by is not None or kind == "delivery_date"
+            else None,
+            target=Money(p.target_unit_price, decision.currency)
+            if p.target_unit_price is not None
+            else None,
+            need_by=p.deliver_by,
+        )
+        for p in decision.positions
+    ]
+    answered = (
+        Answered("offer" if decision.offer_version == 1 else "reply", decision.offer_received_on)
+        if decision.offer_received_on is not None
+        else None
+    )
+    cutoff = decision.cutoff_at.astimezone(UTC) if decision.cutoff_at is not None else None
+    email = negotiation_email(
+        header,
+        action="bafo" if kind == "bafo" else "counter",
+        round=decision.round,
+        answered=answered,
+        lines=lines,
+        asks=asks,
+        mention_competition=decision.mention_competition,
+        reply_by=ReplyBy(
+            cutoff.date() if kind == "bafo" and cutoff is not None else decision.reply_by,
+            cutoff=cutoff if kind == "bafo" else None,
+        ),
+    )
+    best = {p.position for p in decision.positions if p.best_price and p.target_unit_price is None}
+    if kind != "revised_offer" or not best:
+        return email
+    # The builder asks a revised price only where there is a target: the positions asked
+    # without a number are asked too, in the same question.
+    requested = {line.position for line in lines}
+    priced = tuple(
+        sorted(
+            n
+            for n in {*best, *(p.position for p in decision.positions if p.target_unit_price)}
+            if n in requested
+        )
+    )
+    others = tuple(a for a in email.asks if a.kind != "revise_price")
+    return replace(
+        email,
+        type="revised_offer",
+        asks=(Ask("revise_price", positions=priced), *others),
+        round=decision.round,
+        mention_competition=decision.mention_competition,
+    )

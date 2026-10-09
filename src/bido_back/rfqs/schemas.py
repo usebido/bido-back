@@ -141,9 +141,10 @@ class InviteView(BaseModel):
     responded_at: datetime | None
     document_language: str | None = Field(
         default=None,
-        description="ISO 639-1 of the email and PDF this supplier gets, as the send would "
-        "render them now: the supplier's own language, else its country's, else English. "
-        "Lets the on-screen preview match the document",
+        description="ISO 639-1 of the email and PDF this supplier gets: the language its "
+        "RFQ email was prepared in (every later email of the thread keeps it), else the one "
+        "the send would pick now (the supplier's own, its country's, its legal form's, the "
+        "buyer's). Lets the on-screen preview match the document",
     )
 
 
@@ -185,9 +186,10 @@ class RfqHeader(BaseModel):
     )
     document_language: str | None = Field(
         default=None,
-        description="ISO 639-1 the RFQ document is rendered in when no supplier decides "
-        "otherwise (the default before any invite exists); each invite's "
-        "document_language is the one its own PDF uses",
+        description="ISO 639-1 the RFQ document is rendered in when nothing about the "
+        "supplier decides otherwise (the default before any invite exists): the buyer's "
+        "own template, else the buyer's language, else Bido's standard template; each "
+        "invite's document_language is the one its own PDF uses",
     )
 
 
@@ -376,13 +378,22 @@ ApprovalStatus = Literal["pending", "approved", "rejected", "executed", "expired
 
 
 EmailKind = Literal["rfq", "chase", "clarification"]
+FollowupEmailKind = Literal["chase", "clarification", "reminder", "answer"]
 
 
 class RfqEmailDraft(BaseModel):
     """The exact email an approver approves (the stored, hashed arguments)."""
 
-    # The RFQ email itself, a reminder (chase) or a clarification question.
+    # The RFQ email itself, a reminder (chase) or a clarification question. A
+    # reminder of an unanswered email shows as a chase, the buyer's answer to a
+    # supplier's question as a clarification: `followup_kind` tells them apart.
     kind: EmailKind = "rfq"
+    followup_kind: FollowupEmailKind | None = Field(
+        default=None,
+        description="A follow-up's own kind: chase, clarification, reminder (of an email the "
+        "supplier has not answered) or answer (to the supplier's question); null for the "
+        "RFQ email",
+    )
     invite_id: UUID
     rfq_id: UUID | None
     rfq_ref: str | None
@@ -418,6 +429,9 @@ class NegotiationEmailDraft(BaseModel):
     cc: list[str]
     subject: str
     body: str
+    # The same email as HTML (the positions as a real table), when the proposal has one:
+    # the approver previews what the supplier's mail client shows.
+    html_body: str | None = None
 
 
 class MandateLineView(BaseModel):

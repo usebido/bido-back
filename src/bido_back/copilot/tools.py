@@ -53,6 +53,12 @@ from bido_back.comparison.compute import Recommendation
 from bido_back.comparison.loader import load_comparison
 from bido_back.comparison.policy import ComparisonPolicy
 from bido_back.copilot import proposals, queries
+from bido_back.copilot.followup_tools import (
+    SupplierFollowupOut,
+    followup_tools,
+    missing_items,
+    supplier_followups,
+)
 from bido_back.copilot.journey_tools import journey_tools, reply_by_explained
 from bido_back.copilot.order_tools import order_tools
 from bido_back.copilot.proposals import (
@@ -67,6 +73,7 @@ from bido_back.db import tenant_session
 from bido_back.db.models import Analysis, Contact, Invite, Rfq, RfqLine, RfqTemplate, Supplier
 from bido_back.negotiation import service as negotiation_service
 from bido_back.negotiation.agents import NegotiationWriter, default_negotiation_writer
+from bido_back.negotiation.strategy import plain
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
 from bido_back.purchasing import service as purchasing_service
 from bido_back.purchasing.schemas import (
@@ -266,6 +273,8 @@ class WhoRespondedOut(BaseModel):
 
 class SupplierGap(BaseModel):
     supplier_name: str
+    # What the offer lacks, by the rules Bido's clarification emails follow: asked and
+    # waiting, or not asked yet (`followups.missing`), never the model's own list.
     missing_fields: list[str]
     lines_needing_review: int
 
@@ -275,6 +284,8 @@ class WhatIsMissingOut(BaseModel):
     awaiting_suppliers: list[InviteItem]
     lines_without_quote: list[LineItem]
     proposal_gaps: list[SupplierGap]
+    # Every invited supplier: what Bido waits for, or what the buyer must do.
+    suppliers: list[SupplierFollowupOut] = Field(default_factory=list[SupplierFollowupOut])
 
 
 # --- list_proposals ----------------------------------------------------------------------
@@ -812,13 +823,47 @@ class NegotiationLineOut(BaseModel):
     offered_unit_price: Decimal | None
     ask_unit_price: Decimal | None
     lead_time_days: int | None
+    # price: in_target, ask_met, in_range, above_max, no_target; delivery: on_time,
+    # no_need_by, unknown, late, still_late, need_by_unreachable.
+    price: str | None = None
+    delivery: str | None = None
+    # The date Bido asks the supplier to deliver by, the date needed, and the supplier's
+    # expected delivery if ordered today.
+    deliver_by: date | None = None
+    required_by: date | None = None
+    expected_delivery: date | None = None
+    reasons: list[str] = Field(default_factory=list[str])
+
+
+class NegotiationEmailOut(BaseModel):
+    """A negotiation email Bido decided for the supplier, in its exact state."""
+
+    kind: str  # revised_offer, delivery_date, bafo, reminder
+    round: int
+    state: str  # decided, proposed, sent, canceled, rejected, held
+    reply_by: date | None = None
+    cutoff_at: datetime | None = None
+    held_reason: str | None = None
 
 
 class NegotiationSupplierOut(BaseModel):
     supplier_name: str
+    # open, countered / bafo_requested (only once that email was sent), accepted,
+    # rejected, closed.
     status: str
     rounds_used: int
     lines: list[NegotiationLineOut]
+    # Where the supplier stands, in one sentence written by code: waiting for the
+    # supplier (until when), waiting (daily limit, mailbox), held for your approval,
+    # accepted internally (nothing to ask), needs your decision (why), needs your
+    # answer (a supplier question), closed.
+    state: str = ""
+    state_text: str = ""
+    reason: str = ""
+    waiting_until: datetime | None = None
+    next_action: str = ""
+    warnings: list[str] = Field(default_factory=list[str])
+    emails: list[NegotiationEmailOut] = Field(default_factory=list[NegotiationEmailOut])
 
 
 class NegotiationStatusOut(BaseModel):
@@ -829,6 +874,9 @@ class NegotiationStatusOut(BaseModel):
     base_currency: str
     suppliers: list[NegotiationSupplierOut]
     note: str
+    # The one best-and-final cut-off for every supplier, once the final round started.
+    cutoff_at: datetime | None = None
+    warnings: list[str] = Field(default_factory=list[str])
 
 
 class ProposeCounteroffersOut(BaseModel):
@@ -1288,12 +1336,14 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             lines = await queries.lines(session, rfq.id)
             invites = _invite_items(await queries.invites(session, rfq.id))
             proposals = await queries.latest_proposals(session, rfq.id)
+            followups = await supplier_followups(session, rfq.id, deps.today())
         quoted = {
             line.rfq_line_id
             for item in proposals
             for line, _ in item.lines
             if line.unit_price is not None and line.rfq_line_id is not None
         }
+        missing = {out.supplier_name: missing_items(out) for out in followups}
         return WhatIsMissingOut(
             ref=rfq.ref,
             awaiting_suppliers=[i for i in invites if i.status in queries.AWAITING_STATUSES],
@@ -1301,19 +1351,22 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             proposal_gaps=[
                 SupplierGap(
                     supplier_name=item.supplier_name,
-                    missing_fields=queries.missing_fields(item.proposal),
+                    missing_fields=missing.get(item.supplier_name, []),
                     lines_needing_review=sum(1 for line, _ in item.lines if line.needs_review),
                 )
                 for item in proposals
-                if queries.missing_fields(item.proposal)
+                if missing.get(item.supplier_name)
                 or any(line.needs_review for line, _ in item.lines)
             ],
+            suppliers=followups,
         )
 
     async def list_proposals(ctx: ToolContext, args: RfqRef) -> ListProposalsOut:
         async with tenant_session(db, ctx.tenant_id) as session:
             rfq = await _rfq(session, args.rfq)
             proposals = await queries.latest_proposals(session, rfq.id)
+            followups = await supplier_followups(session, rfq.id, deps.today())
+        missing = {out.supplier_name: missing_items(out) for out in followups}
         return ListProposalsOut(
             ref=rfq.ref,
             proposals=[
@@ -1325,7 +1378,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                     valid_until=item.proposal.valid_until,
                     incoterm=item.proposal.incoterm,
                     payment_terms=item.proposal.payment_terms,
-                    missing_fields=queries.missing_fields(item.proposal),
+                    missing_fields=missing.get(item.supplier_name, []),
                     lines=[
                         ProposalLineItem(
                             rfq_line_position=position,
@@ -2152,31 +2205,87 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             "ready_to_close": "Every line has an offer within target: it can be closed now.",
             "closed": "Closed: the outcome is the best eligible offer per line.",
         }
+        suppliers: list[NegotiationSupplierOut] = []
+        for invite in view.invites:
+            plans = {plan.rfq_line_id: plan for plan in invite.line_plans}
+            lines: list[NegotiationLineOut] = []
+            for line in invite.lines:
+                plan = plans.get(line.rfq_line_id)
+                lines.append(
+                    NegotiationLineOut(
+                        position=positions.get(line.rfq_line_id, 0),
+                        decision=line.decision,
+                        offered_unit_price=plain(line.offered_unit_price_base)
+                        if line.offered_unit_price_base is not None
+                        else None,
+                        ask_unit_price=line.ask_unit_price,
+                        lead_time_days=line.lead_time_days,
+                        price=plan.price if plan else None,
+                        delivery=plan.delivery if plan else None,
+                        deliver_by=plan.deliver_by if plan else None,
+                        required_by=plan.required_by if plan else None,
+                        expected_delivery=plan.expected_delivery if plan else None,
+                        reasons=plan.reasons if plan else [],
+                    )
+                )
+            state = invite.state
+            suppliers.append(
+                NegotiationSupplierOut(
+                    supplier_name=invite.supplier_name,
+                    status=invite.status,
+                    rounds_used=invite.rounds_used,
+                    lines=lines,
+                    state=state.phase if state else "",
+                    state_text=state.label if state else "",
+                    reason=state.reason if state else "",
+                    waiting_until=state.until if state else None,
+                    next_action=state.next_action if state else "",
+                    warnings=state.warnings if state else [],
+                    emails=[
+                        NegotiationEmailOut(
+                            kind=m.kind or m.action,
+                            round=m.round,
+                            state=m.state,
+                            reply_by=m.reply_by,
+                            cutoff_at=m.cutoff_at,
+                            held_reason=m.held_reason,
+                        )
+                        for m in invite.messages
+                        if m.state != "canceled"
+                    ],
+                )
+            )
+        note = notes[view.status]
+        if view.status in ("open", "ready_to_close") and suppliers:
+            counts: dict[str, int] = {}
+            for supplier in suppliers:
+                counts[supplier.state] = counts.get(supplier.state, 0) + 1
+            words = {
+                "waiting_for_supplier": "waiting for the supplier",
+                "waiting": "waiting (an email is queued)",
+                "held_for_approval": "held for your approval",
+                "accepted_internally": "accepted internally, nothing to ask",
+                "needs_decision": "needs your decision",
+                "needs_answer": "needs your answer",
+                "closed": "closed",
+                "not_started": "not started",
+            }
+            parts = [f"{n} {words.get(k, k)}" for k, n in counts.items() if k]
+            note += " Per supplier: " + "; ".join(parts) + ". Each supplier's state_text says "
+            note += "why and until when; tell the buyer what needs them."
         return NegotiationStatusOut(
             ref=rfq.ref,
             status=view.status,
             deadline=view.settings.deadline,
             max_rounds=view.settings.max_rounds,
             base_currency=view.settings.base_currency,
-            suppliers=[
-                NegotiationSupplierOut(
-                    supplier_name=invite.supplier_name,
-                    status=invite.status,
-                    rounds_used=invite.rounds_used,
-                    lines=[
-                        NegotiationLineOut(
-                            position=positions.get(line.rfq_line_id, 0),
-                            decision=line.decision,
-                            offered_unit_price=line.offered_unit_price_base,
-                            ask_unit_price=line.ask_unit_price,
-                            lead_time_days=line.lead_time_days,
-                        )
-                        for line in invite.lines
-                    ],
-                )
-                for invite in view.invites
+            suppliers=suppliers,
+            note=note,
+            cutoff_at=view.cutoff_at,
+            warnings=[
+                w.text if not w.supplier_name else f"{w.supplier_name}: {w.text}"
+                for w in view.warnings
             ],
-            note=notes[view.status],
         )
 
     async def propose_counteroffers(ctx: ToolContext, args: RfqRef) -> ProposeCounteroffersOut:
@@ -2200,8 +2309,11 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             proposed=result.proposed,
             approval_ids=list(result.approval_ids),
             note=(
-                "Nothing was sent. Each counter-offer waits for approval by an approver "
-                "other than the requester; it is sent only after that."
+                "Nothing was sent. Each new email waits for approval (by the buyer, or by a "
+                "second person where the company requires it), unless an approved negotiation "
+                "mandate covers it. A supplier offer gets one email at most: one already "
+                "decided, waiting, sent, held or rejected is never repeated, so 0 proposed "
+                "can be right; get_negotiation_status says where each supplier stands."
             ),
         )
 
@@ -2307,7 +2419,9 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         Tool(
             "what_is_missing",
             "What an RFQ still needs: suppliers who have not answered, lines nobody "
-            "priced, and proposals with missing or unverified fields." + rfq_ref_hint,
+            "priced, proposals with missing or unverified fields, and per supplier where it "
+            "stands: what Bido asked and waits for, the supplier's questions waiting for the "
+            "buyer's answer, and what needs the buyer's decision." + rfq_ref_hint,
             RfqRef,
             WhatIsMissingOut,
             "read",
@@ -2510,8 +2624,11 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         ),
         Tool(
             "get_negotiation_status",
-            "Where an RFQ's negotiation stands: deadline, each supplier's rounds and how "
-            "its latest offer compares to the buyer's targets." + rfq_ref_hint,
+            "Where an RFQ's negotiation stands: deadline, the best-and-final cut-off, and per "
+            "supplier its state in one sentence (waiting for the supplier until when, held "
+            "for approval, accepted internally with nothing to ask, needs the buyer's "
+            "decision or answer, closed), the emails decided or sent, and how its latest "
+            "offer compares to the targets and need-by dates." + rfq_ref_hint,
             RfqRef,
             NegotiationStatusOut,
             "read",
@@ -2519,9 +2636,10 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         ),
         Tool(
             "propose_counteroffers",
-            "Propose counter-offers (or best-and-final requests) to the suppliers whose "
-            "latest offer is above target. The prices asked are decided by rules, not by "
-            "you. Nothing is sent: each email waits for approval." + rfq_ref_hint,
+            "Plan the negotiation now: a revised-offer, delivery-date or best-and-final "
+            "request to the suppliers that need one. The prices and dates asked are decided "
+            "by rules, not by you, and an offer never gets a second email. Nothing is sent: "
+            "each email waits for approval." + rfq_ref_hint,
             RfqRef,
             ProposeCounteroffersOut,
             "draft",
@@ -2558,4 +2676,5 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         ),
         *journey_tools(deps),
         *order_tools(deps),
+        *followup_tools(deps),
     )

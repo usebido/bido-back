@@ -3,7 +3,9 @@
 Purchase orders and "not selected" notices are replies in the thread of the
 RFQ email. They go out from the mailbox of the buyer who sent that RFQ email
 (the requester of its executed `send_rfq_email` approval), so the supplier
-sees one conversation, and to the invite's contact.
+sees one conversation, and to the invite's contact. In-Reply-To is the latest
+message with the supplier; References run from the RFQ email to it
+(`supplier_email.threading`).
 """
 
 from dataclasses import dataclass
@@ -26,9 +28,11 @@ from bido_back.db.models import (
     User,
 )
 from bido_back.email.types import OutboundAttachment, OutboundEmail
-from bido_back.followups.service import reply_subject
 from bido_back.rfqs.errors import NotFound
+from bido_back.rfqs.language import thread_language
 from bido_back.rfqs.send import SEND_RFQ_EMAIL, RfqActDeps, send_proposal_ids
+from bido_back.supplier_email.subject import reply_subject
+from bido_back.supplier_email.threading import reply_headers
 
 _MESSAGES_UNIQUE = "messages_tenant_id_message_id_header_key"
 
@@ -42,6 +46,11 @@ class Thread:
     # None when the RFQ email was never sent through Bido.
     sender_user_id: UUID | None
     subject: str
+    # The RFQ email's subject as stored (None: never sent through Bido).
+    first_subject: str | None
+    # The language the RFQ email went out in (`rfqs.language.thread_language`): every
+    # email of the thread keeps it.
+    language: str
 
 
 async def thread_of(session: AsyncSession, invite_id: UUID) -> Thread:
@@ -84,6 +93,8 @@ async def thread_of(session: AsyncSession, invite_id: UUID) -> Thread:
         contact_email=contact_email,
         sender_user_id=sender,
         subject=reply_subject(first_subject, rfq.ref, rfq.title),
+        first_subject=first_subject,
+        language=thread_language(sent.args if sent is not None else None, supplier),
     )
 
 
@@ -98,6 +109,7 @@ class Outgoing:
     message_id: str
     thread_message_id: str
     attachments: tuple[OutboundAttachment, ...] = ()
+    html_body: str | None = None
     # An earlier attempt claimed `message_id` and may have sent it.
     possibly_sent: bool = False
 
@@ -124,6 +136,7 @@ async def deliver(
         .order_by(Contact.created_at)
         .limit(1)
     )
+    in_reply_to, references = await reply_headers(session, email.invite_id, email.thread_message_id)
     sender = await deps.mailbox_senders(session, ctx.tenant_id, buyer.id)
     mailbox_address: object = getattr(sender, "address", None)
     sent = await sender.send(
@@ -136,10 +149,11 @@ async def deliver(
             cc=email.cc,
             subject=email.subject,
             text_body=email.body,
+            html_body=email.html_body,
             message_id=email.message_id,
             possibly_sent=email.possibly_sent,
-            in_reply_to=email.thread_message_id,
-            references=(email.thread_message_id,),
+            in_reply_to=in_reply_to,
+            references=references,
             attachments=email.attachments,
         )
     )
@@ -151,7 +165,7 @@ async def deliver(
             invite_id=email.invite_id,
             direction="out",
             message_id_header=message_id,
-            in_reply_to=email.thread_message_id,
+            in_reply_to=in_reply_to,
             from_contact_id=buyer_contact.id if buyer_contact else None,
             subject=email.subject,
             body_text=email.body,

@@ -3,21 +3,24 @@
 Fake writer and fake mailbox; real strategy, approvals, guard and executor.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
-from uuid import UUID
+from typing import cast
+from uuid import UUID, uuid4
 
 import pytest
+from pydantic import JsonValue
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from bido_back.agents.catalog.contracts import NegotiationEmailInput, NegotiationEmailOutput
+from bido_back.agents.catalog.contracts import EmailNoteOutput, NegotiationEmailInput
 from bido_back.agents.context import ToolContext
 from bido_back.approvals import ActToolRegistry, ApprovalExecutor, decide_approval
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
+    ClarificationAsk,
     FollowupMessage,
     Invite,
     Message,
@@ -26,9 +29,13 @@ from bido_back.db.models import (
     ProposalLine,
     Rfq,
     RfqLine,
+    Supplier,
+    Tenant,
 )
+from bido_back.followups import ledger
 from bido_back.followups import service as followup_service
 from bido_back.followups.calendar import add_business_days
+from bido_back.followups.schemas import FollowupSettingsUpdate
 from bido_back.followups.send import register_followup_act_tools
 from bido_back.negotiation import service
 from bido_back.negotiation.hooks import cancel_on_new_offer
@@ -41,14 +48,15 @@ from bido_back.negotiation.send import (
 )
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs import suppliers
-from bido_back.rfqs.errors import InvalidState, NotFound
+from bido_back.rfqs.activity import rfq_activity
+from bido_back.rfqs.errors import AgentFailed, InvalidState, NotFound
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
 from bido_back.rfqs.send import RfqActDeps, register_act_tools
 from bido_back.worker.envelope import Envelope
 from bido_back.worker.job_types import NEGOTIATION_SWEEP
 from tests.approvals.conftest import FakeJobQueue, People
 from tests.db.conftest import TwoTenants
-from tests.followups.test_followups_db import FakeFollowupWriter
+from tests.followups.test_followups_db import FakeFollowupWriter, gate_refuses
 from tests.rfqs.conftest import FakeIntake, FakeMailboxes, FakeWriter
 
 pytestmark = pytest.mark.db
@@ -57,24 +65,24 @@ EMAIL_DOMAIN = "quotes.example.test"
 
 
 class FakeNegotiationWriter:
-    """Writes every number exactly as given (what the real prompt asks for)."""
+    """The writer agent: code renders the email and every number; the agent adds a note at
+    most. `invent` writes a competitor's price into the note (it must never go out)."""
 
     def __init__(self, *, invent: bool = False) -> None:
         self.calls: list[NegotiationEmailInput] = []
         self.invent = invent
 
-    async def __call__(
-        self, task: NegotiationEmailInput, context: ToolContext
-    ) -> NegotiationEmailOutput:
+    async def __call__(self, task: NegotiationEmailInput, context: ToolContext) -> EmailNoteOutput:
         self.calls.append(task)
-        asks = "; ".join(
-            f"pos {line.position}: target {line.target_unit_price} {line.currency}"
-            if line.target_unit_price is not None
-            else f"pos {line.position}: lead time {line.required_lead_time_days} days"
-            for line in task.lines
-        )
-        extra = " Another supplier offers 0.0123 EUR." if self.invent else ""
-        return NegotiationEmailOutput(body=f"About {task.rfq_ref} ({task.action}): {asks}.{extra}")
+        return EmailNoteOutput(note="Another supplier offers 0.0123 EUR." if self.invent else "")
+
+
+class FailingNegotiationWriter(FakeNegotiationWriter):
+    """The writer's model is down: every call fails."""
+
+    async def __call__(self, task: NegotiationEmailInput, context: ToolContext) -> EmailNoteOutput:
+        self.calls.append(task)
+        raise AgentFailed("rfq_negotiation_writer failed (model_error)")
 
 
 def buyer(people: People) -> Principal:
@@ -242,7 +250,7 @@ class World:
                 await session.scalars(
                     select(NegotiationMessage)
                     .where(NegotiationMessage.invite_id == self.invites[name])
-                    .order_by(NegotiationMessage.round)
+                    .order_by(NegotiationMessage.sequence)
                 )
             )
 
@@ -263,6 +271,14 @@ class World:
 @pytest.fixture
 async def world(app_engine: AsyncEngine, rfq_rows: People) -> World:
     return await World(app_engine, rfq_rows).setup()
+
+
+async def tenant_name(world: World) -> str:
+    """Who signs: no buyer contact exists, so the company (as in production)."""
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        tenant = await session.get(Tenant, world.people.tenant)
+    assert tenant is not None
+    return tenant.name
 
 
 async def test_nothing_is_negotiated_before_the_buyer_sets_it_up(world: World) -> None:
@@ -294,8 +310,11 @@ async def test_a_counter_is_proposed_for_approval_and_sent_in_the_thread(world: 
     # Lyon is within target everywhere: accepted, nothing sent, and the RFQ can close.
     assert await world.messages("lyon") == []
     view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    # Rhein is not "countered" before its email goes out: it is held for approval.
     statuses = {i.supplier_name: i.status for i in view.invites}
-    assert statuses == {"Rhein": "countered", "Lyon": "accepted"}
+    assert statuses == {"Rhein": "open", "Lyon": "accepted"}
+    phases = {i.supplier_name: i.state.phase for i in view.invites if i.state}
+    assert phases == {"Rhein": "held_for_approval", "Lyon": "accepted_internally"}
     assert view.status == "ready_to_close" and view.ready_at is not None
 
     # The approver sees the exact email in the queue, as a negotiation email.
@@ -315,11 +334,23 @@ async def test_a_counter_is_proposed_for_approval_and_sent_in_the_thread(world: 
     rhein_rfq_email = next(
         e for e in world.mailboxes.sender.sent if "sales@rhein.example.test" in e.to
     )
-    assert email.in_reply_to == rhein_rfq_email.message_id
+    # The latest message with Rhein is its offer: the counter replies to it, in the thread.
+    assert email.in_reply_to == "<offer-rhein-1@rhein.example.test>"
+    assert email.references == (rhein_rfq_email.message_id, email.in_reply_to)
     assert email.subject == f"Re: {rhein_rfq_email.subject}"
-    assert "target 0.04 EUR" in email.text_body
+    # Rendered by code in German (Rhein's RFQ email language), the target exactly as decided.
+    assert "Bitte um ein überarbeitetes Angebot – RFQ-" in email.text_body
+    assert "   Zielpreis: 0,04\u00a0€/Stk.\n" in email.text_body
+    assert "   Ihr Angebot: 0,05\u00a0€/Stk.\n" in email.text_body
+    assert email.html_body is not None and "0,04\u00a0€/Stk." in email.html_body
+    assert item.negotiation_email.html_body == email.html_body
     [counter] = await world.messages("rhein")
     assert counter.status == "sent" and counter.sent_at is not None
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.status == "countered" and rhein.rounds_used == 1
+    assert rhein.state is not None and rhein.state.phase == "waiting_for_supplier"
+    assert rhein.state.label.startswith("Waiting for the supplier")
 
 
 async def test_rounds_advance_on_new_offers_and_end_with_best_and_final(world: World) -> None:
@@ -330,51 +361,136 @@ async def test_rounds_advance_on_new_offers_and_end_with_best_and_final(world: W
     [first] = await world.messages("rhein")
     await world.approve(first.approval_id or first.id)
 
-    # Round 2: a better but still high offer gets another counter.
+    # Round 2: a better but still high offer gets another request, conceding a quarter.
     await world.offer("rhein", ("0.045", "1.10"))
     await world.sweep(writer)
-    rounds = await world.messages("rhein")
-    assert [(m.round, m.action, m.status) for m in rounds] == [
-        (1, "counter", "sent"),
-        (2, "counter", "proposed"),
+    rows = await world.messages("rhein")
+    assert [(m.sequence, m.round, m.action, m.status) for m in rows] == [
+        (1, 1, "counter", "sent"),
+        (2, 2, "counter", "proposed"),
     ]
-    # A newer offer arrives before round 2 is approved: round 2 is moot.
+    assert [line.target_unit_price for line in writer.calls[-1].lines] == [
+        Decimal("0.041"),
+        Decimal("1.02"),
+    ]
+    # A newer offer arrives before round 2 is approved: that email is moot.
     await world.offer("rhein", ("0.044", "1.08"))
-    rounds = await world.messages("rhein")
-    assert (rounds[1].status, rounds[1].canceled_reason) == ("canceled", "newer_offer")
-    assert (await world.approval(rounds[1].approval_id)).status == "expired"
+    rows = await world.messages("rhein")
+    assert (rows[1].status, rows[1].canceled_reason) == ("canceled", "newer_offer")
+    assert (await world.approval(rows[1].approval_id)).status == "expired"
     await world.sweep(writer)
-    rounds = await world.messages("rhein")
-    assert [(m.round, m.action, m.status) for m in rounds] == [
-        (1, "counter", "sent"),
-        (2, "counter", "canceled"),
-        (3, "counter", "proposed"),
+    rows = await world.messages("rhein")
+    # The canceled email used no round: its replacement is round 2 again.
+    assert [(m.sequence, m.round, m.action, m.status) for m in rows] == [
+        (1, 1, "counter", "sent"),
+        (2, 2, "counter", "canceled"),
+        (3, 2, "counter", "proposed"),
     ]
-    await world.approve(rounds[2].approval_id or rounds[2].id)
-    # Two rounds used out of three: the next one is the best-and-final request.
+    await world.approve(rows[2].approval_id or rows[2].id)
+    # Two rounds sent out of three: the next one is the best-and-final request.
     await world.offer("rhein", ("0.042", "1.05"))
     await world.sweep(writer)
     last = (await world.messages("rhein"))[-1]
-    assert (last.round, last.action) == (4, "bafo")
+    assert (last.sequence, last.round, last.action, last.kind) == (4, 3, "bafo", "bafo")
     assert writer.calls[-1].action == "bafo"
+    rfq = await world.rfq()
+    assert rfq.negotiation_cutoff_at is not None
     await world.approve(last.approval_id or last.id)
     # The answer to the best-and-final is final: nothing more is sent.
     await world.offer("rhein", ("0.041", "1.02"))
     assert (await world.sweep(writer)).proposed == 0
     view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
-    assert {i.supplier_name: i.status for i in view.invites}["Rhein"] == "closed"
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.status == "closed" and rhein.rounds_used == 3
+    assert rhein.state is not None and rhein.state.reason == "bafo_answered"
+    assert len([m for m in await world.messages("rhein") if m.action == "bafo"]) == 1
 
 
-async def test_a_rejected_counter_is_not_sent_and_a_drafted_wrong_number_is_refused(
+async def test_a_writer_outage_only_leaves_the_note_out(world: World) -> None:
+    await world.configure()
+    await world.offer("rhein", ("0.050", "1.20"))
+    failing = FailingNegotiationWriter()
+    assert (await world.sweep(failing)).proposed == 1
+    assert len(failing.calls) == 1
+    [row] = await world.messages("rhein")
+    assert (row.status, row.attempts, row.sequence) == ("proposed", 1, 1)
+    body = str((await world.approval(row.approval_id)).args["body"])
+    # Rendered by code: the target is there, as decided.
+    assert "0,04\u00a0€" in body
+
+
+async def test_the_copilot_reads_each_suppliers_state_and_cannot_double_a_counter(
+    world: World,
+) -> None:
+    from bido_back.copilot.tools import (
+        CopilotToolDeps,
+        NegotiationStatusOut,
+        ProposeCounteroffersOut,
+        copilot_tools,
+    )
+    from tests.rfqs.conftest import fake_agents
+
+    await world.configure()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.offer("lyon", ("0.038", "0.95"))
+    writer = FakeNegotiationWriter()
+    tools = {
+        tool.name: tool
+        for tool in copilot_tools(
+            CopilotToolDeps(
+                db=world.engine,
+                agents=fake_agents(),
+                mailboxes=world.mailboxes,
+                negotiation_writer=writer,
+            )
+        )
+    }
+    ctx = ToolContext(tenant_id=world.people.tenant, user_id=world.people.owner, run_id=uuid4())
+    ref = (await world.rfq()).ref
+
+    async def propose() -> ProposeCounteroffersOut:
+        tool = tools["propose_counteroffers"]
+        out = await tool.invoke(ctx, tool.parse_input({"rfq": ref}))
+        assert isinstance(out, ProposeCounteroffersOut)
+        return out
+
+    async def status() -> NegotiationStatusOut:
+        tool = tools["get_negotiation_status"]
+        out = await tool.invoke(ctx, tool.parse_input({"rfq": ref}))
+        assert isinstance(out, NegotiationStatusOut)
+        return out
+
+    assert ((await propose()).proposed, (await propose()).proposed) == (1, 0)
+    assert len(writer.calls) == 1
+    suppliers = {s.supplier_name: s for s in (await status()).suppliers}
+    assert (suppliers["Rhein"].state, suppliers["Rhein"].status) == ("held_for_approval", "open")
+    assert suppliers["Rhein"].state_text.startswith("Held for your approval")
+    assert [(e.kind, e.state) for e in suppliers["Rhein"].emails] == [("revised_offer", "proposed")]
+    assert (suppliers["Lyon"].state, suppliers["Lyon"].status) == (
+        "accepted_internally",
+        "accepted",
+    )
+    assert suppliers["Lyon"].state_text.startswith("Accepted internally – nothing to ask")
+    # Sent: still one email for this offer, and the buyer reads that Bido waits.
+    [counter] = await world.messages("rhein")
+    await world.approve(counter.approval_id or counter.id)
+    assert (await propose()).proposed == 0
+    rhein = next(s for s in (await status()).suppliers if s.supplier_name == "Rhein")
+    assert (rhein.state, rhein.status) == ("waiting_for_supplier", "countered")
+    assert rhein.state_text.startswith("Waiting for the supplier")
+
+
+async def test_a_rejected_counter_is_not_sent_and_an_invented_number_never_goes_out(
     world: World,
 ) -> None:
     await world.configure()
     await world.offer("rhein", ("0.050", "1.20"))
-    assert (await world.sweep(FakeNegotiationWriter(invent=True))).skipped == 1
-    assert await world.messages("rhein") == []
-
-    await world.sweep(FakeNegotiationWriter())
+    # The writer's note names a competitor's price: the note is left out, the email (every
+    # number rendered by code) still goes to approval.
+    assert (await world.sweep(FakeNegotiationWriter(invent=True))).proposed == 1
     [counter] = await world.messages("rhein")
+    body = str((await world.approval(counter.approval_id)).args["body"])
+    assert "0123" not in body and "Another supplier" not in body
     sent_before = len(world.mailboxes.sender.sent)
     await decide_approval(
         world.engine,
@@ -387,12 +503,165 @@ async def test_a_rejected_counter_is_not_sent_and_a_drafted_wrong_number_is_refu
     [counter] = await world.messages("rhein")
     assert counter.status == "rejected"
     assert len(world.mailboxes.sender.sent) == sent_before
+    # The buyer said no to that email: no other one for the same offer.
+    writer = FakeNegotiationWriter()
+    assert (await world.sweep(writer)).proposed == 0 and writer.calls == []
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.state is not None and rhein.state.reason == "email_rejected"
+    assert rhein.rounds_used == 0
+
+
+async def test_forcing_counter_offers_never_doubles_an_offers_email(world: World) -> None:
+    await world.configure()
+    await world.offer("rhein", ("0.050", "1.20"))
+    writer = FakeNegotiationWriter()
+    first = await service.evaluate_rfq(
+        world.engine, world.people.tenant, world.rfq_id, writer=writer, force=True
+    )
+    assert first.proposed == 1
+    again = await service.evaluate_rfq(
+        world.engine, world.people.tenant, world.rfq_id, writer=writer, force=True
+    )
+    assert again.proposed == 0
+    [counter] = await world.messages("rhein")
+    await world.approve(counter.approval_id or counter.id)
+    # Sent: still no second email for the same offer.
+    after = await service.evaluate_rfq(
+        world.engine, world.people.tenant, world.rfq_id, writer=writer, force=True
+    )
+    assert after.proposed == 0 and len(writer.calls) == 1
+    assert len(await world.messages("rhein")) == 1
+
+
+async def test_a_refused_email_is_held_once_for_a_person(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Email audit F3: a refused counter was written again every 15-minute sweep, unseen.
+    The decision is stored before the email is rendered; code renders it, so only the send
+    gate refuses one (a rendering bug): it is recorded once, with its codes, for a person."""
+    await world.configure()
+    await world.offer("rhein", ("0.050", "1.20"))
+    gate_refuses(monkeypatch)
+    writer = FakeNegotiationWriter()
+    result = await world.sweep(writer)
+    assert (result.held, result.proposed, result.skipped) == (1, 0, 0)
+    # Recorded once (no approval was proposed): canceled as refused, the codes in its terms;
+    # it waits for a person.
+    [held] = await world.messages("rhein")
+    assert (held.sequence, held.round, held.status, held.canceled_reason, held.approval_id) == (
+        1,
+        1,
+        "canceled",
+        "draft_refused",
+        None,
+    )
+    assert held.terms["refused"] == ["number_not_decided"]
+    assert held.held_reason == "email_refused:number_not_decided" and held.attempts == 1
+    assert held.terms["decision"]["kind"] == "revised_offer"
+    # Later sweeps (every 15 minutes) never decide or render it again; the model is never
+    # asked for a note on an email the gate refused.
+    for _ in range(3):
+        assert (await world.sweep(writer)).held == 0
+    assert writer.calls == [] and len(await world.messages("rhein")) == 1
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.strategy_reasons == ["draft_refused_requires_buyer"]
+    assert rhein.state is not None
+    assert (rhein.state.phase, rhein.state.reason) == ("needs_decision", "email_not_prepared")
+    assert (rhein.messages[0].state, rhein.messages[0].status) == ("held", "canceled")
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    [entry] = [a for a in feed if a.action == "rfq.negotiation_draft_held"]
+    assert (entry.supplier_name, entry.actor) == ("Rhein", "Bido")
+    assert entry.summary.endswith("Needs your decision")
+
+    # Once fixed, a person asks for counter-offers now (the copilot's `propose_counteroffers`):
+    # decided again, the same round (nothing went out).
+    monkeypatch.undo()
+    result = await service.evaluate_rfq(
+        world.engine, world.people.tenant, world.rfq_id, writer=FakeNegotiationWriter(), force=True
+    )
+    assert result.proposed == 1
+    rows = await world.messages("rhein")
+    assert [(m.sequence, m.round, m.status) for m in rows] == [
+        (1, 1, "canceled"),
+        (2, 1, "proposed"),
+    ]
+    # The refusal stays on record; it no longer waits for a person.
+    assert (rows[0].canceled_reason, rows[0].held_reason) == ("draft_refused", None)
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.state is not None and rhein.state.phase == "held_for_approval"
+
+
+async def test_a_round_target_is_asked_in_plain_digits_and_the_counter_is_signed_once(
+    world: World,
+) -> None:
+    """Email audit F1 and F4: a target of 100.00 reached the writer as 1E+2 (the draft was
+    refused), and the company signed twice. No buyer contact exists, as in production."""
+    await world.configure(
+        lines=[
+            LineLimitsUpdate(
+                rfq_line_id=world.lines[0],
+                target_unit_price=Decimal("0.040"),
+                max_unit_price=Decimal("0.060"),
+                max_lead_time_days=42,
+            ),
+            LineLimitsUpdate(
+                rfq_line_id=world.lines[1],
+                target_unit_price=Decimal("100.00"),
+                max_unit_price=Decimal("150.00"),
+                max_lead_time_days=42,
+            ),
+        ]
+    )
+    await world.offer("rhein", ("0.039", "120.00"))
+    writer = FakeNegotiationWriter()
+    assert (await world.sweep(writer)).proposed == 1
+    [task] = writer.calls
+    [ask] = task.lines
+    assert (str(ask.target_unit_price), str(ask.offered_unit_price)) == ("100", "120")
+    assert '"target_unit_price":"100"' in task.model_dump_json()
+    [counter] = await world.messages("rhein")
+    assert counter.terms["lines"][1]["ask"] == "100"
+    approval = await world.approval(counter.approval_id)
+    tenant = await tenant_name(world)
+    body = str(approval.args["body"])
+    # Rendered by code in German: the target exactly as decided, never in exponent form.
+    assert "   Zielpreis: 100,00\u00a0€/Stk.\n" in body and "E+" not in body
+    assert body.endswith(f"\n\nMit freundlichen Grüßen\n{tenant}\n")
+    assert body.count("Mit freundlichen Grüßen") == 1
+
+
+async def test_counters_keep_the_language_the_rfq_email_went_out_in(world: World) -> None:
+    await world.configure()
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        invite = await session.get(Invite, world.invites["rhein"])
+        assert invite is not None
+        # The supplier's language is edited after its RFQ email went out in German.
+        await session.execute(
+            update(Supplier).where(Supplier.id == invite.supplier_id).values(language="fr")
+        )
+    await world.offer("rhein", ("0.050", "1.20"))
+    writer = FakeNegotiationWriter()
+    await world.sweep(writer)
+    assert [t.supplier_language for t in writer.calls] == ["de"]
+    [counter] = await world.messages("rhein")
+    body = str((await world.approval(counter.approval_id)).args["body"])
+    assert body.startswith("Sehr geehrte Damen und Herren,\n")
 
 
 async def test_the_deadline_closes_with_the_best_offers_and_stops_follow_ups(
     app_engine: AsyncEngine, rfq_rows: People
 ) -> None:
     world = await World(app_engine, rfq_rows).setup(silent=True)
+    # Quotes were due today: chasing the silent supplier may start (never before that).
+    await followup_service.update_followups(
+        world.engine,
+        buyer(world.people),
+        world.rfq_id,
+        FollowupSettingsUpdate(response_due=datetime.now(UTC).date()),
+    )
     # A week: the first chase (2 business days, US calendar for the silent
     # supplier) must fall before the deadline even across a holiday weekend.
     deadline = datetime.now(UTC) + timedelta(days=7)
@@ -487,24 +756,23 @@ async def test_limits_must_belong_to_the_rfq_and_tenants_are_isolated(
         await service.get_negotiation(world.engine, other, world.rfq_id)
 
 
-async def test_sent_refusals_stop_after_two_rounds_without_buyer_concession(world: World) -> None:
+async def test_an_unchanged_reply_stops_asking_and_needs_the_buyer(world: World) -> None:
     await world.configure(max_rounds=8)
     await world.offer("rhein", ("0.050", "1.20"))
     writer = FakeNegotiationWriter()
-    for _ in range(2):
-        assert (await world.sweep(writer)).proposed == 1
-        counter = (await world.messages("rhein"))[-1]
-        assert counter.approval_id is not None
-        await world.approve(counter.approval_id)
-        await world.offer("rhein", ("0.050", "1.20"))
-    result = await world.sweep(writer)
-    assert result.proposed == 0
-    assert len(writer.calls) == 2
+    assert (await world.sweep(writer)).proposed == 1
+    counter = (await world.messages("rhein"))[-1]
+    assert counter.approval_id is not None
+    await world.approve(counter.approval_id)
+    await world.offer("rhein", ("0.050", "1.20"))
+    assert (await world.sweep(writer)).proposed == 0
+    assert len(writer.calls) == 1
     view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
     rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
     assert rhein.status == "closed"
-    assert rhein.stalled_rounds == 2
-    assert rhein.strategy_reasons == ["stalled_negotiation_requires_buyer"]
+    assert rhein.stalled_rounds == 1
+    assert rhein.strategy_reasons == ["no_progress"]
+    assert rhein.state is not None and rhein.state.phase == "needs_decision"
 
 
 async def test_policy_change_cancels_pending_email_without_changing_negotiation_bounds(
@@ -544,7 +812,53 @@ async def test_clarification_pauses_price_negotiation_with_existing_offer(world:
     assert writer.calls == []
     view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
     rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
-    assert rhein.strategy_reasons == ["supplier_clarification_requires_buyer"]
+    assert rhein.strategy_reasons == ["supplier_question"]
+    assert rhein.state is not None and rhein.state.phase == "needs_answer"
+
+
+async def test_the_buyer_releases_a_held_offer_and_it_is_negotiated_as_it_is(
+    world: World,
+) -> None:
+    from bido_back.rfqs.activity import rfq_activity
+
+    await world.configure()
+    proposal_id = await world.offer("rhein", ("0.050", "1.20"))
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        proposal = await session.get(Proposal, proposal_id)
+        assert proposal is not None
+        proposal.fields = {
+            "_offer_state": {
+                "reply_kind": "amendment",
+                "issues": ["amendment_without_explicit_preservation"],
+                "requires_clarification": True,
+            }
+        }
+    writer = FakeNegotiationWriter()
+    assert (await world.sweep(writer)).proposed == 0
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.state is not None
+    assert (rhein.state.phase, rhein.state.reason) == (
+        "needs_decision",
+        "offer_state_requires_review",
+    )
+    # Only the offer the buyer reviewed is released: not one that arrived meanwhile.
+    with pytest.raises(InvalidState):
+        await service.release_hold(
+            world.engine, buyer(world.people), world.rfq_id, world.invites["rhein"], uuid4()
+        )
+    released = await service.release_hold(
+        world.engine, buyer(world.people), world.rfq_id, world.invites["rhein"], proposal_id
+    )
+    rhein = next(i for i in released.invites if i.supplier_name == "Rhein")
+    assert rhein.state is not None and rhein.state.next_action == "revised_offer"
+    assert (await world.sweep(writer)).proposed == 1
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    assert any(i.action == "rfq.negotiation_hold_released" for i in feed)
+    with pytest.raises(NotFound):
+        await service.release_hold(
+            world.engine, buyer(world.people), world.rfq_id, world.people.tenant, proposal_id
+        )
 
 
 async def test_closed_outcome_keeps_its_policy_and_evidence_snapshot(world: World) -> None:
@@ -719,7 +1033,7 @@ async def test_correction_during_writer_call_invalidates_unrecorded_proposal(wor
 
     async def correcting_writer(
         task: NegotiationEmailInput, context: ToolContext
-    ) -> NegotiationEmailOutput:
+    ) -> EmailNoteOutput:
         await corrections.correct_line(
             world.engine,
             buyer(world.people),
@@ -733,7 +1047,9 @@ async def test_correction_during_writer_call_invalidates_unrecorded_proposal(wor
         world.engine, world.people.tenant, world.rfq_id, writer=correcting_writer
     )
     assert result.proposed == 0
-    assert await world.messages("rhein") == []
+    # The correction canceled the decided email while it was being written.
+    [row] = await world.messages("rhein")
+    assert (row.status, row.canceled_reason) == ("canceled", "offer_corrected")
     async with tenant_session(world.engine, world.people.tenant) as session:
         approvals = list(
             await session.scalars(select(Approval).where(Approval.tool == SEND_NEGOTIATION_EMAIL))
@@ -787,3 +1103,267 @@ async def test_historical_target_uses_latest_comparable_quantity_and_price_basis
         line.unit = "box"
         await session.flush()
         assert await quoted_price_history(session, rfq, mpn) is None
+
+
+async def test_a_rejected_best_and_final_leaves_no_cut_off_behind(world: World) -> None:
+    await world.configure(max_rounds=2, early_close=False)
+    writer = FakeNegotiationWriter()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.sweep(writer)
+    [first] = await world.messages("rhein")
+    await world.approve(first.approval_id or first.id)
+    await world.offer("rhein", ("0.045", "1.10"))
+    await world.sweep(writer)
+    bafo = (await world.messages("rhein"))[-1]
+    assert bafo.kind == "bafo" and (await world.rfq()).negotiation_cutoff_at is not None
+    await decide_approval(
+        world.engine,
+        approver(world.people),
+        bafo.approval_id or bafo.id,
+        "reject",
+        jobs=FakeJobQueue(),
+        on_reject=NEGOTIATION_REJECT_HOOKS,
+    )
+    # No supplier was told that cut-off: it binds nobody, and nobody is forced to a final round.
+    await world.sweep(writer)
+    assert (await world.rfq()).negotiation_cutoff_at is None
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    assert view.cutoff_at is None
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.state is not None and rhein.state.reason == "email_rejected"
+
+
+async def test_an_email_approved_after_its_reply_by_date_is_decided_again(world: World) -> None:
+    await world.configure()
+    await world.offer("rhein", ("0.050", "1.20"))
+    writer = FakeNegotiationWriter()
+    await world.sweep(writer)
+    [counter] = await world.messages("rhein")
+    # Approved late: the reply-by date the email states has passed.
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        row = await session.get(NegotiationMessage, counter.id)
+        assert row is not None
+        terms = dict(row.terms)
+        decision = dict(cast(dict[str, object], terms["decision"]))
+        decision["reply_by"] = (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
+        terms["decision"] = cast(JsonValue, decision)
+        row.terms = terms
+    sent_before = len(world.mailboxes.sender.sent)
+    await world.approve(counter.approval_id or counter.id)
+    assert len(world.mailboxes.sender.sent) == sent_before
+    [counter] = await world.messages("rhein")
+    assert (counter.status, counter.canceled_reason) == ("canceled", "reply_by_passed")
+    # Nothing went out: decided again, with a new reply-by date, in the same round.
+    assert (await world.sweep(writer)).proposed == 1
+    rows = await world.messages("rhein")
+    assert [(m.sequence, m.round, m.status) for m in rows] == [
+        (1, 1, "canceled"),
+        (2, 1, "proposed"),
+    ]
+
+
+async def test_an_interrupted_send_counts_as_sent(world: World) -> None:
+    await world.configure()
+    writer = FakeNegotiationWriter()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.sweep(writer)
+    [counter] = await world.messages("rhein")
+    # The send claimed its Message-ID and was interrupted; a newer offer then canceled it.
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        await session.execute(
+            update(NegotiationMessage)
+            .where(NegotiationMessage.id == counter.id)
+            .values(message_id_header="<claimed@quotes.example.test>")
+        )
+    await world.offer("rhein", ("0.045", "1.10"))
+    await world.sweep(writer)
+    rows = await world.messages("rhein")
+    assert rows[0].status == "canceled"
+    # It may have reached the supplier: its round is used.
+    assert [(m.sequence, m.round, m.status) for m in rows] == [
+        (1, 1, "canceled"),
+        (2, 2, "proposed"),
+    ]
+
+
+async def test_an_unanswered_request_gets_one_reminder(world: World) -> None:
+    await world.configure()
+    writer = FakeNegotiationWriter()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.sweep(writer)
+    [counter] = await world.messages("rhein")
+    await world.approve(counter.approval_id or counter.id)
+    reply_by = date.fromisoformat(str((await world.messages("rhein"))[0].terms["reply_by"]))
+    # No reply by the reply-by date: the same request once more, with a new reply-by date.
+    after = datetime.combine(reply_by + timedelta(days=1), time(10), tzinfo=UTC)
+    assert (await world.sweep(writer, now=after)).proposed == 1
+    rows = await world.messages("rhein")
+    assert [(m.sequence, m.round, m.kind, m.status) for m in rows] == [
+        (1, 1, "revised_offer", "sent"),
+        (2, 1, "reminder", "proposed"),
+    ]
+    reminder = rows[1]
+    assert reminder.terms["decision"]["reminder_of"] == 1
+    assert date.fromisoformat(str(reminder.terms["reply_by"])) > reply_by
+    await world.approve(reminder.approval_id or reminder.id)
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id, now=after)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    # A reminder is no round.
+    assert rhein.rounds_used == 1
+    assert rhein.state is not None and rhein.state.reason == "reminder_sent"
+    assert [m.kind for m in rhein.messages] == ["revised_offer", "reminder"]
+    # Never a second one: unanswered after it, the last offer stands.
+    much_later = after + timedelta(days=7)
+    assert (await world.sweep(writer, now=much_later)).proposed == 0
+    view = await service.get_negotiation(
+        world.engine, buyer(world.people), world.rfq_id, now=much_later
+    )
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.state is not None and rhein.state.reason == "no_reply_after_reminder"
+    assert len(await world.messages("rhein")) == 2
+
+
+# --- One email per supplier answer -----------------------------------------------------------
+
+
+async def _without_validity(world: World, *proposal_ids: UUID) -> None:
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        for proposal_id in proposal_ids:
+            proposal = await session.get(Proposal, proposal_id)
+            assert proposal is not None
+            proposal.valid_until = None
+
+
+async def _asks(world: World, name: str) -> list[ClarificationAsk]:
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        return list(
+            await session.scalars(
+                select(ClarificationAsk).where(ClarificationAsk.invite_id == world.invites[name])
+            )
+        )
+
+
+async def test_one_email_asks_what_the_offer_lacks_and_for_a_revised_offer(world: World) -> None:
+    """No validity and prices above target: ONE email asks the validity first, then for a
+    revised offer, and it is the round. The follow-up sweep writes no clarification of its
+    own for that supplier (only for one with nothing to negotiate), and the validity is
+    asked by that email, once, when it goes out."""
+    await world.configure()
+    rhein = await world.offer("rhein", ("0.050", "1.20"))
+    lyon = await world.offer("lyon", ("0.038", "0.95"))
+    await _without_validity(world, rhein, lyon)
+
+    followup_writer = FakeFollowupWriter()
+    swept = await followup_service.sweep_tenant(
+        world.engine, world.people.tenant, writer=followup_writer
+    )
+    # Lyon has nothing to negotiate: its validity goes out alone. Rhein's waits for the
+    # negotiation's email.
+    assert swept.clarifications == 1
+    assert [t.supplier_name for t in followup_writer.calls] == ["Lyon"]
+
+    writer = FakeNegotiationWriter()
+    assert (await world.sweep(writer)).proposed == 1
+    [row] = await world.messages("rhein")
+    decision = service.stored_decision(row)
+    assert decision is not None
+    assert (decision.kind, decision.round, row.round, row.action) == (
+        "revised_offer",
+        1,
+        1,
+        "counter",
+    )
+    assert [(q.position, q.field, q.problem) for q in decision.questions] == [
+        (None, "valid_until", "missing")
+    ]
+    assert decision.deferred_lines == []
+    assert await world.messages("lyon") == []
+    approval = await world.approval(row.approval_id)
+    body = str(approval.args["body"])
+    # The question first, then the revised offer: two numbered asks, one reply-by date.
+    first, second = body.index("\n1. "), body.index("\n2. ")
+    assert first < second and "\n3. " not in body
+    assert "Gültigkeit" in body[first:second]
+    assert "überarbeitetes Angebot" in body[second:]
+    assert body.count("bis ") >= 1 and "Bitte antworten Sie auf diese E-Mail bis" in body
+    # Nothing is asked before the email goes out (a rejected one never asked anything).
+    assert await _asks(world, "rhein") == []
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    assert any(
+        i.summary == "Bido prepared a request for a revised offer that also asks for what the "
+        "offer lacks (round 1) (Rhein)"
+        for i in feed
+    )
+
+    await world.approve(approval.id)
+    [asked] = await _asks(world, "rhein")
+    assert (asked.position, asked.field, asked.status) == (None, "valid_until", "open")
+    assert (asked.negotiation_message_id, asked.followup_id) == (row.id, None)
+    assert asked.reply_by == decision.reply_by
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        states = await ledger.supplier_followups(session, world.rfq_id, now=datetime.now(UTC))
+        state = states[world.invites["rhein"]]
+        assert state.request is not None and state.request.kind == "counter"
+        assert [a.id for a in state.request.asks] == [asked.id]
+        assert state.to_ask == ()
+        # The supplier's answer settles what that email asked.
+        later = datetime.now(UTC) + timedelta(minutes=5)
+        answered = await ledger.asks_answered_by(session, world.invites["rhein"], later)
+        assert [a.id for a in answered] == [asked.id]
+    # Nothing else goes to Rhein while that request waits for its answer.
+    followup_writer.calls.clear()
+    await followup_service.sweep_tenant(world.engine, world.people.tenant, writer=followup_writer)
+    assert "Rhein" not in [t.supplier_name for t in followup_writer.calls]
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    shown = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert shown.rounds_used == 1 and shown.status == "countered"
+    assert shown.state is not None and shown.state.reason == "revised_offer_sent"
+
+
+async def test_an_email_asks_the_ledger_once_and_the_database_says_which(world: World) -> None:
+    """Exactly one email asks an item: a clarification or a negotiation email."""
+    from sqlalchemy.exc import DBAPIError
+
+    await world.configure()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.sweep(FakeNegotiationWriter())
+    [row] = await world.messages("rhein")
+    for followup_id, negotiation_id in ((None, None), (uuid4(), row.id)):
+        with pytest.raises(DBAPIError, match="clarification_asks_email_check"):
+            async with tenant_session(world.engine, world.people.tenant) as session:
+                session.add(
+                    ClarificationAsk(
+                        tenant_id=world.people.tenant,
+                        invite_id=world.invites["rhein"],
+                        followup_id=followup_id,
+                        negotiation_message_id=negotiation_id,
+                        field="valid_until",
+                        question="value",
+                        status="proposed",
+                    )
+                )
+                await session.flush()
+
+
+async def test_a_planner_that_cannot_run_only_delays_its_clarifications(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await world.configure()
+    lyon = await world.offer("lyon", ("0.038", "0.95"))
+    await _without_validity(world, lyon)
+
+    async def broken(*_: object, **__: object) -> frozenset[UUID]:
+        raise RuntimeError("comparison unavailable")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(followup_service, "planned_clarifications", broken)
+        writer = FakeFollowupWriter()
+        swept = await followup_service.sweep_tenant(
+            world.engine, world.people.tenant, writer=writer
+        )
+    # Never two emails for one answer: the clarification waits for the next sweep.
+    assert (swept.clarifications, writer.calls) == (0, [])
+    swept = await followup_service.sweep_tenant(
+        world.engine, world.people.tenant, writer=FakeFollowupWriter()
+    )
+    assert swept.clarifications == 1

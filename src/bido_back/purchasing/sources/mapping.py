@@ -22,6 +22,7 @@ from collections import Counter
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+from typing import Final
 from uuid import uuid4
 
 from bido_back.agents.catalog.definitions import MAPPER_MODEL
@@ -894,6 +895,31 @@ class _Derivations:
             )
 
 
+def _section_problem(
+    section: TableProposal,
+    columns: dict[str, int],
+    first_row: int,
+    last_row: int,
+    width: int,
+) -> str | None:
+    """Why a proposed section cannot be read, in words the mapper can act on; None if fine."""
+    if not 1 <= section.header_row < first_row <= last_row:
+        return (
+            f"its rows do not fit the rows read (header row {section.header_row} must precede "
+            f"data rows {first_row}-{last_row})"
+        )
+    if not columns:
+        return "it assigns no columns"
+    if len(columns) != len(section.columns):
+        return "it assigns the same field twice"
+    outside = sorted(c for c in columns.values() if c < 1 or c > width)
+    if outside:
+        return f"column(s) {outside} do not exist (the table has {width} columns)"
+    if len(set(columns.values())) != len(columns):
+        return "two fields are assigned to the same column"
+    return None
+
+
 def materialize(
     table: EvidenceTable,
     proposal: MappingProposal,
@@ -974,26 +1000,26 @@ def materialize(
             return None
 
     width = max((len(row) for row in table.rows), default=0)
-    for section in proposal.sections:
+    for index, section in enumerate(proposal.sections, start=1):
         columns = {assignment.field: assignment.column for assignment in section.columns}
-        if (
-            not (
-                1 <= section.header_row < section.first_row <= section.last_row <= last
-                and section.first_row >= first
-            )
-            or not columns
-            or len(columns) != len(section.columns)
-            or any(column < 1 or column > width for column in columns.values())
-            or len(set(columns.values())) != len(columns)
-        ):
+        # A data interval running past the rows read here is cut to them: rows beyond are
+        # read with the next page (or do not exist), so nothing is invented or lost.
+        first_row = max(section.first_row, first)
+        last_row = min(section.last_row, last)
+        problem = _section_problem(section, columns, first_row, last_row, width)
+        if problem is not None:
             issues.append(
                 Issue(
                     code="invalid_mapping",
                     severity="blocker",
-                    message="Table mapping has invalid rows or columns.",
+                    message=f"{table.name}: section {index} ({section.kind}, header row "
+                    f"{section.header_row}, rows {section.first_row}-{section.last_row}) was not "
+                    f"read: {problem}.",
                 )
             )
             continue
+        if (first_row, last_row) != (section.first_row, section.last_row):
+            section = section.model_copy(update={"first_row": first_row, "last_row": last_row})
         mismatched = [
             a.field
             for a in section.columns
@@ -1211,6 +1237,43 @@ def _continue(sections: list[TableProposal], previous: list[TableProposal]) -> l
     return result
 
 
+# Problems with the shape of a proposed mapping (not with the source): worth one retry.
+STRUCTURAL_PROBLEMS: Final = frozenset(
+    {
+        "invalid_mapping",
+        "header_mismatch",
+        "inadmissible_mapping",
+        "overlapping_mapping",
+        "overlapping_fields",
+        "invalid_fields",
+        "invalid_locator",
+        "invalid_slice",
+    }
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _Attempt:
+    output: MappingProposal
+    found: list[Record]
+    problems: list[Issue]
+    rows: set[int]
+    sections: list[TableProposal]
+
+
+def _structural(problems: Sequence[Issue]) -> int:
+    return sum(1 for issue in problems if issue.code in STRUCTURAL_PROBLEMS)
+
+
+def _better(retry: _Attempt, first: _Attempt) -> bool:
+    """The retry wins when it reads more validated rows, or as many with fewer shape
+    problems: an empty answer has no problems but reads nothing."""
+    return (len(retry.rows), -_structural(retry.problems)) > (
+        len(first.rows),
+        -_structural(first.problems),
+    )
+
+
 async def map_sources(
     tables: Sequence[EvidenceTable],
     objective: str,
@@ -1284,6 +1347,30 @@ async def map_sources(
         )
     formats = scan_formats(tables)
 
+    async def _attempt(
+        task: MappingTask,
+        table: EvidenceTable,
+        previous: list[TableProposal],
+        first: int,
+        last: int,
+    ) -> "_Attempt | None":
+        try:
+            async with semaphore:
+                output = await mapper(
+                    task,
+                    ToolContext(
+                        tenant_id=context.tenant_id, user_id=context.user_id, run_id=uuid4()
+                    ),
+                )
+        except Exception:
+            return None
+        sections = _continue(output.sections, previous)
+        output = output.model_copy(update={"sections": sections})
+        found, problems, rows = await asyncio.to_thread(
+            materialize, table, output, first, last, formats=formats
+        )
+        return _Attempt(output, found, problems, rows, sections)
+
     async def interpret(
         table: EvidenceTable,
         spans: list[tuple[int, int]],
@@ -1312,15 +1399,8 @@ async def map_sources(
                 summary=summary,
                 previous_sections=previous,
             )
-            try:
-                async with semaphore:
-                    output = await mapper(
-                        task,
-                        ToolContext(
-                            tenant_id=context.tenant_id, user_id=context.user_id, run_id=uuid4()
-                        ),
-                    )
-            except Exception:
+            attempt = await _attempt(task, table, previous, first + 1, last)
+            if attempt is None:
                 complete = False
                 issues.append(
                     Issue(
@@ -1330,13 +1410,31 @@ async def map_sources(
                     )
                 )
                 continue
+            if _structural(attempt.problems):
+                # One corrected second answer, told exactly what was not read and why.
+                feedback = [
+                    *(i.message for i in attempt.problems if i.code in STRUCTURAL_PROBLEMS),
+                    "Return the complete answer again with these problems corrected; keep the "
+                    "sections that were right unchanged.",
+                ]
+                retry = await _attempt(
+                    task.model_copy(update={"retry_feedback": feedback}),
+                    table,
+                    previous,
+                    first + 1,
+                    last,
+                )
+                if retry is not None and _better(retry, attempt):
+                    attempt = retry
+            output, found, problems, rows, sections = (
+                attempt.output,
+                attempt.found,
+                attempt.problems,
+                attempt.rows,
+                attempt.sections,
+            )
             if any(i.code == "mapping_failed" for i in output.issues):
                 complete = False
-            sections = _continue(output.sections, previous)
-            output = output.model_copy(update={"sections": sections})
-            found, problems, rows = await asyncio.to_thread(
-                materialize, table, output, first + 1, last, formats=formats
-            )
             records.extend(found)
             issues.extend(problems)
             covered.update(rows)

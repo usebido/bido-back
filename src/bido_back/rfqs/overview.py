@@ -27,13 +27,16 @@ from bido_back.db.models import (
     Contact,
     Invite,
     IssuedPurchaseOrder,
+    MandateSend,
+    NegotiationMandate,
     Proposal,
     Rfq,
     RfqLine,
     Supplier,
     User,
 )
-from bido_back.rfqs.language import DEFAULT_LANGUAGE
+from bido_back.mandates.waits import AUTO_TOOLS
+from bido_back.rfqs.document_language import default_languages
 from bido_back.rfqs.readiness import send_blockers
 from bido_back.rfqs.schemas import RfqNextStep, RfqStage, RfqStatus, RfqSummary
 
@@ -150,6 +153,7 @@ async def list_rfq_overviews(
         need_by = await _need_by(session, [r.id for r in rfqs])
         owners = await owner_names(session, {r.created_by for r in rfqs})
         quoted = await _quoted(session, [r.id for r in rfqs])
+        languages = await default_languages(session, rfqs)
 
     best: dict[UUID, Decimal | None] = {}
     for rfq in rfqs:
@@ -169,7 +173,7 @@ async def list_rfq_overviews(
             send_blockers=send_blockers(rfq.status, rfq.response_due, today),
             payment_terms=rfq.payment_terms,
             quote_validity_days=rfq.quote_validity_days,
-            document_language=DEFAULT_LANGUAGE,
+            document_language=languages[rfq.id],
             stage=derive_stage(rfq.status, rfq.negotiation_status, facts[rfq.id]),
             next_step=derive_next_step(rfq.status, rfq.negotiation_status, facts[rfq.id]),
             supplier_names=facts[rfq.id].suppliers,
@@ -215,12 +219,35 @@ async def _facts(session: AsyncSession, rfq_ids: list[UUID]) -> dict[UUID, RfqFa
     conditions = [rfq_arg.in_(rfq_keys)]
     if invite_keys:
         conditions.append(invite_arg.in_(invite_keys))
-    for rfq_key, invite_key in await session.execute(
-        select(rfq_arg, invite_arg).where(Approval.status == "pending", or_(*conditions))
+    # Emails an active mandate sends on its own (in bounds, maybe waiting for its daily
+    # cap or a mailbox) are not the buyer's to approve; the ones it held are.
+    mandated = set(
+        await session.scalars(
+            select(NegotiationMandate.rfq_id).where(
+                NegotiationMandate.rfq_id.in_(rfq_ids), NegotiationMandate.status == "active"
+            )
+        )
+    )
+    held: set[UUID] = set()
+    if mandated:
+        held = set(
+            await session.scalars(
+                select(MandateSend.approval_id)
+                .join(NegotiationMandate, NegotiationMandate.id == MandateSend.mandate_id)
+                .where(NegotiationMandate.rfq_id.in_(mandated), MandateSend.outcome == "held")
+            )
+        )
+    for approval_id, tool, rfq_key, invite_key in await session.execute(
+        select(Approval.id, Approval.tool, rfq_arg, invite_arg).where(
+            Approval.status == "pending", or_(*conditions)
+        )
     ):
         rfq_id = _rfq_for(rfq_key, invite_key, invite_rfq, facts)
-        if rfq_id is not None:
-            facts[rfq_id].pending_approvals += 1
+        if rfq_id is None:
+            continue
+        if rfq_id in mandated and tool in AUTO_TOOLS and approval_id not in held:
+            continue
+        facts[rfq_id].pending_approvals += 1
 
     for (rfq_id,) in await session.execute(select(Award.rfq_id).where(Award.rfq_id.in_(rfq_ids))):
         facts[rfq_id].awarded = True

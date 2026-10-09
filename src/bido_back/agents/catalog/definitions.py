@@ -20,6 +20,7 @@ from typing import Final
 from bido_back.agents.catalog.contracts import (
     AwardNoticeInput,
     AwardNoticeOutput,
+    EmailNoteOutput,
     FollowupEmailInput,
     FollowupEmailOutput,
     NegotiationEmailInput,
@@ -90,10 +91,18 @@ def rfq_email_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[RfqEmailLoca
 
 
 def quote_extraction(model: str = EXTRACTION_MODEL) -> AgentDefinition[QuoteExtractionOutput]:
+    """v5: always capture a stated delivery time, business days as written; the
+    `delivery_location` header (the named place the supplier delivers to).
+
+    v6: v5 plus lead times as data (amount, unit, basis, approximate, risk note) with
+    an offer-level lead time for every line; a validity given as a duration; a price
+    without tiers keeps `min_quantity` empty; `conditional_terms` only for conditions
+    on one line's price or availability (general terms go to `offer_notes`); the
+    supplier's final-offer statement, declined lines and questions as grounded signals."""
     return AgentDefinition(
         name="quote_extraction",
-        prompt_file="quote_extraction.v5.md",
-        prompt_version=5,
+        prompt_file="quote_extraction.v6.md",
+        prompt_version=6,
         model=model,
         output_model=QuoteExtractionOutput,
         max_turns=_MAX_TURNS,
@@ -128,28 +137,33 @@ def rfq_template_builder(model: str = TEMPLATE_MODEL) -> AgentDefinition[RfqTemp
     )
 
 
-def rfq_followup_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[FollowupEmailOutput]:
+# The thread writers (follow-ups, negotiation, "not selected" notices), v2: code renders
+# the whole email (`bido_back.supplier_email`), signature included, and the model may add
+# only an optional note, empty by default (`EmailNoteOutput`); their input carries no
+# buyer name or company. v1 wrote the whole email and is kept only as the released prompt
+# it was, with its `*EmailOutput` contract and draft checks below.
+
+
+def rfq_followup_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[EmailNoteOutput]:
     return AgentDefinition(
         name="rfq_followup_writer",
-        prompt_file="rfq_followup_writer.v1.md",
-        prompt_version=1,
+        prompt_file="rfq_followup_writer.v2.md",
+        prompt_version=2,
         model=model,
-        output_model=FollowupEmailOutput,
+        output_model=EmailNoteOutput,
         max_turns=_MAX_TURNS,
         thinking=False,
         effort="low",
     )
 
 
-def rfq_negotiation_writer(
-    model: str = DEFAULT_MODEL,
-) -> AgentDefinition[NegotiationEmailOutput]:
+def rfq_negotiation_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[EmailNoteOutput]:
     return AgentDefinition(
         name="rfq_negotiation_writer",
-        prompt_file="rfq_negotiation_writer.v1.md",
-        prompt_version=1,
+        prompt_file="rfq_negotiation_writer.v2.md",
+        prompt_version=2,
         model=model,
-        output_model=NegotiationEmailOutput,
+        output_model=EmailNoteOutput,
         max_turns=_MAX_TURNS,
         thinking=False,
         effort="low",
@@ -165,13 +179,13 @@ RFQ_FOLLOWUP_WRITER: Final = rfq_followup_writer()
 RFQ_NEGOTIATION_WRITER: Final = rfq_negotiation_writer()
 
 
-def award_notice_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[AwardNoticeOutput]:
+def award_notice_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[EmailNoteOutput]:
     return AgentDefinition(
         name="award_notice_writer",
-        prompt_file="award_notice_writer.v1.md",
-        prompt_version=1,
+        prompt_file="award_notice_writer.v2.md",
+        prompt_version=2,
         model=model,
-        output_model=AwardNoticeOutput,
+        output_model=EmailNoteOutput,
         max_turns=_MAX_TURNS,
         thinking=False,
         effort="low",
@@ -220,10 +234,14 @@ SHEET_MAPPER: Final = sheet_mapper()
 
 # --- Deterministic checks on the RFQ email draft ---------------------------------
 
-# A number next to a currency symbol or code: `12.50 EUR`, `€ 0,45`, `USD 3`.
+_CURRENCY: Final = r"(?:R\$|US\$|[€$£¥]|\b(?:EUR|USD|GBP|CHF|CNY|JPY|RMB|BRL)\b)"
+# What may sit between a currency and its number: a space, a no-break space or a
+# narrow no-break space. Never a line break: "BRL\n2." is a code and a list number.
+_GAP: Final = r"[ \u00a0\u202f]"
+
+# A number next to a currency symbol or code: `12.50 EUR`, `€ 0,45`, `USD 3`, `18,00 R$`.
 _PRICE = re.compile(
-    r"(?:[€$£¥]|\b(?:EUR|USD|GBP|CHF|CNY|JPY|RMB|BRL)\b)\s?\d"
-    r"|\d(?:[\d.,]*\d)?\s?(?:[€$£¥]|\b(?:EUR|USD|GBP|CHF|CNY|JPY|RMB|BRL)\b)",
+    rf"{_CURRENCY}{_GAP}?\d|\d(?:[\d.,]*\d)?{_GAP}?{_CURRENCY}",
     re.IGNORECASE,
 )
 
@@ -280,8 +298,11 @@ _MAX_FOLLOWUP_CHARS: Final = 4000
 
 
 def followup_email_problems(task: FollowupEmailInput, draft: FollowupEmailOutput) -> list[str]:
-    """What is wrong with a chase or clarification draft, as codes. Empty means it may go
-    to approval: the RFQ reference is in the body, no prices, and it stays short."""
+    """What is wrong with a v1 chase or clarification draft, as codes. Empty means it may go
+    to approval: the RFQ reference is in the body, no prices, and it stays short.
+
+    v1 drafts only: since v2 code renders the email and `bido_back.supplier_email.checks`
+    gates it (the reference, prices and length are checked there, structurally)."""
     problems: list[str] = []
     body = draft.body.strip()
     if not body:
@@ -298,24 +319,30 @@ def followup_email_problems(task: FollowupEmailInput, draft: FollowupEmailOutput
 # --- Deterministic checks on a negotiation draft ---------------------------------------
 
 _MAX_NEGOTIATION_CHARS: Final = 5000
-_NUMBER = re.compile(r"\d+(?:[.,\s']\d{3}(?!\d))*(?:[.,]\d+)?")
+# One written number, on one line: digits, thousands grouped by `.`, `,`, `'` or a
+# (no-break) space before three digits, and decimals. A separator always sits between
+# two digits, so "18," ends the number, and "BRL 18\n2. Eixo" reads 18, never 182.
+_DIGITS: Final = r"\d+(?:[.,']\d+|[ \u00a0\u202f]\d{3}(?!\d))*"
+# Not part of a code: the 100 in "MTR-100" or the 6 in "RFQ-6" is no amount.
+_STANDALONE: Final = r"(?<![\w-])"
+_NUMBER = re.compile(_STANDALONE + _DIGITS)
 _PRICED_NUMBER = re.compile(
-    r"(?:[€$£¥]|\b(?:EUR|USD|GBP|CHF|CNY|JPY|RMB|BRL)\b)\s?(\d[\d.,\s']*\d|\d)"
-    r"|(\d[\d.,\s']*\d|\d)\s?(?:[€$£¥]|\b(?:EUR|USD|GBP|CHF|CNY|JPY|RMB|BRL)\b)",
+    rf"{_CURRENCY}{_GAP}?({_DIGITS})|{_STANDALONE}({_DIGITS}){_GAP}?{_CURRENCY}",
     re.IGNORECASE,
 )
+_GROUPING: Final = re.compile(r"[ \u00a0\u202f']")
 
 
 def _readings(text: str) -> set[Decimal]:
     """Every value a written number may stand for (either decimal separator)."""
-    raw = text.strip().replace(" ", "").replace("'", "")
+    raw = _GROUPING.sub("", text.strip())
     values: set[Decimal] = set()
     for decimal_sep, group_sep in ((".", ","), (",", ".")):
         candidate = raw.replace(group_sep, "").replace(decimal_sep, ".")
         if candidate.count(".") > 1:
             continue
         try:
-            values.add(Decimal(candidate).normalize())
+            values.add(Decimal(candidate))
         except ArithmeticError:
             continue
     return values
@@ -324,13 +351,16 @@ def _readings(text: str) -> set[Decimal]:
 def negotiation_email_problems(
     task: NegotiationEmailInput, draft: NegotiationEmailOutput
 ) -> list[str]:
-    """What is wrong with a counter-offer or BAFO draft, as codes. Empty means it may go
-    to approval.
+    """What is wrong with a v1 counter-offer or BAFO draft, as codes. Empty means it may go
+    to approval. v1 drafts only: since v2 code renders the numbers and
+    `bido_back.supplier_email.checks` holds every number to the decision.
 
-    Code decided the numbers; this checks the model kept them: the RFQ
-    reference is in the body, every target price appears, and every amount
+    Code decided the numbers; this checks the model kept them, against the
+    task's asks as numbers (never as text): the RFQ reference is in the body,
+    every target price and every required lead time appears, and every amount
     next to a currency is one of the prices in the task (ours or the
-    supplier's own). It stays short.
+    supplier's own). Numbers are read one line at a time and never inside a
+    code ("MTR-100"). It stays short.
     """
     problems: list[str] = []
     body = draft.body.strip()
@@ -338,21 +368,20 @@ def negotiation_email_problems(
         return ["empty"]
     if task.rfq_ref not in body:
         problems.append("rfq_ref_missing_in_body")
+    priced = [m.group(1) or m.group(2) for m in _PRICED_NUMBER.finditer(body)]
     written: set[Decimal] = set()
-    for match in _NUMBER.finditer(body):
-        written |= _readings(match.group(0))
+    for text in (*(m.group(0) for m in _NUMBER.finditer(body)), *priced):
+        written |= _readings(text)
     allowed: set[Decimal] = set()
     for line in task.lines:
-        for value in (line.offered_unit_price, line.target_unit_price):
-            if value is not None:
-                allowed.add(value.normalize())
-        if line.target_unit_price is not None and line.target_unit_price.normalize() not in written:
+        allowed |= {v for v in (line.offered_unit_price, line.target_unit_price) if v is not None}
+        if line.target_unit_price is not None and line.target_unit_price not in written:
             problems.append(f"target_missing:{line.position}")
-    for match in _PRICED_NUMBER.finditer(body):
-        amount = match.group(1) or match.group(2)
-        if amount is not None and not (_readings(amount) & allowed):
-            problems.append("unknown_amount")
-            break
+        lead = line.required_lead_time_days
+        if lead is not None and Decimal(lead) not in written:
+            problems.append(f"lead_time_missing:{line.position}")
+    if any(not (_readings(amount) & allowed) for amount in priced):
+        problems.append("unknown_amount")
     if len(body) > _MAX_NEGOTIATION_CHARS:
         problems.append("too_long")
     return problems
@@ -362,8 +391,9 @@ _MAX_NOTICE_CHARS: Final = 2000
 
 
 def award_notice_problems(task: AwardNoticeInput, draft: AwardNoticeOutput) -> list[str]:
-    """What is wrong with a "not selected" draft, as codes. Empty means it may go to
-    approval: the RFQ reference is in the body, no prices, and it stays short."""
+    """What is wrong with a v1 "not selected" draft, as codes. Empty means it may go to
+    approval: the RFQ reference is in the body, no prices, and it stays short. v1 drafts
+    only (see `followup_email_problems`)."""
     problems: list[str] = []
     body = draft.body.strip()
     if not body:

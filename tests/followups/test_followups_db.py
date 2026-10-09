@@ -4,19 +4,20 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from email.message import EmailMessage
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from bido_back.agents.catalog.contracts import FollowupEmailInput, FollowupEmailOutput
+from bido_back.agents.catalog.contracts import EmailNoteOutput, FollowupEmailInput
 from bido_back.agents.context import ToolContext
 from bido_back.approvals import ActToolRegistry, ApprovalExecutor, decide_approval
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
+    ClarificationAsk,
     FollowupMessage,
     Invite,
     Message,
@@ -24,6 +25,8 @@ from bido_back.db.models import (
     ProposalLine,
     Rfq,
     RfqLine,
+    Supplier,
+    Tenant,
 )
 from bido_back.followups import service
 from bido_back.followups.jobs import ALL_TENANTS, FollowupSweepHandler, followup_tenants
@@ -36,10 +39,12 @@ from bido_back.followups.send import (
 from bido_back.intake.service import InboundService
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs import suppliers
+from bido_back.rfqs.activity import rfq_activity
 from bido_back.rfqs.errors import AgentFailed
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
 from bido_back.rfqs.send import RfqActDeps, register_act_tools
 from bido_back.storage.local import LocalFileStorage
+from bido_back.supplier_email import compose
 from bido_back.worker.envelope import Envelope
 from bido_back.worker.job_types import FOLLOWUPS_SWEEP
 from tests.approvals.conftest import FakeJobQueue, People
@@ -51,20 +56,18 @@ EMAIL_DOMAIN = "quotes.example.test"
 
 
 class FakeFollowupWriter:
-    def __init__(self, *, fail: bool = False) -> None:
+    """The writer agent: code renders the email, the agent returns at most a note."""
+
+    def __init__(self, *, fail: bool = False, note: str = "") -> None:
         self.calls: list[FollowupEmailInput] = []
         self.fail = fail
+        self.note = note
 
-    async def __call__(self, task: FollowupEmailInput, context: ToolContext) -> FollowupEmailOutput:
+    async def __call__(self, task: FollowupEmailInput, context: ToolContext) -> EmailNoteOutput:
         self.calls.append(task)
         if self.fail:
             raise AgentFailed("writer down")
-        if task.kind == "chase":
-            return FollowupEmailOutput(body=f"Reminder {task.chase_number} about {task.rfq_ref}.")
-        asks = "; ".join(f"{i.position}:{i.field}:{i.problem}" for i in task.open_items)
-        return FollowupEmailOutput(
-            body=f"Thanks for your offer on {task.rfq_ref}. Please send {asks}."
-        )
+        return EmailNoteOutput(note=self.note)
 
 
 @pytest.fixture
@@ -120,6 +123,13 @@ class World:
         )
         await self.approve(prepared.approvals[0].approval_id)
         self.rfq_id, self.invite_id = rfq.id, invite.id
+        # Quotes due today: chases follow the schedule from now on (never before that date).
+        await service.update_followups(
+            self.engine,
+            principal,
+            rfq.id,
+            FollowupSettingsUpdate(response_due=datetime.now(UTC).date()),
+        )
         async with tenant_session(self.engine, self.people.tenant) as session:
             stored = await session.get(Invite, invite.id)
             assert stored is not None and stored.sent_at is not None
@@ -184,7 +194,13 @@ async def test_a_due_chase_is_proposed_once_then_sent_in_the_thread(
     assert followup_email.in_reply_to == rfq_email.message_id
     assert followup_email.references == (rfq_email.message_id,)
     assert followup_email.subject == f"Re: {rfq_email.subject}"
-    assert followup_email.text_body.startswith("Reminder 1 about RFQ-")
+    # Rendered by code in the thread's language (Rhein got its RFQ email in German).
+    ref = rfq_email.subject.split("]")[0].lstrip("[")
+    assert followup_email.text_body.startswith(
+        f"Sehr geehrte Damen und Herren,\n\nErinnerung – {ref}\n"
+    )
+    assert "Bitte antworten Sie auf diese E-Mail bis " in followup_email.text_body
+    assert followup_email.html_body is not None and '<html lang="de">' in followup_email.html_body
     [chase] = await world.followups()
     assert chase.status == "sent" and chase.sent_at is not None
     async with tenant_session(world.engine, world.people.tenant) as session:
@@ -278,7 +294,25 @@ async def test_a_stale_chase_is_skipped_by_the_send_tool(
 ) -> None:
     await world.sweep(writer, world.sent_at + timedelta(days=5))
     [chase] = await world.followups()
-    # The supplier answered after the approval (no intake hook ran: worst case).
+    # The supplier sent its offer after the approval (no intake hook ran: worst case).
+    await decide_approval(
+        world.engine,
+        approver(world.people),
+        chase.approval_id or chase.id,
+        "approve",
+        jobs=world.jobs,
+    )
+    await _store_proposal(world, complete=True)
+    await world.executor(world.jobs.jobs[-1])
+
+    assert len(world.mailboxes.sender.sent) == 1  # only the RFQ email
+    [chase] = await world.followups()
+    assert (chase.status, chase.canceled_reason) == ("canceled", "offer_received")
+
+
+async def test_a_declined_invite_is_never_chased(world: World, writer: FakeFollowupWriter) -> None:
+    await world.sweep(writer, world.sent_at + timedelta(days=5))
+    [chase] = await world.followups()
     await decide_approval(
         world.engine,
         approver(world.people),
@@ -288,13 +322,13 @@ async def test_a_stale_chase_is_skipped_by_the_send_tool(
     )
     async with tenant_session(world.engine, world.people.tenant) as session:
         await session.execute(
-            update(Invite).where(Invite.id == world.invite_id).values(status="responded")
+            update(Invite).where(Invite.id == world.invite_id).values(status="declined")
         )
     await world.executor(world.jobs.jobs[-1])
 
-    assert len(world.mailboxes.sender.sent) == 1  # only the RFQ email
+    assert len(world.mailboxes.sender.sent) == 1
     [chase] = await world.followups()
-    assert (chase.status, chase.canceled_reason) == ("canceled", "invite_responded")
+    assert (chase.status, chase.canceled_reason) == ("canceled", "invite_declined")
 
 
 async def test_an_auto_reply_pauses_chasing(
@@ -327,7 +361,7 @@ async def _store_proposal(world: World, *, complete: bool) -> UUID:
             tenant_id=world.people.tenant,
             invite_id=world.invite_id,
             direction="in",
-            message_id_header=f"<offer-{complete}@rhein.example.test>",
+            message_id_header=f"<offer-{complete}-{uuid4().hex}@rhein.example.test>",
             status="extracted",
             occurred_at=datetime.now(UTC),
         )
@@ -380,30 +414,86 @@ async def test_a_clarification_asks_for_exactly_what_is_missing(
     [clarification] = await world.followups()
     assert (clarification.kind, clarification.proposal_id) == ("clarification", proposal_id)
     task = writer.calls[-1]
-    assert [(i.position, i.field, i.problem) for i in task.open_items] == [
-        (None, "valid_until", "missing"),
-        (1, "lead_time", "missing"),
-        (2, "unit_price", "missing"),
-        (2, "quantity", "missing"),
-        (2, "lead_time", "missing"),
+    # Line 2 has no price: one question about it ("the price, or tell us you do not
+    # quote it"); line 1's single price applies to the requested quantity.
+    assert [(i.position, i.field, i.problem, i.question) for i in task.open_items] == [
+        (None, "valid_until", "missing", "value"),
+        (1, "lead_time", "missing", "value"),
+        (2, "unit_price", "missing", "price_or_decline"),
     ]
-    # Once per proposal.
+    assert task.reply_by is not None and task.reply_by >= now.date()
+    assert clarification.reply_by == task.reply_by
+    # The email asks exactly that: the validity, then the values marked per position, by a
+    # reply-by date; no price in a clarification.
+    approval = await world.approval(clarification.approval_id)
+    body = str(approval.args["body"])
+    assert "Bitte nennen Sie uns die Gültigkeit Ihres Angebots." in body
+    assert "   Fehlt: Lieferzeit\n" in body
+    assert "   Fehlt: Stückpreis\n" in body
+    assert "Bitte antworten Sie auf diese E-Mail bis " in body
+    assert "EUR" not in body and "€" not in body
+    # The ledger: asked once, in this email, waiting for approval.
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        asks = list(
+            await session.scalars(
+                select(ClarificationAsk).where(ClarificationAsk.invite_id == world.invite_id)
+            )
+        )
+    assert sorted((a.position or 0, a.field, a.status) for a in asks) == [
+        (0, "valid_until", "proposed"),
+        (1, "lead_time", "proposed"),
+        (2, "unit_price", "proposed"),
+    ]
+    assert {a.followup_id for a in asks} == {clarification.id}
+    # One email at a time: nothing more while it waits.
     assert (await world.sweep(writer, now)).clarifications == 0
 
-    # A newer, complete offer: the old clarification is canceled, nothing new is asked.
+    # A newer, complete offer: the old clarification is canceled (nothing was asked), and
+    # nothing new is asked.
     await _store_proposal(world, complete=True)
     result = await world.sweep(writer, now)
     assert (result.canceled, result.clarifications) == (1, 0)
     [clarification] = await world.followups()
     assert (clarification.status, clarification.canceled_reason) == ("canceled", "newer_offer")
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        statuses = set(
+            await session.scalars(
+                select(ClarificationAsk.status).where(ClarificationAsk.invite_id == world.invite_id)
+            )
+        )
+    assert statuses == {"withdrawn"}
 
 
-async def test_a_failing_writer_skips_and_retries_next_time(world: World) -> None:
+async def test_a_failing_writer_still_proposes_the_email_without_a_note(world: World) -> None:
     later = world.sent_at + timedelta(days=5)
     result = await world.sweep(FakeFollowupWriter(fail=True), later)
-    assert (result.chases, result.skipped) == (0, 1)
-    assert await world.followups() == []
-    assert (await world.sweep(FakeFollowupWriter(), later)).chases == 1
+    # Code renders the email: a writer problem never means "no email".
+    assert (result.chases, result.skipped) == (1, 0)
+    [chase] = await world.followups()
+    assert chase.status == "proposed"
+
+
+async def test_the_writers_note_is_kept_when_it_follows_the_rules_and_dropped_when_not(
+    world: World,
+) -> None:
+    later = world.sent_at + timedelta(days=5)
+    note = "Wir freuen uns auf Ihre Rückmeldung."
+    await world.sweep(FakeFollowupWriter(note=note), later)
+    [chase] = await world.followups()
+    approval = await world.approval(chase.approval_id)
+    assert note in str(approval.args["body"]) and note in str(approval.args["html_body"])
+
+    # A note with a price never reaches the email; the email still goes to approval.
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        await session.execute(
+            update(FollowupMessage).where(FollowupMessage.id == chase.id).values(status="rejected")
+        )
+    priced = "Ein anderer Lieferant bietet 0,40 EUR."
+    await world.sweep(FakeFollowupWriter(note=priced), later + timedelta(days=7))
+    second = (await world.followups())[-1]
+    assert second.sequence == 2
+    body = str((await world.approval(second.approval_id)).args["body"])
+    assert "0,40" not in body and "Lieferant" not in body
 
 
 async def test_the_scheduled_job_finds_tenants_through_the_lookup_function(
@@ -415,6 +505,121 @@ async def test_the_scheduled_job_finds_tenants_through_the_lookup_function(
     )
     await handler(Envelope(type=FOLLOWUPS_SWEEP, tenant_id=ALL_TENANTS, idempotency_key="sweep:1"))
     assert [f.kind for f in await world.followups()] == ["chase"]
+
+
+async def _tenant_name(world: World) -> str:
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        tenant = await session.get(Tenant, world.people.tenant)
+    assert tenant is not None
+    return tenant.name
+
+
+def gate_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The send gate refuses every email, as it would after a rendering bug or an
+    inconsistent decision: code renders the email, so nothing else can refuse it."""
+
+    def refused(*_: object) -> list[str]:
+        return ["number_not_decided"]
+
+    monkeypatch.setattr(compose, "email_problems", refused)
+
+
+async def test_a_refused_chase_is_held_once_and_the_schedule_moves_on(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Email audit F3: a refused email was written again every 15-minute sweep, unseen."""
+    await service.update_followups(
+        world.engine,
+        buyer(world.people),
+        world.rfq_id,
+        FollowupSettingsUpdate(first_after_business_days=0, every_business_days=2),
+    )
+    gate_refuses(monkeypatch)
+    writer = FakeFollowupWriter()
+    now = datetime.now(UTC)
+    result = await world.sweep(writer, now)
+    assert (result.chases, result.held, result.skipped) == (0, 1, 0)
+    [held] = await world.followups()
+    assert (held.kind, held.sequence, held.status, held.canceled_reason, held.approval_id) == (
+        "chase",
+        1,
+        "canceled",
+        "draft_refused",
+        None,
+    )
+    # The next sweeps do not render the same chase again, and the model is never asked.
+    for minutes in (15, 30, 45):
+        assert await world.sweep(writer, now + timedelta(minutes=minutes)) == service.SweepResult()
+    assert writer.calls == []
+    view = await service.get_followups(world.engine, buyer(world.people), world.rfq_id)
+    [invite_view] = view.invites
+    assert (invite_view.chase_state, invite_view.chases_used) == ("scheduled", 1)
+    assert invite_view.next_chase_at is not None and invite_view.next_chase_at > now
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    [entry] = [a for a in feed if a.action == "rfq.followup_draft_held"]
+    assert entry.summary == (
+        "Reminder to Rhein not sent: the draft failed Bido's checks. Needs your decision"
+    )
+    # Once fixed, the next chase comes when the schedule says, and is proposed normally.
+    monkeypatch.undo()
+    later = now + timedelta(days=7)
+    assert (await world.sweep(FakeFollowupWriter(), later)).chases == 1
+    assert [(r.sequence, r.status) for r in await world.followups()] == [
+        (1, "canceled"),
+        (2, "proposed"),
+    ]
+
+
+async def test_a_refused_clarification_is_held_once_per_offer(
+    world: World, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await _store_proposal(world, complete=False)
+    gate_refuses(monkeypatch)
+    writer = FakeFollowupWriter()
+    now = datetime.now(UTC)
+    assert (await world.sweep(writer, now)).held == 1
+    assert (await world.sweep(writer, now + timedelta(minutes=15))).held == 0
+    assert writer.calls == []
+    [held] = await world.followups()
+    assert (held.kind, held.status, held.canceled_reason) == (
+        "clarification",
+        "canceled",
+        "draft_refused",
+    )
+    # The buyer sees it: nothing was asked (no asks in the ledger), the buyer decides.
+    view = await service.get_followups(world.engine, buyer(world.people), world.rfq_id)
+    [invite_view] = view.invites
+    assert invite_view.phase == "needs_your_decision" and invite_view.asks == []
+    assert [(d.kind, d.reasons) for d in invite_view.needs_your_decision] == [
+        ("email_held", ["clarification"])
+    ]
+    # A newer (still incomplete) offer gets its own clarification.
+    monkeypatch.undo()
+    await _store_proposal(world, complete=False)
+    assert (await world.sweep(FakeFollowupWriter(), now)).clarifications == 1
+
+
+async def test_followups_are_signed_once_in_the_language_of_the_rfq_email(world: World) -> None:
+    """Email audit F4 and F5: the company signed twice (no buyer contact exists), and a
+    supplier edited mid-thread switched the thread's language."""
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        invite = await session.get(Invite, world.invite_id)
+        assert invite is not None
+        await session.execute(
+            update(Supplier).where(Supplier.id == invite.supplier_id).values(language="fr")
+        )
+    company = await _tenant_name(world)
+    # A writer that signs anyway: its note is left out, and code signs once.
+    writer = FakeFollowupWriter(note=f"Mit freundlichen Grüßen, {company}")
+    assert (await world.sweep(writer, world.sent_at + timedelta(days=5))).chases == 1
+    [task] = writer.calls
+    assert task.supplier_language == "de"  # the RFQ email's, not the edited one
+    [chase] = await world.followups()
+    approval = await world.approval(chase.approval_id)
+    body = str(approval.args["body"])
+    assert body.startswith("Sehr geehrte Damen und Herren,\n")
+    assert body.endswith(f"\n\nMit freundlichen Grüßen\n{company}\n")
+    assert body.count("Mit freundlichen Grüßen") == 1
 
 
 async def test_followups_of_another_tenant_are_invisible(world: World) -> None:

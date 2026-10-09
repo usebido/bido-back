@@ -24,6 +24,7 @@ from bido_back.db.models import (
     Rfq,
     Supplier,
 )
+from bido_back.negotiation.labels import reason_text
 from bido_back.rfqs.errors import NotFound
 from bido_back.rfqs.overview import owner_names
 from bido_back.rfqs.schemas import ActivityKind, RfqActivityItem
@@ -37,6 +38,7 @@ BIDO: Final = "Bido"
 _TOOLS: Final[Mapping[str, str]] = {
     "send_rfq_email": "RFQ email",
     "send_followup_email": "follow-up email",
+    "send_supplier_answer": "answer to a supplier's question",
     "send_negotiation_email": "negotiation email",
     "award_rfq": "award",
     "send_purchase_order": "purchase order",
@@ -44,11 +46,24 @@ _TOOLS: Final[Mapping[str, str]] = {
     "send_po_cancellation": "purchase order cancellation",
     "approve_negotiation_mandate": "negotiation mandate",
 }
+_FOLLOWUP_KINDS: Final[Mapping[str, str]] = {
+    "chase": "Reminder",
+    "clarification": "Clarification question",
+    "reminder": "Reminder of our unanswered email",
+    "answer": "Answer to the supplier's question",
+}
 _NEGOTIATION_ACTIONS: Final[Mapping[str, str]] = {
     "counter": "Counter-offer",
     "counteroffer": "Counter-offer",
     "bafo": "Best-and-final request",
     "accept": "Acceptance",
+}
+# What a negotiation email decided by Bido asks for.
+_EMAIL_KINDS: Final[Mapping[str, str]] = {
+    "revised_offer": "a request for a revised offer",
+    "delivery_date": "a delivery-date request",
+    "bafo": "the best-and-final request",
+    "reminder": "a reminder of our unanswered request",
 }
 _ORIGINS: Final[Mapping[str, str]] = {
     "copilot": " from the Copilot",
@@ -204,12 +219,48 @@ def _event_item(
         case "rfq.email_sent":
             kind, summary = "email", f"RFQ sent{to}"
         case "rfq.followup_sent":
-            what = "Clarification question" if data.get("kind") == "clarification" else "Reminder"
+            what = _FOLLOWUP_KINDS.get(str(data.get("kind")), "Reminder")
             kind, summary = "email", f"{what} sent{to}"
+        case "rfq.supplier_question":
+            kind, actor = "agent", BIDO
+            summary = f"Question from the supplier{_from(supplier)}: needs your answer"
+        case "rfq.supplier_question_answered":
+            kind, summary = "user", f"Supplier's question answered{to} (email awaits approval)"
+        case "rfq.supplier_question_dismissed":
+            kind, summary = "user", f"Supplier's question closed without an email{_from(supplier)}"
+        case "rfq.supplier_question_superseded":
+            # Bido closed it on its own (never answered it): the buyer may reopen it.
+            kind, actor = "agent", BIDO
+            offer_date = data.get("offer_date")
+            offer = f"the supplier's offer of {offer_date}" if offer_date else "a later offer"
+            summary = (
+                f"Supplier's question{_from(supplier)} considered superseded by {offer} "
+                "— reopen if needed"
+            )
+        case "rfq.supplier_question_reopened":
+            kind, summary = (
+                "user",
+                f"Supplier's question reopened{_from(supplier)}: needs your answer",
+            )
+        case "proposal.hold_released":
+            kind, summary = "user", f"Offer{_from(supplier)} taken as shown: hold released"
         case "rfq.negotiation_sent":
             action = _NEGOTIATION_ACTIONS.get(str(data.get("action")), "Negotiation email")
+            if data.get("reminder") is True:
+                action = f"Reminder of the {action.lower()}"
             kind, summary = "email", f"{action} (round {data.get('round', '?')}) sent{to}"
             actor = actor or BIDO
+        case "rfq.negotiation_draft_held":
+            action = _NEGOTIATION_ACTIONS.get(str(data.get("action")), "Negotiation email")
+            kind, actor = "agent", BIDO
+            summary = (
+                f"{action} (round {data.get('round', '?')}){to} not sent: the draft failed "
+                "Bido's checks. Needs your decision"
+            )
+        case "rfq.followup_draft_held":
+            what = "Clarification question" if data.get("kind") == "clarification" else "Reminder"
+            kind, actor = "agent", BIDO
+            summary = f"{what}{to} not sent: the draft failed Bido's checks. Needs your decision"
         case "purchase_order.sent":
             kind, summary = "email", f"Purchase order sent{to}"
         case "purchase_order.acknowledged":
@@ -306,7 +357,9 @@ def _event_item(
             summary = f"Negotiation closed ({data.get('reason', 'closed')})"
             actor = actor or BIDO
         case "mandate.started":
-            count = len(data.get("suppliers") or [])
+            # The payload stores the number of suppliers (a list in older events).
+            raw = data.get("suppliers")
+            count = raw if isinstance(raw, int) else len(cast(list[object], raw or []))
             kind = "user"
             plural = "s" if count != 1 else ""
             summary = f"Negotiation mandate approved for {count} supplier{plural}"
@@ -315,7 +368,51 @@ def _event_item(
             paused = event.action.endswith("paused")
             summary = "Negotiation paused" if paused else "Negotiation resumed"
         case "mandate.held":
-            kind, summary, actor = "agent", "An email was held for review", BIDO
+            tool = _TOOLS.get(str(data.get("tool")), "email")
+            why = _words(data.get("reason"))
+            summary = f"{tool.capitalize()}{to} held for your approval" + (
+                f": {why}" if why else ""
+            )
+            kind, actor = "agent", BIDO
+        case "mandate.waiting":
+            tool = _TOOLS.get(str(data.get("tool")), "email")
+            until = _moment(data.get("until"))
+            if data.get("reason") == "daily_cap":
+                summary = f"{tool.capitalize()}{to} waits for the daily email limit" + (
+                    f" until {until}" if until else ""
+                )
+            else:
+                summary = f"{tool.capitalize()}{to} waits for your mailbox to be connected"
+            kind, actor = "agent", BIDO
+        case "rfq.negotiation_decided":
+            what = _EMAIL_KINDS.get(str(data.get("kind")), "a negotiation email")
+            questions = data.get("questions")
+            # One email per supplier answer: it also asks what the offer lacks.
+            also = (
+                " that also asks for what the offer lacks"
+                if isinstance(questions, int) and questions > 0
+                else ""
+            )
+            summary = f"Bido prepared {what}{also} (round {data.get('round', '?')}){_for(supplier)}"
+            kind, actor = "agent", BIDO
+        case "rfq.negotiation_accepted":
+            summary = f"Accepted internally – nothing to ask{_for(supplier)}"
+            kind, actor = "agent", BIDO
+        case "rfq.negotiation_final":
+            summary = reason_text(str(data.get("reason", ""))) + _for(supplier)
+            kind, actor = "agent", BIDO
+        case "rfq.negotiation_needs_decision" | "rfq.negotiation_needs_answer":
+            summary = reason_text(str(data.get("reason", ""))) + _for(supplier)
+            kind, actor = "agent", BIDO
+        case "rfq.negotiation_hold_released":
+            kind = "user"
+            summary = f"Hold released: Bido negotiates the current offer as it is{_for(supplier)}"
+        case "rfq.negotiation_held":
+            why = _words(data.get("reason"))
+            summary = f"Needs your decision: the email{to} could not be prepared" + (
+                f" ({why})" if why else ""
+            )
+            kind, actor = "agent", BIDO
         case action if action.startswith("approval."):
             tool = _TOOLS.get(str(data.get("tool")), "action")
             verb = action.removeprefix("approval.").replace("_", " ")
@@ -331,6 +428,24 @@ def _event_item(
         supplier_name=supplier,
         summary=summary,
     )
+
+
+def _for(supplier: str | None) -> str:
+    return f" ({supplier})" if supplier else ""
+
+
+def _words(value: object) -> str:
+    """A reason code as words (codes only; never content)."""
+    return value.replace("_", " ") if isinstance(value, str) and value else ""
+
+
+def _moment(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    try:
+        return datetime.fromisoformat(value).strftime("%Y-%m-%d %H:%M UTC")
+    except ValueError:
+        return ""
 
 
 _RESPONSE_KINDS: Final[Mapping[str, str]] = {
@@ -438,6 +553,10 @@ def _value(value: object) -> str:
     if isinstance(value, list):
         return "/".join(_value(item) for item in cast(list[object], value))
     return str(value)
+
+
+def _from(supplier: str | None) -> str:
+    return f" from {supplier}" if supplier else ""
 
 
 def _supplier(value: object, suppliers: Mapping[UUID, str]) -> str | None:

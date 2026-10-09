@@ -90,7 +90,9 @@ class ProposeMandateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     deadline: datetime
-    max_rounds: int = Field(default=3, ge=1, le=10)
+    # One revised-offer round, then one best-and-final request, by default.
+    max_rounds: int = Field(default=2, ge=1, le=10)
+    # Follow-up and negotiation emails per supplier per 24 hours (the RFQ email excluded).
     max_messages_per_supplier_per_day: int = Field(default=2, ge=1, le=5)
     # Lines not listed keep the limits already on the RFQ (e.g. from the analysis).
     lines: list[LineLimitsUpdate] = Field(default_factory=list[LineLimitsUpdate], max_length=500)
@@ -140,6 +142,19 @@ class MandateActivityItem(BaseModel):
     created_at: datetime
 
 
+class MandateWaitItem(BaseModel):
+    """An in-bounds email the mandate will send on its own, once its wait clears."""
+
+    approval_id: UUID
+    tool: str
+    invite_id: UUID | None
+    supplier_name: str | None
+    # daily_cap: the supplier already got today's automatic emails (`until`: when the
+    # next one may go); mailbox_not_connected: sending starts once the buyer connects.
+    reason: Literal["daily_cap", "mailbox_not_connected"]
+    until: datetime | None = None
+
+
 class MandateActivity(BaseModel):
     rfq_id: UUID
     mandate: MandateView | None
@@ -149,3 +164,5 @@ class MandateActivity(BaseModel):
     # on their own once the reason clears. Null while nothing holds them back.
     waiting_reason: Literal["mailbox_not_connected"] | None = None
     waiting_emails: int = 0
+    # Each email waiting (daily cap or mailbox), with its supplier and until when.
+    waits: list[MandateWaitItem] = Field(default_factory=list[MandateWaitItem])

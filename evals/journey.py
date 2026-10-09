@@ -28,9 +28,16 @@ The buyer, in Portuguese, in one conversation:
    e-mails go out to the three suppliers.
 4. replies: the scripted suppliers answer over four simulated days
    (`evals.journey_suppliers.SCRIPT`): the extracted state must follow the
-   business rules after every e-mail.
-5. negotiation: the counter-offers and best-and-final requests the sweeps send
-   under the mandate, against golden asks from the buyer's rules.
+   business rules after every e-mail. A negotiation sweep runs after each day's
+   replies; the buyer's view of the negotiation is read right before and right
+   after each sweep.
+5. negotiation: what the sweeps decided, sent and showed under the mandate,
+   graded against the buyer's negotiation rules as properties
+   (`evals.journey_negotiation`: one request per round, one best-and-final
+   request with a common cut-off, asks within the limits, no concession without
+   a move, the no-progress stop, the late-line date ask, the buyer-visible
+   state), not against a golden sequence: which day a supplier's offer becomes
+   usable varies in live runs.
 6. comparison: "Feche e me mostre a comparação final": the outcome per line,
    the extra kept apart, explicit gaps, and no award, PO or PR.
 
@@ -66,7 +73,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, JsonValue, ValidationError
 from sqlalchemy import func, select, update
 
-from bido_back.agents.catalog.contracts import NegotiationEmailInput, NegotiationEmailOutput
+from bido_back.agents.catalog.contracts import NegotiationEmailInput
 from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
 from bido_back.agents.tools import AnyTool, ToolError
@@ -83,11 +90,13 @@ from bido_back.db.models import (
     Approval,
     Award,
     Contact,
+    FollowupMessage,
     Invite,
     IssuedPurchaseOrder,
     MandateSend,
     Message,
     NegotiationMandate,
+    NegotiationMessage,
     Proposal,
     ProposalLine,
     Rfq,
@@ -103,7 +112,10 @@ from bido_back.intake.service import IngestResult
 from bido_back.mandates import service as mandates
 from bido_back.mandates.policy import commitment_language
 from bido_back.mandates.schemas import ApproveMandateArgs, ProposeMandateRequest
-from bido_back.negotiation.schemas import LineLimitsUpdate
+from bido_back.negotiation.decision import decision_of
+from bido_back.negotiation.schemas import LineLimitsUpdate, RfqNegotiation
+from bido_back.negotiation.service import get_negotiation
+from bido_back.negotiation.signals import offer_signals
 from bido_back.onboarding.service import store_upload
 from bido_back.purchasing.sources.contracts import PlanningScope, SourceAssessment
 from bido_back.purchasing.sources.mapping import default_mapper
@@ -115,6 +127,7 @@ from bido_back.rfqs import suppliers as supplier_service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
 from bido_back.settings import get_settings
+from evals import journey_negotiation as rules
 from evals.harness import Env, MemoryStorage, Mode
 from evals.journey_suppliers import (
     DAYS,
@@ -139,7 +152,7 @@ from evals.journey_workbook import (
     mock_case,
     real_case,
 )
-from evals.scripted import ScriptedModel, negotiation
+from evals.scripted import ScriptedModel
 from evals.world import Captured, World
 
 REPORTS: Final = Path(__file__).parent / "reports"
@@ -444,48 +457,12 @@ _NOT_REQUESTED: Final = re.compile(
 )
 
 
-# --- A Portuguese negotiation writer for mock mode --------------------------------------------
-
-
-def _pt_number(value: Decimal) -> str:
-    return format(value.normalize(), "f").replace(".", ",")
-
-
-def negotiation_pt(task: NegotiationEmailInput) -> NegotiationEmailOutput:
-    """Mock mode's negotiation writer for Brazilian suppliers: every number as given."""
-    if task.supplier_language != "pt":
-        return negotiation(task)
-    opening = (
-        "Pedimos sua melhor e última oferta para:"
-        if task.action == "bafo"
-        else "Pedimos que revisem as condições abaixo:"
-    )
-    lines = [f"Agradecemos a proposta para a {task.rfq_ref}. {opening}"]
-    if task.mention_competition:
-        lines.insert(0, "Recebemos uma oferta mais competitiva.")
-    for ask in task.lines:
-        if ask.target_unit_price is not None:
-            lines.append(
-                f"Item {ask.position} {ask.line}: preço alvo R$ {_pt_number(ask.target_unit_price)}"
-                f" por {ask.unit}"
-            )
-        if ask.required_lead_time_days is not None:
-            lines.append(
-                f"Item {ask.position} {ask.line}: prazo de entrega de até "
-                f"{ask.required_lead_time_days} dias"
-            )
-    if task.reply_by is not None:
-        lines.append(f"Pedimos retorno até {task.reply_by:%d/%m/%Y}.")
-    body = "\n".join(lines)
-    return NegotiationEmailOutput(body=f"Prezados,\n\n{body}\n\nAtenciosamente,\n{task.buyer_name}")
+# --- The scripted model ----------------------------------------------------------------------
 
 
 class JourneyModel(ScriptedModel):
-    """The flow evals' scripted model, with Portuguese counter-offers."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._scripts["rfq_negotiation_writer"] = negotiation_pt
+    """The flow evals' scripted model. Code renders the negotiation emails in the supplier's
+    language (`bido_back.supplier_email`); the scripted writer adds no note."""
 
 
 # --- The copilot, live or scripted ------------------------------------------------------------
@@ -505,18 +482,29 @@ class Snapshot:
     reply_kind: str | None
     extras: tuple[str, ...]
     invite_status: str
+    # The reply signals stored with the offer: declared final, the parts it declines.
+    final: bool = False
+    declined: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
 class SweepRecord:
-    """One negotiation sweep: who had replied that day, what was drafted, what went out."""
+    """One negotiation sweep: who had replied that day, what was drafted, what went out,
+    and what the buyer saw of the negotiation right before and right after it."""
 
     day: int
     at: datetime
     replied: list[str]
     tasks: list[NegotiationEmailInput]
-    drafts: list[str]
+    # The writers' optional notes (code renders the emails).
+    notes: list[str]
     sent: list[Captured]
+    before: RfqNegotiation | None = None
+    after: RfqNegotiation | None = None
+    # The negotiation e-mails (`negotiation_messages` ids) this sweep decided.
+    decided: list[UUID] = field(default_factory=list[UUID])
+    # Why the buyer's view could not be read (None: it was).
+    view_error: str | None = None
 
 
 @dataclass(slots=True)
@@ -541,6 +529,8 @@ class Journey:
         default_factory=dict[str, tuple[Decimal, Decimal]]
     )
     max_rounds: int = MAX_ROUNDS
+    # The approved mandate's negotiation deadline.
+    mandate_deadline: datetime | None = None
     t0: datetime | None = None
     rfq_emails: list[Captured] = field(default_factory=list[Captured])
     snapshots: dict[str, Snapshot] = field(default_factory=dict[str, Snapshot])
@@ -924,6 +914,8 @@ async def snapshot(j: Journey, supplier_key: str) -> Snapshot:
             key = part or f"unmatched:{row.offered_mpn or row.id}"
             lines[key] = (row.unit_price, row.lead_time_days, row.needs_review)
         kind = state.get("reply_kind")
+        signals = offer_signals(proposal.fields)
+        parts = {position: part for part, position in j.positions.items()}
         return Snapshot(
             proposal.version,
             lines,
@@ -931,6 +923,8 @@ async def snapshot(j: Journey, supplier_key: str) -> Snapshot:
             str(kind) if kind is not None else None,
             tuple(extras),
             status,
+            final=signals.final_offer,
+            declined=tuple(sorted(parts.get(p, str(p)) for p in signals.declined_positions)),
         )
 
 
@@ -1494,6 +1488,7 @@ async def step_mandate(j: Journey, step: Step) -> None:
     step.check("mandate_active", terms is not None, "no mandate after the approval")
     if terms is not None:
         j.max_rounds = terms.max_rounds
+        j.mandate_deadline = terms.deadline
         by_id = {line_id: part for part, line_id in j.lines.items()}
         j.limits = {
             by_id[line.rfq_line_id]: (line.target_unit_price, line.max_unit_price)
@@ -1593,8 +1588,26 @@ async def deliver(j: Journey, email: SupplierEmail) -> str:
     return f"{result.outcome}/{status}"
 
 
+async def negotiation_view(j: Journey) -> tuple[RfqNegotiation | None, str | None]:
+    """What the buyer sees of the negotiation now (`get_negotiation`), or why it failed."""
+    if j.rfq_id is None:
+        return None, "no RFQ"
+    try:
+        view = await get_negotiation(j.world.engine, j.world.principal, j.rfq_id, now=j.world.now)
+    except Exception as exc:  # graded in step 5: the buyer could not see the negotiation
+        return None, f"{type(exc).__name__}: {exc}"[:300]
+    return view, None
+
+
+async def negotiation_message_ids(j: Journey) -> set[UUID]:
+    """Every negotiation e-mail decided so far (`negotiation_messages`)."""
+    async with tenant_session(j.world.engine, j.world.tenant_id) as session:
+        return set(await session.scalars(select(NegotiationMessage.id)))
+
+
 async def run_timeline(j: Journey) -> None:
-    """Four simulated days: the day's replies, then the negotiation sweep."""
+    """Four simulated days: the day's replies, then the negotiation sweep, with the buyer's
+    view of the negotiation read right before and right after it."""
     assert j.t0 is not None
     world = j.world
     for day in range(DAYS):
@@ -1606,7 +1619,11 @@ async def run_timeline(j: Journey) -> None:
         world.at(j.t0 + timedelta(days=day, hours=max(e.hour for e in today) + 0.5))
         calls = len(world.negotiation_writer.calls)
         sent = len(world.outbox.sent)
+        before, before_error = await negotiation_view(j)
+        known = await negotiation_message_ids(j)
         await world.sweep_negotiation()
+        decided = await negotiation_message_ids(j) - known
+        after, after_error = await negotiation_view(j)
         new = world.negotiation_writer.calls[calls:]
         j.sweeps.append(
             SweepRecord(
@@ -1614,8 +1631,12 @@ async def run_timeline(j: Journey) -> None:
                 at=world.now,
                 replied=sorted({e.supplier.key for e in today}),
                 tasks=[task for task, _ in new],
-                drafts=[out.body.strip() for _, out in new if out is not None],
+                notes=[out.note for _, out in new if out is not None and out.note],
                 sent=world.outbox.sent[sent:],
+                before=before,
+                after=after,
+                decided=sorted(decided),
+                view_error=before_error or after_error,
             )
         )
 
@@ -1707,6 +1728,20 @@ async def step_replies(j: Journey, step: Step) -> None:
         f"held: issues={late.issues if late else None}",
         owner="extraction",
     )
+    # A "melhor e última oferta" and a "não conseguimos reduzir os preços" are declared
+    # final positions (the extraction prompt's "we cannot go any lower"); nothing else is.
+    # A declined line is kept as declined (never a missing price).
+    misread = [
+        f"{e.key}: final={snap.final}, declined={list(snap.declined)}"
+        for e in SCRIPT
+        if (snap := j.snapshots.get(e.key)) is not None
+        and snap.version is not None
+        and (
+            snap.final != (e.kind in ("final", "repeat"))
+            or not set(e.declined) <= set(snap.declined)
+        )
+    ]
+    step.check("offer_signals_read", not misread, "; ".join(misread[:4]), owner="extraction")
     held = {
         key: snap.issues
         for key, snap in j.snapshots.items()
@@ -1736,125 +1771,251 @@ def last_key(supplier_key: str) -> str:
 
 # --- Step 5: negotiation ----------------------------------------------------------------------
 
-Asks = dict[str, Decimal]
+# A negotiation e-mail not sent yet (being written or awaiting approval).
+_UNSENT: Final = frozenset({"decided", "proposed"})
 
 
-def golden_rounds(
-    targets: Mapping[str, Decimal], max_rounds: int, script: Sequence[SupplierEmail] = SCRIPT
-) -> dict[str, list[tuple[str, Asks]]]:
-    """Per supplier, the counter-offers the buyer's rules send, in order.
+def supplier_views(
+    view: RfqNegotiation | None, suppliers: Mapping[UUID, str], parts: Mapping[int, str]
+) -> dict[str, rules.SupplierView]:
+    """Each supplier as the buyer sees it in one negotiation view (keyed by supplier)."""
+    found: dict[str, rules.SupplierView] = {}
+    for item in view.invites if view is not None else ():
+        key = suppliers.get(item.invite_id)
+        if key is None or item.state is None:
+            continue
+        lines = tuple(
+            rules.LineView(
+                part=parts.get(line.position, str(line.position)),
+                status=line.status,
+                price=line.price,
+                delivery=line.delivery,
+                ask=line.ask_unit_price,
+                best_price=line.asks_best_price,
+                deliver_by=line.deliver_by,
+                acceptable=line.acceptable,
+            )
+            for line in item.line_plans
+        )
+        found[key] = rules.SupplierView(
+            phase=item.state.phase,
+            reason=item.state.reason,
+            label=item.state.label,
+            next_action=item.state.next_action,
+            status=item.status,
+            until=item.state.until,
+            offer_version=item.latest_proposal_version,
+            lines=lines,
+            pending=sum(1 for m in item.messages if m.state in _UNSENT),
+        )
+    return found
 
-    After each day's replies: ask the target on every line above it; nothing when
-    every line is within target; stop after a best-and-final request, after the
-    round cap, or after two replies in a row without a lower price or a shorter
-    lead time. The last allowed round is the best-and-final request.
-    """
-    states = expected_states(script)
-    result: dict[str, list[tuple[str, Asks]]] = {s.key: [] for s in SUPPLIERS}
-    history: dict[str, list[Mapping[str, Offer]]] = defaultdict(list)
-    stopped: set[str] = set()
-    for day in range(DAYS):
-        for supplier in SUPPLIERS:
-            todays = [e for e in script if e.day == day and e.supplier.key == supplier.key]
-            if not todays or supplier.key in stopped:
-                continue
-            state = states[todays[-1].key]
-            asks = {
-                p: targets[p] for p, o in state.items() if p in targets and o.price > targets[p]
-            }
-            if not asks:
-                continue
-            stagnant, recent = 0, state
-            for prior in reversed(history[supplier.key]):
-                if set(prior) != set(recent):
-                    break
-                if any(
-                    recent[p].price < prior[p].price or recent[p].lead < prior[p].lead
-                    for p in recent
-                ):
-                    break
-                stagnant, recent = stagnant + 1, prior
-            rounds = result[supplier.key]
-            if stagnant >= 2 or len(rounds) >= max_rounds or any(a == "bafo" for a, _ in rounds):
-                stopped.add(supplier.key)
-                continue
-            action = "bafo" if len(rounds) + 1 >= max_rounds else "counter"
-            rounds.append((action, asks))
-            history[supplier.key].append(state)
-    return result
+
+def _request(
+    row: NegotiationMessage,
+    supplier: str,
+    version: int,
+    parts: Mapping[int, str],
+    sweep: int | None,
+    by_line: Mapping[UUID, str],
+) -> rules.Request:
+    """One decided negotiation e-mail as the rules read it (its typed decision)."""
+    decision = decision_of(cast(dict[str, object], row.terms))
+    # A refused draft waiting for a person is "held" (as the planner reads it).
+    state = "held" if row.status == "canceled" and row.held_reason else row.status
+    if decision is None:
+        return rules.Request(
+            supplier, row.sequence, row.round, row.kind or row.action, state, version,
+            row.created_at.date(), message_id=row.message_id_header, sweep=sweep,
+        )  # fmt: skip
+    asks = tuple(
+        rules.LineAsk(
+            part=parts.get(p.position, p.part_number or str(p.position)),
+            offered=p.offered_unit_price,
+            offered_lead=p.offered_lead_time_days,
+            price=p.target_unit_price,
+            best_price=p.best_price,
+            deliver_by=p.deliver_by,
+        )
+        for p in decision.positions
+    )
+    reminder = row.kind == "reminder" or decision.reminder_of is not None
+    return rules.Request(
+        supplier=supplier,
+        sequence=decision.sequence,
+        round=decision.round,
+        kind="reminder" if reminder else decision.kind,
+        state=state,
+        offer_version=decision.offer_version,
+        order_date=decision.order_date,
+        reply_by=decision.reply_by,
+        cutoff_at=decision.cutoff_at,
+        asks=asks,
+        reminder_of=decision.reminder_of,
+        message_id=row.message_id_header,
+        sweep=sweep,
+        questions=len(decision.questions),
+        deferred=tuple(by_line.get(line_id, str(line_id)) for line_id in decision.deferred_lines),
+    )
+
+
+def declared_finals(j: Journey) -> dict[str, frozenset[int]]:
+    """Per supplier, the stored offer versions its final positions made ("melhor e última
+    oferta", "não conseguimos reduzir os preços"; the script's truth): an e-mail that
+    stored no new version marks nothing."""
+    finals: dict[str, set[int]] = defaultdict(set)
+    previous: dict[str, int | None] = {}
+    for email in sorted(SCRIPT, key=lambda e: (e.day, e.hour)):
+        snap = j.snapshots.get(email.key)
+        version = snap.version if snap is not None else None
+        key = email.supplier.key
+        if (
+            email.kind in ("final", "repeat")
+            and version is not None
+            and version != previous.get(key)
+        ):
+            finals[key].add(version)
+        previous[key] = version
+    return {key: frozenset(versions) for key, versions in finals.items()}
+
+
+async def negotiation_record(j: Journey) -> rules.Negotiation:
+    """What the sweeps decided, sent and showed, read from the run (`evals.journey_negotiation`)."""
+    assert j.rfq_id is not None
+    suppliers = {invite: key for key, invite in j.invites.items()}
+    parts = {position: part for part, position in j.positions.items()}
+    by_line = {line_id: part for part, line_id in j.lines.items()}
+    sweep_of = {row_id: index for index, s in enumerate(j.sweeps) for row_id in s.decided}
+    requests: dict[str, list[rules.Request]] = defaultdict(list)
+    offers: dict[str, dict[int, dict[str, rules.Quote]]] = defaultdict(dict)
+    async with tenant_session(j.world.engine, j.world.tenant_id) as session:
+        rows = (
+            await session.execute(
+                select(NegotiationMessage, Proposal.version)
+                .join(Proposal, Proposal.id == NegotiationMessage.proposal_id)
+                .where(NegotiationMessage.invite_id.in_(list(suppliers)))
+            )
+        ).all()
+        for row, version in rows:
+            key = suppliers[row.invite_id]
+            requests[key].append(_request(row, key, version, parts, sweep_of.get(row.id), by_line))
+        lines = (
+            await session.execute(
+                select(Proposal.invite_id, Proposal.version, ProposalLine, RfqLine.part_number)
+                .join(ProposalLine, ProposalLine.proposal_id == Proposal.id)
+                .join(RfqLine, RfqLine.id == ProposalLine.rfq_line_id)
+                .where(Proposal.invite_id.in_(list(suppliers)))
+            )
+        ).all()
+        for invite_id, version, line, part in lines:
+            offers[suppliers[invite_id]].setdefault(version, {})[part or str(line.rfq_line_id)] = (
+                rules.Quote(line.unit_price, line.lead_time_days, line.needs_review)
+            )
+        stored_finals: dict[str, set[int]] = defaultdict(set)
+        for invite_id, version, fields in (
+            await session.execute(
+                select(Proposal.invite_id, Proposal.version, Proposal.fields).where(
+                    Proposal.invite_id.in_(list(suppliers))
+                )
+            )
+        ).all():
+            if offer_signals(fields).final_offer:
+                stored_finals[suppliers[invite_id]].add(version)
+        followups = set(
+            await session.scalars(
+                select(FollowupMessage.message_id_header).where(
+                    FollowupMessage.message_id_header.is_not(None)
+                )
+            )
+        )
+        need_by = {
+            row.part_number or row.description: row.need_by
+            for row in await session.scalars(select(RfqLine).where(RfqLine.rfq_id == j.rfq_id))
+            if row.need_by is not None
+        }
+    return rules.Negotiation(
+        limits=rules.Limits(
+            targets={p: t for p, (t, _) in j.limits.items()},
+            maxima={p: m for p, (_, m) in j.limits.items()},
+            need_by=need_by,
+            max_rounds=j.max_rounds,
+            deadline=j.mandate_deadline,
+        ),
+        suppliers=tuple(s.key for s in SUPPLIERS if s.key in j.invites),
+        requests={k: tuple(v) for k, v in requests.items()},
+        offers=offers,
+        sweeps=tuple(
+            rules.Sweep(
+                day=s.day,
+                at=s.at,
+                before=supplier_views(s.before, suppliers, parts),
+                after=supplier_views(s.after, suppliers, parts),
+                cutoff=s.after.cutoff_at if s.after is not None else None,
+            )
+            for s in j.sweeps
+        ),
+        emails={
+            s.key: tuple(
+                rules.Email(s.key, e.message_id, e.body, e.at)
+                for e in j.world.outbox.to(s.email)
+                if e not in j.rfq_emails and e.message_id not in followups
+            )
+            for s in SUPPLIERS
+        },
+        finals=declared_finals(j),
+        stored_finals={k: frozenset(v) for k, v in stored_finals.items()},
+    )
 
 
 def supplier_of(name: str) -> SupplierRef | None:
     return next((s for s in SUPPLIERS if s.key in compact(name)), None)
 
 
-async def step_negotiation(j: Journey, step: Step) -> None:
-    if not j.sweeps:
-        step.skipped = "no negotiation ran"
-        return
-    targets = {p: t for p, (t, _) in j.limits.items()}
-    maxima = {p: m for p, (_, m) in j.limits.items()}
-    want = golden_rounds(targets, j.max_rounds)
-    by_position = {position: part for part, position in j.positions.items()}
-    got: dict[str, list[tuple[str, Asks]]] = {s.key: [] for s in SUPPLIERS}
-    tasks: list[NegotiationEmailInput] = [t for s in j.sweeps for t in s.tasks]
-    above: list[str] = []
-    lead_asks: list[str] = []
-    for task in tasks:
-        supplier = supplier_of(task.supplier_name)
-        if supplier is None:
-            continue
-        asks: Asks = {}
-        for ask in task.lines:
-            part = by_position.get(ask.position, str(ask.position))
-            if ask.target_unit_price is not None:
-                asks[part] = ask.target_unit_price.normalize()
-                if part in maxima and ask.target_unit_price > maxima[part]:
-                    above.append(f"{supplier.key} {part} {ask.target_unit_price} > {maxima[part]}")
-            if ask.required_lead_time_days is not None:
-                lead_asks.append(f"{supplier.key} {part} {ask.required_lead_time_days}d")
-        got[supplier.key].append((task.action, asks))
-    step.notes["asks"] = {
-        k: [(a, {p: str(v) for p, v in x.items()}) for a, x in v] for k, v in got.items()
-    }
-    step.notes["lead_time_asks"] = lead_asks
-    for supplier in SUPPLIERS:
-        expected = [(a, {p: v.normalize() for p, v in x.items()}) for a, x in want[supplier.key]]
-        step.check(
-            f"asks:{supplier.key}",
-            got[supplier.key] == expected,
-            f"got {got[supplier.key]} want {expected}",
-            owner="negotiation",
-        )
-        emails = [e for e in j.world.outbox.to(supplier.email) if e not in j.rfq_emails]
-        step.check(
-            f"sent:{supplier.key}",
-            len(emails) == len(expected),
-            f"{len(emails)} negotiation e-mails, {len(expected)} expected",
-            owner="negotiation",
-        )
-        step.check(
-            f"round_cap:{supplier.key}",
-            len(emails) <= j.max_rounds,
-            f"{len(emails)}",
-            owner="negotiation",
-        )
-    step.check("no_ask_above_max", not above, "; ".join(above), owner="negotiation")
-    drafts = {d for s in j.sweeps for d in s.drafts}
+def view_text(view: rules.SupplierView | None) -> str:
+    return f"{view.phase}:{view.reason} ({view.status})" if view is not None else "-"
+
+
+def last_view(view: rules.SupplierView) -> str:
+    """The supplier's label and its lines that are not acceptable (status/price/delivery)."""
+    off = [f"{x.part} {x.status}/{x.price}/{x.delivery}" for x in view.lines if not x.acceptable]
+    return f"{view.label} | not acceptable: {', '.join(off) or '-'}"
+
+
+_CONTENT_CHECKS: Final = (
+    "html_part",
+    "no_max_revealed",
+    "no_competitor_leak",
+    "no_commitment_language",
+    "negotiation_language",
+)
+
+
+async def check_email_content(j: Journey, step: Step, n: rules.Negotiation) -> None:
+    """What every negotiation e-mail may say: never the buyer's maximum, another supplier's
+    name or price, or commitment language; Portuguese, with an HTML part. Nothing held."""
     states = expected_states()
     own: dict[str, set[Decimal]] = defaultdict(set)
     for email in SCRIPT:
         own[email.supplier.key] |= {o.price.normalize() for o in states[email.key].values()}
-    disclosed = {t.normalize() for t in targets.values()}
+    disclosed = {t.normalize() for t in n.limits.targets.values()}
     problems: dict[str, list[str]] = defaultdict(list)
     for supplier in SUPPLIERS:
         others = [s for s in SUPPLIERS if s.key != supplier.key]
+        # Our own asks to this supplier are decided by code from its prices and the target
+        # (`no_concession_without_move` checks how): never another supplier's price.
+        asked = {
+            a.price.normalize()
+            for r in n.requests.get(supplier.key, ())
+            for a in r.asks
+            if a.price is not None
+        }
         rival_prices = {p for s in others for p in own[s.key]} - own[supplier.key] - disclosed
-        hidden = {m.normalize() for m in maxima.values()} - own[supplier.key] - disclosed
+        rival_prices -= asked
+        hidden = {m.normalize() for m in n.limits.maxima.values()} - own[supplier.key] - disclosed
         for email in [e for e in j.world.outbox.to(supplier.email) if e not in j.rfq_emails]:
             body = email.body
-            if body.strip() not in drafts:
-                problems["as_drafted"].append(supplier.key)
+            if email.html is None:
+                problems["html_part"].append(supplier.key)
             if numbers(body) & hidden:
                 problems["no_max_revealed"].append(
                     f"{supplier.key}: {sorted(numbers(body) & hidden)}"
@@ -1867,14 +2028,9 @@ async def step_negotiation(j: Journey, step: Step) -> None:
                 problems["no_commitment_language"].append(supplier.key)
             if language_of(body) != "pt":
                 problems["negotiation_language"].append(f"{supplier.key}: {language_of(body)}")
-    for name in ("as_drafted", "no_max_revealed", "no_competitor_leak", "no_commitment_language",
-                 "negotiation_language"):  # fmt: skip
+    for name in _CONTENT_CHECKS:
         step.check(name, not problems[name], "; ".join(problems[name][:4]), owner="negotiation")
-    stalled = [a for a, _ in got[MULTIPECAS_KEY]]
     async with tenant_session(j.world.engine, j.world.tenant_id) as session:
-        status = await session.scalar(
-            select(Invite.negotiation_status).where(Invite.id == j.invites[MULTIPECAS_KEY])
-        )
         held = [
             f"{tool}:{reason}"
             for tool, reason in (
@@ -1885,27 +2041,39 @@ async def step_negotiation(j: Journey, step: Step) -> None:
                 )
             ).all()
         ]
-    step.check(
-        "stops_without_progress",
-        stalled == ["counter", "counter"] and status in ("closed", "rejected"),
-        f"MultiPecas got {stalled}, status {status}",
-        owner="negotiation",
-    )
     step.check("nothing_held", not held, f"held for a person: {held}", owner="negotiation")
-    step.check(
-        "late_line_lead_time_asked",
-        any(a.startswith("metalnova 000104") for a in lead_asks),
-        f"MetalNova's late 000104 never had its lead time negotiated; asks: {lead_asks}",
-        owner="negotiation",
-    )
+
+
+async def step_negotiation(j: Journey, step: Step) -> None:
+    if not j.sweeps or j.rfq_id is None:
+        step.skipped = "no negotiation ran"
+        return
+    unread = [f"day {s.day}: {s.view_error}" for s in j.sweeps if s.view_error]
+    step.check("buyer_view_read", not unread, "; ".join(unread), owner="negotiation")
+    n = await negotiation_record(j)
+    for name, problems in rules.grade(n):
+        step.check(name, not problems, "; ".join(problems[:4]), owner="negotiation")
+    step.notes["requests"] = {
+        s: [rules.describe(r) for r in sorted(n.requests.get(s, ()), key=lambda r: r.sequence)]
+        for s in n.suppliers
+    }
+    step.notes["final_offers"] = {
+        s: f"written v{sorted(n.finals.get(s, ()))}, stored v{sorted(n.stored_finals.get(s, ()))}"
+        for s in n.suppliers
+    }
+    step.notes["buyer_sees"] = [
+        f"day {sweep.day} {s}: {view_text(sweep.before.get(s))} -> {view_text(sweep.after.get(s))}"
+        for sweep in n.sweeps
+        for s in n.suppliers
+    ]
+    if n.sweeps:
+        step.notes["last_view"] = {s: last_view(v) for s, v in n.sweeps[-1].after.items()}
+    await check_email_content(j, step, n)
     step.notes["emails"] = [
         f"day {sweep.day} -> {', '.join(e.to)}: {e.body[:700]}"
         for sweep in j.sweeps
         for e in sweep.sent
     ]
-
-
-MULTIPECAS_KEY: Final = "multipecas"
 
 
 # --- Step 6: comparison -----------------------------------------------------------------------

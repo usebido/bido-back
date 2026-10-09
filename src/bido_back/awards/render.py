@@ -21,6 +21,7 @@ from pydantic import JsonValue
 from bido_back.agents.events import args_hash
 from bido_back.exports.render import safe_text
 from bido_back.rfqs.document import DocumentBranding
+from bido_back.templates.signature import signature
 
 XLSX_MEDIA_TYPE: Final = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 HTML_MEDIA_TYPE: Final = "text/html; charset=utf-8"
@@ -319,7 +320,8 @@ def po_email_body(doc: PoDocument, language: str, buyer_name: str) -> str:
         )
         if part
     )
+    closing = "\n".join([sign_off, *signature(buyer_name, doc.buyer_company)])
     return (
         f"{greeting.format(**values)}\n\n{intro.format(**values)}\n\n{lines}\n{terms}\n\n"
-        f"{ask}\n\n{sign_off}\n{buyer_name}\n{doc.buyer_company}"
+        f"{ask}\n\n{closing}"
     )

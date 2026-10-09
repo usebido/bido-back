@@ -33,10 +33,13 @@ from bido_back.db.models import (
     Supplier,
 )
 from bido_back.quotes.extract_job import JOB_TYPE, handle_quote_extract, quote_extract_handler
+from bido_back.quotes.lead_time import decode_lead_time, decode_validity
+from bido_back.quotes.terms import line_terms, offer_terms
 from bido_back.worker.envelope import Envelope
 from tests.agents.test_runner import Script, final, script
 from tests.db.conftest import TwoTenants, app_engine, migrator_engine, two_tenants
 from tests.documents.fixtures import build_xlsx
+from tests.quotes import rfq6
 
 __all__ = ["app_engine", "migrator_engine", "script", "two_tenants"]
 
@@ -325,8 +328,19 @@ async def test_reply_becomes_a_proposal_with_provenance(seeded: Seeded, script: 
         "declined": False,
     }
     assert proposal.fields["_extraction"]["agent"] == "quote_extraction"
-    assert proposal.fields["_extraction"]["prompt_version"] == 5
+    assert proposal.fields["_extraction"]["prompt_version"] == 6
     assert proposal.fields["extra_offers"] == []
+    assert proposal.fields["offer_notes"] == []
+    assert proposal.fields["_signals"] == {
+        "final_offer": False,
+        "final_offer_quote": None,
+        "declined_lines": [],
+        "questions": [],
+    }
+    # Two tiers with their quantities written in the sheet.
+    assert [line.fields["_terms"] for line in lines] == [
+        {"quantity_basis": "stated_tier", "price_applies_to_requested_quantity": True}
+    ] * 2
 
     assert [(pl.min_quantity, pl.unit_price) for pl in lines] == [
         (Decimal("1000.0000"), Decimal("0.450000")),
@@ -659,3 +673,160 @@ async def test_an_older_revision_delivered_late_keeps_the_newer_offer_usable(
     assert not any(line.needs_review for line in lines)
     # The first reply's unrequested offer is still listed after the second reply.
     assert [offer["mpn"] for offer in proposal.fields["extra_offers"]] == ["WS-1"]
+
+
+async def test_an_offer_stored_before_v5_can_still_be_amended(
+    seeded: Seeded, script: Script
+) -> None:
+    first = await seeded.add_message()
+    script(final(**quote_output()))
+    await run_job(seeded, first)
+    # Strip what prompt v6 added from the stored event, as an older proposal has it.
+    async with tenant_session(seeded.engine, seeded.tenant_id) as session:
+        stored = await session.scalar(select(Proposal).where(Proposal.message_id == first))
+        assert stored is not None
+        event = dict(stored.fields["_quote_event"])
+        event["header"] = {
+            k: v for k, v in event["header"].items() if k not in ("validity", "lead_time")
+        }
+        event["lines"] = [
+            {**line, "fields": {k: v for k, v in line["fields"].items() if k != "lead_time_terms"}}
+            for line in event["lines"]
+        ]
+        stored.fields = {**stored.fields, "_quote_event": event}
+    second = await seeded.add_message(body=AMENDMENT, with_sheet=False)
+    script(final(**revision_output()))
+
+    await run_job(seeded, second)
+
+    proposal, lines = (await proposals_of(seeded))[-1]
+    assert proposal.message_id == second
+    assert [(line.unit_price, line.lead_time_days) for line in lines] == [
+        (Decimal("0.45"), 15),
+        (Decimal("0.41"), 42),
+    ]
+    assert not any(line.needs_review for line in lines)
+
+
+@pytest_asyncio.fixture
+async def metalnova(
+    app_engine: AsyncEngine, migrator_engine: AsyncEngine, two_tenants: TwoTenants
+) -> AsyncIterator[Seeded]:
+    """RFQ-6: a supplier created from the chat (language "en", no country)."""
+    tenant = two_tenants.a
+    async with tenant_session(app_engine, tenant.tenant_id) as session:
+        supplier = Supplier(tenant_id=tenant.tenant_id, name="MetalNova Teste Ltda", language="en")
+        contact = Contact(tenant_id=tenant.tenant_id, kind="supplier", email="sales@metal.test")
+        rfq = Rfq(
+            tenant_id=tenant.tenant_id, ref="RFQ-6", title="MTR-100", created_by=tenant.user_id
+        )
+        session.add_all([supplier, contact, rfq])
+        await session.flush()
+        lines = [
+            RfqLine(
+                tenant_id=tenant.tenant_id,
+                rfq_id=rfq.id,
+                position=position,
+                description=description,
+                part_number=part,
+                quantities=[quantity],
+                unit=unit,
+            )
+            for position, description, part, quantity, unit in (
+                (1, "Rolamento motor MTR-100", "000101", 70, "pcs"),
+                (2, "Eixo motor MTR-100", "000102", 15, "pcs"),
+                (3, "Fio de cobre esmaltado", "000104", 12.5, "kg"),
+            )
+        ]
+        invite = Invite(
+            tenant_id=tenant.tenant_id,
+            rfq_id=rfq.id,
+            supplier_id=supplier.id,
+            contact_id=contact.id,
+            reply_token=uuid4().hex,
+            status="responded",
+        )
+        session.add_all([*lines, invite])
+        await session.flush()
+        seeded = Seeded(
+            tenant_id=tenant.tenant_id,
+            invite_id=invite.id,
+            line_ids={line.position: line.id for line in lines},
+            storage=FakeStorage(),
+            engine=app_engine,
+        )
+    try:
+        yield seeded
+    finally:
+        async with tenant_session(migrator_engine, tenant.tenant_id) as session:
+            for model in (ProposalLine, Proposal, Message, Invite, RfqLine, Rfq, Contact, Supplier):
+                await session.execute(delete(model).where(model.tenant_id == tenant.tenant_id))
+
+
+async def test_rfq6_first_reply_stores_lead_time_validity_and_quantity_terms(
+    metalnova: Seeded, script: Script
+) -> None:
+    stub = script(final(**rfq6.first_reply().model_dump(mode="json")))
+    message_id = await metalnova.add_message(
+        body=rfq6.REPLY_1, with_sheet=False, occurred_at=rfq6.REPLY_1_AT, subject=rfq6.SUBJECT
+    )
+
+    await run_job(metalnova, message_id)
+
+    # The model may complete a date without a year; durations are counted by code.
+    user_text = cast(list[dict[str, Any]], stub.calls[0]["input"])[1]["content"]
+    assert '"message_date":"2026-10-09"' in user_text
+    [(proposal, lines)] = await proposals_of(metalnova)
+    # "valid for 15 days" from the message's date.
+    assert proposal.valid_until == date(2026, 10, 24)
+    validity = decode_validity(proposal.fields["validity"]["parsed"])
+    assert validity is not None and validity.anchor == date(2026, 10, 9)
+    # "approximately 10 business days" for all items, with Brazil's holidays (BRL): 17 days.
+    by_position = sorted(lines, key=lambda line: line.fields["_review"]["rfq_line_position"])
+    assert [line.lead_time_days for line in by_position] == [17, 17, 17]
+    assert not any(line.needs_review for line in by_position)
+    assert [line.min_quantity for line in by_position] == [None, None, None]
+    terms = [line_terms(line.fields) for line in by_position]
+    assert all(
+        t.quantity is not None and t.quantity.price_applies_to_requested_quantity for t in terms
+    )
+    shaft = terms[1].lead_time
+    assert shaft is not None and shaft.risk_note == rfq6.SHAFT_RISK and shaft.approximate
+    offer = offer_terms(proposal.fields)
+    assert offer.notes == ("All items are supplied in standard industrial packaging.",)
+    assert not offer.signals.final_offer
+
+
+async def test_rfq6_second_reply_is_read_per_line_in_business_days(
+    metalnova: Seeded, script: Script
+) -> None:
+    script(final(**rfq6.first_reply().model_dump(mode="json")))
+    first = await metalnova.add_message(
+        body=rfq6.REPLY_1, with_sheet=False, occurred_at=rfq6.REPLY_1_AT, subject=rfq6.SUBJECT
+    )
+    await run_job(metalnova, first)
+    stub = script(final(**rfq6.second_reply().model_dump(mode="json")))
+    second = await metalnova.add_message(
+        body=rfq6.REPLY_2, with_sheet=False, occurred_at=rfq6.REPLY_2_AT, subject=rfq6.SUBJECT
+    )
+
+    await run_job(metalnova, second)
+
+    assert "prior_supplier_offer" in str(stub.calls[0]["input"])
+    proposal, _ = (await proposals_of(metalnova))[-1]
+    # What this message says, before reconciliation decides what it changes.
+    event = proposal.fields["_quote_event"]
+    lead_days = [line["fields"]["lead_time_days"] for line in event["lines"]]
+    assert [entry["parsed"] for entry in lead_days] == [12, 19, 13]
+    assert all(entry["issues"] == [] for entry in lead_days)
+    leads = [
+        decode_lead_time(line["fields"]["lead_time_terms"]["parsed"]) for line in event["lines"]
+    ]
+    assert [(lead.amount, lead.unit, lead.basis) for lead in leads if lead is not None] == [
+        (Decimal(7), "business_days", "order"),
+        (Decimal(12), "business_days", "order"),
+        (Decimal(8), "business_days", "order"),
+    ]
+    assert event["header"]["valid_until"]["parsed"] == "2026-10-24"
+    validity = decode_validity(event["header"]["validity"]["parsed"])
+    assert validity is not None and validity.anchor_kind == "original_offer"

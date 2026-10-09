@@ -92,8 +92,8 @@ def test_pdf_shows_the_rfq_in_the_suppliers_language() -> None:
         "15/10/2026",
         "AÇO CARBONO SAE 1020 CHAPA 3MM",
         "Código 100000101",
-        "7500",
-        "KG",
+        "7.500",  # the supplier's locale, as in the email
+        "kg",
         "31/10/2026",
         "DAP",
         "28 DDL",
@@ -377,7 +377,7 @@ def test_the_pdf_carries_what_the_full_email_would() -> None:
         "NCP18XH103F03RB",
         "Murata",
         "Qualificação AEC-Q200",
-        "10000 / 50000",
+        "10.000 / 50.000",  # as the supplier's locale writes them (pt)
         "Por favor, informe o preço unitário para cada quantidade, com a moeda.",
         "Se oferecer um item alternativo, indique claramente, com o código e o fabricante.",
         "Mantenha RFQ-3 no assunto da sua resposta.",

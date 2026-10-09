@@ -1,9 +1,9 @@
 """Negotiation hook quote extraction calls inside its own transaction (no agents).
 
 `cancel_on_new_offer`: the supplier sent a new offer, so a counter-offer or
-best-and-final request still awaiting approval answers an older offer. It is
-canceled and its pending approval expired; the next sweep evaluates the new
-offer (the next round).
+best-and-final request decided or still awaiting approval answers an older
+offer. It is canceled (it never counts as a round) and its pending approval
+expired; the next sweep plans the new offer.
 """
 
 from uuid import UUID
@@ -23,7 +23,7 @@ async def cancel_on_new_offer(
             select(NegotiationMessage)
             .where(
                 NegotiationMessage.invite_id == invite_id,
-                NegotiationMessage.status == "proposed",
+                NegotiationMessage.status.in_(("decided", "proposed")),
             )
             .with_for_update()
         )

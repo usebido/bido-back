@@ -193,7 +193,8 @@ async def test_rfq_flow_over_http(api: Api, rfq_rows: People) -> None:
     assert "reply_token" not in detail["invites"][0]
     # The supplier's own language: what its email and PDF were rendered in.
     assert detail["invites"][0]["document_language"] == "de"
-    assert detail["document_language"] == "en"
+    # Nothing known about a supplier: Bido's standard template is Portuguese.
+    assert detail["document_language"] == "pt"
 
     # Lines are frozen once an email was prepared from them.
     frozen = await http.patch(f"/v1/rfqs/{rfq['id']}/lines/{line_id}", json={"unit": "kg"})
@@ -258,10 +259,11 @@ async def test_rfq_detail_and_list_show_payment_terms_and_quote_validity(
 async def test_invite_says_which_language_its_document_uses(api: Api) -> None:
     """The preview mirrors the PDF only when it knows the language the send will
     pick for each supplier (`bido_back.rfqs.language`): the supplier's own, else
-    its country's, else the RFQ default."""
+    its country's, else its legal form's, else the buyer's (the RFQ default; this
+    tenant uses Bido's Portuguese standard template)."""
     http = api.http
     created = (await http.post("/v1/rfqs", json={"text": "Need MLCC", "currency": "EUR"})).json()
-    assert created["document_language"] == "en"
+    assert created["document_language"] == "pt"
     assert created["invites"] == []
 
     async def invite(supplier: dict[str, object]) -> dict[str, object]:
@@ -292,20 +294,26 @@ async def test_invite_says_which_language_its_document_uses(api: Api) -> None:
         }
     )
     assert brazilian["document_language"] == "pt"
+    # Nothing known about the supplier (RFQ-6): the RFQ default, the buyer's language.
     unknown = await invite(
         {"name": "Nowhere Components", "contacts": [{"email": "sales@nowhere.example.test"}]}
     )
-    assert unknown["document_language"] == "en"
+    assert unknown["document_language"] == "pt"
+    english = await invite(
+        {"name": "Pennine Components Ltd", "contacts": [{"email": "sales@pennine.example.test"}]}
+    )
+    assert english["document_language"] == "en"
 
     detail = (await http.get(f"/v1/rfqs/{created['id']}")).json()
-    assert detail["document_language"] == "en"
+    assert detail["document_language"] == "pt"
     assert [(i["supplier_name"], i["document_language"]) for i in detail["invites"]] == [
         ("Condensadores do Minho", "pt"),
         ("Capacitores Paulista", "pt"),
-        ("Nowhere Components", "en"),
+        ("Nowhere Components", "pt"),
+        ("Pennine Components Ltd", "en"),
     ]
     [listed] = (await http.get("/v1/rfqs")).json()
-    assert listed["document_language"] == "en"
+    assert listed["document_language"] == "pt"
 
 
 @pytest.mark.db

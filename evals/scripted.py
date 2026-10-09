@@ -5,24 +5,21 @@ through (`agno_adapter.stream_run`) for a lookup by agent name, so the real
 services, writers, checks and jobs run unchanged around it. The scripts are
 what a correct model returns: intake answers the scenario's golden lines,
 extraction the supplier's truth (registered when the supplier writes), and the
-writers fixed sentences in the supplier's language with every number exactly
-as given. Mock mode checks the harness and the deterministic code, not a model.
+thread writers no note (code renders their emails). Mock mode checks the
+harness and the deterministic code, not a model.
 """
 
 from collections.abc import AsyncIterator, Callable, Generator
 from contextlib import contextmanager
-from decimal import Decimal
 from typing import Any, Final
 
 from pydantic import BaseModel
 
 from bido_back.agents.catalog.contracts import (
     AwardNoticeInput,
-    AwardNoticeOutput,
+    EmailNoteOutput,
     FollowupEmailInput,
-    FollowupEmailOutput,
     NegotiationEmailInput,
-    NegotiationEmailOutput,
     PoResponseInput,
     PoResponseOutput,
     QuoteExtractionInput,
@@ -34,7 +31,6 @@ from bido_back.agents.catalog.contracts import (
 )
 from bido_back.agents.context import ToolContext
 from bido_back.agents.events import Event, RunCompleted, RunFailed
-from evals.personas import number, written_date
 
 Script = Callable[[Any], BaseModel | None]
 
@@ -150,134 +146,19 @@ def localize(task: RfqEmailLocalizeInput) -> RfqEmailLocalizeOutput | None:
 
 
 # --- Writers --------------------------------------------------------------------------------
-
-_W: Final[dict[str, dict[str, str]]] = {
-    "de": {
-        "hello": "Sehr geehrte Damen und Herren,",
-        "chase": "wir möchten freundlich an unsere Anfrage {ref} ({title}) erinnern und "
-        "freuen uns auf Ihr Angebot.",
-        "clarify": "vielen Dank für Ihr Angebot zu {ref}. Bitte ergänzen Sie noch:",
-        "counter": "vielen Dank für Ihr Angebot zu {ref}. Wir bitten um folgende Anpassung:",
-        "bafo": "vielen Dank für Ihr Angebot zu {ref}. Bitte senden Sie uns Ihr bestes und "
-        "letztes Angebot:",
-        "competition": "Uns liegt ein wettbewerbsfähigeres Angebot vor.",
-        "price": "Pos. {p} {line}: Zielpreis {price} {cur} pro Stück",
-        "lead": "Pos. {p} {line}: Lieferzeit höchstens {days} Tage",
-        "by": "Bitte antworten Sie bis {date}.",
-        "notice": "vielen Dank für Ihr Angebot zu {ref} ({title}). Wir haben uns diesmal für "
-        "ein anderes Angebot entschieden und freuen uns auf künftige Anfragen.",
-        "bye": "Mit freundlichen Grüßen",
-    },
-    "it": {
-        "hello": "Buongiorno,",
-        "chase": "vi ricordiamo la nostra richiesta {ref} ({title}) e restiamo in attesa "
-        "della vostra offerta.",
-        "clarify": "grazie per la vostra offerta per {ref}. Vi chiediamo di completare:",
-        "counter": "grazie per la vostra offerta per {ref}. Vi chiediamo di rivedere:",
-        "bafo": "grazie per la vostra offerta per {ref}. Vi chiediamo la vostra migliore "
-        "offerta finale:",
-        "competition": "Abbiamo ricevuto un'offerta più competitiva.",
-        "price": "Pos. {p} {line}: prezzo obiettivo {price} {cur} cad.",
-        "lead": "Pos. {p} {line}: consegna entro {days} giorni",
-        "by": "Vi preghiamo di rispondere entro il {date}.",
-        "notice": "grazie per la vostra offerta per {ref} ({title}). Questa volta abbiamo "
-        "scelto un'altra offerta e restiamo a disposizione per le prossime richieste.",
-        "bye": "Cordiali saluti",
-    },
-    "fr": {
-        "hello": "Bonjour,",
-        "chase": "nous nous permettons de vous rappeler notre demande {ref} ({title}) et "
-        "attendons votre offre.",
-        "clarify": "merci pour votre offre concernant {ref}. Merci de nous préciser :",
-        "counter": "merci pour votre offre concernant {ref}. Nous vous demandons de revoir :",
-        "bafo": "merci pour votre offre concernant {ref}. Merci de nous envoyer votre "
-        "meilleure offre finale :",
-        "competition": "Nous avons reçu une offre plus compétitive.",
-        "price": "Pos. {p} {line} : prix cible {price} {cur} l'unité",
-        "lead": "Pos. {p} {line} : délai de livraison de {days} jours maximum",
-        "by": "Merci de nous répondre avant le {date}.",
-        "notice": "merci pour votre offre concernant {ref} ({title}). Nous avons retenu une "
-        "autre offre cette fois et restons à votre disposition pour nos prochaines demandes.",
-        "bye": "Cordialement",
-    },
-    "en": {
-        "hello": "Hello,",
-        "chase": "we would like to remind you of our request {ref} ({title}) and look "
-        "forward to your quotation.",
-        "clarify": "thank you for your quotation for {ref}. Please complete the following:",
-        "counter": "thank you for your quotation for {ref}. We ask you to review:",
-        "bafo": "thank you for your quotation for {ref}. Please send us your best and final offer:",
-        "competition": "We have received a more competitive offer.",
-        "price": "Item {p} {line}: target price {price} {cur} each",
-        "lead": "Item {p} {line}: lead time of at most {days} days",
-        "by": "Please answer by {date}.",
-        "notice": "thank you for your quotation for {ref} ({title}). This time we chose "
-        "another offer and look forward to working with you on future requests.",
-        "bye": "Best regards",
-    },
-}
-_FIELD: Final[dict[str, dict[str, str]]] = {
-    "de": {"currency": "Währung", "valid_until": "Gültigkeit des Angebots",
-           "unit_price": "Stückpreis", "quantity": "Menge", "lead_time": "Lieferzeit"},
-    "it": {"currency": "valuta", "valid_until": "validità dell'offerta",
-           "unit_price": "prezzo unitario", "quantity": "quantità",
-           "lead_time": "tempi di consegna"},
-    "fr": {"currency": "devise", "valid_until": "validité de l'offre",
-           "unit_price": "prix unitaire", "quantity": "quantité",
-           "lead_time": "délai de livraison"},
-    "en": {"currency": "currency", "valid_until": "offer validity",
-           "unit_price": "unit price", "quantity": "quantity", "lead_time": "lead time"},
-}  # fmt: skip
+#
+# Code renders every follow-up, negotiation and "not selected" email (`bido_back.supplier_email`):
+# the writers' v2 prompts only allow an optional note, empty by default. A correct model
+# returns none, and so do these scripts.
 
 
-def _lang(language: str) -> str:
-    return language if language in _W else "en"
+def followup(task: FollowupEmailInput) -> EmailNoteOutput:
+    return EmailNoteOutput(note="")
 
 
-def _t(language: str, key: str, **values: object) -> str:
-    return _W[_lang(language)][key].format(**values)
+def negotiation(task: NegotiationEmailInput) -> EmailNoteOutput:
+    return EmailNoteOutput(note="")
 
 
-def followup(task: FollowupEmailInput) -> FollowupEmailOutput:
-    lang = _lang(task.supplier_language)
-    if task.kind == "chase":
-        middle = _t(lang, "chase", ref=task.rfq_ref, title=task.rfq_title)
-    else:
-        fields = _FIELD[lang]
-        items = [
-            f"- {item.line + ': ' if item.line else ''}{fields[item.field]}"
-            for item in task.open_items
-        ]
-        middle = "\n".join([_t(lang, "clarify", ref=task.rfq_ref), *items])
-    return FollowupEmailOutput(
-        body=f"{_t(lang, 'hello')}\n\n{middle}\n\n{_t(lang, 'bye')}\n{task.buyer_name}"
-    )
-
-
-def negotiation(task: NegotiationEmailInput) -> NegotiationEmailOutput:
-    lang = _lang(task.supplier_language)
-    lines: list[str] = [_t(lang, task.action, ref=task.rfq_ref)]
-    if task.mention_competition:
-        lines.insert(0, _t(lang, "competition"))
-    for ask in task.lines:
-        if ask.target_unit_price is not None:
-            price = number(Decimal(ask.target_unit_price), lang)
-            lines.append(_t(lang, "price", p=ask.position, line=ask.line, price=price,
-                            cur=ask.currency))  # fmt: skip
-        if ask.required_lead_time_days is not None:
-            lines.append(_t(lang, "lead", p=ask.position, line=ask.line,
-                            days=ask.required_lead_time_days))  # fmt: skip
-    if task.reply_by is not None:
-        lines.append(_t(lang, "by", date=written_date(task.reply_by, lang)))
-    body = "\n".join(lines)
-    return NegotiationEmailOutput(
-        body=f"{_t(lang, 'hello')}\n\n{body}\n\n{_t(lang, 'bye')}\n{task.buyer_name}"
-    )
-
-
-def notice(task: AwardNoticeInput) -> AwardNoticeOutput:
-    lang = _lang(task.supplier_language)
-    middle = _t(lang, "notice", ref=task.rfq_ref, title=task.rfq_title)
-    return AwardNoticeOutput(
-        body=f"{_t(lang, 'hello')}\n\n{middle}\n\n{_t(lang, 'bye')}\n{task.buyer_name}"
-    )
+def notice(task: AwardNoticeInput) -> EmailNoteOutput:
+    return EmailNoteOutput(note="")

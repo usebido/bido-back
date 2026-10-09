@@ -319,7 +319,13 @@ class LineLimitIn(BaseModel):
 class ProposeMandateIn(BaseModel):
     rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
     deadline: date = Field(description="The last day of the negotiation, as the buyer said")
-    max_rounds: int = Field(default=3, ge=1, le=10)
+    max_rounds: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="Negotiation emails per supplier: by default one request for a revised "
+        "offer, then one best-and-final request",
+    )
     limits: list[LineLimitIn] = Field(
         default_factory=list[LineLimitIn],
         max_length=200,

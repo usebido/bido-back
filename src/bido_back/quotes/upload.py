@@ -67,6 +67,7 @@ from bido_back.intake.service import safe_filename
 from bido_back.quotes.extract_job import (
     RunMeta,
     email_line,
+    message_date,
     offer_events,
     persist_quote,
     requested_line,
@@ -168,6 +169,8 @@ class QuoteTarget:
     supplier_id: UUID
     supplier_name: str
     supplier_language: str | None
+    # Its holiday calendar counts business-day lead times and validity periods.
+    supplier_country: str | None
     contact_email: str | None
     # Position -> description, for the preview's lines.
     line_descriptions: dict[int, str]
@@ -226,6 +229,7 @@ async def quote_target(session: AsyncSession, rfq: Rfq, invite_id: UUID) -> Quot
         supplier_id=supplier.id,
         supplier_name=supplier.name,
         supplier_language=supplier.language,
+        supplier_country=supplier.country,
         contact_email=email,
         line_descriptions=descriptions,
     )
@@ -266,6 +270,11 @@ async def extract_uploaded_quote(
         files = await owned_uploads(session, principal, upload_ids)
         prior = await offer_events(session, target.invite_id)
         prior_state = reconcile(prior) if prior else None
+    # The file carries no message date: durations in it count from the day it is
+    # registered, as an emailed quote's count from its Date header.
+    original_offer_date = min(
+        (message_date(event.occurred_at, event.received_at) for event in prior), default=None
+    )
 
     documents = await _documents(storage, files)
     task = QuoteExtractionInput(
@@ -283,6 +292,7 @@ async def extract_uploaded_quote(
             if prior_state is not None
             else None
         ),
+        message_date=today,
     )
     run_id = uuid4()
     output = await extractor(
@@ -298,6 +308,9 @@ async def extract_uploaded_quote(
         ),
         today=today,
         decimal=decimal_separator_for(target.supplier_language),
+        offer_date=today,
+        original_offer_date=original_offer_date,
+        country=target.supplier_country,
         rfq_currency=target.rfq_currency,
     )
     if not validated.is_quote:

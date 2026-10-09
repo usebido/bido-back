@@ -1,8 +1,12 @@
 """The negotiation of an RFQ: `/v1/rfqs/{rfq_id}/negotiation`.
 
 GET shows the settings (deadline, round cap, per-line limits), where each
-supplier stands (rounds used, how its latest offer compares to the limits,
-every counter-offer proposed) and, once closed, the outcome. PUT saves the
+supplier stands (its state in words: waiting for the supplier until when, held
+for approval, accepted internally, needs your decision or answer, closed; the
+rounds sent; how its latest offer compares to the limits and need-by dates;
+every email decided) and, once closed, the outcome. POST
+`/suppliers/{invite_id}/release-hold` negotiates an offer held for review as
+it is (the buyer's audited decision). PUT saves the
 settings and opens the negotiation; the sweeper applies it on its next run.
 POST `/close` closes it now (the buyer saw "ready to close", or decides not
 to wait) and returns the outcome: the best eligible offer per line and tier.
@@ -31,7 +35,11 @@ from bido_back.mandates.schemas import (
     ProposeMandateRequest,
 )
 from bido_back.negotiation import service
-from bido_back.negotiation.schemas import NegotiationSettingsUpdate, RfqNegotiation
+from bido_back.negotiation.schemas import (
+    NegotiationSettingsUpdate,
+    ReleaseHoldRequest,
+    RfqNegotiation,
+)
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.errors import RfqError
 from bido_back.rfqs.mailbox import MailboxSenderFactory
@@ -58,6 +66,29 @@ def negotiation_router() -> APIRouter:
     ) -> RfqNegotiation:
         try:
             return await service.update_negotiation(db, principal, rfq_id, body)
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
+
+    @router.post(
+        "/{rfq_id}/negotiation/suppliers/{invite_id}/release-hold",
+        responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT),
+    )
+    async def release_hold(  # pyright: ignore[reportUnusedFunction]
+        rfq_id: UUID,
+        invite_id: UUID,
+        body: ReleaseHoldRequest,
+        principal: CurrentPrincipal,
+        db: Db,
+    ) -> RfqNegotiation:
+        """Negotiate a supplier's offer as it is, though it was held for review.
+
+        `proposal_id` is the offer the buyer reviewed (`latest_proposal_id`); 409 when
+        a newer one arrived meanwhile. The buyer's decision, audited. A newer offer
+        from that supplier is held again if it needs to be; a withdrawn offer stays
+        closed.
+        """
+        try:
+            return await service.release_hold(db, principal, rfq_id, invite_id, body.proposal_id)
         except RfqError as exc:
             raise rfq_http_error(exc) from None
 

@@ -120,8 +120,9 @@ def test_buyer_columns_in_their_order_then_the_missing_line_data() -> None:
     assert rows[0] == [
         "1",
         "NTC thermistor 10k",
-        "10000 / 50000",
-        "pcs",
+        # The supplier's locale: thousands grouped, pieces as "pç" (as every later email).
+        "10.000 / 50.000",
+        "pç",
         "NCP18XH103F03RB",
         "",
         "",
@@ -290,7 +291,7 @@ def test_an_english_translation_of_prazo_is_still_the_need_by_date() -> None:
     )
 
     assert "Lead time" not in rows[0]
-    assert dict(zip(rows[0], rows[1], strict=True))["Need-by date"] == "2026-10-31"
+    assert dict(zip(rows[0], rows[1], strict=True))["Need-by date"] == "31 Oct 2026"
 
 
 def test_the_unit_is_the_lines_own() -> None:
@@ -344,7 +345,7 @@ def test_the_html_is_a_document_with_a_real_table() -> None:
 
     assert rendered.html.startswith('<!doctype html><html lang="pt">')
     assert rendered.html.count("<tr>") == 3  # heading + two lines
-    assert ">7500</td>" in rendered.html and "text-align:right" in rendered.html
+    assert ">7.500</td>" in rendered.html and "text-align:right" in rendered.html
 
 
 def test_the_buyers_terms_are_stated_only_when_set() -> None:
@@ -405,6 +406,30 @@ def test_a_bido_column_empty_on_every_line_is_dropped_supplier_columns_stay() ->
 
     header, *_ = table_rows(render(template).text)
     assert "Prazo" in header  # with dates it stays
+
+
+def test_the_subject_names_the_type_once_and_numbers_follow_the_suppliers_locale() -> None:
+    wire = replace(STEEL, quantities=[Decimal("12.5"), Decimal("1250")])
+    base = RenderInput(
+        rfq_ref="RFQ-6",
+        rfq_title="Cotação de componentes para motor MTR-100",
+        response_due=date(2026, 10, 20),
+        buyer_name="Biduuuuu",
+        buyer_company="Biduuuuu",
+        language="pt",
+        template=STANDARD_TEMPLATE,
+        display=STANDARD_TEMPLATE,
+        lines=(wire,),
+    )
+    portuguese = render_rfq(base)
+    # The title repeated the type ("Cotação de …"): the subject says it once.
+    assert portuguese.subject == "[RFQ-6] Solicitação de cotação: Componentes para motor MTR-100"
+    assert table_rows(portuguese.text)[1][2] == "12,5 / 1.250"
+    mexico = render_rfq(replace(base, language="es", region="MX"))
+    assert table_rows(mexico.text)[1][2] == "12.5 / 1,250"
+    english = render_rfq(replace(base, language="en"))
+    assert "Please send your quote by 20 Oct 2026." in english.text
+    assert "2026-10-20" not in english.text
 
 
 def cover(language: str = "pt", **overrides: object) -> RenderedRfq:

@@ -708,3 +708,105 @@ def test_a_wide_tables_summary_stays_within_its_budget() -> None:
     # The header is shown, and text columns keep listing spellings where they fit.
     assert summary.shown[0].row == 1
     assert any(p.values for p in summary.profiles if p.numbers == 0)
+
+
+def test_a_section_running_past_the_page_is_read_up_to_the_page() -> None:
+    table = EvidenceTable(
+        source_id="S",
+        name="T",
+        rows=[["Part", "Qty"], ["P-01", "25"], ["P-02", "30"], ["P-03", "35"]],
+    )
+    proposal = MappingProposal(
+        sections=[
+            TableProposal(
+                kind="material_requirement",
+                header_row=1,
+                first_row=2,
+                last_row=9,  # past the page and the table: cut, not rejected
+                columns=columns({"part_number": 1, "quantity": 2}),
+            )
+        ]
+    )
+
+    records, issues, covered = materialize(table, proposal, 1, 3)
+
+    assert [r.values["part_number"] for r in records] == ["P-01", "P-02"]
+    assert covered == {2, 3}
+    assert issues == []
+
+
+async def test_a_page_with_a_rejected_section_is_asked_once_more_with_the_reason() -> None:
+    table = EvidenceTable(
+        source_id="S", name="T", rows=[["Part", "Qty"], ["P-01", "25"], ["P-02", "30"]]
+    )
+    seen: list[list[str]] = []
+
+    async def mapper(task: MappingTask, _: ToolContext) -> MappingProposal:
+        seen.append(task.retry_feedback)
+        # First answer maps two fields to one column; the corrected one does not.
+        assigned = (
+            {"part_number": 1, "quantity": 1}
+            if not task.retry_feedback
+            else {
+                "part_number": 1,
+                "quantity": 2,
+            }
+        )
+        return MappingProposal(
+            sections=[
+                TableProposal(
+                    kind="material_requirement",
+                    header_row=1,
+                    first_row=2,
+                    last_row=3,
+                    columns=columns(assigned),
+                )
+            ]
+        )
+
+    records, issues, coverage = await map_sources([table], "Read", context(), mapper)
+
+    assert len(seen) == 2 and seen[0] == []
+    assert any("same field twice" in item or "same column" in item for item in seen[1])
+    assert [r.values["quantity"] for r in records] == ["25", "30"]
+    assert not any(issue.code == "invalid_mapping" for issue in issues)
+    assert coverage[0].mapped_rows == 2
+
+
+async def test_a_retry_that_is_no_better_keeps_the_first_answer() -> None:
+    table = EvidenceTable(
+        source_id="S", name="T", rows=[["Part", "Qty"], ["P-01", "25"], ["P-02", "30"]]
+    )
+    calls = 0
+
+    async def mapper(task: MappingTask, _: ToolContext) -> MappingProposal:
+        nonlocal calls
+        calls += 1
+        sections = [
+            TableProposal(
+                kind="material_requirement",
+                header_row=1,
+                first_row=2,
+                last_row=3,
+                columns=columns({"part_number": 1}),
+            )
+        ]
+        if not task.retry_feedback:
+            sections.append(
+                TableProposal(
+                    kind="inventory",
+                    header_row=1,
+                    first_row=2,
+                    last_row=3,
+                    columns=columns({"part_number": 7}),
+                )
+            )
+        else:
+            sections = []  # a worse second answer
+        return MappingProposal(sections=sections)
+
+    records, issues, _ = await map_sources([table], "Read", context(), mapper)
+
+    assert calls == 2
+    assert [r.values["part_number"] for r in records] == ["P-01", "P-02"]
+    assert [i.code for i in issues if i.code == "invalid_mapping"] == ["invalid_mapping"]

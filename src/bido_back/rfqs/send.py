@@ -49,6 +49,7 @@ rejected one while concurrent prepares of the same attempt still do.
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated, Final
@@ -133,8 +134,16 @@ class SendRfqEmailArgs(BaseModel):
     # proposals have none and go out as text only.
     html_body: str | None = Field(default=None, max_length=200_000)
     # The supplier's RFQ document, attached as a PDF rendered from exactly this.
-    # Optional: older proposals have none and go out without an attachment.
+    # Optional: older proposals have none and go out without an attachment; None too
+    # when the PDF did not render and the full email goes instead.
     document: RfqDocument | None = None
+    # The thread's language (ISO 639-1), decided when this email was prepared
+    # (`bido_back.rfqs.language.decide_email_language`): every later email of the
+    # thread keeps it, with or without the document. Left out of the approved arguments
+    # when unset, so emails approved before it hash the same.
+    language: str | None = Field(
+        default=None, pattern=r"^[a-z]{2}$", exclude_if=lambda v: v is None
+    )
 
 
 class SendRfqEmailResult(BaseModel):
@@ -143,12 +152,19 @@ class SendRfqEmailResult(BaseModel):
     already_sent: bool
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 @dataclass(frozen=True, slots=True)
 class RfqActDeps:
     db: AsyncEngine | async_sessionmaker[AsyncSession]
     email_domain: str
     # Default: the buyer's connected mailbox (bido_back.mailbox, imported lazily).
     mailbox_senders: MailboxSenderFactory = field(default=default_mailbox_sender)
+    # When a follow-up went out (its schedule and the clarification ledger read it);
+    # evals pin it to their simulated clock.
+    clock: Callable[[], datetime] = field(default=_utc_now)
 
 
 @dataclass(frozen=True, slots=True)

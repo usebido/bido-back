@@ -3,13 +3,41 @@
 Every supplier reply remains an immutable validated event. Proposal versions contain
 an effective snapshot rebuilt in business order. Field evidence retains the original
 message and each explicit statement authorizing inheritance. Ambiguity fails closed.
+
+How a reply changes the offer:
+
+- A replacement is the whole new offer: earlier holds and pending updates go.
+- An amendment changes what it states and keeps the rest only with an explicit
+  "other terms unchanged". It may quote a requested line the offer lacked. Without
+  that statement it is held and kept pending: a later amendment that has the
+  statement, or a reply to our clarification, covers it, and it is applied first.
+- A reply to our clarification (`OfferEvent.answers`, from the ledger in
+  `bido_back.followups.ledger`) is applied as a supplement: the fields Bido asked
+  for are taken from it, everything else carries over, with no "unchanged"
+  sentence. Restating a value changes nothing and filling a gap is fine; changing
+  a commercial term nobody asked about (price, currency, unit, basis, MOQ,
+  payment, Incoterm, conditions) holds the offer, unless the reply is a whole
+  new offer.
+- A question-only reply changes nothing and holds nothing: supplier questions
+  are tracked in the ledger (`technical_questions` still names them). Nor does a
+  reply that only declines requested lines.
+- Declined lines (a reply's signals, `ValidatedQuote.signals`, or a withdrawal)
+  are kept in `declined_line_positions` until a later reply offers them.
+- A buyer release ("use the current offer", `OfferEvent.released`) clears the
+  holds up to that reply: the offer as shown is the offer.
+
+Holds are recomputed on every reply from this event history, never carried as
+leftovers: line issues that follow from a field (currency, missing price,
+conditions, tax rate) are re-derived from the merged fields, so an answer that
+fills a gap also clears the issue it caused.
 """
 
 import re
-from dataclasses import dataclass, replace
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta
 from decimal import Decimal
-from typing import Literal
+from typing import Final, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, JsonValue
@@ -28,6 +56,7 @@ from bido_back.quotes.validation import (
     FieldKind,
     LineCheck,
     ValidatedQuote,
+    absent_field,
 )
 
 
@@ -58,6 +87,25 @@ class StoredQuote(BaseModel):
     issues: tuple[str, ...]
 
 
+ReplyKind = Literal["replacement", "amendment", "withdrawal", "clarification"]
+
+
+@dataclass(frozen=True, slots=True)
+class AskedField:
+    """One item of our clarification that a supplier reply answers.
+
+    `position` is the RFQ line position (None for the whole offer); `field` is the
+    ledger's field: currency, valid_until, unit_price, quantity, lead_time,
+    delivery_date.
+    """
+
+    position: int | None
+    field: str
+
+    def provenance(self) -> dict[str, JsonValue]:
+        return {"position": self.position, "field": self.field}
+
+
 @dataclass(frozen=True, slots=True)
 class OfferEvent:
     message_id: UUID
@@ -68,6 +116,11 @@ class OfferEvent:
     quote: ValidatedQuote
     # The supplier's explicit revision number ("Revisão 2", "Rev. 3", "R01"), if any.
     revision: int | None = None
+    # The items of our clarification this reply answers (its first reply with an offer
+    # after the email went out); empty for any other reply.
+    answers: tuple[AskedField, ...] = ()
+    # The buyer released the holds of the offer as it stood after this reply.
+    released: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,10 +128,18 @@ class OfferState:
     quote: ValidatedQuote
     active_message_id: UUID
     message_ids: tuple[UUID, ...]
-    reply_kind: Literal["replacement", "amendment", "withdrawal", "clarification"]
+    # How the effective offer was last set: a reply to our clarification is an
+    # amendment; a question-only reply does not change it.
+    reply_kind: ReplyKind
     issues: tuple[str, ...] = ()
     technical_questions: tuple[str, ...] = ()
     withdrawn_line_positions: tuple[int, ...] = ()
+    # The clarification items the latest reply answered (applied as a supplement).
+    answered: tuple[AskedField, ...] = ()
+    # Positions the supplier withdrew (or declined) and has not offered since.
+    declined_line_positions: tuple[int, ...] = ()
+    # The replies whose holds are still active (not applied, or applied with a doubt).
+    held_message_ids: tuple[UUID, ...] = ()
 
     def provenance(self) -> dict[str, JsonValue]:
         return {
@@ -86,11 +147,32 @@ class OfferState:
             "message_ids": [str(message_id) for message_id in self.message_ids],
             "reply_kind": self.reply_kind,
             "issues": list(self.issues),
-            "requires_clarification": bool(self.issues) or self.reply_kind == "clarification",
+            "requires_clarification": bool(self.issues)
+            or self.reply_kind == "clarification"
+            or bool(self.technical_questions),
             "technical_questions": list(self.technical_questions),
             "withdrawn_line_positions": list(self.withdrawn_line_positions),
             "fully_withdrawn": self.reply_kind == "withdrawal" and not self.quote.lines,
+            "answered_asks": [answer.provenance() for answer in self.answered],
+            "declined_line_positions": list(self.declined_line_positions),
+            "held_message_ids": [str(message_id) for message_id in self.held_message_ids],
         }
+
+
+def released_message_id(offer_state: object) -> UUID | None:
+    """The reply whose holds the buyer released, from a proposal's `_offer_state`."""
+    if not isinstance(offer_state, Mapping):
+        return None
+    released = cast(Mapping[str, object], offer_state).get("released")
+    if not isinstance(released, Mapping):
+        return None
+    raw = cast(Mapping[str, object], released).get("message_id")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return UUID(raw)
+    except ValueError:
+        return None
 
 
 def _store_field(check: FieldCheck) -> StoredField:
@@ -152,13 +234,6 @@ def restore_field(name: str, kind: FieldKind, stored: StoredField) -> FieldCheck
     )
 
 
-def _absent(name: str) -> FieldCheck:
-    """A field the stored quote predates (added to the contract since): never stated."""
-    return FieldCheck(
-        name=name, extracted=ExtractedValue(value=None, source=None, confidence=0), parsed=None
-    )
-
-
 def restore_quote(raw: object) -> ValidatedQuote:
     record = StoredQuote.model_validate(raw)
     return ValidatedQuote(
@@ -166,7 +241,7 @@ def restore_quote(raw: object) -> ValidatedQuote:
         header={
             name: restore_field(name, kind, record.header[name])
             if name in record.header
-            else _absent(name)
+            else absent_field(name)  # a field the stored quote predates: never stated
             for name, kind in HEADER_FIELDS.items()
         },
         lines=tuple(
@@ -177,7 +252,7 @@ def restore_quote(raw: object) -> ValidatedQuote:
                 fields={
                     name: restore_field(name, kind, line.fields[name])
                     if name in line.fields
-                    else _absent(name)
+                    else absent_field(name)
                     for name, kind in LINE_FIELDS.items()
                 },
                 issues=line.issues,
@@ -235,12 +310,13 @@ def revision_marker(subject: str | None, body: str | None = None) -> int | None:
     return next(iter(found)) if len(found) == 1 else None
 
 
-def _ordered(events: list[OfferEvent]) -> tuple[list[OfferEvent], tuple[str, ...]]:
+def _ordered(events: list[OfferEvent]) -> tuple[list[OfferEvent], list[tuple[str, int]]]:
     """Known reply ancestry wins; receipt time bounds untrusted supplier dates.
 
     Messages delivered in another order than their Date headers say are
     ordered by those dates only when the supplier's explicit revision numbers
-    agree; otherwise the chronology is uncertain and the offer is held.
+    agree; otherwise the chronology is uncertain and the offer is held. Each
+    issue comes with the position (in the order) of the latest reply it involves.
     """
     by_header = {event.message_header.strip(): event for event in events if event.message_header}
     pending = sorted(
@@ -253,10 +329,8 @@ def _ordered(events: list[OfferEvent]) -> tuple[list[OfferEvent], tuple[str, ...
         ),
     )
     result: list[OfferEvent] = []
-    issues: list[str] = []
+    cyclic: list[tuple[str, int]] = []
     seen: set[UUID] = set()
-    if any(event.occurred_at > event.received_at + timedelta(minutes=5) for event in events):
-        issues.append("untrusted_future_message_date")
     # No message body or model-supplied reference can create a reply edge.
     while pending:
         progressed = False
@@ -272,10 +346,16 @@ def _ordered(events: list[OfferEvent]) -> tuple[list[OfferEvent], tuple[str, ...
             progressed = True
             break
         if not progressed:
-            issues.append("cyclic_reply_relationship")
             result.extend(pending)
+            cyclic.append(("cyclic_reply_relationship", len(result) - 1))
             break
-    for previous, current in zip(result, result[1:], strict=False):
+    issues = [
+        ("untrusted_future_message_date", index)
+        for index, event in enumerate(result)
+        if event.occurred_at > event.received_at + timedelta(minutes=5)
+    ]
+    issues.extend(cyclic)
+    for index, (previous, current) in enumerate(zip(result, result[1:], strict=False), start=1):
         directly_related = (current.in_reply_to or "").strip() == (
             previous.message_header or ""
         ).strip() and current.in_reply_to is not None
@@ -288,14 +368,14 @@ def _ordered(events: list[OfferEvent]) -> tuple[list[OfferEvent], tuple[str, ...
         ):
             # Two explicit revision numbers: they must agree with the dates.
             if previous.revision > current.revision:
-                issues.append("uncertain_message_chronology")
+                issues.append(("uncertain_message_chronology", index))
             continue
         if (
             current.received_at < previous.received_at
             or current.occurred_at == previous.occurred_at
         ):
-            issues.append("uncertain_message_chronology")
-    return result, tuple(dict.fromkeys(issues))
+            issues.append(("uncertain_message_chronology", index))
+    return result, issues
 
 
 _UNCHANGED = re.compile(
@@ -339,97 +419,356 @@ def _hold(quote: ValidatedQuote, *issues: str) -> ValidatedQuote:
     )
 
 
-def _inherit(previous: FieldCheck, event: OfferEvent) -> FieldCheck:
+def _inherit(previous: FieldCheck, event: OfferEvent, basis: str | None = None) -> FieldCheck:
+    """`previous` carried over by `event`; the evidence says why it may be."""
     source = event.quote.output.unchanged_terms.source
     evidence: dict[str, JsonValue] = {
         "message_id": str(event.message_id),
         "source": source.model_dump(mode="json") if source is not None else None,
     }
+    if basis is not None:
+        evidence["basis"] = basis
     return replace(previous, retained_by=(*previous.retained_by, evidence))
 
 
 def _merge_fields(
-    previous: dict[str, FieldCheck], current: dict[str, FieldCheck], event: OfferEvent
+    previous: Mapping[str, FieldCheck],
+    current: Mapping[str, FieldCheck],
+    event: OfferEvent,
+    basis: str | None = None,
 ) -> dict[str, FieldCheck]:
     return {
-        name: check if check.extracted.value is not None else _inherit(previous[name], event)
+        name: check if check.extracted.value is not None else _inherit(previous[name], event, basis)
         for name, check in current.items()
     }
 
 
-def _candidate(previous: LineCheck, update: LineCheck) -> bool:
+def _tier_matches(previous: LineCheck, update: LineCheck, *, only_tier: bool) -> bool:
+    """`update` restates `previous`'s price break. A break the offer left without a
+    quantity is matched by position when it is the line's only break."""
     if previous.rfq_line_id is None or previous.rfq_line_id != update.rfq_line_id:
         return False
-    for name in ("min_quantity", "offered_mpn"):
-        offered = update.fields[name].parsed
-        if offered is not None and offered != previous.fields[name].parsed:
-            return False
-    return True
+    offered_mpn = update.fields["offered_mpn"].parsed
+    if offered_mpn is not None and offered_mpn != previous.fields["offered_mpn"].parsed:
+        return False
+    offered = update.fields["min_quantity"].parsed
+    stored = previous.fields["min_quantity"].parsed
+    return offered is None or offered == stored or (stored is None and only_tier)
 
 
-def _amend(previous: ValidatedQuote, event: OfferEvent) -> ValidatedQuote:
+def _matches(lines: Sequence[LineCheck], update: LineCheck) -> list[int]:
+    """The previous price breaks `update` may restate (exactly one, unless ambiguous)."""
+    same_line = [
+        index
+        for index, line in enumerate(lines)
+        if line.rfq_line_id is not None and line.rfq_line_id == update.rfq_line_id
+    ]
+    only_tier = len(same_line) == 1
+    return [i for i in same_line if _tier_matches(lines[i], update, only_tier=only_tier)]
+
+
+def _new_line(lines: Sequence[LineCheck], update: LineCheck) -> bool:
+    """`update` quotes a requested line the offer had no price break for at all."""
+    return update.rfq_line_id is not None and not any(
+        line.rfq_line_id == update.rfq_line_id for line in lines
+    )
+
+
+def _currency_changed(update: LineCheck, header: Mapping[str, FieldCheck]) -> bool:
+    """A price whose text names another currency than the offer's."""
+    for name in _PRICED:
+        source = update.fields[name].extracted.source
+        currencies: set[str] = detect_currencies(source.quote) if source is not None else set()
+        if currencies and header["currency"].parsed not in currencies:
+            return True
+    return False
+
+
+def _merged_line(old: LineCheck, update: LineCheck, fields: dict[str, FieldCheck]) -> LineCheck:
+    extracted = {name: value.extracted for name, value in fields.items()}
+    draft = update.draft.model_copy(update=extracted)
+    return replace(
+        update,
+        draft=draft,
+        fields=fields,
+        is_alternative=old.is_alternative or update.is_alternative,
+        issues=tuple(dict.fromkeys((*old.issues, *update.issues))),
+        notes=tuple(dict.fromkeys((*old.notes, *update.notes))),
+    )
+
+
+def _amend(
+    previous: ValidatedQuote, event: OfferEvent, *, authority: OfferEvent | None = None
+) -> tuple[ValidatedQuote, tuple[str, ...]]:
+    """Apply an amendment: the merged offer, or `previous` and the reasons to hold.
+
+    `authority` is the later reply that covers this one (an amendment with an
+    "other terms unchanged" statement, or answers to our clarification) when this
+    one had no such statement of its own.
+    """
     current = event.quote
-    if not _has_preservation(event):
-        return _hold(previous, "amendment_without_explicit_preservation")
-    if current.issues:
-        return _hold(previous, *current.issues)
+    if authority is None and not _has_preservation(event):
+        return previous, ("amendment_without_explicit_preservation",)
+    issues = tuple(
+        issue
+        for issue in current.issues
+        if not (authority is not None and issue == "unverified:unchanged_terms")
+    )
+    if issues:
+        return previous, issues
     if current.output.conflicts:
-        return _hold(previous, "conflicting_update")
+        return previous, ("conflicting_update",)
     # A new currency/incoterm/payment basis cannot reuse old prices, even if a
     # broad preservation sentence also appears in the supplier's message.
     changed_header = any(
         current.header[name].parsed is not None
         and current.header[name].parsed != previous.header[name].parsed
-        for name in ("currency", "incoterm", "payment_terms")
+        for name in _COMMERCIAL_HEADER
     )
     if changed_header:
-        return _hold(previous, "changed_commercial_basis_requires_replacement")
-    header = _merge_fields(dict(previous.header), dict(current.header), event)
+        return previous, ("changed_commercial_basis_requires_replacement",)
+    basis = f"covered_by:{authority.message_id}" if authority is not None else None
+    header = _merge_fields(previous.header, current.header, event, basis)
     lines = list(previous.lines)
     touched: set[int] = set()
+    added: list[LineCheck] = []
     for update in current.lines:
-        matches = [index for index, line in enumerate(lines) if _candidate(line, update)]
+        if _currency_changed(update, header):
+            return previous, ("changed_commercial_basis_requires_replacement",)
+        if _new_line(lines, update):
+            # A requested line the offer lacked ("the shaft, other terms unchanged").
+            added.append(update)
+            continue
+        matches = _matches(lines, update)
         if len(matches) != 1 or matches[0] in touched:
-            return _hold(previous, "ambiguous_amendment_line_or_tier")
+            return previous, ("ambiguous_amendment_line_or_tier",)
         index = matches[0]
         touched.add(index)
         old = lines[index]
-        for name in ("unit_price", "tooling_cost", "freight_cost"):
-            check = update.fields[name]
-            source = check.extracted.source
-            currencies: set[str] = detect_currencies(source.quote) if source is not None else set()
-            if currencies and header["currency"].parsed not in currencies:
-                return _hold(previous, "changed_commercial_basis_requires_replacement")
         if any(
             update.fields[name].parsed is not None
             and update.fields[name].parsed != old.fields[name].parsed
             for name in ("unit", "price_basis_quantity", "conditional_terms", "moq")
         ):
-            return _hold(previous, "changed_commercial_basis_requires_replacement")
-        fields = _merge_fields(dict(old.fields), dict(update.fields), event)
-        draft = update.draft.model_copy(
-            update={name: value.extracted for name, value in fields.items()}
-        )
-        issues = tuple(dict.fromkeys((*old.issues, *update.issues)))
-        # Required fields are evaluated on the resulting state, never the delta.
-        issues = tuple(
-            issue
-            for issue in issues
-            if not (issue == "missing:unit_price" and fields["unit_price"].parsed is not None)
-        )
-        lines[index] = replace(
-            update,
-            draft=draft,
-            fields=fields,
-            is_alternative=old.is_alternative or update.is_alternative,
-            issues=issues,
-        )
+            return previous, ("changed_commercial_basis_requires_replacement",)
+        lines[index] = _merged_line(old, update, _merge_fields(old.fields, update.fields, event))
     for index, line in enumerate(lines):
         if index not in touched:
             lines[index] = replace(
-                line, fields={name: _inherit(check, event) for name, check in line.fields.items()}
+                line,
+                fields={name: _inherit(check, event, basis) for name, check in line.fields.items()},
             )
-    return replace(current, header=header, lines=tuple(lines), issues=previous.issues)
+    return replace(current, header=header, lines=(*lines, *added), issues=previous.issues), ()
+
+
+# --- Answers to our clarification -------------------------------------------------------------
+
+# The quote fields an asked item lets the answer set.
+_ANSWERED_HEADER: Final[Mapping[str, tuple[str, ...]]] = {
+    "currency": ("currency",),
+    "valid_until": ("valid_until", "validity"),
+}
+_ANSWERED_LINE: Final[Mapping[str, tuple[str, ...]]] = {
+    "unit_price": ("unit_price", "unit", "price_basis_quantity"),
+    "quantity": ("min_quantity", "price_basis_quantity"),
+    "lead_time": ("lead_time_days", "lead_time_terms"),
+    "delivery_date": ("lead_time_days", "lead_time_terms"),
+}
+# The offer's commercial basis: a reply may not change these unasked.
+_COMMERCIAL_HEADER: Final = ("currency", "incoterm", "payment_terms")
+_COMMERCIAL_LINE: Final = (
+    "unit_price",
+    "unit",
+    "price_basis_quantity",
+    "conditional_terms",
+    "moq",
+    "tooling_cost",
+    "freight_cost",
+    "tax_rate_percent",
+)
+_PRICED: Final = ("unit_price", "tooling_cost", "freight_cost")
+_SUPPLEMENT: Final = "clarification_answer"
+
+
+def _restates(old: FieldCheck, new: FieldCheck) -> bool:
+    if old.parsed is None or new.parsed is None:
+        return False
+    if isinstance(old.parsed, str) and isinstance(new.parsed, str):
+        return normalize_text(old.parsed) == normalize_text(new.parsed)
+    return old.parsed == new.parsed
+
+
+def _supplement_field(
+    old: FieldCheck,
+    new: FieldCheck,
+    event: OfferEvent,
+    *,
+    asked: bool,
+    commercial: bool,
+    whole_offer: bool,
+) -> tuple[FieldCheck, bool]:
+    """The field after a reply to our clarification, and whether the reply changed a
+    commercial term nobody asked about (taken, but the offer is held for the buyer)."""
+    if new.extracted.value is None:
+        return _inherit(old, event, _SUPPLEMENT), False
+    if _restates(old, new):
+        # The same value again: keep whichever evidence needs no review.
+        return (old if new.issues and not old.issues else new), False
+    if asked or (old.parsed is None and old.extracted.value is None):
+        return new, False
+    return new, commercial and not whole_offer
+
+
+_UNASKED_CHANGE: Final = "changed_commercial_basis_requires_replacement"
+
+
+def _supplement(
+    previous: ValidatedQuote, event: OfferEvent
+) -> tuple[ValidatedQuote, tuple[str, ...], bool]:
+    """A reply to our clarification, applied as an amendment of exactly what was asked:
+    (the offer, the reasons to hold it, whether the reply was applied).
+
+    The asked fields are taken from the reply; everything else carries over, with no
+    "other terms unchanged" sentence. Restated values and filled gaps change nothing
+    doubtful. A commercial term changed unasked is taken too, as the supplier's latest
+    statement, but holds the offer for the buyer, unless the reply is a whole new offer
+    (which states every term it changes). Conflicting statements, or a price break that
+    cannot be told apart, leave the offer as it was, held.
+    """
+    current = event.quote
+    if current.output.conflicts or any(
+        issue.startswith("conflicting_sources") for issue in current.issues
+    ):
+        return previous, ("conflicting_update",), False
+    whole_offer = current.output.reply_kind == "replacement"
+    unasked = False
+    header_asked = {
+        name
+        for answer in event.answers
+        if answer.position is None
+        for name in _ANSWERED_HEADER.get(answer.field, ())
+    }
+    line_asked: dict[int, set[str]] = {}
+    for answer in event.answers:
+        if answer.position is not None:
+            line_asked.setdefault(answer.position, set()).update(
+                _ANSWERED_LINE.get(answer.field, ())
+            )
+    header: dict[str, FieldCheck] = {}
+    for name, new in current.header.items():
+        header[name], changed = _supplement_field(
+            previous.header[name],
+            new,
+            event,
+            asked=name in header_asked,
+            commercial=name in _COMMERCIAL_HEADER,
+            whole_offer=whole_offer,
+        )
+        unasked = unasked or changed
+    lines = list(previous.lines)
+    touched: set[int] = set()
+    added: list[LineCheck] = []
+    for update in current.lines:
+        if update.rfq_line_id is None:
+            return previous, ("ambiguous_amendment_line_or_tier",), False
+        if _currency_changed(update, header):
+            return previous, (_UNASKED_CHANGE,), False
+        if _new_line(lines, update):
+            added.append(update)
+            continue
+        matches = _matches(lines, update)
+        if len(matches) != 1 or matches[0] in touched:
+            return previous, ("ambiguous_amendment_line_or_tier",), False
+        index = matches[0]
+        touched.add(index)
+        old = lines[index]
+        position = update.draft.rfq_line_position
+        asked = line_asked.get(position, set()) if position is not None else set[str]()
+        fields: dict[str, FieldCheck] = {}
+        for name, new in update.fields.items():
+            fields[name], changed = _supplement_field(
+                old.fields[name],
+                new,
+                event,
+                asked=name in asked,
+                commercial=name in _COMMERCIAL_LINE,
+                whole_offer=whole_offer,
+            )
+            unasked = unasked or changed
+        lines[index] = _merged_line(old, update, fields)
+    for index, line in enumerate(lines):
+        if index not in touched:
+            lines[index] = replace(
+                line,
+                fields={
+                    name: _inherit(check, event, _SUPPLEMENT) for name, check in line.fields.items()
+                },
+            )
+    merged = replace(current, header=header, lines=(*lines, *added), issues=previous.issues)
+    return merged, (_UNASKED_CHANGE,) if unasked else (), True
+
+
+# --- Issues that follow from the fields -------------------------------------------------------
+
+
+def _resolved_line_issues(line: LineCheck, currency: FieldCheck) -> tuple[str, ...]:
+    """The line's issues without those its merged fields no longer cause.
+
+    Only resolves: an issue goes once its cause is gone (a price now given, a trusted
+    currency, conditions or an impossible tax rate gone); nothing is added here.
+    """
+    priced = [line.fields[name] for name in _PRICED if line.fields[name].parsed is not None]
+    trusted = currency.parsed is not None and not currency.needs_review
+    kept: list[str] = []
+    for issue in line.issues:
+        if issue == "missing:unit_price" and line.fields["unit_price"].parsed is not None:
+            continue
+        if issue == "currency_unverified" and (trusted or not priced):
+            continue
+        if issue.startswith("currency_mismatch:"):
+            check = line.fields.get(issue.partition(":")[2])
+            source = check.extracted.source if check is not None else None
+            named = detect_currencies(source.quote) if source is not None else set[str]()
+            if check is None or check.parsed is None or not named or currency.parsed in named:
+                continue
+        if (
+            issue == "conditional_terms_require_review"
+            and line.fields["conditional_terms"].parsed is None
+        ):
+            continue
+        tax = line.fields["tax_rate_percent"].parsed
+        if issue == "invalid_tax_rate" and not (isinstance(tax, Decimal) and tax > 100):
+            continue
+        kept.append(issue)
+    return tuple(kept)
+
+
+def _resolved(
+    quote: ValidatedQuote, issues_by_message: Mapping[UUID, tuple[str, ...]]
+) -> ValidatedQuote:
+    """The effective quote without the issues its fields no longer cause."""
+    currency = quote.header["currency"]
+    kept: list[str] = []
+    for issue in quote.issues:
+        if issue == "missing:currency" and currency.parsed is not None:
+            continue
+        if issue == "no_lines" and quote.lines:
+            continue
+        if issue == "validity_expired":
+            # The validity in force came from a reply that was not expired.
+            source = quote.header["valid_until"].message_id
+            if source is not None and "validity_expired" not in issues_by_message.get(
+                source, ("validity_expired",)
+            ):
+                continue
+        kept.append(issue)
+    return replace(
+        quote,
+        issues=tuple(kept),
+        lines=tuple(
+            replace(line, issues=_resolved_line_issues(line, currency)) for line in quote.lines
+        ),
+    )
 
 
 def _extra_key(offer: ExtraOfferDraft) -> str:
@@ -438,20 +777,178 @@ def _extra_key(offer: ExtraOfferDraft) -> str:
     return "text:" + normalize_text(offer.description)
 
 
+def has_offer_content(quote: ValidatedQuote) -> bool:
+    """The reply states something about the offer: a line, or a header value."""
+    return bool(quote.lines) or any(
+        check.extracted.value is not None for check in quote.header.values()
+    )
+
+
+def answers_offer(event: OfferEvent, effective: ValidatedQuote | None) -> bool:
+    """`event` answers our clarification about an offer: it is applied as a supplement."""
+    return (
+        bool(event.answers)
+        and effective is not None
+        and event.quote.output.reply_kind != "withdrawal"
+        and has_offer_content(event.quote)
+    )
+
+
+def _question_only(quote: ValidatedQuote) -> bool:
+    """A reply that only asks the buyer something and/or declines requested lines it never
+    priced: nothing in the offer changes and nothing is held (the questions wait in the
+    ledger, the declined lines are never asked for)."""
+    output = quote.output
+    return (
+        output.reply_kind == "clarification"
+        and bool(output.technical_questions or quote.signals.declined_lines)
+        and not output.conflicts
+        and not has_offer_content(quote)
+    )
+
+
+def _offered_positions(quote: ValidatedQuote) -> set[int]:
+    return {
+        line.draft.rfq_line_position
+        for line in quote.lines
+        if line.draft.rfq_line_position is not None
+    }
+
+
+@dataclass(slots=True)
+class _Progress:
+    """The offer while the replies are replayed in business order."""
+
+    effective: ValidatedQuote | None = None
+    kind: ReplyKind = "replacement"
+    # (reason, the reply that caused it), in order.
+    holds: list[tuple[str, UUID]] = field(default_factory=list[tuple[str, UUID]])
+    # Amendments held only for lack of an "other terms unchanged" statement.
+    pending: list[OfferEvent] = field(default_factory=list[OfferEvent])
+    declined: set[int] = field(default_factory=set[int])
+
+    def hold(self, event: OfferEvent, *reasons: str) -> None:
+        self.holds.extend((reason, event.message_id) for reason in reasons)
+
+    def apply_pending(self, authority: OfferEvent) -> None:
+        """Earlier amendments held only for a missing "other terms unchanged", now covered
+        by `authority`: applied first, in order."""
+        for earlier in self.pending:
+            assert self.effective is not None
+            self.holds = [
+                (reason, message_id)
+                for reason, message_id in self.holds
+                if not (
+                    message_id == earlier.message_id
+                    and reason == "amendment_without_explicit_preservation"
+                )
+            ]
+            self.effective, reasons = _amend(self.effective, earlier, authority=authority)
+            self.hold(earlier, *reasons)
+        self.pending = []
+
+    def apply(self, event: OfferEvent) -> bool:
+        """One reply (see the module docstring). True when what it states is now in the
+        offer (a supplement may be applied and still hold the offer)."""
+        current = event.quote
+        kind = current.output.reply_kind
+        if answers_offer(event, self.effective):
+            self.apply_pending(event)
+            assert self.effective is not None
+            self.effective, reasons, applied = _supplement(self.effective, event)
+            self.hold(event, *reasons)
+            if applied:
+                self.kind = "amendment"
+            return applied
+        if kind == "replacement":
+            self.effective = current
+            self.kind = "replacement"
+            self.holds = []
+            self.pending = []
+            return True
+        if kind == "amendment":
+            return self._amendment(event)
+        if kind == "withdrawal":
+            self._withdrawal(event)
+            return False
+        if self.effective is not None and _question_only(current):
+            # A question changes nothing: it waits for the buyer in the ledger.
+            return False
+        self.effective = self.effective or current
+        self.kind = "clarification"
+        self.hold(event, "supplier_clarification_required")
+        return False
+
+    def _amendment(self, event: OfferEvent) -> bool:
+        if self.effective is None:
+            self.effective = event.quote
+            self.kind = "amendment"
+            self.hold(event, "amendment_without_prior_offer")
+            return False
+        if not _has_preservation(event):
+            self.hold(event, "amendment_without_explicit_preservation")
+            self.pending.append(event)
+            return False
+        self.apply_pending(event)
+        self.effective, reasons = _amend(self.effective, event)
+        self.hold(event, *reasons)
+        if reasons:
+            return False
+        self.kind = "amendment"
+        return True
+
+    def _withdrawal(self, event: OfferEvent) -> None:
+        current = event.quote
+        evidence = current.output.update_evidence
+        if (
+            evidence.value is None
+            or evidence.source is None
+            or evidence.confidence < 0.8
+            or "unverified:update_evidence" in current.issues
+        ):
+            self.effective = self.effective or current
+            self.hold(event, "unverified_withdrawal")
+            return
+        if self.effective is None:
+            self.effective = replace(current, lines=())
+            self.kind = "withdrawal"
+            return
+        positions = current.output.withdrawn_line_positions
+        known_positions = {line.draft.rfq_line_position for line in self.effective.lines}
+        if any(position not in known_positions for position in positions):
+            self.hold(event, "withdrawal_for_unknown_line")
+            return
+        withdrawn = set(positions) if positions else _offered_positions(self.effective)
+        self.effective = replace(
+            self.effective,
+            lines=tuple(
+                line
+                for line in self.effective.lines
+                if positions and line.draft.rfq_line_position not in positions
+            ),
+        )
+        self.kind = "withdrawal"
+        self.declined |= withdrawn
+
+
 def reconcile(events: list[OfferEvent]) -> OfferState:
     if not events:
         raise ValueError("offer events are required")
     ordered, chronology_issues = _ordered(events)
-    effective: ValidatedQuote | None = None
+    progress = _Progress(kind=ordered[0].quote.output.reply_kind)
     active = ordered[0]
+    answered: tuple[AskedField, ...] = ()
+    released_at = -1
+    issues_by_message: dict[UUID, tuple[str, ...]] = {}
     # Unrequested offers stay until the supplier withdraws its whole offer; a
     # later mention of the same item (same MPN or description) replaces it.
     extras: dict[str, ExtraOfferDraft] = {}
-    for raw_event in ordered:
+    for index, raw_event in enumerate(ordered):
         event = replace(raw_event, quote=stamp_quote(raw_event.quote, raw_event.message_id))
         current = event.quote
         kind = current.output.reply_kind
         active = event
+        issues_by_message[event.message_id] = current.issues
         if (
             kind == "withdrawal"
             and not current.output.withdrawn_line_positions
@@ -461,57 +958,43 @@ def reconcile(events: list[OfferEvent]) -> OfferState:
             extras.clear()
         for offer in current.output.extra_offers:
             extras[_extra_key(offer)] = offer
-        if kind == "replacement":
-            effective = current
-        elif kind == "amendment":
-            effective = (
-                _amend(effective, event)
-                if effective is not None
-                else _hold(current, "amendment_without_prior_offer")
-            )
-        elif kind == "withdrawal":
-            evidence = current.output.update_evidence
-            if (
-                evidence.value is None
-                or evidence.source is None
-                or evidence.confidence < 0.8
-                or "unverified:update_evidence" in current.issues
-            ):
-                effective = _hold(effective or current, "unverified_withdrawal")
-            elif effective is not None:
-                positions = current.output.withdrawn_line_positions
-                known_positions = {line.draft.rfq_line_position for line in effective.lines}
-                if any(position not in known_positions for position in positions):
-                    effective = _hold(effective, "withdrawal_for_unknown_line")
-                    continue
-                effective = replace(
-                    effective,
-                    lines=tuple(
-                        line
-                        for line in effective.lines
-                        if positions and line.draft.rfq_line_position not in positions
-                    ),
-                )
-            else:
-                effective = replace(current, lines=())
-        else:
-            effective = _hold(effective or current, "supplier_clarification_required")
+        supplement = answers_offer(event, progress.effective)
+        applied = progress.apply(event)
+        answered = event.answers if supplement and applied else ()
+        if applied:
+            progress.declined -= _offered_positions(current)
+        # Lines the reply says the supplier will not quote (its signals): never asked for,
+        # until a later reply offers them.
+        progress.declined |= set(current.signals.declined_line_positions)
         if current.output.conflicts:
-            effective = _hold(effective, "conflicting_sources")
-        if current.output.technical_questions:
-            effective = _hold(effective, "supplier_clarification_required")
+            progress.hold(event, "conflicting_sources")
+        if event.released:
+            # The buyer took the offer as it stood after this reply: its holds go.
+            progress.holds = []
+            progress.pending = []
+            if progress.kind == "clarification":
+                progress.kind = "amendment"
+            released_at = index
+    effective = progress.effective
     assert effective is not None
     effective = replace(
         effective,
         output=effective.output.model_copy(update={"extra_offers": list(extras.values())}),
     )
-    effective = _hold(effective, *chronology_issues) if chronology_issues else effective
+    effective = _resolved(effective, issues_by_message)
+    reasons = [reason for reason, _ in progress.holds]
+    reasons.extend(issue for issue, at in chronology_issues if at > released_at)
+    if reasons:
+        effective = _hold(effective, *dict.fromkeys(reasons))
     return OfferState(
         quote=effective,
         active_message_id=active.message_id,
         message_ids=tuple(event.message_id for event in ordered),
-        reply_kind=active.quote.output.reply_kind,
+        reply_kind=progress.kind,
         issues=effective.issues,
         technical_questions=tuple(active.quote.output.technical_questions),
         withdrawn_line_positions=tuple(active.quote.output.withdrawn_line_positions),
+        answered=answered,
+        declined_line_positions=tuple(sorted(progress.declined)),
+        held_message_ids=tuple(dict.fromkeys(message_id for _, message_id in progress.holds)),
     )

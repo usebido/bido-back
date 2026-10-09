@@ -1,0 +1,151 @@
+===== 01-reminder
+Subject: Re: [RFQ-6] Demande de prix: Composants pour moteur MTR-100
+
+Bonjour,
+
+Relance – RFQ-6
+Notre demande de prix du 08/10/2026 est toujours ouverte et nous n'avons pas encore reçu votre offre.
+
+1. Pouvez-vous nous envoyer votre offre ? Si vous ne souhaitez pas répondre, merci de nous le faire savoir.
+
+Merci de répondre à cet e-mail au plus tard le mardi 20/10/2026.
+
+Ce message ne constitue ni une commande ni une acceptation de votre offre ; Biduuuuu n'est engagée que par une commande écrite.
+
+Cordialement,
+Biduuuuu
+
+===== 02-clarification-delivery
+Subject: Re: [RFQ-6] Demande de prix: Composants pour moteur MTR-100
+
+Bonjour,
+
+Demande de précisions – RFQ-6
+Merci pour votre offre du 08/10/2026. Avant de l'évaluer, nous devons confirmer la livraison de deux positions.
+
+Pos. 1 · Rolamento motor MTR-100 · réf. 000101 · 70 pièces
+   Délai indiqué : env. 10 jours ouvrés après la commande
+   Livraison requise : au plus tard le 22/10/2026
+Pos. 2 · Eixo motor MTR-100 · réf. 000102 · 15 pièces
+   Délai indiqué : env. 10 jours ouvrés + quelques jours supplémentaires après la commande
+   Livraison requise : au plus tard le 22/10/2026
+
+1. Pouvez-vous livrer les positions 1 et 2 au plus tard le 22/10/2026 ? Sinon, merci d'indiquer pour chacune la date de livraison que vous pouvez confirmer.
+
+Merci de répondre à cet e-mail au plus tard le mardi 13/10/2026, par exemple :
+   Pos. 1 – livraison au plus tard le : __/__/____
+   Pos. 2 – livraison au plus tard le : __/__/____
+
+Ce message ne constitue ni une commande ni une acceptation de votre offre ; Biduuuuu n'est engagée que par une commande écrite.
+
+Cordialement,
+Biduuuuu
+
+===== 03-clarification-missing
+Subject: Re: [RFQ-6] Demande de prix: Composants pour moteur MTR-100
+
+Bonjour,
+
+Demande de précisions – RFQ-6
+Merci pour votre offre du 08/10/2026. Avant de l'évaluer, nous avons besoin des informations ci-dessous.
+
+Pos. 1 · Rolamento motor MTR-100 · réf. 000101 · 70 pièces
+   À confirmer : délai de livraison
+Pos. 2 · Eixo motor MTR-100 · réf. 000102 · 15 pièces
+   Manquant : prix unitaire, délai de livraison
+
+1. Merci de nous indiquer la durée de validité de votre offre.
+2. Pour chaque position ci-dessus, merci de nous indiquer les informations manquantes et de confirmer les autres informations signalées.
+
+Merci de répondre à cet e-mail au plus tard le mardi 13/10/2026.
+
+Ce message ne constitue ni une commande ni une acceptation de votre offre ; Biduuuuu n'est engagée que par une commande écrite.
+
+Cordialement,
+Biduuuuu
+
+===== 04-revised-offer
+Subject: Re: [RFQ-6] Demande de prix: Composants pour moteur MTR-100
+
+Bonjour,
+
+Demande d'offre révisée – RFQ-6, tour 1
+Merci pour votre réponse du 08/10/2026. Nous vous demandons de revoir vos prix pour les positions ci-dessous. Pour ces positions, votre offre n'est pas la plus compétitive que nous ayons reçue.
+
+Pos. 1 · Rolamento motor MTR-100 · réf. 000101 · 70 pièces
+   Votre offre : 19,50 BRL/pièce
+   Prix cible : 17,90 BRL/pièce
+Pos. 3 · Fio de cobre esmaltado · réf. 000104 · 12,5 kg
+   Votre offre : 95,00 BRL/kg
+   Prix cible : 90,00 BRL/kg
+
+1. Merci de nous envoyer une offre révisée pour les positions 1 et 3.
+
+Merci de répondre à cet e-mail au plus tard le mercredi 14/10/2026, par exemple :
+   Pos. 1 – prix unitaire révisé : ________
+   Pos. 3 – prix unitaire révisé : ________
+Il n'est pas nécessaire de renvoyer les autres positions.
+
+Ce message ne constitue ni une commande ni une acceptation de votre offre ; Biduuuuu n'est engagée que par une commande écrite.
+
+Cordialement,
+Biduuuuu
+
+===== 05-delivery-date
+Subject: Re: [RFQ-6] Demande de prix: Composants pour moteur MTR-100
+
+Bonjour,
+
+Demande de délai de livraison – RFQ-6
+Merci pour votre réponse du 08/10/2026. Cette demande concerne uniquement la position 2 : le délai indiqué ne permet pas de respecter la date requise.
+
+Pos. 2 · Eixo motor MTR-100 · réf. 000102 · 15 pièces
+   Votre offre : 89,00 BRL/pièce · 12 jours ouvrés après la commande
+   Livraison requise : au plus tard le 22/10/2026
+
+1. Pouvez-vous livrer les 15 pièces au plus tard le 22/10/2026 ? Sinon, quelle est la date la plus proche que vous pouvez confirmer ?
+
+Merci de répondre à cet e-mail au plus tard le mercredi 14/10/2026. Il n'est pas nécessaire de renvoyer les autres positions.
+
+Ce message ne constitue ni une commande ni une acceptation de votre offre ; Biduuuuu n'est engagée que par une commande écrite.
+
+Cordialement,
+Biduuuuu
+
+===== 06-bafo
+Subject: Re: [RFQ-6] Demande de prix: Composants pour moteur MTR-100
+
+Bonjour,
+
+Demande de meilleure offre finale – RFQ-6
+Merci pour votre réponse du 14/10/2026. Il s'agit du dernier tour de cette demande de prix : nous prévoyons de décider sans autre négociation.
+
+Pos. 1 · Rolamento motor MTR-100 · réf. 000101 · 70 pièces
+   Votre offre : 18,40 BRL/pièce
+   Prix cible : 17,90 BRL/pièce
+Pos. 3 · Fio de cobre esmaltado · réf. 000104 · 12,5 kg
+   Votre offre : 92,00 BRL/kg
+   Prix cible : 90,00 BRL/kg
+
+1. Merci de nous envoyer votre meilleure offre finale pour les positions 1 et 3, ou de confirmer que votre offre actuelle est maintenue.
+
+Merci de répondre à cet e-mail au plus tard le vendredi 16/10/2026 à 18:00 (UTC), par exemple :
+   Pos. 1 – prix unitaire final : ________
+   Pos. 3 – prix unitaire final : ________
+Il n'est pas nécessaire de renvoyer les autres positions.
+
+Ce message ne constitue ni une commande ni une acceptation de votre offre ; Biduuuuu n'est engagée que par une commande écrite.
+
+Cordialement,
+Biduuuuu
+
+===== 07-not-selected
+Subject: Re: [RFQ-6] Demande de prix: Composants pour moteur MTR-100
+
+Bonjour,
+
+Résultat de la demande de prix – RFQ-6
+Merci pour votre offre du 08/10/2026 et pour le temps consacré à notre demande. Après évaluation des offres reçues, nous avons décidé de ne pas retenir votre offre cette fois-ci.
+
+Cordialement,
+Biduuuuu
