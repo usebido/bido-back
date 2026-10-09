@@ -333,6 +333,18 @@ async def test_uploads_are_prepared_and_the_background_can_be_removed_and_restor
         assert logo["background_removable"] is True and logo["background_removed"] is False
         assert logo["prepared"] is True
 
+        # Both versions exist from the upload on, to compare before choosing.
+        for variant, suffix in (
+            ("with_background", ".prepared.png"),
+            ("without_background", ".nobg.png"),
+        ):
+            shown = await http.get(
+                f"/v1/company/logos/{logo['id']}/file", params={"variant": variant}
+            )
+            assert shown.status_code == 200, shown.text
+            assert api.links.calls[-1][0].endswith(suffix)
+            assert api.links.calls[-1][0] in api.storage.blobs
+
         removed = await http.post(
             f"/v1/company/logos/{logo['id']}/background", json={"remove": True}
         )
@@ -362,6 +374,10 @@ async def test_background_removal_is_refused_when_there_is_none(api: Api) -> Non
         transparent.save(buffer, format="PNG")
         logo = await api.upload(http, "clean.png", buffer.getvalue())
         assert logo["background_removable"] is False
+        no_variant = await http.get(
+            f"/v1/company/logos/{logo['id']}/file", params={"variant": "without_background"}
+        )
+        assert no_variant.status_code == 404
         refused = await http.post(
             f"/v1/company/logos/{logo['id']}/background", json={"remove": True}
         )

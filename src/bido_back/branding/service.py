@@ -26,7 +26,7 @@ import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Final, cast
+from typing import Final, Literal, cast
 from urllib.parse import urlparse
 from uuid import UUID, uuid4
 
@@ -38,8 +38,10 @@ from bido_back.auth import Principal
 from bido_back.branding.images import (
     MAX_LOGO_BYTES,
     STORED_EXTENSION,
+    CheckedLogo,
     InvalidLogo,
     LogoType,
+    PreparedLogo,
     check_logo,
     logo_type_for,
     prepare_raster_logo,
@@ -66,6 +68,8 @@ from bido_back.storage.links import DownloadLinks
 logger = logging.getLogger(__name__)
 
 Db = async_sessionmaker[AsyncSession]
+
+LogoVariant = Literal["current", "with_background", "without_background"]
 
 UPLOAD_TTL: Final = timedelta(minutes=15)
 LINK_TTL: Final = timedelta(minutes=5)
@@ -235,14 +239,28 @@ async def delete_logo(db: Db, principal: Principal, logo_id: UUID) -> None:
 
 
 async def logo_link(
-    db: Db, links: DownloadLinks, principal: Principal, logo_id: UUID
+    db: Db,
+    links: DownloadLinks,
+    principal: Principal,
+    logo_id: UUID,
+    variant: LogoVariant = "current",
 ) -> LogoFileLink:
-    """A short-lived inline link for an `<img>`. An SVG is served as stored: sanitized."""
+    """A short-lived inline link for an `<img>`. An SVG is served as stored: sanitized.
+
+    `variant`: what documents use (`current`), or, for a logo with a removable
+    background, the version `with_background` or `without_background` (to compare).
+    """
     async with tenant_session(db, principal.tenant_id) as session:
         row = await _logo(session, logo_id)
     content_type = cast(LogoType, row.content_type)
+    key = row.storage_key
+    if variant != "current":
+        if not row.background_removable:
+            raise NotFound(f"logo {logo_id} has no {variant} version")
+        content_type = "image/png"
+        key = _prepared_key(principal.tenant_id, logo_id, removed=variant == "without_background")
     link = await links.presign_get(
-        row.storage_key,
+        key,
         filename=f"{row.name}.{STORED_EXTENSION[content_type]}",
         content_type=content_type,
         disposition="inline",
@@ -274,15 +292,31 @@ async def _reprepare(
     except BlobNotFound:
         raise NotFound(f"logo {logo_id} not found") from None
     try:
-        prepared = prepare_raster_logo(original, original_type, remove_background=remove_background)
+        kept = prepare_raster_logo(original, original_type)
     except InvalidLogo as exc:
         raise LogoRejected(str(exc)) from None
-    if prepared is None:
+    if kept is None:
         raise LogoRejected("an SVG logo has no background to remove")
-    if remove_background and not prepared.background_removable:
+    if remove_background and not kept.background_removable:
         raise LogoRejected("no plain or checkerboard background was found to remove")
+    # Both versions are stored, so the buyer can compare and switch back and forth.
+    await storage.put(
+        _prepared_key(principal.tenant_id, logo_id, removed=False), kept.data, kept.content_type
+    )
+    await _store_without_background(
+        storage,
+        principal.tenant_id,
+        logo_id,
+        CheckedLogo(original_type, original, None, None),
+        kept,
+    )
+    prepared = (
+        prepare_raster_logo(original, original_type, remove_background=True)
+        if remove_background
+        else kept
+    )
+    assert prepared is not None
     key = _prepared_key(principal.tenant_id, logo_id, removed=prepared.background_removed)
-    await storage.put(key, prepared.data, prepared.content_type)
     async with tenant_session(db, principal.tenant_id) as session:
         row = await _logo(session, logo_id)
         row.original_storage_key = original_key
@@ -510,6 +544,7 @@ async def _add_logo(
         stored_type, stored = prepared.content_type, prepared.data
         width, height = prepared.width, prepared.height
         await storage.put(stored_key, stored, stored_type)
+        await _store_without_background(storage, principal.tenant_id, logo_id, checked, prepared)
     async with tenant_session(db, principal.tenant_id) as session:
         row = CompanyLogo(
             id=logo_id,
@@ -598,6 +633,24 @@ def _declared_type(filename: str) -> LogoType:
 
 def _logo_key(tenant_id: UUID, logo_id: UUID, content_type: LogoType) -> str:
     return f"branding/{tenant_id}/{logo_id}.{STORED_EXTENSION[content_type]}"
+
+
+async def _store_without_background(
+    storage: BlobStorage,
+    tenant_id: UUID,
+    logo_id: UUID,
+    original: CheckedLogo,
+    prepared: PreparedLogo,
+) -> None:
+    """Also keep the version without the background, so the buyer can compare before
+    choosing (`logo_link(..., variant="without_background")`)."""
+    if not prepared.background_removable:
+        return
+    without = prepare_raster_logo(original.data, original.content_type, remove_background=True)
+    if without is not None:
+        await storage.put(
+            _prepared_key(tenant_id, logo_id, removed=True), without.data, without.content_type
+        )
 
 
 def _prepared_key(tenant_id: UUID, logo_id: UUID, *, removed: bool) -> str:

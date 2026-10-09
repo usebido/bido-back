@@ -208,10 +208,13 @@ def branding_router() -> APIRouter:
         principal: CurrentPrincipal,
         db: Db,
         links: Annotated[DownloadLinks, Depends(get_download_links)],
+        variant: service.LogoVariant = "current",
     ) -> LogoFileLink:
-        """A short-lived link serving the image inline, for an `<img>` tag."""
+        """A short-lived link serving the image inline, for an `<img>` tag. `variant`
+        `with_background` / `without_background` shows both versions of a logo whose
+        background can be removed (404 otherwise), to compare before choosing."""
         try:
-            return await service.logo_link(db, links, principal, logo_id)
+            return await service.logo_link(db, links, principal, logo_id, variant)
         except service.BrandingError as exc:
             raise branding_http_error(exc) from None
 

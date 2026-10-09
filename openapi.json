@@ -14186,7 +14186,7 @@
     },
     "/v1/company/logos/{logo_id}/file": {
       "get": {
-        "description": "A short-lived link serving the image inline, for an `<img>` tag.",
+        "description": "A short-lived link serving the image inline, for an `<img>` tag. `variant`\n`with_background` / `without_background` shows both versions of a logo whose\nbackground can be removed (404 otherwise), to compare before choosing.",
         "operationId": "logo_file_v1_company_logos__logo_id__file_get",
         "parameters": [
           {
@@ -14196,6 +14196,21 @@
             "schema": {
               "format": "uuid",
               "title": "Logo Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "variant",
+            "required": false,
+            "schema": {
+              "default": "current",
+              "enum": [
+                "current",
+                "with_background",
+                "without_background"
+              ],
+              "title": "Variant",
               "type": "string"
             }
           },
