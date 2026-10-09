@@ -308,3 +308,68 @@ def test_a_best_and_final_request_carries_the_common_cut_off() -> None:
     rendered = render(email)
     assert email_problems(email, rendered, GATE) == []
     assert "23:59" in rendered.text and "R$ 84,50" in rendered.text
+
+
+# --- The default clarification ledger -------------------------------------------------------
+
+
+def test_an_unanswered_clarification_expires_into_the_buyers_items() -> None:
+    from bido_back.db.models import (
+        FollowupMessage,
+        Invite,
+        Proposal,
+        ProposalLine,
+        Rfq,
+        RfqLine,
+        Supplier,
+    )
+    from bido_back.negotiation import service
+    from bido_back.negotiation.planner import LineTerms
+
+    row = RfqLine(id=SHAFT, position=2, description="Eixo motor MTR-100", mpn=None)
+    proposal = Proposal(id=uuid4(), version=1, currency="BRL", valid_until=None, fields={})
+    offered = ProposalLine(
+        proposal_id=proposal.id,
+        rfq_line_id=SHAFT,
+        unit_price=Decimal("89"),
+        min_quantity=Decimal(15),
+        lead_time_days=12,
+        fields={},
+    )
+    sent_at = datetime(2026, 10, 9, 12, tzinfo=UTC)
+    asked = FollowupMessage(
+        kind="clarification", proposal_id=proposal.id, status="sent", sent_at=sent_at
+    )
+    item = service._Supplier(  # pyright: ignore[reportPrivateUsage]
+        invite=Invite(status="responded"),
+        supplier=Supplier(country="BR"),
+        proposal=proposal,
+        proposal_lines=[offered],
+        followups=[asked],
+    )
+    loaded = service._Loaded(  # pyright: ignore[reportPrivateUsage]
+        rfq=Rfq(),
+        lines=[
+            service._Line(  # pyright: ignore[reportPrivateUsage]
+                row=row,
+                terms=LineTerms(rfq_line_id=SHAFT, position=2, quantity=Decimal(15)),
+                facts=LINES[SHAFT],
+            )
+        ],
+        suppliers=[item],
+        versions={},
+        approvals={},
+        waits={},
+    )
+    clarification = service._clarification  # pyright: ignore[reportPrivateUsage]
+    # Two Brazilian business days to answer (12/10 is a holiday): until Wednesday 14/10.
+    waiting = clarification(item, loaded, datetime(2026, 10, 14, 20, tzinfo=UTC))
+    assert waiting.awaiting and waiting.awaiting_until is not None
+    assert waiting.awaiting_until.date() == date(2026, 10, 14)
+    # Unanswered past it: the validity is the buyer's now; the offer is negotiated as it is.
+    expired = clarification(item, loaded, datetime(2026, 10, 15, 9, tzinfo=UTC))
+    assert (expired.awaiting, expired.blocking, expired.exhausted) == (
+        False,
+        False,
+        ("valid_until",),
+    )

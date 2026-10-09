@@ -758,12 +758,12 @@ class NegotiationMessage(Base):
     """A supplier email the negotiation planner decided (migrations 0013, 0034).
 
     The id is derived from (invite, sequence). The row is written when the
-    email is decided (`decided`), before any draft exists; then `proposed`
-    (awaiting approval), `sent`, `canceled`, `rejected` or `held` (its draft
-    kept failing: the buyer decides). `round` counts SENT emails only (a
-    replacement repeats the round). `terms` holds the decision (the numbers and
-    dates asked for); the approved text lives in the approval's args and, once
-    sent, in `messages`.
+    email is decided (`decided`), before the email is rendered; then `proposed`
+    (awaiting approval), `sent`, `canceled`, `rejected` or `held` (the send
+    gate refused it, or it cannot be addressed: the buyer decides). `round`
+    counts SENT emails only (a replacement repeats the round). `terms` holds the
+    decision (the numbers and dates asked for); the approved text lives in the
+    approval's args and, once sent, in `messages`.
     """
 
     __tablename__ = "negotiation_messages"

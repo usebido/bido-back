@@ -5,9 +5,11 @@ Fake writer and fake mailbox; real strategy, approvals, guard and executor.
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
+from pydantic import JsonValue
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
@@ -1087,3 +1089,84 @@ async def test_historical_target_uses_latest_comparable_quantity_and_price_basis
         line.unit = "box"
         await session.flush()
         assert await quoted_price_history(session, rfq, mpn) is None
+
+
+async def test_a_rejected_best_and_final_leaves_no_cut_off_behind(world: World) -> None:
+    await world.configure(max_rounds=2, early_close=False)
+    writer = FakeNegotiationWriter()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.sweep(writer)
+    [first] = await world.messages("rhein")
+    await world.approve(first.approval_id or first.id)
+    await world.offer("rhein", ("0.045", "1.10"))
+    await world.sweep(writer)
+    bafo = (await world.messages("rhein"))[-1]
+    assert bafo.kind == "bafo" and (await world.rfq()).negotiation_cutoff_at is not None
+    await decide_approval(
+        world.engine,
+        approver(world.people),
+        bafo.approval_id or bafo.id,
+        "reject",
+        jobs=FakeJobQueue(),
+        on_reject=NEGOTIATION_REJECT_HOOKS,
+    )
+    # No supplier was told that cut-off: it binds nobody, and nobody is forced to a final round.
+    await world.sweep(writer)
+    assert (await world.rfq()).negotiation_cutoff_at is None
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    assert view.cutoff_at is None
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.state is not None and rhein.state.reason == "email_rejected"
+
+
+async def test_an_email_approved_after_its_reply_by_date_is_decided_again(world: World) -> None:
+    await world.configure()
+    await world.offer("rhein", ("0.050", "1.20"))
+    writer = FakeNegotiationWriter()
+    await world.sweep(writer)
+    [counter] = await world.messages("rhein")
+    # Approved late: the reply-by date the email states has passed.
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        row = await session.get(NegotiationMessage, counter.id)
+        assert row is not None
+        terms = dict(row.terms)
+        decision = dict(cast(dict[str, object], terms["decision"]))
+        decision["reply_by"] = (datetime.now(UTC).date() - timedelta(days=1)).isoformat()
+        terms["decision"] = cast(JsonValue, decision)
+        row.terms = terms
+    sent_before = len(world.mailboxes.sender.sent)
+    await world.approve(counter.approval_id or counter.id)
+    assert len(world.mailboxes.sender.sent) == sent_before
+    [counter] = await world.messages("rhein")
+    assert (counter.status, counter.canceled_reason) == ("canceled", "reply_by_passed")
+    # Nothing went out: decided again, with a new reply-by date, in the same round.
+    assert (await world.sweep(writer)).proposed == 1
+    rows = await world.messages("rhein")
+    assert [(m.sequence, m.round, m.status) for m in rows] == [
+        (1, 1, "canceled"),
+        (2, 1, "proposed"),
+    ]
+
+
+async def test_an_interrupted_send_counts_as_sent(world: World) -> None:
+    await world.configure()
+    writer = FakeNegotiationWriter()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.sweep(writer)
+    [counter] = await world.messages("rhein")
+    # The send claimed its Message-ID and was interrupted; a newer offer then canceled it.
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        await session.execute(
+            update(NegotiationMessage)
+            .where(NegotiationMessage.id == counter.id)
+            .values(message_id_header="<claimed@quotes.example.test>")
+        )
+    await world.offer("rhein", ("0.045", "1.10"))
+    await world.sweep(writer)
+    rows = await world.messages("rhein")
+    assert rows[0].status == "canceled"
+    # It may have reached the supplier: its round is used.
+    assert [(m.sequence, m.round, m.status) for m in rows] == [
+        (1, 1, "canceled"),
+        (2, 2, "proposed"),
+    ]
