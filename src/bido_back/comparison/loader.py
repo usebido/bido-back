@@ -45,6 +45,7 @@ from bido_back.db.models import (
     FxRate,
     Invite,
     Item,
+    Message,
     PoLine,
     Proposal,
     ProposalLine,
@@ -301,6 +302,16 @@ async def load_comparison(db: Db, principal: Principal, rfq_id: UUID, today: dat
                 )
             ).all()
         )
+        origins: dict[UUID, str] = {}
+        if proposals:
+            origins = {
+                proposal_id: origin
+                for proposal_id, origin in await session.execute(
+                    select(Proposal.id, Message.origin)
+                    .join(Message, Message.id == Proposal.message_id)
+                    .where(Proposal.id.in_([p.id for p in proposals.values()]))
+                )
+            }
         proposal_lines: dict[UUID, list[ProposalLine]] = {p.id: [] for p in proposals.values()}
         if proposal_lines:
             for pl in await session.scalars(
@@ -349,6 +360,7 @@ async def load_comparison(db: Db, principal: Principal, rfq_id: UUID, today: dat
                 performance=performance.get(invite.supplier_id, {}),
                 negotiation_holds=negotiation_holds(proposal.fields),
                 correction_revision=revisions.get(proposal.id, 0),
+                origin=origins.get(proposal.id, "email"),
                 lines=tuple(
                     QuotedLine(
                         id=pl.id,

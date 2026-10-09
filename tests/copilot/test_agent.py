@@ -34,6 +34,7 @@ EXPECTED_TOOLS = {
     "remove_rfq_line": "draft",
     "set_rfq_terms": "draft",
     "invite_suppliers": "draft",
+    "register_quote": "draft",
     "prepare_send": "draft",
     "get_negotiation_status": "read",
     "propose_counteroffers": "draft",
@@ -86,7 +87,7 @@ def test_definition_and_tools() -> None:
     agent = copilot_agent(tools)
 
     assert agent.model == DEFAULT_MODEL
-    assert (agent.prompt_file, agent.prompt_version) == ("copilot.v23.md", 23)
+    assert (agent.prompt_file, agent.prompt_version) == ("copilot.v24.md", 24)
     # The copilot runs its newest prompt: a new version is never left unused.
     newest = max(int(p.stem.removeprefix("copilot.v")) for p in PROMPTS.glob("copilot.v*.md"))
     assert agent.prompt_version == newest

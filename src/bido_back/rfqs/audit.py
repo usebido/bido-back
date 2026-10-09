@@ -1,5 +1,5 @@
 """Audit events for the RFQ lifecycle: created, lines edited, terms set, suppliers
-invited or removed, status changed.
+invited or removed, status changed, a quote registered by the buyer.
 
 The services write them in the same transaction as the change, from the REST
 and the Copilot paths alike, and the activity feed (`bido_back.rfqs.activity`)
@@ -20,6 +20,9 @@ from bido_back.db.models import AuditEvent
 # How the RFQ came to be: the REST API, the Copilot's `create_rfq`, or code
 # (a purchase analysis or procurement assessment).
 RfqOrigin = Literal["api", "copilot", "analysis"]
+# How a supplier's quote reached the RFQ: the supplier's email reply, or a document
+# the buyer attached in the Copilot and registered (`messages.origin`).
+QuoteOrigin = Literal["email", "copilot_upload"]
 
 RFQ_CREATED: Final = "rfq.created"
 RFQ_LINE_ADDED: Final = "rfq.line_added"
@@ -29,6 +32,10 @@ RFQ_TERMS_SET: Final = "rfq.terms_set"
 RFQ_INVITE_ADDED: Final = "rfq.invite_added"
 RFQ_INVITE_REMOVED: Final = "rfq.invite_removed"
 RFQ_STATUS_CHANGED: Final = "rfq.status_changed"
+# A supplier's quote stored on an invite from somewhere other than its email
+# reply (the buyer registered an uploaded document). Email replies are visible
+# in the feed as received messages and need no event.
+QUOTE_REGISTERED: Final = "quote.registered"
 
 TEXT_LIMIT: Final = 120
 

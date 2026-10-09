@@ -172,6 +172,22 @@ def test_pdf_names_only_its_own_supplier() -> None:
     assert "Metalúrgica Horizonte" not in text
 
 
+def test_document_without_a_supplier_has_no_addressee() -> None:
+    # The RFQ's own PDF (the buyer's download) names nobody: no "To" pair at all,
+    # and a file name without a supplier slug. The rest is the supplier's document.
+    doc = _doc(supplier_name="")
+    markup = document_html(doc)
+    assert ">Para<" not in markup and ">To<" not in markup
+    assert ">De<" in markup
+    assert "Metalúrgica Horizonte" not in markup
+    assert document_filename(doc) == "RFQ-3.pdf"
+    text = _text(render_pdf(doc))
+    assert "Necessidades de materiais BR01" in text
+    assert "Metalúrgica Horizonte" not in text
+    # The addressed document still says "To".
+    assert ">Para<" in document_html(_doc())
+
+
 def test_values_are_escaped() -> None:
     markup = document_html(_doc(title='<img src="http://evil.example/x.png"> Q4'))
     assert '<img src="http://evil' not in markup
