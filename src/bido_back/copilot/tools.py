@@ -83,6 +83,7 @@ from bido_back.rfqs.errors import (
     ReplyByRequired,
     RfqError,
 )
+from bido_back.rfqs.language import DEFAULT_LANGUAGE, email_language
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.rfqs.schemas import (
     AddLineRequest,
@@ -1623,12 +1624,15 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 rfq = await _rfq(session, args.rfq)
                 contacts = await queries.first_contacts(session, list(args.supplier_ids))
                 wanted = list(dict.fromkeys(args.supplier_ids))
-                names = {
-                    row.id: row.name
+                rows = {
+                    row.id: row
                     for row in await session.execute(
-                        select(Supplier.id, Supplier.name).where(Supplier.id.in_(wanted))
+                        select(
+                            Supplier.id, Supplier.name, Supplier.country, Supplier.language
+                        ).where(Supplier.id.in_(wanted))
                     )
                 }
+                names = {supplier_id: row.name for supplier_id, row in rows.items()}
                 emails = {
                     row.id: row.email
                     for row in await session.execute(
@@ -1640,6 +1644,14 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             missing = [str(s) for s in wanted if s not in names]
             if missing:
                 raise ToolError(f"unknown supplier ids: {', '.join(missing)}; use list_suppliers")
+            # A supplier with no country and the default language would get an English
+            # document: that is the buyer's call, not a guess (a Brazilian supplier saved
+            # from an English name and a .com address).
+            unknown_locale = [
+                rows[s].name
+                for s in wanted
+                if rows[s].country is None and rows[s].language in (None, DEFAULT_LANGUAGE)
+            ]
             preview = ProposalPreview(
                 action="invite_suppliers",
                 rfq=rfq.ref,
@@ -1648,8 +1660,15 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                     ProposedSupplier(
                         name=names[s],
                         email=emails.get(contacts[s]) if s in contacts else None,
+                        document_language=email_language(rows[s].language, rows[s].country),
                     )
                     for s in wanted
+                ],
+                questions=[
+                    f"{name}: no country or language on file, so its RFQ document would be in "
+                    "English. Which country is it in? (add_supplier_contact with `country` "
+                    "records the answer.)"
+                    for name in unknown_locale
                 ],
             )
             proposal_id = await _propose(
