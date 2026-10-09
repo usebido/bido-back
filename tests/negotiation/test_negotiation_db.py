@@ -736,6 +736,46 @@ async def test_clarification_pauses_price_negotiation_with_existing_offer(world:
     assert rhein.state is not None and rhein.state.phase == "needs_answer"
 
 
+async def test_the_buyer_releases_a_held_offer_and_it_is_negotiated_as_it_is(
+    world: World,
+) -> None:
+    from bido_back.rfqs.activity import rfq_activity
+
+    await world.configure()
+    proposal_id = await world.offer("rhein", ("0.050", "1.20"))
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        proposal = await session.get(Proposal, proposal_id)
+        assert proposal is not None
+        proposal.fields = {
+            "_offer_state": {
+                "reply_kind": "amendment",
+                "issues": ["amendment_without_explicit_preservation"],
+                "requires_clarification": True,
+            }
+        }
+    writer = FakeNegotiationWriter()
+    assert (await world.sweep(writer)).proposed == 0
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.state is not None
+    assert (rhein.state.phase, rhein.state.reason) == (
+        "needs_decision",
+        "offer_state_requires_review",
+    )
+    released = await service.release_hold(
+        world.engine, buyer(world.people), world.rfq_id, world.invites["rhein"]
+    )
+    rhein = next(i for i in released.invites if i.supplier_name == "Rhein")
+    assert rhein.state is not None and rhein.state.next_action == "revised_offer"
+    assert (await world.sweep(writer)).proposed == 1
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    assert any(i.action == "rfq.negotiation_hold_released" for i in feed)
+    with pytest.raises(NotFound):
+        await service.release_hold(
+            world.engine, buyer(world.people), world.rfq_id, world.people.tenant
+        )
+
+
 async def test_closed_outcome_keeps_its_policy_and_evidence_snapshot(world: World) -> None:
     from bido_back.comparison.policy import ComparisonPolicy
 

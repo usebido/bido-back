@@ -634,6 +634,19 @@ def test_an_offer_held_for_review_needs_the_buyers_decision() -> None:
     assert (withdrawn.action, withdrawn.reason) == ("close", "offer_withdrawn")
 
 
+def test_the_buyer_can_release_an_offer_held_for_review() -> None:
+    held = replace(
+        ABOVE,
+        holds=("supplier_clarification_requires_buyer", "offer_state_requires_review"),
+        holds_released=True,
+    )
+    result = plan(facts(held))
+    assert (result.action, result.phase) == ("revised_offer", "waiting")
+    # A withdrawal is never released.
+    gone = plan(facts(replace(ABOVE, holds=("offer_withdrawn",), holds_released=True)))
+    assert (gone.action, gone.reason) == ("close", "offer_withdrawn")
+
+
 def test_an_alternative_part_is_never_negotiated_or_accepted_as_the_exact_part() -> None:
     alternative = offer(
         quote(L1, "44.90"),

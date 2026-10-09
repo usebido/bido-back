@@ -698,6 +698,7 @@ def _offer(
             positions[p] for p in signals.declined_positions if p in positions
         ),
         payment_terms_shorter=offered is not None and requested is not None and offered < requested,
+        holds_released=item.invite.negotiation_released_proposal_id == proposal.id,
     )
 
 
@@ -1225,6 +1226,63 @@ async def update_negotiation(
     return await _view(db, principal.tenant_id, rfq_id, at, history)
 
 
+async def release_hold(
+    db: Db,
+    principal: Principal,
+    rfq_id: UUID,
+    invite_id: UUID,
+    *,
+    now: datetime | None = None,
+    history: PriceHistory = quoted_price_history,
+) -> RfqNegotiation:
+    """The buyer releases the holds on a supplier's current offer: negotiate it as it is.
+
+    For an offer held for review (a reply that could not be applied, a question the
+    buyer answered outside Bido): from the next sweep the planner treats that offer
+    version as clean. Audited; a newer offer is held again if it needs to be. A
+    withdrawn offer stays closed.
+    """
+    at = now or datetime.now(UTC)
+    async with tenant_session(db, principal.tenant_id) as session:
+        invite = await session.scalar(
+            select(Invite).where(Invite.id == invite_id, Invite.rfq_id == rfq_id).with_for_update()
+        )
+        if invite is None:
+            raise NotFound(f"supplier {invite_id} is not on rfq {rfq_id}")
+        rfq = await session.get(Rfq, rfq_id)
+        if rfq is None or rfq.negotiation_status not in _ACTIVE:
+            raise InvalidState(f"rfq {rfq_id}: the negotiation is not open")
+        proposal = await session.scalar(
+            select(Proposal)
+            .where(Proposal.invite_id == invite_id)
+            .order_by(Proposal.version.desc())
+            .limit(1)
+        )
+        if proposal is None:
+            raise InvalidState(f"supplier {invite_id} has no offer to release")
+        invite.negotiation_released_proposal_id = proposal.id
+        session.add(
+            AuditEvent(
+                tenant_id=principal.tenant_id,
+                actor_user_id=principal.user_id,
+                action="rfq.negotiation_hold_released",
+                payload={
+                    "rfq_id": str(rfq_id),
+                    "invite_id": str(invite_id),
+                    "proposal_version": proposal.version,
+                },
+            )
+        )
+    logger.info(
+        "negotiation hold released tenant=%s rfq=%s invite=%s by=%s",
+        principal.tenant_id,
+        rfq_id,
+        invite_id,
+        principal.user_id,
+    )
+    return await _view(db, principal.tenant_id, rfq_id, at, history)
+
+
 # --- Closing ---------------------------------------------------------------------------
 
 
@@ -1490,6 +1548,7 @@ async def _record_decision(
             currency=rfq.base_currency,
             offer_version=proposal.version,
             offer_received_on=item.received_on,
+            language=supplier_email_language(item.supplier),
             lines={line.row.id: line.facts for line in lines},
         )
         row_id = negotiation_message_id(invite.id, sequence)

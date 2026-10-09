@@ -82,6 +82,9 @@ class EmailDecision(BaseModel):
     # The offer this email answers.
     offer_version: int
     offer_received_on: date | None = None
+    # The email's language (ISO 639-1), fixed when decided: a retried draft never
+    # switches language. None on decisions stored before it was recorded.
+    language: str | None = None
     mention_competition: bool = False
     positions: list[PositionDecision]
 
@@ -107,6 +110,7 @@ def build_decision(
     currency: str,
     offer_version: int,
     offer_received_on: date | None,
+    language: str | None = None,
     lines: dict[UUID, DecisionLine],
 ) -> EmailDecision:
     """The stored decision for an email the planner decided."""
@@ -145,6 +149,7 @@ def build_decision(
         cutoff_at=plan.cutoff_at,
         offer_version=offer_version,
         offer_received_on=offer_received_on,
+        language=language,
         mention_competition=plan.mention_competition,
         positions=sorted(positions, key=lambda p: p.position),
     )
@@ -199,6 +204,8 @@ def writer_task(
 ) -> NegotiationEmailInput:
     """The negotiation writer's task for a decision (until code renders the email).
 
+    The language is the decision's (`supplier_language` only when it has none).
+
     A delivery-date ask becomes `required_lead_time_days`: the days from the
     decision's order date to the deliver-by date (the writer's v1 contract
     has no date per line); the decision itself keeps the date.
@@ -228,7 +235,7 @@ def writer_task(
         buyer_company=buyer_company,
         buyer_name=buyer_name,
         supplier_name=supplier_name,
-        supplier_language=supplier_language,
+        supplier_language=decision.language or supplier_language,
         round=decision.round,
         reply_by=decision.reply_by,
         mention_competition=decision.mention_competition,

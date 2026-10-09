@@ -29,6 +29,10 @@ every supplier of the RFQ, set by the first best-and-final request.
 supplier (action, buyer-visible phase, reason code, offer version, when): codes
 and ids only, never content.
 
+`invites.negotiation_released_proposal_id`: the offer version whose holds the
+buyer released ("negotiate this offer as it is", audited); a newer version is
+held again if it needs to be.
+
 `rfqs.negotiation_max_rounds` defaults to 2: one revised-offer round, then one
 best-and-final request.
 
@@ -103,9 +107,19 @@ def upgrade() -> None:
     op.add_column("rfqs", sa.Column("negotiation_cutoff_at", sa.DateTime(timezone=True)))
     op.alter_column("rfqs", "negotiation_max_rounds", server_default="2")
     op.add_column("invites", sa.Column("negotiation_decision", postgresql.JSONB()))
+    op.add_column(
+        "invites",
+        sa.Column(
+            "negotiation_released_proposal_id",
+            postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("proposals.id", ondelete="SET NULL"),
+            nullable=True,
+        ),
+    )
 
 
 def downgrade() -> None:
+    op.drop_column("invites", "negotiation_released_proposal_id")
     op.drop_column("invites", "negotiation_decision")
     op.alter_column("rfqs", "negotiation_max_rounds", server_default="3")
     op.drop_column("rfqs", "negotiation_cutoff_at")

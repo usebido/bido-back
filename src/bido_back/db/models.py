@@ -406,6 +406,10 @@ class Invite(Base):
     # The negotiation planner's last recorded decision for this supplier: action,
     # buyer-visible phase, reason code, offer version and when (migration 0034).
     negotiation_decision: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # The offer version whose holds the buyer released (negotiated as it is).
+    negotiation_released_proposal_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("proposals.id", ondelete="SET NULL")
+    )
 
 
 class Message(Base):

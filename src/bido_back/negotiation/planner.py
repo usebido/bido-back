@@ -29,7 +29,8 @@ First match wins:
    be written, or that the buyer rejected, for the current offer: hold. Never
    a second email for the same offer version.
 3. The offer is on hold: a supplier question (needs your answer), a withdrawal
-   (close), anything else to review (needs your decision).
+   (close), anything else to review (needs your decision). The buyer may release
+   an offer's holds (audited): it is then negotiated as it is.
 4. The clarification ledger: an open clarification (to ask, pending, sent and
    unanswered) comes first.
 5. Our last email is unanswered: wait for the supplier (until its reply-by
@@ -163,6 +164,9 @@ class Offer:
     declined_lines: frozenset[UUID] = frozenset()
     # The offer pays sooner than the RFQ's payment terms ask.
     payment_terms_shorter: bool = False
+    # The buyer released this offer's holds: negotiate it as it is (a withdrawal still
+    # closes it).
+    holds_released: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -640,20 +644,21 @@ def plan_supplier(
     if any(e.state == "rejected" for e in current):
         return replace(base, action="hold", phase="needs_decision", reason="email_rejected")
 
-    # 3. The offer is on hold.
-    if offer.questions or (
-        "supplier_clarification_requires_buyer" in offer.holds
-        and "offer_state_requires_review" not in offer.holds
-    ):
-        return replace(base, action="hold", phase="needs_answer", reason="supplier_question")
+    # 3. The offer is on hold (unless the buyer released it: negotiate it as it is).
     if "offer_withdrawn" in offer.holds:
         return replace(
             base, action="close", phase="closed", reason="offer_withdrawn", status="closed"
         )
-    if offer.holds:
-        review = "offer_state_requires_review"
-        reason = review if review in offer.holds else offer.holds[0]
-        return replace(base, action="hold", phase="needs_decision", reason=reason)
+    if not offer.holds_released:
+        if offer.questions or (
+            "supplier_clarification_requires_buyer" in offer.holds
+            and "offer_state_requires_review" not in offer.holds
+        ):
+            return replace(base, action="hold", phase="needs_answer", reason="supplier_question")
+        if offer.holds:
+            review = "offer_state_requires_review"
+            reason = review if review in offer.holds else offer.holds[0]
+            return replace(base, action="hold", phase="needs_decision", reason=reason)
 
     # 4. Open questions first.
     clarification = supplier.clarification

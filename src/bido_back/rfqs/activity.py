@@ -296,6 +296,9 @@ def _event_item(
         case "rfq.negotiation_needs_decision" | "rfq.negotiation_needs_answer":
             summary = reason_text(str(data.get("reason", ""))) + _for(supplier)
             kind, actor = "agent", BIDO
+        case "rfq.negotiation_hold_released":
+            kind = "user"
+            summary = f"Hold released: Bido negotiates the current offer as it is{_for(supplier)}"
         case "rfq.negotiation_held":
             why = _words(data.get("reason"))
             summary = f"Needs your decision: the email{to} could not be prepared" + (

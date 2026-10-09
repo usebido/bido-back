@@ -346,6 +346,7 @@ async def test_correction_cancels_pending_send_and_reopens_review(
             tenant_id=principal.tenant_id,
             invite_id=invite.id,
             proposal_id=proposal.id,
+            sequence=1,
             round=1,
             action="counter",
             status="proposed",
