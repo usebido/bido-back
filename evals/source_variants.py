@@ -46,7 +46,7 @@ from evals.source_scenario import (
 
 ColType = Literal["text", "code", "qty", "price", "date"]
 Render = Literal["native", "text_br", "text_sap"]
-Outcome = Literal["exact", "review"]
+Outcome = Literal["exact", "review", "estimate"]
 
 XLSX: Final = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -1090,10 +1090,11 @@ VARIANTS: Final = (
     Variant(
         "mrp_grid",
         "Planned production as a time-phased MRP grid (ISO weeks as columns) instead of dated "
-        "orders; needs_review is an acceptable outcome, wrong ready numbers are not",
+        "orders; needs_review or labeled estimates are acceptable, wrong numbers presented as "
+        "certain are not",
         PT,
         lambda: scattered(PT, grid=True),
-        accepts=frozenset({"exact", "review"}),
+        accepts=frozenset({"exact", "review", "estimate"}),
     ),
     Variant(
         "sap_text_numbers",

@@ -250,13 +250,21 @@ def wanted_suppliers(lines: Sequence[AssessmentLine], per_line: int) -> list[Wan
     wanted: dict[object, WantedSupplier] = {}
     blocked: dict[object, WantedSupplier] = {}
     for line in lines:
-        candidates = [s for s in line.suppliers if s.suggested] or [
+        suggested = [s for s in line.suppliers if s.suggested]
+        candidates = suggested or [
             s for s in line.suppliers if _has_history(s) or _status(s) in APPROVED
         ]
+        # Approved sources of supply with a current agreement compete too.
+        chosen = {id(s) for s in candidates}
+        candidates += [
+            s
+            for s in line.suppliers
+            if id(s) not in chosen and _status(s) in APPROVED and s.contract_expired is False
+        ]
         for supplier in candidates:
-            if _status(supplier) in DISQUALIFIED:
+            if _disqualified(supplier):
                 _want(blocked, supplier, line.part_number).disqualified = True
-        eligible = [s for s in candidates if _status(s) not in DISQUALIFIED]
+        eligible = [s for s in candidates if not _disqualified(s)]
         for supplier in eligible[:per_line]:
             _want(wanted, supplier, line.part_number)
     return [*wanted.values(), *blocked.values()]
@@ -402,6 +410,11 @@ def new_supplier_language(evidence: SupplierEvidence, buyer_language: str | None
 
 def _status(supplier: SupplierEvidence) -> str:
     return norm(supplier.qualification_status or "")
+
+
+def _disqualified(supplier: SupplierEvidence) -> bool:
+    """The buyer's approved-source data or supplier master (purchasing block) excludes it."""
+    return supplier.purchase_blocked or _status(supplier) in DISQUALIFIED
 
 
 def _has_history(supplier: SupplierEvidence) -> bool:

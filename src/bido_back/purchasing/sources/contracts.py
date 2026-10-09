@@ -50,6 +50,11 @@ CanonicalBasis = Literal[
     "date_order",
     # The mapper declared the order from the source's language; no value contradicts it.
     "declared_date_order",
+    # A recognized report's documented convention decided the reading (an ERP's sign of
+    # MRP elements, a price per price unit, a status implied by the report).
+    "report_convention",
+    # A quantity, price or unit converted with the item's alternative unit of measure.
+    "unit_conversion",
 ]
 
 
@@ -84,10 +89,13 @@ class PlanningScope(BaseModel):
     horizon_end: date
     safety_stock: Decimal | None = Field(default=None, ge=0, lt=10**12)
     production_lead_days: int = Field(default=0, ge=0, le=365)
+    # Every directly required material of the location: an MRP list (dated requirements
+    # per material) without production plans, settled by code from the evidence.
+    all_materials: bool = False
 
     @model_validator(mode="after")
     def valid_scope(self) -> "PlanningScope":
-        if self.product_code is None and self.area is None:
+        if self.product_code is None and self.area is None and not self.all_materials:
             raise ValueError("A product code or area is required for scoped planning")
         if self.horizon_end < self.as_of:
             raise ValueError("The planning horizon must end on or after the snapshot date")
@@ -254,6 +262,32 @@ class NettingStep(BaseModel):
     projected_balance: Decimal
 
 
+class Assumption(BaseModel):
+    """A reading or default the assessment settled on instead of stopping: disclosed with
+    the reply, the RFQ draft and the approval, never hidden. `alternative` states what
+    changes if the assumption is wrong."""
+
+    code: str
+    message: str
+    alternative: str | None = None
+    # low: a real ambiguity was settled by the most plausible reading; medium: a known
+    # convention or a default the sources did not state.
+    confidence: Literal["medium", "low"] = "medium"
+    # The items it concerns; empty = every line of the assessment.
+    part_numbers: list[str] = Field(default_factory=list[str])
+    evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
+
+
+class RecognizedReport(BaseModel):
+    """A table read by a deterministic report pack instead of the source mapper."""
+
+    source_id: str
+    table: str
+    pack: str
+    report: str
+    rows: int
+
+
 class SupplierEvidence(BaseModel):
     supplier_code: str | None = None
     name: str | None = None
@@ -268,6 +302,22 @@ class SupplierEvidence(BaseModel):
     qualification_status: str | None = None
     # ISO 3166-1 alpha-2, when the buyer's supplier master names one recognizable country.
     country: str | None = None
+    # The buyer's supplier master blocks purchasing from it: never invited.
+    purchase_blocked: bool = False
+    # The source's own evaluation scores (e.g. an ERP vendor evaluation), as reported.
+    score_overall: Decimal | None = None
+    score_price: Decimal | None = None
+    score_quality: Decimal | None = None
+    score_delivery: Decimal | None = None
+    score_service: Decimal | None = None
+    # A purchasing info record / price agreement for the item, per base unit.
+    contract_price: Decimal | None = None
+    contract_currency: str | None = None
+    contract_valid_to: date | None = None
+    # The agreement ended before the reference date: price history only, not a price.
+    contract_expired: bool | None = None
+    contract_lead_time_days: Decimal | None = None
+    min_order_quantity: Decimal | None = None
     evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
     # Measured by Bido from reconciled source orders and receipts, in the line's price
     # currency. otif_pct/quality_pct/lead_time_days above stay the source-REPORTED values.
@@ -347,6 +397,9 @@ class AssessmentLine(BaseModel):
     on_order: Decimal | None = None
     safety_stock: Decimal | None = None
     calculated_to_buy: Decimal | None = None
+    # The net requirement before the item's lot-sizing rules (minimum lot, rounding);
+    # calculated_to_buy is the order quantity after them. None: no rule applied.
+    net_requirement: Decimal | None = None
     reported_to_buy: Decimal | None = None
     reported_estimated_cost: Decimal | None = None
     currency: str | None = None
@@ -359,11 +412,18 @@ class AssessmentLine(BaseModel):
     netting: list[NettingStep] = Field(default_factory=list[NettingStep])
     price: PriceBenchmark | None = None
     flags: list[LineFlag] = Field(default_factory=list[LineFlag])
+    # What the quantity rests on besides stated evidence; shown before any RFQ.
+    assumptions: list[Assumption] = Field(default_factory=list[Assumption])
+    # high: stated evidence only; medium: known conventions or defaults (assumptions);
+    # low: an inconsistency or ambiguity was settled by the most plausible reading.
+    confidence: Literal["high", "medium", "low"] = "high"
 
 
 class Assessment(BaseModel):
     lines: list[AssessmentLine] = Field(default_factory=list[AssessmentLine])
     issues: list[Issue] = Field(default_factory=list[Issue])
+    # Assessment-wide readings and defaults; each line also lists those that concern it.
+    assumptions: list[Assumption] = Field(default_factory=list[Assumption])
     record_counts: dict[str, int] = Field(default_factory=dict[str, int])
 
 
@@ -404,6 +464,8 @@ class SourceAssessment(Assessment):
     planning_candidates: list[PlanningCandidate] = Field(default_factory=list[PlanningCandidate])
     snapshot_dates: list[date] = Field(default_factory=list[date])
     coverage: list[Coverage] = Field(default_factory=list[Coverage])
+    # Tables read by a report pack (no model call) and the conventions applied.
+    reports: list[RecognizedReport] = Field(default_factory=list[RecognizedReport])
     status: Literal["assessed", "needs_review"] = "needs_review"
     persisted: bool = False
     assessment_id: UUID | None = None
@@ -455,7 +517,8 @@ VocabularyTerm = Literal[
     "open", "closed", "cancelled", "pending", "received", "planned", "released", "approved",
     "blocked", "receipt", "reversal", "return", "gross", "net", "available", "count", "kg",
     "g", "t", "lb", "l", "ml", "m", "cm", "mm", "m2", "m3", "kit", "set", "pair", "box",
-    "pack", "roll",
+    "pack", "roll", "requirement", "proposal", "stock", "safety_stock", "negative",
+    "positive",
 ]  # fmt: skip
 
 

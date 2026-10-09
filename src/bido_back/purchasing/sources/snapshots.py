@@ -371,30 +371,12 @@ async def draft_from_snapshot(
         assessment = _view(row)
         preliminary = request.pending_validation is not None
         title = _title(request)
-        # A complete assessment, or a PRELIMINARY draft that carries its open issues: the
-        # mark keeps it from being prepared for sending, and the quantities and units still
-        # come from the assessment, never from a rewritten text.
-        if not preliminary and (
-            assessment.status != "assessed"
-            or any(issue.severity == "blocker" for issue in assessment.issues)
-            or not assessment.coverage
-            or not all(part.inspected for part in assessment.coverage)
-        ):
-            raise InvalidRequest("resolve the assessment's evidence issues before creating an RFQ")
-        if not preliminary and any(
-            not line.ready
-            or line.calculated_to_buy is None
-            or not line.unit
-            or not line.evidence
-            or any(issue.severity == "blocker" for issue in line.issues)
-            for line in assessment.lines
-        ):
-            raise InvalidRequest(
-                "every assessed line needs validated quantities, units and evidence"
-            )
+        # Problems never hold a draft: every line with a quantity and a unit becomes an RFQ
+        # line carrying its assumptions and confidence (`source_evidence`), which the draft
+        # and the send approval show. Sending stays behind the buyer's approval.
         lines, skipped = rfq_lines(assessment)
         if not lines:
-            raise InvalidRequest("the assessment has no validated positive purchase requirements")
+            raise InvalidRequest("the assessment has no positive purchase quantities")
         if row.rfq_id is not None:
             rfq = await session.get(Rfq, row.rfq_id)
             if rfq is None:

@@ -398,25 +398,13 @@ def _assessment_preview(
     (`rfq_lines`) with their default limits, and the suppliers it would invite or skip
     (`plan_from_snapshot`). The same rules as `draft_from_snapshot`, which checks again
     when it runs."""
-    preliminary = args.pending_validation is not None
     lines, skipped = rfq_lines(assessment)
     limits = {limit.position: limit for limit in plan.limits}
-    open_issues = [issue.message for issue in assessment.issues if issue.severity == "blocker"]
-    if assessment.status != "assessed":
-        open_issues.insert(0, "the assessment still needs review")
-    for line in assessment.lines:
-        if not line.ready or not line.unit or line.calculated_to_buy is None:
-            open_issues.append(f"{line.part_number}: quantity, unit or evidence not validated")
-        open_issues.extend(
-            f"{line.part_number}: {issue.message}"
-            for issue in line.issues
-            if issue.severity == "blocker"
-        )
-    # Open issues stop a complete RFQ; a preliminary one carries them (its mark keeps it
-    # from being prepared for sending), so for it they are what the buyer still settles.
-    issues = [] if preliminary else open_issues
+    # Assumptions and problems never stop the draft: each line carries its own, shown
+    # with it, and the send approval shows them again.
+    issues: list[str] = []
     if not lines:
-        issues.append("the assessment has no validated positive purchase requirements")
+        issues.append("the assessment has no positive purchase quantities")
     issues.extend(plan.issues)
     return ProposalPreview(
         action="create_rfq_from_assessment",
@@ -440,6 +428,8 @@ def _assessment_preview(
                 target_unit_price=found.target_unit_price if found else None,
                 max_unit_price=found.max_unit_price if found else None,
                 limits_basis=found.basis if found else None,
+                confidence=line.confidence,
+                assumptions=[a.message for a in line.assumptions],
             )
             for position, line in enumerate(lines, start=1)
             if line.calculated_to_buy is not None
@@ -455,10 +445,9 @@ def _assessment_preview(
             )
             for supplier in plan.invited
         ],
-        skipped=skipped if preliminary else [],
+        skipped=skipped,
         skipped_suppliers=plan.skipped_suppliers,
         lines_without_limits=plan.lines_without_limits,
-        questions=open_issues if preliminary else [],
         issues=issues,
     )
 

@@ -19,6 +19,10 @@ NUMBER_FIELDS: Final = frozenset(
         "quantity", "quantity_per", "base_quantity", "rejected", "otif_pct", "quality_pct",
         "rating", "lead_time_days", "demand", "projected", "reported_to_buy",
         "reported_estimated_cost", "received_quantity", "rejected_quantity", "open_quantity",
+        "quality_inspection", "in_transit", "price_basis_quantity", "score_overall",
+        "score_price", "score_quality", "score_delivery", "score_service",
+        "planned_delivery_days", "min_lot_size", "rounding", "min_order_quantity",
+        "alt_unit_factor",
     }
 )  # fmt: skip
 DATE_FIELDS: Final = frozenset(
@@ -39,8 +43,12 @@ IDENTIFIER_FIELDS: Final[dict[str, str]] = {
     "location": "location",
     "warehouse": "warehouse",
 }
-_NUMBER_BASES: Final = frozenset({"native_number", "decimal_separator"})
-_DATE_BASES: Final = frozenset({"date_order", "declared_date_order"})
+_NUMBER_BASES: Final = frozenset(
+    {"native_number", "decimal_separator", "report_convention", "unit_conversion"}
+)
+_DATE_BASES: Final = frozenset({"date_order", "declared_date_order", "report_convention"})
+# Interpretations of a categorical spelling: the mapper's checked one, or a report pack's.
+_TERM_BASES: Final = frozenset({"value_map", "report_convention", "unit_conversion"})
 
 
 def source_text(record: Record | None, field: str) -> str | None:
@@ -143,6 +151,20 @@ def source_date(record: Record | None, field: str, issues: list[Issue]) -> date 
     return None
 
 
+def unit_price(
+    record: Record | None, issues: list[Issue], *, warning: bool = False
+) -> Decimal | None:
+    """A price per ONE unit: the source price divided by the quantity it is quoted for
+    ("Por"/"Unidade de preço" 1000 = per thousand), when the source states one."""
+    price = source_number(record, "unit_price", issues, warning=warning)
+    if price is None:
+        return None
+    basis = source_number(record, "price_basis_quantity", issues, warning=warning)
+    if basis is None or basis <= 0:
+        return price
+    return price / basis
+
+
 def normalize_unit(value: str | None) -> str | None:
     """A unit spelling's canonical unit (UN, EA, pcs, Stk, pç -> count), else its text."""
     if value is None:
@@ -156,7 +178,7 @@ def unit_key(record: Record | None, field: str = "unit") -> str | None:
     if raw is None or record is None:
         return None
     canonical = record.canonical.get(field)
-    if canonical is not None and canonical.basis == "value_map" and canonical.source == raw:
+    if canonical is not None and canonical.basis in _TERM_BASES and canonical.source == raw:
         return canonical.value
     return normalize_unit(raw)
 
@@ -171,7 +193,7 @@ def categorical(record: Record | None, field: str) -> str | None:
     if raw is None or record is None:
         return None
     canonical = record.canonical.get(field)
-    if canonical is not None and canonical.basis == "value_map" and canonical.source == raw:
+    if canonical is not None and canonical.basis in _TERM_BASES and canonical.source == raw:
         return canonical.value
     return built_in(record.kind, field, raw)
 

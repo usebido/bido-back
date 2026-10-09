@@ -14,7 +14,9 @@ time-phased MRP grid. Each run goes through `analyze_documents` (readers,
 mapping, deterministic planning) and is graded on exact quantities per
 in-scope part, no out-of-scope parts, the last received price and supplier per
 part, the assessed/needs_review status, and the critical false-ready flag (a
-line marked ready with a wrong quantity). pass^k means all k repeats passed.
+wrong quantity presented with high confidence: no assumption, no problem). A
+wrong quantity labeled as an estimate (low or medium confidence, with its
+assumptions) is the `estimate` outcome. pass^k means all k repeats passed.
 
 `--mock` injects the correct mapping of every table (no network): it checks the
 harness and the deterministic code, and shows what readers and planning do with
@@ -63,9 +65,11 @@ from bido_back.purchasing.sources.service import analyze_documents
 from evals.source_scenario import AS_OF, CURRENCY, HORIZON_END, PRODUCT, expected, scenario
 from evals.source_variants import VARIANT, VARIANTS, Corpus, Variant, render
 
-# exact: assessed and right; review: needs_review, nothing wrong marked ready;
-# inexact: assessed but something wrong or missing; error: the run raised or timed out.
-Outcome = Literal["exact", "review", "inexact", "false_ready", "error"]
+# exact: assessed and right; review: needs_review, nothing wrong presented as certain;
+# estimate: a wrong or missing quantity, but every wrong one labeled as an estimate (low
+# or medium confidence, with its assumptions); inexact: assessed, something wrong or
+# missing and not labeled; error: the run raised or timed out.
+Outcome = Literal["exact", "review", "estimate", "inexact", "false_ready", "error"]
 
 # Fields without which the deterministic code cannot use a record of that kind.
 CRITICAL: Final[dict[str, frozenset[str]]] = {
@@ -498,11 +502,14 @@ def grade(
                     issues=sorted({f"{i.severity}:{i.code}" for i in line.issues}),
                 )
             )
-    false_ready = any(
-        line.ready and (key not in scope or line.calculated_to_buy != truth.to_buy[scope[key]])
+    wrong = [
+        line
         for key, found in lines.items()
         for line in found
-    )
+        if line.ready and (key not in scope or line.calculated_to_buy != truth.to_buy[scope[key]])
+    ]
+    # Honesty: a wrong number may be an estimate, never presented as certain.
+    false_ready = any(line.confidence == "high" for line in wrong)
     false_complete = assessment.status == "assessed" and any(k not in lines for k in scope)
     if assessment.status != "assessed":
         failures.insert(0, f"status {assessment.status}")
@@ -519,6 +526,10 @@ def grade(
         outcome = "exact"
     elif assessment.status == "needs_review":
         outcome = "review"
+    elif all(k in lines for k in scope) and (
+        wrong or not checks["quantities"] or not checks["scope"]
+    ):
+        outcome = "estimate"
     else:
         outcome = "inexact"
     tables: dict[tuple[str, str], EvidenceTable] = {}

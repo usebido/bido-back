@@ -94,7 +94,8 @@ def test_an_open_balance_must_reconcile_with_the_order(change: dict[str, str], c
     extend(order, **change)
     line = assess_plan(rows, SCOPE).lines[0]
     assert code in {i.code for i in line.issues}
-    assert not line.ready and line.calculated_to_buy is None
+    assert line.confidence == "low"
+    assert "open_orders_not_counted" in {a.code for a in line.assumptions}
 
 
 def test_inline_and_separate_evidence_must_agree() -> None:
@@ -103,7 +104,7 @@ def test_inline_and_separate_evidence_must_agree() -> None:
     extend(order, open_quantity="9")
     line = assess_plan(rows, SCOPE).lines[0]
     assert "conflicting_pending_evidence" in {i.code for i in line.issues}
-    assert not line.ready
+    assert line.confidence == "low"
 
     rows = motor_records()
     order = next(r for r in rows if r.values.get("po_number") == "OPEN-40")

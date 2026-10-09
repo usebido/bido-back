@@ -6,6 +6,7 @@ Consolidated tables corroborate source tables; they never add another stock or
 demand balance. Every issue retains the original evidence coordinates.
 """
 
+import json
 import re
 from collections import Counter, defaultdict
 from collections.abc import Sequence
@@ -15,6 +16,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from bido_back.purchasing.sources.contracts import (
     Assessment,
     AssessmentLine,
+    Assumption,
     Issue,
     Record,
     SupplierEvidence,
@@ -27,6 +29,7 @@ from bido_back.purchasing.sources.evidence import (
     join_key,
     same_key,
     unit_key,
+    unit_price,
 )
 from bido_back.purchasing.sources.evidence import (
     source_date as _day,
@@ -248,11 +251,58 @@ def _reconcile(
             )
 
 
+def confidence(line: AssessmentLine, *, blocked: bool = False) -> None:
+    """low: an inconsistency was settled; medium: conventions or defaults; else high."""
+    if (
+        blocked
+        or any(i.severity == "blocker" for i in line.issues)
+        or any(a.confidence == "low" for a in line.assumptions)
+    ):
+        line.confidence = "low"
+    elif line.assumptions:
+        line.confidence = "medium"
+    else:
+        line.confidence = "high"
+
+
+def _note(
+    part: str, code: str, message: str, alternative: str | None = None, *, low: bool = False
+) -> Assumption:
+    return Assumption(
+        code=code,
+        message=message,
+        alternative=alternative,
+        confidence="low" if low else "medium",
+        part_numbers=[part],
+    )
+
+
+def _assume(
+    line: AssessmentLine,
+    code: str,
+    message: str,
+    alternative: str | None = None,
+    *,
+    low: bool = False,
+) -> None:
+    line.assumptions.append(
+        Assumption(
+            code=code,
+            message=message,
+            alternative=alternative,
+            confidence="low" if low else "medium",
+            part_numbers=[line.part_number],
+        )
+    )
+
+
 def _calculate(
     line: AssessmentLine,
     inventory: Record | None,
     requirement: Record | None,
 ) -> None:
+    """The quantity to buy, best estimate: what the sources do not establish is not
+    netted (or is read the most plausible way) and becomes a disclosed assumption."""
     issues = line.issues
     if requirement is None:
         _issue(
@@ -261,6 +311,16 @@ def _calculate(
             "No unambiguous direct requirement was found for this item and location.",
             [],
         )
+        if line.reported_to_buy is not None and line.reported_to_buy >= 0:
+            line.calculated_to_buy = line.reported_to_buy
+            _assume(
+                line,
+                "reported_quantity_used",
+                "No requirement could be read for this item: the source's own suggested "
+                "purchase quantity is used, not an independent calculation.",
+                "Check the source summary; Bido could not recompute it.",
+                low=True,
+            )
         return
     basis = categorical(requirement, "demand_basis")
     if basis not in ("gross", "net"):
@@ -272,7 +332,16 @@ def _calculate(
             [requirement],
             "quantity",
             "demand_basis",
+            warning=True,
         )
+        _assume(
+            line,
+            "requirement_basis_assumed_gross",
+            "The requirement does not say whether it is gross or already netted: it was read "
+            "as gross demand and netted against stock and open orders.",
+            "If it is already a net purchase requirement, buy exactly the required quantity.",
+        )
+        basis = "gross"
     if line.demand is None:
         _issue(
             issues,
@@ -299,9 +368,36 @@ def _calculate(
             "need_by",
             warning=True,
         )
+    if line.demand is None:
+        return  # Literally no quantity: nothing to estimate.
     if basis == "net":
-        if not any(issue.severity == "blocker" for issue in issues):
-            line.calculated_to_buy = line.demand
+        line.calculated_to_buy = line.demand
+        return
+    available, on_order, safety = line.available, line.on_order, line.safety_stock
+    if (
+        inventory is not None
+        and _text(inventory, "unit") is not None
+        and _text(requirement, "unit") is not None
+        and unit_key(inventory) != unit_key(requirement)
+    ):
+        # No conversion: balances in another unit are never netted against the demand.
+        same = (
+            max(line.demand + safety - available - on_order, _ZERO)
+            if available is not None and on_order is not None and safety is not None
+            else None
+        )
+        _assume(
+            line,
+            "stock_not_netted",
+            f"Stock is in {_text(inventory, 'unit')} and the requirement in "
+            f"{_text(requirement, 'unit')}, with no conversion: stock, open orders and "
+            "safety stock were not netted.",
+            f"If the stock is in {_text(requirement, 'unit')} too, buy {same.normalize():f}."
+            if same is not None
+            else "With a conversion, the quantity to buy drops by the stock and open orders.",
+            low=True,
+        )
+        line.calculated_to_buy = line.demand
         return
     if inventory is None:
         _issue(
@@ -309,18 +405,45 @@ def _calculate(
             "missing_inventory",
             "No unambiguous inventory balance was found for this item and location.",
             [],
+            warning=True,
         )
-        return
     for field in ("available", "on_order", "safety_stock"):
         if getattr(line, field) is None:
             _issue(
                 issues,
                 f"missing_{field}",
                 f"The source does not establish {field.replace('_', ' ')}; zero was not assumed.",
-                [inventory],
+                [inventory] if inventory is not None else [],
                 field,
+                warning=True,
             )
-    if line.inventory_unit is None:
+    if available is None:
+        available = _ZERO
+        _assume(
+            line,
+            "stock_not_netted",
+            "No usable free-stock balance was found: stock was not subtracted.",
+            "Any free stock on hand reduces the quantity to buy by its size.",
+            low=True,
+        )
+    if on_order is None:
+        on_order = _ZERO
+        _assume(
+            line,
+            "no_open_orders_known",
+            "No open-order quantity was found: no open order was subtracted.",
+            "Open orders arriving in time reduce the quantity to buy.",
+            low=True,
+        )
+    if safety is None:
+        safety = _ZERO
+        _assume(
+            line,
+            "no_safety_stock",
+            "No safety-stock policy was found or agreed: none was kept (0).",
+            "A safety stock raises the quantity to buy by its size.",
+        )
+    if line.inventory_unit is None and inventory is not None:
         _issue(
             issues,
             "missing_inventory_unit",
@@ -329,8 +452,8 @@ def _calculate(
             "available",
             "unit",
         )
-    eligible_on_order = line.on_order
-    if line.on_order is not None and line.on_order > 0:
+    eligible_on_order = on_order
+    if on_order > 0 and inventory is not None:
         receipt = _day(inventory, "receipt_date", issues)
         if receipt is None or line.need_by is None:
             _issue(
@@ -342,6 +465,15 @@ def _calculate(
                 "on_order",
                 "receipt_date",
                 "need_by",
+                warning=True,
+            )
+            _assume(
+                line,
+                "inbound_assumed_on_time",
+                "The on-order quantity has no confirmed arrival date: it is assumed to arrive "
+                "in time.",
+                f"If it arrives late, buy {on_order.normalize():f} more.",
+                low=True,
             )
         elif receipt > line.need_by:
             eligible_on_order = _ZERO
@@ -355,16 +487,7 @@ def _calculate(
                 "need_by",
                 warning=True,
             )
-    if (
-        not any(issue.severity == "blocker" for issue in issues)
-        and line.demand is not None
-        and line.available is not None
-        and eligible_on_order is not None
-        and line.safety_stock is not None
-    ):
-        line.calculated_to_buy = max(
-            line.demand + line.safety_stock - line.available - eligible_on_order, _ZERO
-        )
+    line.calculated_to_buy = max(line.demand + safety - available - eligible_on_order, _ZERO)
 
 
 def _planning_line(part: str, location: str | None, records: Sequence[Record]) -> AssessmentLine:
@@ -372,6 +495,64 @@ def _planning_line(part: str, location: str | None, records: Sequence[Record]) -
     inventory = _one(records, "inventory", issues)
     requirement = _one(records, "material_requirement", issues)
     summary = _one(records, "purchase_summary", issues)
+    notes: list[Assumption] = []
+    stocks = [r for r in records if r.kind == "inventory"]
+    if inventory is None and len(stocks) > 1:
+        if len({json.dumps(r.values, sort_keys=True) for r in stocks}) == 1:
+            inventory = stocks[0]
+            notes.append(
+                _note(
+                    part,
+                    "duplicate_stock_counted_once",
+                    f"{len(stocks)} identical stock rows were counted once.",
+                    "If they are separate balances, add them up.",
+                )
+            )
+        elif usable := [(q, r) for r in stocks if (q := _number(r, "available", [])) is not None]:
+            # Disagreeing balances: the lowest free stock is the cautious reading.
+            low_stock, inventory = min(usable, key=lambda pair: pair[0])
+            high_stock = max(q for q, _ in usable)
+            notes.append(
+                _note(
+                    part,
+                    "stock_rows_disagree",
+                    f"{len(stocks)} different stock rows exist for this item and plant: the "
+                    f"lowest free stock ({low_stock.normalize():f}) was used.",
+                    f"With the highest ({high_stock.normalize():f}), buy up to "
+                    f"{(high_stock - low_stock).normalize():f} less.",
+                    low=True,
+                )
+            )
+        else:
+            notes.append(
+                _note(
+                    part,
+                    "stock_rows_disagree",
+                    f"{len(stocks)} different stock "
+                    "rows exist for this item and plant: stock was not netted.",
+                    "Once the right balance is known, the quantity to buy drops by it.",
+                    low=True,
+                )
+            )
+    demands = [r for r in records if r.kind == "material_requirement"]
+    combined: tuple[Decimal, date | None] | None = None
+    if requirement is None and len(demands) > 1 and len({unit_key(r) for r in demands}) == 1:
+        quantities = [_number(r, "quantity", []) for r in demands]
+        if None not in quantities:
+            requirement = demands[0]
+            total = sum((q for q in quantities if q is not None), _ZERO)
+            days = [d for r in demands if (d := _day(r, "need_by", [])) is not None]
+            combined = (total, min(days, default=None))
+            notes.append(
+                _note(
+                    part,
+                    "requirements_added",
+                    f"{len(demands)} requirement rows "
+                    f"for this item and plant were added up ({total.normalize():f}).",
+                    "If they repeat one requirement, the demand is the largest of them.",
+                    low=True,
+                )
+            )
     _reconcile(inventory, requirement, summary, issues)
     stock = inventory or summary
     reported_unit = _text(summary, "unit")
@@ -414,6 +595,9 @@ def _planning_line(part: str, location: str | None, records: Sequence[Record]) -
         evidence=_refs(records),
         issues=issues,
     )
+    line.assumptions.extend(notes)
+    if combined is not None:
+        line.demand, line.need_by = combined
     _calculate(line, inventory, requirement)
     if line.reported_estimated_cost is not None and line.currency is None:
         _issue(
@@ -544,7 +728,10 @@ def supplier_evidence(
     if all(day is not None for _, day in dated):
         last_day = max(day for _, day in dated if day is not None)
         newest = [record for record, day in dated if day == last_day]
-        signatures = {(_text(record, "unit_price"), _text(record, "currency")) for record in newest}
+        signatures = {
+            (unit_price(record, []), _text(record, "currency"), unit_key(record))
+            for record in newest
+        }
         if len(signatures) == 1:
             latest = newest[0]
         else:
@@ -571,7 +758,7 @@ def supplier_evidence(
         supplier_code=code,
         name=name,
         email=next(iter(emails)) if len(emails) == 1 and not conflicted else None,
-        last_price=_number(latest, "unit_price", issues, warning=True),
+        last_price=unit_price(latest, issues, warning=True),
         currency=_currency(latest, issues),
         ordered_at=_day(latest, "ordered_at", issues),
         country=supplier_country(matching),
@@ -608,7 +795,23 @@ def supplier_evidence(
                 )
             else:
                 setattr(result, field, value)
+    master_facts(result, matching, metrics)
     return result
+
+
+_SCORES = ("score_overall", "score_price", "score_quality", "score_delivery", "score_service")
+
+
+def master_facts(
+    supplier: SupplierEvidence, masters: Sequence[Record], metrics: Sequence[Record]
+) -> None:
+    """The supplier master's purchase block and the vendor evaluation's own scores."""
+    if any(categorical(record, "purchase_block") == "blocked" for record in masters):
+        supplier.purchase_blocked = True
+    for field in _SCORES:
+        values = {_number(record, field, []) for record in metrics} - {None}
+        if len(values) == 1:
+            setattr(supplier, field, next(iter(values)))
 
 
 def _supplier_key(code: str | None, name: str | None) -> str | None:
@@ -681,7 +884,14 @@ def assess(records: Sequence[Record]) -> Assessment:
                 "part_number",
                 "location",
             )
-            line.calculated_to_buy = None
+            _assume(
+                line,
+                "location_unknown",
+                "This item's evidence names no plant while the item is at several plants: "
+                "it was assessed on its own, without the stock of any plant.",
+                "Once the plant is known, that plant's stock and orders are netted.",
+                low=True,
+            )
         by_supplier: dict[tuple[str | None, str | None], list[Record]] = defaultdict(list)
         for record in purchases[join_key(part)]:
             code = _text(record, "supplier_code")
@@ -716,9 +926,8 @@ def assess(records: Sequence[Record]) -> Assessment:
         line.suppliers = list(suppliers.values())
         # Supplier performance and the internal price benchmark (an internal reference only).
         measure(line, suppliers, orders, as_of)
-        line.ready = line.calculated_to_buy is not None and not any(
-            issue.severity == "blocker" for issue in line.issues
-        )
+        line.ready = line.calculated_to_buy is not None
+        confidence(line)
         # Validation can encounter the same source field in several comparisons.
         seen: set[str] = set()
         distinct: list[Issue] = []

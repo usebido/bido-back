@@ -75,6 +75,15 @@ def codes(line: AssessmentLine) -> set[str]:
     return {issue.code for issue in line.issues}
 
 
+def assumed(line: AssessmentLine) -> set[str]:
+    return {assumption.code for assumption in line.assumptions}
+
+
+def estimate(line: AssessmentLine) -> bool:
+    """A best-estimate quantity, labeled: ready, low confidence."""
+    return line.ready and line.calculated_to_buy is not None and line.confidence == "low"
+
+
 def test_gross_demand_uses_absolute_safety_and_available_stock_once() -> None:
     result = assess(
         [
@@ -109,7 +118,7 @@ def test_summary_does_not_add_stock_or_demand_and_missing_currency_stays_unknown
     }
 
 
-def test_available_plus_blocked_cannot_exceed_total_but_reported_purchases_remain() -> None:
+def test_available_plus_blocked_above_total_is_flagged_and_the_line_is_an_estimate() -> None:
     stock = inventory(
         total="8200", available="6100", blocked="2200", on_order="1000", safety_stock="4800"
     )
@@ -130,10 +139,11 @@ def test_available_plus_blocked_cannot_exceed_total_but_reported_purchases_remai
         ]
     ).lines[0]
     assert "inventory_balance_conflict" in codes(line)
-    assert line.calculated_to_buy is None
+    # The stated free stock is used; the inconsistency stays visible and lowers confidence.
+    assert line.calculated_to_buy == Decimal(4900)
     assert line.reported_to_buy == Decimal(4900)
     assert line.reported_estimated_cost == Decimal(391510)
-    assert not line.ready
+    assert estimate(line)
     conflict = next(issue for issue in line.issues if issue.code == "inventory_balance_conflict")
     assert conflict.evidence == [
         ref for field, ref in stock.evidence.items() if field in {"total", "available", "blocked"}
@@ -143,7 +153,7 @@ def test_available_plus_blocked_cannot_exceed_total_but_reported_purchases_remai
 def test_available_stock_cannot_exceed_total_even_without_a_blocked_balance() -> None:
     line = assess([inventory(available="8300", total="8200"), requirement()]).lines[0]
     assert "inventory_balance_conflict" in codes(line)
-    assert not line.ready
+    assert estimate(line)
 
 
 def test_residual_stock_gap_does_not_require_equality_or_subtract_reservations() -> None:
@@ -164,8 +174,10 @@ def test_source_units_remain_visible_when_conversion_is_missing() -> None:
         ]
     )
     line = result.lines[0]
-    assert line.calculated_to_buy is None
-    assert not line.ready
+    # Stock in UN is never netted against a demand in KG: the whole demand is bought.
+    assert line.calculated_to_buy == Decimal(11000)
+    assert estimate(line)
+    assert "stock_not_netted" in assumed(line)
     assert line.reported_to_buy == Decimal(7500)
     assert line.reported_estimated_cost == Decimal(588750)
     assert line.inventory_unit == line.reported_unit == "UN"
@@ -194,22 +206,27 @@ def test_net_requirement_is_not_netted_again_or_given_extra_safety_stock() -> No
     assert alone.lines[0].ready
 
 
-def test_missing_gross_net_semantics_preserves_reported_purchase() -> None:
+def test_missing_gross_net_semantics_is_read_as_gross_and_disclosed() -> None:
     result = assess([inventory(), requirement(demand_basis=""), summary()])
     line = result.lines[0]
-    assert line.calculated_to_buy is None
+    assert line.calculated_to_buy == Decimal(7500)
     assert line.reported_to_buy == Decimal(7500)
     assert "ambiguous_demand_basis" in codes(line)
+    assert "requirement_basis_assumed_gross" in assumed(line)
+    assert line.ready and line.confidence == "medium"  # A default reading, disclosed.
     assert all("BOM" not in issue.message for issue in line.issues)
 
 
-def test_unknown_inbound_date_does_not_promise_timed_coverage() -> None:
+def test_unknown_inbound_date_is_an_assumption_with_its_alternative() -> None:
     result = assess([inventory(receipt_date=""), requirement(), summary()])
     line = result.lines[0]
     assert line.on_order == Decimal(1500)
-    assert line.calculated_to_buy is None
+    assert line.calculated_to_buy == Decimal(7500)
     assert line.reported_to_buy == Decimal(7500)
     assert "unconfirmed_inbound_date" in codes(line)
+    timed = next(a for a in line.assumptions if a.code == "inbound_assumed_on_time")
+    assert timed.alternative is not None and "1500" in timed.alternative
+    assert estimate(line)
 
 
 def test_late_inbound_is_excluded_from_coverage() -> None:
@@ -226,12 +243,23 @@ def test_zero_on_order_needs_no_receipt_date() -> None:
     assert result.lines[0].ready
 
 
-@pytest.mark.parametrize("field", ["available", "on_order", "safety_stock"])
-def test_absent_inventory_quantities_do_not_silently_become_zero(field: str) -> None:
+@pytest.mark.parametrize(
+    ("field", "to_buy", "assumption"),
+    [
+        ("available", 16000, "stock_not_netted"),
+        ("on_order", 9000, "no_open_orders_known"),
+        ("safety_stock", 1000, "no_safety_stock"),
+    ],
+)
+def test_absent_inventory_quantities_are_not_netted_and_say_so(
+    field: str, to_buy: int, assumption: str
+) -> None:
     result = assess([inventory(**{field: ""}), requirement()])
     line = result.lines[0]
-    assert line.calculated_to_buy is None
+    assert line.calculated_to_buy == Decimal(to_buy)
     assert f"missing_{field}" in codes(line)
+    assert assumption in assumed(line)
+    assert getattr(line, field) is None  # Never reported as a zero balance.
 
 
 @pytest.mark.parametrize(
@@ -251,7 +279,7 @@ def test_consolidated_arithmetic_and_cross_source_conflicts_are_reported(
 ) -> None:
     line = assess([inventory(), requirement(), summary(**{field: value})]).lines[0]
     assert code in codes(line)
-    assert not line.ready
+    assert estimate(line)
     assert line.reported_to_buy is not None
 
 
@@ -261,9 +289,16 @@ def test_duplicate_mapping_of_same_cells_deduplicates_but_different_rows_do_not(
     assert line.calculated_to_buy == Decimal(7500)
     other = record("inventory", 3, **stock.values)
     line = assess([stock, other, requirement(), summary()]).lines[0]
-    assert line.calculated_to_buy is None
+    # The same balance in two places counts once, disclosed.
+    assert line.calculated_to_buy == Decimal(7500)
     assert line.reported_to_buy == Decimal(7500)
     assert "ambiguous_inventory" in codes(line)
+    assert "duplicate_stock_counted_once" in assumed(line)
+    different = record("inventory", 3, **{**stock.values, "available": "100"})
+    line = assess([stock, different, requirement()]).lines[0]
+    assert line.calculated_to_buy == Decimal(15900)  # The lower free stock, 100.
+    assert "stock_rows_disagree" in assumed(line)
+    assert estimate(line)
 
 
 def test_one_source_row_can_supply_distinct_concepts_without_double_counting() -> None:
@@ -281,18 +316,20 @@ def test_one_source_cell_cannot_be_both_stock_and_demand() -> None:
     stock, demand = inventory(), requirement(quantity="8500")
     demand.evidence["quantity"] = stock.evidence["available"]
     line = assess([stock, demand]).lines[0]
-    assert line.calculated_to_buy is None
-    assert not line.ready
+    assert line.calculated_to_buy == Decimal(5000)
+    assert estimate(line)
     assert "overlapping_stock_demand_evidence" in codes(line)
 
 
-def test_multiple_demand_rows_are_not_arbitrarily_added_or_overwritten() -> None:
+def test_multiple_demand_rows_are_added_up_and_disclosed() -> None:
     first = requirement()
     second = record("material_requirement", 3, **{**first.values, "quantity": "1000"})
     line = assess([inventory(), first, second, summary()]).lines[0]
-    assert line.calculated_to_buy is None
-    assert line.demand is None
+    assert line.demand == Decimal(12000)
+    assert line.calculated_to_buy == Decimal(8500)
     assert "ambiguous_material_requirement" in codes(line)
+    assert "requirements_added" in assumed(line)
+    assert estimate(line)
 
 
 def test_location_matching_keeps_stock_pools_separate() -> None:
@@ -312,9 +349,13 @@ def test_location_matching_keeps_stock_pools_separate() -> None:
 
 def test_unlocated_requirement_cannot_choose_between_multiple_sites() -> None:
     result = assess([inventory(location="A"), inventory(location="B"), requirement(location="")])
-    assert all(line.calculated_to_buy is None for line in result.lines)
     unlocated = next(line for line in result.lines if line.location is None)
     assert "ambiguous_location" in codes(unlocated)
+    # Without a plant, no plant's stock is netted: the estimate says so.
+    assert unlocated.calculated_to_buy == Decimal(11000)
+    assert {"location_unknown", "stock_not_netted"} <= assumed(unlocated)
+    assert estimate(unlocated)
+    assert all(line.calculated_to_buy is None for line in result.lines if line.location)
 
 
 def test_one_ambiguous_item_does_not_block_other_items() -> None:
@@ -327,8 +368,10 @@ def test_one_ambiguous_item_does_not_block_other_items() -> None:
         ]
     )
     by_part = {line.part_number: line for line in result.lines}
-    assert by_part["00010"].calculated_to_buy is None
+    assert by_part["00010"].calculated_to_buy == Decimal(11000)
+    assert estimate(by_part["00010"])
     assert by_part["B"].calculated_to_buy == Decimal(7500)
+    assert by_part["B"].confidence == "high"
     assert by_part["B"].ready
 
 
@@ -437,7 +480,7 @@ def test_conflicting_supplier_identity_does_not_erase_calculated_quantities() ->
     )
     line = result.lines[0]
     assert line.calculated_to_buy == Decimal(7500)
-    assert not line.ready
+    assert estimate(line)
     assert line.suppliers[0].name is None
     assert "supplier_code_conflict" in codes(line)
 
@@ -473,7 +516,7 @@ def test_supplier_identity_conflicts_consider_every_source(other_kind: RecordKin
     assert line.suppliers[0].name is None
     assert line.suppliers[0].email is None
     assert line.calculated_to_buy == Decimal(11000)
-    assert not line.ready
+    assert estimate(line)
     conflict = next(issue for issue in line.issues if issue.code == "supplier_code_conflict")
     assert {ref.row for ref in conflict.evidence} == {2, 3}
 
@@ -586,5 +629,8 @@ def test_summary_only_remains_useful_without_fabricating_a_requirement() -> None
     line = assess([summary()]).lines[0]
     assert line.reported_to_buy == Decimal(7500)
     assert line.reported_estimated_cost == Decimal(588750)
-    assert line.calculated_to_buy is None
+    # The source's own suggestion is the estimate, labeled as not recomputed.
+    assert line.calculated_to_buy == Decimal(7500)
+    assert "reported_quantity_used" in assumed(line)
     assert "missing_material_requirement" in codes(line)
+    assert estimate(line)

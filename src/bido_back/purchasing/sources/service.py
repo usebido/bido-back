@@ -5,6 +5,7 @@ import hashlib
 import json
 from collections import Counter
 from collections.abc import Sequence
+from datetime import date
 from uuid import UUID
 
 from sqlalchemy import select
@@ -14,9 +15,10 @@ from bido_back.agents.context import ToolContext
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import TemplateUpload
-from bido_back.purchasing.sources.analysis import assess
+from bido_back.purchasing.sources.analysis import assess, confidence
 from bido_back.purchasing.sources.contracts import (
     Assessment,
+    Assumption,
     Coverage,
     EvidenceTable,
     Issue,
@@ -24,19 +26,25 @@ from bido_back.purchasing.sources.contracts import (
     ScopeRequest,
     SourceAssessment,
 )
+from bido_back.purchasing.sources.evidence import same_key
 from bido_back.purchasing.sources.mapping import Mapper, map_sources
+from bido_back.purchasing.sources.packs import read_known
+from bido_back.purchasing.sources.packs.base import PackContext
 from bido_back.purchasing.sources.planning import assess_plan, planning_context
 from bido_back.purchasing.sources.pricing import spend_totals
 from bido_back.purchasing.sources.readers import SourceDocument, read_source
 from bido_back.purchasing.sources.scope import (
     ResolvedScope,
     as_request,
+    candidate_scopes,
     direct_scope,
     has_production_plans,
+    mrp_scopes,
     resolve_scope,
     scope_issues,
 )
 from bido_back.purchasing.sources.snapshots import find_snapshot, save_snapshot
+from bido_back.purchasing.sources.units import convert_units
 from bido_back.storage import BlobStorage
 
 Db = AsyncEngine | async_sessionmaker[AsyncSession]
@@ -53,13 +61,22 @@ async def analyze_documents(
     mapper: Mapper,
     *,
     scope: ScopeRequest | PlanningScope | None = None,
+    today: date | None = None,
 ) -> SourceAssessment:
     """Read, map, settle the buyer's planning boundaries, then assess, in one pass.
 
-    `scope` is the buyer's request; code resolves it against the mapped evidence (no
-    second model call). With production plans and unsettled boundaries, the result holds
-    the candidates and the questions to ask, never per-material lines of every area.
+    Tables of a known ERP report are read by its report pack (no model call); the rest
+    go to the source mapper, in parallel. `scope` is the buyer's request; code resolves
+    it against the mapped evidence (no second model call). With production plans and
+    unsettled boundaries, the result holds the candidates and the questions to ask,
+    never per-material lines of every area. Without them, an MRP list is planned for
+    every required material of each plant.
+
+    Problems never hold the quantities: every line with demand gets a best estimate,
+    its assumptions and a confidence (see `planning.assess_plan`); the buyer and the
+    approvals downstream decide.
     """
+    today = today or date.today()
     tables: list[EvidenceTable] = []
     issues: list[Issue] = []
     unread: list[Coverage] = []
@@ -77,17 +94,71 @@ async def analyze_documents(
                     rows=0,
                 )
             )
-    records, problems, coverage = await map_sources(tables, objective, context, mapper)
+    known = read_known(tables, PackContext(filenames=names, today=today))
+    mapped, problems, coverage = await map_sources(
+        known.remaining, objective, context, mapper, known=known.records
+    )
+    records = [*known.records, *mapped]
+    unit_issues, conversions = convert_units(records)
+    problems = [*known.issues, *problems, *unit_issues]
+    coverage = [*known.coverage, *coverage]
     candidates, snapshot_dates = planning_context(records)
     request = as_request(scope)
     planned = has_production_plans(records)
     resolved: ResolvedScope | None = None
+    lists: list[ResolvedScope] = []
     if planned:
         resolved = resolve_scope(records, request or ScopeRequest())
     elif request is not None:
         resolved = direct_scope(records, request)
+    left: list[str] = []
+    if planned and resolved is not None and resolved.scope is None:
+        # Open boundaries never hold the plan: each candidate is planned on its own.
+        lists, left = candidate_scopes(records, request or ScopeRequest(), today)
+        if lists:
+            resolved = lists[0]
+    elif not planned and (resolved is None or resolved.scope is None):
+        lists = mrp_scopes(records, request, today)
+        if lists:
+            resolved = lists[0]
     planning = resolved.scope if resolved is not None else None
-    if planning is not None:
+    if lists:
+        result = Assessment(record_counts=dict(Counter(record.kind for record in records)))
+        for each in lists:
+            if each.scope is None:
+                continue
+            found = assess_plan(records, each.scope)
+            if len(lists) > 1:
+                # Each scope's own settled values belong to its lines only.
+                for line in found.lines:
+                    line.assumptions.extend(
+                        Assumption(
+                            code=a.code,
+                            message=a.message,
+                            evidence=a.evidence,
+                            part_numbers=[line.part_number],
+                        )
+                        for a in each.resolution.assumptions
+                        if a.code != "planned_each_candidate"
+                    )
+            if planned and len(lists) > 1:
+                label = f"{each.scope.product_code} at {each.scope.location}"
+                for line in found.lines:
+                    line.assumptions.append(
+                        Assumption(
+                            code="candidate_plan",
+                            message=f"Part of the plan for {label}, one of {len(lists)} "
+                            "product/plant candidates planned separately.",
+                            alternative=f"If {label} is not wanted, leave this line out.",
+                            part_numbers=[line.part_number],
+                        )
+                    )
+            result.lines.extend(found.lines)
+            result.issues.extend(found.issues)
+            result.assumptions.extend(found.assumptions)
+            if each is not resolved:
+                result.issues[:0] = scope_issues(each, planned=False)
+    elif planning is not None:
         result = assess_plan(records, planning)
     elif planned:
         # Unsettled boundaries: no lines for every material of every area and snapshot.
@@ -97,6 +168,35 @@ async def analyze_documents(
     if resolved is not None:
         result.issues[:0] = scope_issues(resolved, planned=planned)
     result.issues.extend([*issues, *problems])
+    settled = [
+        Assumption(code=a.code, message=a.message, evidence=a.evidence)
+        for each in (
+            (lists if len(lists) == 1 else []) or ([resolved] if resolved and not lists else [])
+        )
+        for a in each.resolution.assumptions
+        if a.code != "planned_each_candidate"
+    ]
+    if planned and len(lists) > 1:
+        labels = [f"{e.scope.product_code} at {e.scope.location}" for e in lists if e.scope]
+        settled.append(
+            Assumption(
+                code="planned_each_candidate",
+                message=f"The request does not settle one product and plant: {len(labels)} "
+                f"candidates were planned separately ({'; '.join(labels)}).",
+                alternative="If you meant only one, ignore the other candidates' lines.",
+            )
+        )
+    result.assumptions[:0] = [*settled, *known.assumptions, *conversions]
+    if left:
+        result.assumptions.append(
+            Assumption(
+                code="candidates_not_planned",
+                message="Also with production orders, not planned in this answer: "
+                + "; ".join(left[:10])
+                + ".",
+                alternative="Ask to plan any of them.",
+            )
+        )
     if not result.lines and (planning is not None or not planned):
         result.issues.append(
             Issue(
@@ -109,10 +209,7 @@ async def analyze_documents(
     for row in coverage:
         row.filename = names[row.source_id]
     all_coverage = [*coverage, *unread]
-    blocked = any(issue.severity == "blocker" for issue in result.issues)
-    if blocked:
-        for line in result.lines:
-            line.ready = False
+    _disclose(result, all_coverage)
     return SourceAssessment(
         **result.model_dump(),
         scope=planning,
@@ -120,16 +217,43 @@ async def analyze_documents(
         planning_candidates=candidates,
         snapshot_dates=snapshot_dates,
         coverage=all_coverage,
-        status=(
-            "assessed"
-            if result.lines
-            and not blocked
-            and all(line.ready for line in result.lines)
-            and all(row.inspected for row in all_coverage)
-            else "needs_review"
-        ),
+        reports=known.reports,
+        status="assessed"
+        if result.lines and all(line.calculated_to_buy is not None for line in result.lines)
+        else "needs_review",
         totals=spend_totals(result.lines),
     )
+
+
+def _disclose(result: Assessment, coverage: Sequence[Coverage]) -> None:
+    """Each line lists the assessment-wide assumptions that concern it, and problems
+    elsewhere in the evidence lower every line's confidence instead of holding it."""
+    general = [a for a in result.assumptions if not a.part_numbers]
+    unread = [row for row in coverage if not row.inspected]
+    if unread:
+        general.append(
+            Assumption(
+                code="sources_not_fully_read",
+                message=f"{len(unread)} table(s) could not be fully read: "
+                + ", ".join(f"{row.filename} ({row.table})" for row in unread[:5])
+                + ". Their content is not in the quantities.",
+                confidence="low",
+            )
+        )
+        result.assumptions.append(general[-1])
+    blocked = any(issue.severity == "blocker" for issue in result.issues)
+    for line in result.lines:
+        known = {(a.code, a.message) for a in line.assumptions}
+        for assumption in result.assumptions:
+            if (assumption.code, assumption.message) in known:
+                continue
+            if not assumption.part_numbers or any(
+                same_key(part, line.part_number) for part in assumption.part_numbers
+            ):
+                line.assumptions.append(assumption)
+                known.add((assumption.code, assumption.message))
+        line.ready = line.calculated_to_buy is not None
+        confidence(line, blocked=blocked or bool(unread))
 
 
 async def analyze_uploads(
@@ -174,7 +298,7 @@ async def analyze_uploads(
     source_key = hashlib.sha256(
         json.dumps(
             {
-                "version": 4,
+                "version": 5,
                 "objective": objective,
                 "scope": request.model_dump(mode="json") if request is not None else None,
                 "sources": sorted(

@@ -21,7 +21,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
-from typing import Any, Final
+from typing import Any, Final, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field, JsonValue
@@ -64,6 +64,10 @@ class ProposedLine(BaseModel):
     max_unit_price: Decimal | None = None
     # Why those limits: the rule, how many received orders, the window, the latest order.
     limits_basis: LimitsBasis | None = None
+    # From an assessment: how reliable the quantity is and what it rests on. Show them
+    # with the line; they do not stop the draft.
+    confidence: Literal["high", "medium", "low"] | None = None
+    assumptions: list[str] = Field(default_factory=list[str])
 
 
 class ProposedSupplier(BaseModel):
