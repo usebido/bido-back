@@ -86,7 +86,7 @@ from bido_back.quotes.parsing import DecimalSeparator
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.currency import ResolvedCurrency, fx_factor, resolve_currency
 from bido_back.rfqs.errors import RfqError
-from bido_back.rfqs.language import DEFAULT_LANGUAGE, country_language
+from bido_back.rfqs.language import DEFAULT_LANGUAGE, country_language, infer_supplier_locale
 from bido_back.storage import BlobStorage
 
 logger = logging.getLogger(__name__)
@@ -265,6 +265,7 @@ async def _apply_contacts(
                 await session.flush()
                 counts.add("suppliers", created=True)
             suppliers[name.lower()] = supplier
+        email = str(row["email"]).strip().lower()
         country = row.get("country")
         if isinstance(country, str) and country.strip() and not supplier.country:
             supplier.country = country.strip()[:60]
@@ -276,10 +277,15 @@ async def _apply_contacts(
             spoken = country_language(supplier.country)
             if spoken is not None:
                 supplier.language = spoken
+        if supplier.country is None and supplier.language in (None, DEFAULT_LANGUAGE):
+            # No country column either: the email's country TLD or the legal suffix.
+            inferred_country, inferred_language = infer_supplier_locale(supplier.name, email)
+            if inferred_country is not None:
+                supplier.country = inferred_country
+                supplier.language = inferred_language or DEFAULT_LANGUAGE
         kind = supplier_type(row.get("type"))
         if kind is not None:
             supplier.type = kind  # the buyer's supplier master says what it is
-        email = str(row["email"]).strip().lower()
         existing = await session.scalar(
             select(Contact)
             .join(SupplierContact, SupplierContact.contact_id == Contact.id)
@@ -432,7 +438,14 @@ async def _apply_purchases(
                 select(Supplier).where(func.lower(Supplier.name) == name.lower()).limit(1)
             )
             if supplier is None:
-                supplier = Supplier(tenant_id=tenant_id, name=name, type="distributor")
+                country, language = infer_supplier_locale(name, None)
+                supplier = Supplier(
+                    tenant_id=tenant_id,
+                    name=name,
+                    type="distributor",
+                    country=country,
+                    language=language or DEFAULT_LANGUAGE,
+                )
                 session.add(supplier)
                 await session.flush()
                 counts.add("suppliers", created=True)

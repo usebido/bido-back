@@ -158,6 +158,9 @@ class SupplierQuote:
     )
     negotiation_holds: tuple[str, ...] = ()
     correction_revision: int = 0
+    # How the proposal reached Bido: the supplier's email, or a document the buyer
+    # registered from the Copilot (`messages.origin`).
+    origin: str = "email"
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +265,11 @@ class SupplierColumn(BaseModel):
     payment_terms: str | None = None
     negotiation_holds: list[str] = Field(default_factory=list[str])
     correction_revision: int = 0
+    origin: Literal["email", "copilot_upload"] = Field(
+        default="email",
+        description="How the latest proposal reached Bido: the supplier's email reply, or a "
+        "document the buyer attached in the Copilot and registered (copilot_upload)",
+    )
 
 
 class AwaitingSupplier(BaseModel):
@@ -768,6 +776,7 @@ def compute_supplier(
         payment_terms=quote.payment_terms,
         negotiation_holds=list(quote.negotiation_holds),
         correction_revision=quote.correction_revision,
+        origin="copilot_upload" if quote.origin == "copilot_upload" else "email",
     )
 
 

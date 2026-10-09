@@ -39,6 +39,7 @@ class StoredField(BaseModel):
     retained_by: tuple[dict[str, JsonValue], ...] = ()
     corrected: bool = False
     correction_id: str | None = None
+    conversion: dict[str, JsonValue] | None = None
 
 
 class StoredLine(BaseModel):
@@ -106,6 +107,7 @@ def _store_field(check: FieldCheck) -> StoredField:
         retained_by=check.retained_by,
         corrected=check.corrected,
         correction_id=check.correction_id,
+        conversion=dict(check.conversion) if check.conversion is not None else None,
     )
 
 
@@ -146,6 +148,14 @@ def restore_field(name: str, kind: FieldKind, stored: StoredField) -> FieldCheck
         retained_by=stored.retained_by,
         corrected=stored.corrected,
         correction_id=stored.correction_id,
+        conversion=stored.conversion,
+    )
+
+
+def _absent(name: str) -> FieldCheck:
+    """A field the stored quote predates (added to the contract since): never stated."""
+    return FieldCheck(
+        name=name, extracted=ExtractedValue(value=None, source=None, confidence=0), parsed=None
     )
 
 
@@ -154,8 +164,10 @@ def restore_quote(raw: object) -> ValidatedQuote:
     return ValidatedQuote(
         output=record.output,
         header={
-            name: restore_field(name, HEADER_FIELDS[name], value)
-            for name, value in record.header.items()
+            name: restore_field(name, kind, record.header[name])
+            if name in record.header
+            else _absent(name)
+            for name, kind in HEADER_FIELDS.items()
         },
         lines=tuple(
             LineCheck(
@@ -163,8 +175,10 @@ def restore_quote(raw: object) -> ValidatedQuote:
                 rfq_line_id=line.rfq_line_id,
                 is_alternative=line.is_alternative,
                 fields={
-                    name: restore_field(name, LINE_FIELDS[name], value)
-                    for name, value in line.fields.items()
+                    name: restore_field(name, kind, line.fields[name])
+                    if name in line.fields
+                    else _absent(name)
+                    for name, kind in LINE_FIELDS.items()
                 },
                 issues=line.issues,
                 notes=line.notes,

@@ -10,10 +10,14 @@ date of today or later when there is an invite to prepare
 caller (the buyer) has a connected mailbox, since that is where the emails will go out from
 (`MailboxNotConnected` otherwise). It pins the RFQ to the template version
 its emails use (`bido_back.templates.service.resolve_for_rfq`, recorded at
-the first send). Then, for each invite still in `draft`, it renders the email
-from that template in the supplier's language (`bido_back.templates.render`;
+the first send). Then, for each invite still in `draft`, it builds the RFQ
+document (the supplier's PDF) and a short cover note from that template in the
+supplier's language (`bido_back.rfqs.document`, `bido_back.templates.render`;
 the email writer agent only translates the buyer's own template text when the
-languages differ), checks it (`rfq_email_problems`), makes sure the subject
+languages differ), checks the document (`document_problems`,
+`rfq_email_problems`) and the cover (`rfq_cover_problems`); when the PDF does
+not render, the full email with the item table goes instead, checked with
+`rfq_email_problems`. It makes sure the subject
 carries the `[RFQ-<n>]` marker, records an `ApprovalProposal` for the act
 tool `send_rfq_email` through `PostgresApprovalSink` (requested by the
 caller), and moves the invite to `pending_approval`. The proposal's run id
@@ -47,7 +51,7 @@ from bido_back.agents.catalog.contracts import (
     RfqIntakeInput,
     RfqIntakeOutput,
 )
-from bido_back.agents.catalog.definitions import rfq_email_problems
+from bido_back.agents.catalog.definitions import rfq_cover_problems, rfq_email_problems
 from bido_back.agents.context import ToolContext
 from bido_back.agents.events import args_hash
 from bido_back.approvals import ApprovalConflict, PostgresApprovalSink
@@ -90,6 +94,8 @@ from bido_back.rfqs.document import (
     build_document,
     default_branding,
     document_filename,
+    document_problems,
+    document_text,
     render_pdf,
 )
 from bido_back.rfqs.errors import Duplicate, InvalidState, NotFound, ReplyByRequired
@@ -127,7 +133,15 @@ from bido_back.rfqs.send import (
 )
 from bido_back.storage import BlobStorage
 from bido_back.templates.localize import localize
-from bido_back.templates.render import RenderedRfq, RenderInput, RenderLine, render_rfq
+from bido_back.templates.render import (
+    RenderedRfq,
+    RenderInput,
+    RenderLine,
+    render_cover,
+    render_rfq,
+    rfq_subject,
+    template_ask_labels,
+)
 from bido_back.templates.schemas import RfqEmailPreview
 from bido_back.templates.service import (
     ResolvedTemplate,
@@ -1012,21 +1026,47 @@ async def _document_branding(
     )
 
 
-async def _render_for(
+@dataclass(frozen=True, slots=True)
+class _SupplierEmail:
+    """What one supplier gets, and what it was rendered from."""
+
+    # The cover note with the PDF, or the full email when no PDF can be attached.
+    email: RenderedRfq
+    render_input: RenderInput
+    # The PDF's content; None when the full email goes without it.
+    document: RfqDocument | None
+
+
+async def _pdf_renders(document: RfqDocument, rfq_id: UUID, supplier_id: UUID) -> bool:
+    """Whether the document renders as a PDF. A failure is logged with ids only."""
+    try:
+        await asyncio.to_thread(render_pdf, document)
+    except Exception as exc:
+        logger.warning(
+            "rfq document did not render; the full email goes without it rfq=%s supplier=%s "
+            "error=%s",
+            rfq_id,
+            supplier_id,
+            type(exc).__name__,
+        )
+        return False
+    return True
+
+
+async def _render_input_for(
     ctx: _SendContext,
-    supplier: Supplier,
+    language: str,
     writer: EmailWriterAgent,
     context: ToolContext,
     localized: dict[str, TemplateContent],
-) -> tuple[RenderedRfq, RenderInput]:
-    """The supplier's email (and what it was rendered from); refuses one that fails
-    the deterministic checks."""
-    language = supplier_email_language(supplier)
+) -> RenderInput:
+    """What an email or document in `language` is rendered from: the RFQ's facts and
+    the template shown in that language (localized once per language)."""
     display = localized.get(language)
     if display is None:
         display = await localize(ctx.template.content, language, writer, context)
         localized[language] = display
-    render_input = RenderInput(
+    return RenderInput(
         rfq_ref=ctx.rfq.ref,
         rfq_title=ctx.rfq.title,
         response_due=ctx.rfq.response_due,
@@ -1039,25 +1079,70 @@ async def _render_for(
         payment_terms=ctx.rfq.payment_terms,
         quote_validity_days=ctx.rfq.quote_validity_days,
     )
-    rendered = render_rfq(render_input)
-    problems = rfq_email_problems(
-        RfqEmailInput(
-            rfq_ref=ctx.rfq.ref,
-            rfq_title=ctx.rfq.title,
-            buyer_company=ctx.buyer_company,
-            buyer_name=ctx.buyer_name,
-            supplier_name=supplier.name,
-            supplier_language=language,
-            response_due=ctx.rfq.response_due,
-            lines=[_email_line(line) for line in ctx.lines],
-            payment_terms=ctx.rfq.payment_terms,
-        ),
-        RfqEmailOutput(subject=rendered.subject, body=rendered.text),
+
+
+async def _render_for(
+    ctx: _SendContext,
+    supplier: Supplier,
+    writer: EmailWriterAgent,
+    context: ToolContext,
+    localized: dict[str, TemplateContent],
+    *,
+    issued_on: date,
+    check_pdf: bool = True,
+) -> _SupplierEmail:
+    """The supplier's email: by default a short cover note with the RFQ as a PDF.
+
+    The checks run on what carries the RFQ: the document (every required field,
+    the reference, the MPNs, the payment terms, no prices) and the cover (the
+    `[RFQ-<n>]` marker, no items, no prices). When the PDF does not render, the
+    full email with the item table goes instead, checked as before; with
+    `check_pdf` False the PDF is assumed to render (the caller renders it).
+    Refuses anything that fails a check.
+    """
+    language = supplier_email_language(supplier)
+    render_input = await _render_input_for(ctx, language, writer, context, localized)
+    task = RfqEmailInput(
+        rfq_ref=ctx.rfq.ref,
+        rfq_title=ctx.rfq.title,
+        buyer_company=ctx.buyer_company,
+        buyer_name=ctx.buyer_name,
+        supplier_name=supplier.name,
+        supplier_language=language,
+        response_due=ctx.rfq.response_due,
+        lines=[_email_line(line) for line in ctx.lines],
+        payment_terms=ctx.rfq.payment_terms,
     )
+    document = build_document(
+        render_input,
+        supplier_name=supplier.name,
+        currency=ctx.rfq.base_currency,
+        issued_on=issued_on,
+        branding=ctx.branding,
+    )
+    # The company's branding (footer, address) is its own text, not the RFQ's: a
+    # "capital R$ 1.000.000" there is not a price.
+    unbranded = document.model_copy(update={"branding": default_branding(ctx.buyer_company)})
+    problems = [
+        *document_problems(document, template_ask_labels(render_input)),
+        *rfq_email_problems(
+            task, RfqEmailOutput(subject=rfq_subject(render_input), body=document_text(unbranded))
+        ),
+    ]
     if problems:
         # The buyer's template text is the only free text: e.g. a price in it.
+        raise InvalidState(f"rfq {ctx.rfq.id}: rfq document fails checks: {', '.join(problems)}")
+    if not check_pdf or await _pdf_renders(document, ctx.rfq.id, supplier.id):
+        cover = render_cover(render_input)
+        problems = rfq_cover_problems(task, RfqEmailOutput(subject=cover.subject, body=cover.text))
+        if problems:
+            raise InvalidState(f"rfq {ctx.rfq.id}: cover email fails checks: {', '.join(problems)}")
+        return _SupplierEmail(email=cover, render_input=render_input, document=document)
+    full = render_rfq(render_input)
+    problems = rfq_email_problems(task, RfqEmailOutput(subject=full.subject, body=full.text))
+    if problems:
         raise InvalidState(f"rfq {ctx.rfq.id}: rendered email fails checks: {', '.join(problems)}")
-    return rendered, render_input
+    return _SupplierEmail(email=full, render_input=render_input, document=None)
 
 
 async def preview_email(
@@ -1084,16 +1169,20 @@ async def preview_email(
         _, supplier = row
         ctx = await _send_context(session, principal, rfq, storage)
     context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
-    rendered, _ = await _render_for(ctx, supplier, writer, context, {})
+    rendered = await _render_for(ctx, supplier, writer, context, {}, issued_on=utc_today())
+    email = rendered.email
     return RfqEmailPreview(
         invite_id=invite_id,
-        subject=with_marker(rendered.subject, rfq.ref),
-        text=rendered.text,
-        html=rendered.html,
-        language=rendered.language,
+        subject=with_marker(email.subject, rfq.ref),
+        text=email.text,
+        html=email.html,
+        language=email.language,
         template_id=ctx.template.template_id,
         template_version=ctx.template.version,
         missing_required=required_views(ctx.template.content),
+        attachment_name=(
+            document_filename(rendered.document) if rendered.document is not None else None
+        ),
     )
 
 
@@ -1154,14 +1243,46 @@ async def preview_document(
         context = ToolContext(
             tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4()
         )
-        _, render_input = await _render_for(ctx, supplier, writer, context, {})
-        document = build_document(
-            render_input,
-            supplier_name=supplier.name,
-            currency=rfq.base_currency,
-            issued_on=today or utc_today(),
-            branding=ctx.branding,
+        rendered = await _render_for(
+            ctx, supplier, writer, context, {}, issued_on=today or utc_today(), check_pdf=False
         )
+        document = rendered.document
+        if document is None:  # pragma: no cover - always built when the PDF is not checked
+            raise InvalidState(f"rfq {rfq_id} has no document")
+    pdf = await asyncio.to_thread(render_pdf, document)
+    return RfqDocumentFile(filename=document_filename(document), content=pdf)
+
+
+async def rfq_document(
+    db: Db,
+    principal: Principal,
+    rfq_id: UUID,
+    writer: EmailWriterAgent,
+    *,
+    today: date | None = None,
+    storage: BlobStorage | None = None,
+) -> RfqDocumentFile:
+    """The RFQ's own PDF, addressed to nobody: the same document the invites carry,
+    with the same branding, in the RFQ-level `document_language`, as the RFQ is now.
+
+    Available in every status (a draft with no supplier included), so the buyer can
+    download it from the RFQ page. Never what was approved for a supplier: that is
+    `preview_document`. Sends nothing.
+    """
+    async with tenant_session(db, principal.tenant_id) as session:
+        rfq = await _rfq(session, rfq_id)
+        ctx = await _send_context(session, principal, rfq, storage)
+    if not ctx.lines:
+        raise InvalidState(f"rfq {rfq_id} has no lines")
+    context = ToolContext(tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4())
+    render_input = await _render_input_for(ctx, DEFAULT_LANGUAGE, writer, context, {})
+    document = build_document(
+        render_input,
+        supplier_name="",
+        currency=rfq.base_currency,
+        issued_on=today or utc_today(),
+        branding=ctx.branding,
+    )
     pdf = await asyncio.to_thread(render_pdf, document)
     return RfqDocumentFile(filename=document_filename(document), content=pdf)
 
@@ -1239,22 +1360,19 @@ async def prepare_send(
         context = ToolContext(
             tenant_id=principal.tenant_id, user_id=principal.user_id, run_id=uuid4()
         )
-        rendered, render_input = await _render_for(ctx, supplier, writer, context, localized)
+        rendered = await _render_for(
+            ctx, supplier, writer, context, localized, issued_on=today or utc_today()
+        )
         args = SendRfqEmailArgs(
             invite_id=invite.id,
             sender_user_id=principal.user_id,
             to=[contact.email],
-            subject=with_marker(rendered.subject, rfq.ref),
-            body=rendered.text,
-            html_body=rendered.html,
-            # The supplier's PDF: addressed to this supplier only, approved with the email.
-            document=build_document(
-                render_input,
-                supplier_name=supplier.name,
-                currency=rfq.base_currency,
-                issued_on=today or utc_today(),
-                branding=ctx.branding,
-            ),
+            subject=with_marker(rendered.email.subject, rfq.ref),
+            body=rendered.email.text,
+            html_body=rendered.email.html,
+            # The supplier's PDF (the RFQ itself): addressed to this supplier only,
+            # approved with the cover note. None: the full email goes without it.
+            document=rendered.document,
         )
         payload = cast(dict[str, JsonValue], args.model_dump(mode="json"))
         call_id = send_proposal_ids(invite.id)[1]

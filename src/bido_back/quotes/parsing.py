@@ -350,11 +350,28 @@ _WEEK_WORDS = re.compile(
     re.IGNORECASE,
 )
 _WORKING_DAY_WORDS = re.compile(
-    r"\b(working|business|work)\s+days?\b|\barbeitstage?n?\b|\bwerktage?n?\b|jours ouvr",
+    r"\b(working|business|work)\s+days?\b|\barbeitstage?n?\b|\bwerktage?n?\b|jours ouvr"
+    r"|\bdias?\s+[úu]t(?:eis|il)\b|\bd[íi]as?\s+h[áa]bil(?:es)?\b|\bd[íi]as?\s+laborables?\b"
+    r"|\bgiorn[oi]\s+lavorativ[oi]\b|\bwerkdag(?:en)?\b",
     re.IGNORECASE,
 )
-# German "Arbeitstage", abbreviated; case-sensitive so English "at" does not match.
-_WORKING_DAYS_ABBREVIATION = re.compile(r"(?:(?<=\d)|\b)AT\b")
+# Abbreviations: German "Arbeitstage" (AT), English "business/working days" (BD, WD).
+# Case-sensitive so English "at" and "wd" inside words do not match.
+_WORKING_DAYS_ABBREVIATION = re.compile(r"(?:(?<=\d)|\b)(?:AT|BD|WD)\b")
+_DAY_WORDS = re.compile(
+    r"\bdays?\b|\bdias?\b|\bd[íi]as?\b|\btage?n?\b|\bjours?\b|\bgiorn[oi]\b|\bdagen?\b"
+    r"|(?<=\d)\s?d\b|\bdni\b|\bdn[íi]\b",
+    re.IGNORECASE,
+)
+
+# A business week: 5 business days are one calendar week (7 days).
+BUSINESS_DAYS_PER_WEEK = 5
+# How `lead_time_days` is normalized: the stored value is always CALENDAR days.
+# Weeks are 7 days each. Business days (`dias úteis`, `Arbeitstage`, `working
+# days`, `BD`) become calendar days by whole business weeks, rounded up, without
+# any holiday calendar: `ceil(n * 7 / 5)`, so 25 business days = 35 calendar days
+# and 5 = 7. The raw number and its unit stay in the field's provenance.
+BUSINESS_DAYS_RULE = "ceil(business_days * 7 / 5)"
 
 
 def mentions_weeks(text: str) -> bool:
@@ -366,6 +383,16 @@ def mentions_working_days(text: str) -> bool:
         _WORKING_DAY_WORDS.search(text) is not None
         or _WORKING_DAYS_ABBREVIATION.search(text) is not None
     )
+
+
+def mentions_days(text: str) -> bool:
+    """`42 days`, `25 dias`, `30 Tage`, `42d`: a duration written in days (of any kind)."""
+    return _DAY_WORDS.search(text) is not None or mentions_working_days(text)
+
+
+def business_days_to_calendar(business_days: int) -> int:
+    """`BUSINESS_DAYS_RULE`: whole business weeks, rounded up, no holidays."""
+    return -(-business_days * 7 // BUSINESS_DAYS_PER_WEEK)
 
 
 # "No tooling cost", written as a word instead of 0.

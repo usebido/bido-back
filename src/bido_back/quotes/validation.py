@@ -12,11 +12,22 @@ any model:
 - the confidence is at least `REVIEW_CONFIDENCE`;
 - each line maps to a requested RFQ line; an offered MPN that differs from the
   requested one marks the line as an alternative;
-- required values are present and the quote is not already expired.
+- required values are present and the quote is not already expired;
+- the offer answers what the RFQ asked: a quoted quantity that is none of the
+  requested tiers (`quantity_mismatch`, on the line), an Incoterm, a delivery
+  location or a currency other than the RFQ's (`incoterm_mismatch`,
+  `delivery_location_mismatch`, `currency_mismatch`, on the proposal). These
+  are warnings for the buyer, never rejections: the quote still registers.
 
 Anything that fails marks the field, and through it the line or the proposal,
 `needs_review`. Nothing is dropped: the persisted provenance keeps the raw
 value, the source, the confidence and the reasons.
+
+Lead times: `lead_time_days` is always stored as CALENDAR days. The model
+writes the number as the supplier wrote it, with its unit in the cited quote;
+this code reads the unit from the quote and converts (weeks x 7; business days
+by `parsing.BUSINESS_DAYS_RULE`, `ceil(n * 7 / 5)`), recording the raw number
+and the unit in the field's provenance (`conversion`).
 """
 
 import re
@@ -38,13 +49,16 @@ from bido_back.agents.catalog.contracts import (
 )
 from bido_back.documents import DocumentText
 from bido_back.quotes.parsing import (
+    BUSINESS_DAYS_RULE,
     INCOTERMS,
     ISO_CURRENCIES,
     DecimalSeparator,
+    business_days_to_calendar,
     dates_in,
     detect_currencies,
     find_number,
     incoterms_in,
+    mentions_days,
     mentions_none,
     mentions_weeks,
     mentions_working_days,
@@ -66,6 +80,7 @@ HEADER_FIELDS: Final[Mapping[str, FieldKind]] = {
     "currency": "currency",
     "valid_until": "date",
     "incoterm": "incoterm",
+    "delivery_location": "text",
     "payment_terms": "text",
 }
 LINE_FIELDS: Final[Mapping[str, FieldKind]] = {
@@ -92,9 +107,15 @@ type Parsed = Decimal | int | date | str
 
 @dataclass(frozen=True, slots=True)
 class RequestedLine:
+    """What the RFQ asked for on one line: what a quoted line is compared against."""
+
     id: UUID
     position: int
     mpn: str | None = None
+    # Requested quantity tiers; a quoted quantity must be one of them.
+    quantities: tuple[Decimal, ...] = ()
+    incoterm: str | None = None
+    delivery_location: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +146,9 @@ class FieldCheck:
     retained_by: tuple[dict[str, JsonValue], ...] = ()
     corrected: bool = False
     correction_id: str | None = None
+    # How `parsed` was derived from `value` when they differ (a lead time written
+    # in weeks or business days): the raw number, its unit and the rule applied.
+    conversion: Mapping[str, JsonValue] | None = None
 
     @property
     def needs_review(self) -> bool:
@@ -140,6 +164,8 @@ class FieldCheck:
             "needs_review": self.needs_review,
             "issues": list(self.issues),
         }
+        if self.conversion is not None:
+            data["conversion"] = dict(self.conversion)
         if self.message_id is not None:
             data["message_id"] = str(self.message_id)
         if self.retained_by:
@@ -224,11 +250,14 @@ def validate_quote(
     today: date,
     decimal: DecimalSeparator | None = None,
     review_confidence: float = REVIEW_CONFIDENCE,
+    rfq_currency: str | None = None,
 ) -> ValidatedQuote:
     """Check an extraction against its sources and the RFQ.
 
     `decimal` is the supplier's likely decimal separator (from its language);
     without it, numbers like `1,000` are ambiguous and go to review.
+    `rfq_currency` is the RFQ's base currency: a quote in another one is a
+    `currency_mismatch` (a warning, so the buyer sees it before comparing).
     """
 
     def check(name: str, kind: FieldKind, value: ExtractedValue) -> FieldCheck:
@@ -267,6 +296,7 @@ def validate_quote(
     valid_until = header["valid_until"].parsed
     if isinstance(valid_until, date) and valid_until < today:
         issues.append("validity_expired")
+    issues.extend(_rfq_mismatches(header, lines, requested, rfq_currency))
     for conflict in output.conflicts:
         # Even an ungrounded alleged conflict is held; neither claim wins silently.
         issues.append(f"conflicting_sources:{conflict.field}")
@@ -319,6 +349,16 @@ def _check_line(
             is_alternative = True
     if is_alternative:
         notes.append("alternative_offered")
+    quantity = fields["min_quantity"].parsed
+    if (
+        requested is not None
+        and requested.quantities
+        and isinstance(quantity, Decimal)
+        and quantity not in requested.quantities
+    ):
+        # 50 pcs quoted for a 1,500 pcs request: the price may not hold for the
+        # quantity the buyer needs. A warning, never a rejection.
+        issues.append("quantity_mismatch")
     tax = fields["tax_rate_percent"].parsed
     if isinstance(tax, Decimal) and tax > 100:
         issues.append("invalid_tax_rate")
@@ -333,6 +373,63 @@ def _check_line(
         issues=tuple(issues),
         notes=tuple(notes),
     )
+
+
+def _rfq_mismatches(
+    header: Mapping[str, FieldCheck],
+    lines: Sequence[LineCheck],
+    requested: Sequence[RequestedLine],
+    rfq_currency: str | None,
+) -> list[str]:
+    """The quote's terms against the RFQ's: Incoterm, delivery location, currency.
+
+    Compared with the requested lines the quote answers (every requested line
+    when none could be matched). Only parsed, grounded values are compared: a
+    value the quote does not state is not a mismatch.
+    """
+    issues: list[str] = []
+    matched = {line.rfq_line_id for line in lines if line.rfq_line_id is not None}
+    against = [line for line in requested if line.id in matched] or list(requested)
+
+    incoterm = _trusted(header["incoterm"])
+    if incoterm is not None and any(
+        line.incoterm and line.incoterm.upper() != incoterm for line in against
+    ):
+        issues.append("incoterm_mismatch")
+
+    location = _trusted(header["delivery_location"])
+    if location is not None and any(
+        line.delivery_location and not _same_place(location, line.delivery_location)
+        for line in against
+    ):
+        issues.append("delivery_location_mismatch")
+
+    currency = _trusted(header["currency"])
+    if currency is not None and rfq_currency and currency != rfq_currency.upper():
+        issues.append("currency_mismatch")
+    return issues
+
+
+def _trusted(check: FieldCheck) -> str | None:
+    """The value when the quote backs it; an unverified value is already on review."""
+    return check.parsed if isinstance(check.parsed, str) and not check.issues else None
+
+
+def _same_place(quoted: str, requested: str) -> bool:
+    """`Joinville/SC` is `Joinville-SC` and `Joinville`; `Curitiba` is not.
+
+    Place names are compared as sets of words without accents, case or
+    punctuation (Incoterm codes dropped): one must contain the other.
+    """
+    a, b = _place_words(quoted), _place_words(requested)
+    return not a or not b or a <= b or b <= a
+
+
+def _place_words(text: str) -> set[str]:
+    plain = "".join(
+        c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)
+    ).casefold()
+    return {w for w in re.split(r"[^0-9a-z]+", plain) if w and w.upper() not in INCOTERMS}
 
 
 def check_field(
@@ -366,11 +463,19 @@ def check_field(
         # change a price and the "1" is rarely written, so it never puts an offer on review.
         return FieldCheck(name=name, extracted=extracted, parsed=parsed)
     issues.extend(value_issues)
+    conversion: dict[str, JsonValue] | None = None
     if parsed is not None and source is not None and source.quote.strip():
-        header = _column_header(source, sources) if kind == "days" else None
-        grounding = _grounding(kind, parsed, source.quote, decimal, header=header)
+        if kind == "days":
+            assert isinstance(parsed, int)
+            parsed, conversion, grounding = _lead_time(
+                parsed, source.quote, decimal, header=_column_header(source, sources)
+            )
+        else:
+            grounding = _grounding(kind, parsed, source.quote, decimal)
         issues.extend(grounding)
-    return FieldCheck(name=name, extracted=extracted, parsed=parsed, issues=tuple(issues))
+    return FieldCheck(
+        name=name, extracted=extracted, parsed=parsed, issues=tuple(issues), conversion=conversion
+    )
 
 
 # --- Is the quote in the source? ------------------------------------------------------
@@ -509,15 +614,60 @@ def _parse(
             return value, []
 
 
+def _lead_time(
+    written: int, quote: str, decimal: DecimalSeparator | None, *, header: str | None
+) -> tuple[int | None, dict[str, JsonValue] | None, list[str]]:
+    """Calendar days from a lead time the model wrote, in the unit its quote states.
+
+    `header` is the column header of a cited sheet cell (`Lieferzeit (Wochen)`),
+    which may carry the unit the cell omits. The model may write the number as
+    the supplier did (`25` for "25 dias úteis", `6` for "6 Wochen") or already
+    converted (`35`, `42`): both ground, and the stored value is the same.
+    Returns the calendar days (None when out of range), the conversion applied
+    (raw number, unit, rule) and the grounding issues.
+    """
+    unit_text = quote if header is None else f"{quote}\n{header}"
+    business = mentions_working_days(unit_text)
+    weeks = mentions_weeks(unit_text) and not mentions_days(unit_text)
+    direct = find_number(Decimal(written), quote, decimal=decimal)
+    if direct.found:
+        issues = ["ambiguous_number"] if direct.ambiguous else []
+        if business:
+            return _converted(business_days_to_calendar(written), written, "business_days", issues)
+        if weeks:
+            return _converted(written * 7, written, "weeks", issues)
+        return written, None, issues
+    # Not written as such: the model converted. The number it read must be there.
+    if business:
+        for raw in range(max(0, written * 5 // 7 - 1), written * 5 // 7 + 2):
+            if (
+                business_days_to_calendar(raw) == written
+                and find_number(Decimal(raw), quote, decimal=decimal).found
+            ):
+                return _converted(written, raw, "business_days", [])
+    if (
+        weeks
+        and written % 7 == 0
+        and find_number(Decimal(written // 7), quote, decimal=decimal).found
+    ):
+        return _converted(written, written // 7, "weeks", [])
+    return written, None, ["not_grounded"]
+
+
+def _converted(
+    days: int, raw: int, unit: Literal["business_days", "weeks"], issues: list[str]
+) -> tuple[int | None, dict[str, JsonValue] | None, list[str]]:
+    conversion: dict[str, JsonValue] = {"quoted": raw, "unit": unit, "calendar_days": days}
+    if unit == "business_days":
+        conversion["rule"] = BUSINESS_DAYS_RULE
+    if days > MAX_LEAD_TIME_DAYS:
+        return None, conversion, [*issues, "out_of_range"]
+    return days, conversion, issues
+
+
 def _grounding(
-    kind: FieldKind,
-    parsed: Parsed,
-    quote: str,
-    decimal: DecimalSeparator | None,
-    *,
-    header: str | None = None,
+    kind: FieldKind, parsed: Parsed, quote: str, decimal: DecimalSeparator | None
 ) -> list[str]:
-    """`header` is the column header of a cited sheet cell (`Lieferzeit (Wochen)`)."""
     match kind:
         case "amount" if parsed == 0 and mentions_none(quote):
             return []  # "Werkzeugkosten: keine"
@@ -525,20 +675,7 @@ def _grounding(
             assert isinstance(parsed, Decimal)
             return _number_grounding(parsed, quote, decimal)
         case "days":
-            assert isinstance(parsed, int)
-            issues: list[str] = []
-            direct = find_number(Decimal(parsed), quote, decimal=decimal)
-            if direct.found:
-                issues.extend(["ambiguous_number"] if direct.ambiguous else [])
-            elif not (
-                parsed % 7 == 0
-                and (mentions_weeks(quote) or (header is not None and mentions_weeks(header)))
-                and find_number(Decimal(parsed // 7), quote, decimal=decimal).found
-            ):
-                issues.append("not_grounded")
-            if mentions_working_days(quote):
-                issues.append("working_days")  # calendar days depend on the supplier's calendar
-            return issues
+            raise AssertionError("lead times are grounded by _lead_time")
         case "currency":
             return [] if parsed in detect_currencies(quote) else ["not_grounded"]
         case "date":
