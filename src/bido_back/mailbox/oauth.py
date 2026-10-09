@@ -19,9 +19,11 @@ foreign or other-provider state is rejected.
 Requested permissions
 ---------------------
 Google: `gmail.send`, `gmail.readonly`, `openid`, `email`, with
-`access_type=offline` and `prompt=consent` so a refresh token is always
-issued. Microsoft (multi-tenant app, delegated): `offline_access Mail.Read
-Mail.Send User.Read openid email`. `readonly`/`Mail.Read` grant the whole
+`access_type=offline` and `prompt=consent select_account`: consent so a refresh
+token is always issued, and the account chooser so a buyer signed in to several
+Google accounts can pick (or switch to) the one Bido sends from. Microsoft
+(multi-tenant app, delegated): `offline_access Mail.Read Mail.Send User.Read
+openid email`. `readonly`/`Mail.Read` grant the whole
 mailbox; Bido's code limits itself to the RFQ threads it started (see
 `bido_back.mailbox.base`). A grant missing the send or read permission
 (Google lets the user untick scopes) is refused.
@@ -250,7 +252,7 @@ def authorization_url(client: OAuthClient, *, state: str, code_verifier: str) ->
     }
     if client.provider == "google":
         params["access_type"] = "offline"
-        params["prompt"] = "consent"
+        params["prompt"] = "consent select_account"
     else:
         params["response_mode"] = "query"
         params["prompt"] = "select_account"

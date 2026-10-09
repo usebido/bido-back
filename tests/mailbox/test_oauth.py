@@ -76,7 +76,7 @@ def test_google_authorization_url() -> None:
         "email",
     ]
     assert q["access_type"] == "offline"
-    assert q["prompt"] == "consent"
+    assert q["prompt"] == "consent select_account"  # always a refresh token, and the chooser
     assert q["state"] == "sealed-state"
     assert q["code_challenge_method"] == "S256"
     expected = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b"=")
