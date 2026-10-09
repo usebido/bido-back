@@ -237,7 +237,7 @@ class ProposalLineDraft(BaseModel):
     unit: ExtractedValue
     tooling_cost: ExtractedValue
     moq: ExtractedValue
-    # Calendar days. Since prompt v5 the model writes `lead_time` and code computes
+    # Calendar days. Since prompt v6 the model writes `lead_time` and code computes
     # this value from it, so it is not part of the model's output schema.
     lead_time_days: SkipJsonSchema[ExtractedValue] = Field(default_factory=_absent_value)
     origin_country: ExtractedValue
@@ -281,7 +281,7 @@ class QuoteExtractionInput(BaseModel):
     email_body: str
     attachments_text: str = Field(description="Extracted text with [file p.N] / [sheet!A1] markers")
     prior_supplier_offer: PriorSupplierOffer | None = None
-    # When the supplier sent the message (prompt v5): only to complete a date written
+    # When the supplier sent the message (prompt v6): only to complete a date written
     # without a year. Code, not the model, counts durations from it.
     message_date: date | None = None
 
@@ -334,6 +334,9 @@ class QuoteExtractionOutput(BaseModel):
     valid_until: ExtractedValue
     incoterm: ExtractedValue
     payment_terms: ExtractedValue
+    # The named place the supplier delivers to ("CIF Joinville/SC" -> "Joinville/SC"),
+    # as written; compared with the RFQ's delivery location by code.
+    delivery_location: ExtractedValue = Field(default_factory=_absent_value)
     lines: list[ProposalLineDraft] = Field(default_factory=list[ProposalLineDraft])
     missing_fields: list[str] = Field(default_factory=list[str])
     # Offers for things not requested; empty when there are none.
@@ -346,7 +349,7 @@ class QuoteExtractionOutput(BaseModel):
     conflicts: list[OfferConflict] = Field(default_factory=list[OfferConflict])
     # Code adds the text of every `supplier_questions` entry here: a question holds the offer.
     technical_questions: list[str] = Field(default_factory=list[str])
-    # Since prompt v5. A validity given as a duration; code computes `valid_until`.
+    # Since prompt v6. A validity given as a duration; code computes `valid_until`.
     validity: ValidityField = Field(default_factory=_absent_validity)
     # The lead time stated for the whole offer: it applies to every line without its own.
     lead_time: LeadTimeField = Field(default_factory=_absent_lead_time)

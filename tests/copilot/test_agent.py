@@ -34,12 +34,18 @@ EXPECTED_TOOLS = {
     "remove_rfq_line": "draft",
     "set_rfq_terms": "draft",
     "invite_suppliers": "draft",
+    "register_quote": "draft",
     "prepare_send": "draft",
     "get_negotiation_status": "read",
     "propose_counteroffers": "draft",
     "get_award_status": "read",
     "list_open_pos": "read",
     "prepare_award": "draft",
+    "list_purchase_orders": "read",
+    "acknowledge_purchase_order": "draft",
+    "receive_purchase_order": "draft",
+    "close_purchase_order": "draft",
+    "cancel_purchase_order": "draft",
     "import_spreadsheet": "draft",
     "analyze_procurement_sources": "read",
     "save_procurement_assessment": "draft",
@@ -88,7 +94,7 @@ def test_definition_and_tools() -> None:
     agent = copilot_agent(tools)
 
     assert agent.model == DEFAULT_MODEL
-    assert (agent.prompt_file, agent.prompt_version) == ("copilot.v22.md", 22)
+    assert (agent.prompt_file, agent.prompt_version) == ("copilot.v25.md", 25)
     # The copilot runs its newest prompt: a new version is never left unused.
     newest = max(int(p.stem.removeprefix("copilot.v")) for p in PROMPTS.glob("copilot.v*.md"))
     assert agent.prompt_version == newest

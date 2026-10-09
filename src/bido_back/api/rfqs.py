@@ -272,6 +272,43 @@ def rfqs_router() -> APIRouter:
             raise rfq_http_error(exc) from None
 
     @router.get(
+        "/{rfq_id}/document.pdf",
+        response_class=Response,
+        responses={
+            status.HTTP_200_OK: {
+                "content": {"application/pdf": {"schema": {"type": "string", "format": "binary"}}},
+                "description": "The RFQ document, addressed to no supplier",
+            },
+            **error_responses(
+                status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT, status.HTTP_502_BAD_GATEWAY
+            ),
+        },
+    )
+    async def rfq_document(  # pyright: ignore[reportUnusedFunction]
+        rfq_id: UUID,
+        principal: CurrentPrincipal,
+        db: Db,
+        agents: Annotated[RfqAgents, Depends(get_rfq_agents)],
+    ) -> Response:
+        """The RFQ's PDF as it is now, in its `document_language`, with the company
+        branding and no addressee: the download for any status, a draft without
+        suppliers included. Each invite's own copy (addressed to that supplier, and
+        the approved one once a send was proposed) is the invite's document.pdf."""
+        try:
+            doc = await service.rfq_document(db, principal, rfq_id, agents.email_writer)
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
+        return Response(
+            content=doc.content,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": f'attachment; filename="{doc.filename}"',
+                "X-Content-Type-Options": "nosniff",
+                "Cache-Control": "no-store",
+            },
+        )
+
+    @router.get(
         "/{rfq_id}/invites/{invite_id}/document.pdf",
         response_class=Response,
         responses={

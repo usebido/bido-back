@@ -2704,7 +2704,7 @@ EXPECTED_MOCK_FAILURES: Final[frozenset[tuple[str, str, str]]] = frozenset(
     {
         ("rfq6_replay", "first_reply", "status_matches_emails"),
         ("rfq6_replay", "first_reply", "no_quantity_tier_asked"),
-        # Reached since prompt v5 reads business days: the shaft's lead-time counter asks
+        # Reached since prompt v6 reads business days: the shaft's lead-time counter asks
         # with the limit computed when the mandate was approved.
         ("rfq6_replay", "second_reply", "lead_ask_meets_need_by"),
         ("rfq6_replay", "second_reply", "visible_waiting_for_supplier"),

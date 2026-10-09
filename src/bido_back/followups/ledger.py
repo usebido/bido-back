@@ -1,6 +1,6 @@
 """The clarification ledger: what Bido asked each supplier, and what each supplier asked.
 
-Asks (`clarification_asks`, migration 0034): every item a clarification email
+Asks (`clarification_asks`, migration 0036): every item a clarification email
 asks one supplier, at most once per (invite, requested line or the whole offer,
 field), with its status:
 

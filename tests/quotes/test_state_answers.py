@@ -422,10 +422,13 @@ def test_rfq6_the_second_reply_is_applied_as_answers() -> None:
 
     assert state.issues == () and state.reply_kind == "amendment"
     by_position = {line.draft.rfq_line_position: line for line in state.quote.lines}
+    # Business days written the older way are counted like the v6 statement: calendar
+    # days from the offer date (9 Oct), in the calendar of the BRL prices (12 Oct a
+    # holiday in Brazil).
     assert {p: line.parsed("lead_time_days") for p, line in by_position.items()} == {
-        1: 7,
-        2: 12,
-        3: 8,
+        1: 12,
+        2: 19,
+        3: 13,
     }
     assert {p: line.parsed("min_quantity") for p, line in by_position.items()} == {
         1: Decimal(70),
@@ -439,8 +442,10 @@ def test_rfq6_the_second_reply_is_applied_as_answers() -> None:
         2: Decimal(10),
         3: Decimal(5),
     }
-    # Business days are for the conversion to decide; the offer itself is not held.
-    assert by_position[2].fields["lead_time_days"].issues == ("working_days",)
+    # Converted, with the rule on record; nothing to review, the offer is not held.
+    shaft = by_position[2].fields["lead_time_days"]
+    assert shaft.issues == ()
+    assert shaft.conversion is not None and shaft.conversion["unit"] == "business_days"
 
 
 def test_rfq6_read_by_prompt_v5_the_second_reply_is_applied_as_answers() -> None:

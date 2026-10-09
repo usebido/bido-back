@@ -30,8 +30,18 @@ The decision takes the strongest evidence first:
 8. `default`: English.
 
 RFQ-6 went out in English: a supplier added by the copilot (name and email,
-no country) kept the column default. It now reads "Ltda", and the buyer's
-Portuguese.
+no country) kept the column default. Two things now prevent that:
+
+- When a supplier is created from just a name and an email (the Copilot's
+  `add_supplier_contact`, `POST /v1/suppliers` without a country, the
+  spreadsheet imports), `infer_supplier_locale` reads the country off the
+  email's country TLD or an unambiguous legal suffix in the name, and the
+  supplier is saved with that country and its language: the decision above
+  then finds them at steps 1 and 2. It infers nothing else: a `.com` address
+  and a name like "Cobre Sul S.A." infer nothing, since "S.A." is used across
+  Latin countries; the Copilot asks the buyer in those cases.
+- At the first send, a supplier with nothing on file is still decided by the
+  steps above: "Ltda" reads Portuguese, and so does the buyer.
 
 Pure functions, no I/O.
 """
@@ -133,6 +143,83 @@ _COUNTRY_CODE: Final[dict[str, str]] = {
     **dict.fromkeys(("gb", "gbr", "uk", "united kingdom", "reino unido"), "GB"),
     **dict.fromkeys(("cn", "chn", "china", "chine"), "CN"),
 }
+
+
+# Email country-code TLDs that name one country whose language is not in doubt (or, for
+# US and GB, whose RFQs are in English either way). Never generic-looking ones: `.co` is
+# sold as "company", `.io`, `.me`, `.tv` likewise; `.ch`, `.be` and `.ca` are multilingual.
+_TLD_COUNTRY: Final[dict[str, str]] = {
+    "br": "BR",
+    "pt": "PT",
+    "ao": "AO",
+    "mz": "MZ",
+    "de": "DE",
+    "at": "AT",
+    "it": "IT",
+    "fr": "FR",
+    "es": "ES",
+    "mx": "MX",
+    "ar": "AR",
+    "cl": "CL",
+    "pe": "PE",
+    "uy": "UY",
+    "py": "PY",
+    "us": "US",
+    "uk": "GB",
+}
+
+# Legal-form suffixes that belong to one country, matched as whole tokens of the name.
+# Left out on purpose: "S.A." (Brazil, Portugal, Spain, France, Argentina...), "AG"
+# (Germany and Switzerland), "SAS" (France, but also a plain acronym), bare "SPA" (a spa),
+# "Ltd"/"Inc" (anywhere English is written). Case matters where a spelling is also a word.
+_SUFFIX_COUNTRY: Final[tuple[tuple[str, int, str], ...]] = (
+    (r"ltda\.?", re.IGNORECASE, "BR"),
+    (r"eireli", re.IGNORECASE, "BR"),
+    (r"EPP", 0, "BR"),
+    (r"ME", 0, "BR"),  # "Padaria Silva ME"
+    (r"lda\.?", re.IGNORECASE, "PT"),
+    (r"g?mbh", re.IGNORECASE, "DE"),  # "GmbH", "GMBH", "Gesellschaft mbH", "GmbH & Co. KG"
+    (r"s\.?r\.?l\.?", re.IGNORECASE, "IT"),
+    (r"S\.p\.A\.?|S\.P\.A\.?|SpA", 0, "IT"),
+    (r"S\.L\.(?:U\.?)?|SLU?", 0, "ES"),
+    (r"s\.?a\.?r\.?l\.?|sasu|eurl", re.IGNORECASE, "FR"),
+    (r"s\.?a\.? de c\.?v\.?|s\.? de r\.?l\.?(?: de c\.?v\.?)?", re.IGNORECASE, "MX"),
+)
+_SUFFIX_PATTERNS: Final[tuple[tuple[re.Pattern[str], str], ...]] = tuple(
+    (re.compile(rf"(?:^|(?<=\s))(?:{suffix})(?=$|[\s,.;)])", flags), country)
+    for suffix, flags, country in _SUFFIX_COUNTRY
+)
+
+
+def _tld_country(email: str | None) -> str | None:
+    if not email or "@" not in email:
+        return None
+    domain = email.rsplit("@", 1)[1].strip().lower().rstrip(".")
+    if "." not in domain:
+        return None
+    return _TLD_COUNTRY.get(domain.rsplit(".", 1)[1])
+
+
+def _suffix_country(name: str | None) -> str | None:
+    if not name:
+        return None
+    collapsed = " ".join(name.split())
+    for pattern, country in _SUFFIX_PATTERNS:
+        if pattern.search(collapsed):
+            return country
+    return None
+
+
+def infer_supplier_locale(name: str | None, email: str | None) -> tuple[str | None, str | None]:
+    """A supplier's (country, language) when its email's country TLD or an unambiguous
+    legal suffix in its name says so; (None, None) otherwise. The TLD wins over the name:
+    it is where the mail goes. Conservative by design: `.com` alone infers nothing, and
+    the language is only the country's known one (None for US or GB: English by default).
+    """
+    country = _tld_country(email) or _suffix_country(name)
+    if country is None:
+        return None, None
+    return country, country_language(country)
 
 
 def country_code(country: str | None) -> str | None:
@@ -308,10 +395,15 @@ def decide_email_language(
 def sent_language(rfq_send_args: Mapping[str, object] | None) -> str | None:
     """The language an invite's RFQ email went out in, from its approved send arguments.
 
-    The approved document (`SendRfqEmailArgs.document`) carries it; None for an
-    email approved before documents existed.
+    The arguments record it (`SendRfqEmailArgs.language`), and so does the approved
+    document (`SendRfqEmailArgs.document`) when the PDF went with the email; None for
+    an email approved before either existed.
     """
-    document = (rfq_send_args or {}).get("document")
+    args = rfq_send_args or {}
+    recorded = args.get("language")
+    if isinstance(recorded, str) and (code := language_code(recorded)) is not None:
+        return code
+    document = args.get("document")
     if not isinstance(document, Mapping):
         return None
     language = cast(Mapping[str, object], document).get("language")

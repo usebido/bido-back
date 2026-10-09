@@ -1,7 +1,7 @@
 """The clarification ledger: what Bido asked each supplier, and what each supplier asked.
 
-Revision ID: 0034
-Revises: 0033
+Revision ID: 0036
+Revises: 0035
 Create Date: 2026-10-09
 
 `clarification_asks`: one row per thing a clarification email asks one supplier
@@ -48,8 +48,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0034"
-down_revision: str | Sequence[str] | None = "0033"
+revision: str = "0036"
+down_revision: str | Sequence[str] | None = "0035"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

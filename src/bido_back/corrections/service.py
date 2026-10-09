@@ -29,9 +29,12 @@ approver or owner always may. Audited with ids and reason codes only.
 Review issues a correction resolves (the issue strings come from
 `bido_back.quotes.validation`):
 - `missing:<field>` and `currency_mismatch:<field>` when `<field>` is corrected;
-- `unmatched_rfq_line` / `unknown_rfq_line` when `rfq_line_id` is corrected;
+- `unmatched_rfq_line` / `unknown_rfq_line` and `quantity_mismatch` when
+  `rfq_line_id` is corrected; `quantity_mismatch` when `min_quantity` is;
 - on every line of the proposal, `currency_unverified` and
-  `currency_mismatch:*` when the proposal's currency is corrected;
+  `currency_mismatch:*` when the proposal's currency is corrected, and the
+  proposal's own `currency_mismatch` (a currency other than the RFQ's);
+- `incoterm_mismatch` when `incoterm` is corrected;
 - `validity_expired` when `valid_until` is corrected to today or later.
 """
 
@@ -152,7 +155,9 @@ async def correct_line(
             )
             resolved |= {f"missing:{name}", f"currency_mismatch:{name}"}
             if name == "rfq_line_id":
-                resolved |= {"unmatched_rfq_line", "unknown_rfq_line"}
+                resolved |= {"unmatched_rfq_line", "unknown_rfq_line", "quantity_mismatch"}
+            if name == "min_quantity":
+                resolved.add("quantity_mismatch")
             if name == "tax_rate_percent":
                 resolved.add("invalid_tax_rate")
             if name == "conditional_terms" and new is None:
@@ -181,6 +186,9 @@ async def correct_header(
             resolved.add(f"missing:{name}")
             if name == "valid_until" and isinstance(new, date) and new >= datetime.now(UTC).date():
                 resolved.add("validity_expired")
+            if name in ("currency", "incoterm"):
+                # The buyer looked at the term that differs from the RFQ's.
+                resolved.add(f"{name}_mismatch")
         _resolve(fields, resolved)
         proposal.fields = fields
         await _invalidate_negotiation(session, proposal.invite_id, rfq_id)

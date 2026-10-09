@@ -328,7 +328,7 @@ async def test_reply_becomes_a_proposal_with_provenance(seeded: Seeded, script: 
         "declined": False,
     }
     assert proposal.fields["_extraction"]["agent"] == "quote_extraction"
-    assert proposal.fields["_extraction"]["prompt_version"] == 5
+    assert proposal.fields["_extraction"]["prompt_version"] == 6
     assert proposal.fields["extra_offers"] == []
     assert proposal.fields["offer_notes"] == []
     assert proposal.fields["_signals"] == {
@@ -681,7 +681,7 @@ async def test_an_offer_stored_before_v5_can_still_be_amended(
     first = await seeded.add_message()
     script(final(**quote_output()))
     await run_job(seeded, first)
-    # Strip what prompt v5 added from the stored event, as an older proposal has it.
+    # Strip what prompt v6 added from the stored event, as an older proposal has it.
     async with tenant_session(seeded.engine, seeded.tenant_id) as session:
         stored = await session.scalar(select(Proposal).where(Proposal.message_id == first))
         assert stored is not None

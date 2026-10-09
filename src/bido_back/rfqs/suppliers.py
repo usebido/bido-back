@@ -16,6 +16,7 @@ from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import Contact, Supplier, SupplierContact
 from bido_back.rfqs.errors import NotFound
+from bido_back.rfqs.language import DEFAULT_LANGUAGE, infer_supplier_locale
 from bido_back.rfqs.schemas import (
     ContactIn,
     ContactView,
@@ -68,13 +69,25 @@ async def create_supplier(
 async def create_supplier_in(
     session: AsyncSession, tenant_id: UUID, request: CreateSupplierRequest
 ) -> SupplierView:
-    """`create_supplier` in the caller's tenant session, as part of its transaction."""
+    """`create_supplier` in the caller's tenant session, as part of its transaction.
+
+    A request with no country and no language beyond the default gets both inferred
+    from the name and the first contact's email when they are unambiguous (an RFQ to a
+    `.com.br` address is in Portuguese): see `infer_supplier_locale`.
+    """
+    country, language = request.country, request.language
+    if country is None and language in (None, DEFAULT_LANGUAGE):
+        email = next((c.email for c in request.contacts), None) or (
+            f"@{request.email_domain}" if request.email_domain else None
+        )
+        country, inferred = infer_supplier_locale(request.name, email)
+        language = inferred or DEFAULT_LANGUAGE
     supplier = Supplier(
         tenant_id=tenant_id,
         name=request.name,
         type=request.type,
-        country=request.country,
-        language=request.language,
+        country=country,
+        language=language,
         email_domain=request.email_domain,
     )
     session.add(supplier)

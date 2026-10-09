@@ -2,7 +2,7 @@
 
 Synthetic test data the buyer wrote for a deployed test. The supplier's two
 replies are verbatim; the extractions are what a correct model returns under
-prompt v5, and `V4_CATCH_ALL` is the condition text the v4 model copied onto
+prompt v6, and `V4_CATCH_ALL` is the condition text the v4 model copied onto
 every line of the first reply.
 """
 
@@ -145,7 +145,7 @@ def line(
 
 
 def first_reply(*, conditions: str | None = None) -> QuoteExtractionOutput:
-    """Reply 1 as prompt v5 reads it; `conditions` copies a text onto every line (v4)."""
+    """Reply 1 as prompt v6 reads it; `conditions` copies a text onto every line (v4)."""
     moq_pieces = "The MOQ is 10 pieces for bearings and shafts"
     terms = ev(conditions, conditions) if conditions is not None else NONE
     shaft_terms = (
@@ -196,7 +196,7 @@ def first_reply(*, conditions: str | None = None) -> QuoteExtractionOutput:
 
 
 def second_reply() -> QuoteExtractionOutput:
-    """Reply 2 as prompt v5 reads it: per-line business days, the basis stated once."""
+    """Reply 2 as prompt v6 reads it: per-line business days, the basis stated once."""
 
     def answered(
         position: int, part: str, price: str, per: str, qty: str, days: int

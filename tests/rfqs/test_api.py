@@ -77,6 +77,7 @@ async def test_routes_require_authentication() -> None:
             await http.delete(f"/v1/rfqs/{uuid4()}/lines/{uuid4()}"),
             await http.delete(f"/v1/rfqs/{uuid4()}/invites/{uuid4()}"),
             await http.get(f"/v1/rfqs/{uuid4()}/invites/{uuid4()}/document.pdf"),
+            await http.get(f"/v1/rfqs/{uuid4()}/document.pdf"),
         ]
     assert [r.status_code for r in responses] == [401] * len(responses)
 
@@ -208,8 +209,8 @@ async def test_rfq_flow_over_http(api: Api, rfq_rows: People) -> None:
     assert email["to"] == ["jonas@rhein.example.test"]
     assert email["subject"].startswith("[RFQ-1] ")
     assert email["sender_user_id"] == str(rfq_rows.owner)
-    # The approver previews the HTML version and the attached RFQ document.
-    assert "<table" in (email["html_body"] or "")
+    # The approver previews the cover note (HTML) and the attached RFQ document.
+    assert "[RFQ-1]" in (email["html_body"] or "") and "<table" not in email["html_body"]
     attachment = email["attachment_name"]
     assert attachment.startswith("RFQ-1-") and attachment.endswith(".pdf")
 
@@ -491,11 +492,14 @@ async def test_invite_document_pdf_over_http(api: Api, rfq_rows: People) -> None
     rfq = (
         await http.post("/v1/rfqs", json={"text": "Need MLCC and connectors", "currency": "EUR"})
     ).json()
+    assert rfq["status"] == "draft"
     invite = await _invite(http, rfq["id"], "Elbe", "sales@elbe.example.test")
+    # A draft invite (nothing proposed yet) renders from the RFQ as it is now.
+    assert invite["status"] == "draft"
     response = await http.get(f"/v1/rfqs/{rfq['id']}/invites/{invite['id']}/document.pdf")
     assert response.status_code == 200, response.text
     assert response.headers["content-type"] == "application/pdf"
-    assert response.headers["content-disposition"].startswith('inline; filename="RFQ-')
+    assert response.headers["content-disposition"] == f'inline; filename="{rfq["ref"]}-elbe.pdf"'
     assert response.headers["cache-control"] == "no-store"
     assert response.content.startswith(b"%PDF")
 
@@ -503,4 +507,35 @@ async def test_invite_document_pdf_over_http(api: Api, rfq_rows: People) -> None
     assert missing.status_code == 404
     api.principal = Principal(tenant_id=rfq_rows.other_tenant, user_id=rfq_rows.other_approver)
     other = await http.get(f"/v1/rfqs/{rfq['id']}/invites/{invite['id']}/document.pdf")
+    assert other.status_code == 404
+
+
+@pytest.mark.db
+async def test_rfq_document_pdf_over_http(api: Api, rfq_rows: People) -> None:
+    http = api.http
+    rfq = (
+        await http.post("/v1/rfqs", json={"text": "Need MLCC and connectors", "currency": "EUR"})
+    ).json()
+    # A draft with no supplier yet has a document: the buyer's download from the RFQ page.
+    assert rfq["status"] == "draft" and rfq["invites"] == []
+    response = await http.get(f"/v1/rfqs/{rfq['id']}/document.pdf")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.headers["content-disposition"] == f'attachment; filename="{rfq["ref"]}.pdf"'
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.content.startswith(b"%PDF")
+
+    # Still there once suppliers are invited and a send is proposed; the file name
+    # never carries a supplier.
+    await _invite(http, rfq["id"], "Elbe", "sales@elbe.example.test")
+    sent = await http.post(f"/v1/rfqs/{rfq['id']}/send")
+    assert sent.status_code == 200, sent.text
+    again = await http.get(f"/v1/rfqs/{rfq['id']}/document.pdf")
+    assert again.status_code == 200, again.text
+    assert again.headers["content-disposition"] == f'attachment; filename="{rfq["ref"]}.pdf"'
+
+    assert (await http.get(f"/v1/rfqs/{uuid4()}/document.pdf")).status_code == 404
+    api.principal = Principal(tenant_id=rfq_rows.other_tenant, user_id=rfq_rows.other_approver)
+    other = await http.get(f"/v1/rfqs/{rfq['id']}/document.pdf")
     assert other.status_code == 404

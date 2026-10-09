@@ -22,6 +22,8 @@ from bido_back.db.models import (
     RfqTemplate,
     RfqTemplateVersion,
 )
+from bido_back.rfqs import suppliers
+from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
 from bido_back.rfqs.send import SEND_RFQ_EMAIL
 from tests.approvals.conftest import People
 
@@ -610,6 +612,46 @@ async def test_nothing_is_created_until_the_buyer_confirms_in_a_later_message(
         await tools.call(
             replace(ctx, run_id=uuid4()), "create_rfq", text="x", proposal_id=proposal_id
         )
+
+
+async def test_the_invite_preview_says_which_language_each_document_is_in(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+    rhein = await supplier(app_engine, principal, "Rhein")  # language "de"
+    cobre = await suppliers.create_supplier(
+        app_engine,
+        principal,
+        CreateSupplierRequest(
+            name="Cobre Sul Fios Esmaltados S.A.",
+            contacts=[ContactIn(email="vendas@cobresul.com.br")],  # inferred: BR, pt
+        ),
+    )
+    acme = await suppliers.create_supplier(
+        app_engine,
+        principal,
+        CreateSupplierRequest(name="Acme Corp", contacts=[ContactIn(email="sales@acme.com")]),
+    )
+    rfq = await make_rfq(app_engine, principal)
+
+    proposed = await tools.call(
+        ctx,
+        "invite_suppliers",
+        rfq=rfq.ref,
+        supplier_ids=[str(rhein.id), str(cobre.id), str(acme.id)],
+    )
+
+    assert proposed.preview is not None
+    assert [(s.name, s.document_language) for s in proposed.preview.suppliers] == [
+        ("Rhein", "de"),
+        ("Cobre Sul Fios Esmaltados S.A.", "pt"),
+        ("Acme Corp", "en"),
+    ]
+    # Only the supplier nobody knows the country of is asked about, never guessed.
+    assert len(proposed.preview.questions) == 1
+    assert proposed.preview.questions[0].startswith("Acme Corp: no country or language")
 
 
 async def test_a_proposal_is_only_confirmed_by_its_owner_in_its_conversation(

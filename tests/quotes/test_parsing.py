@@ -7,6 +7,7 @@ import pytest
 
 from bido_back.quotes.parsing import (
     DecimalSeparator,
+    business_days_to_calendar,
     dates_in,
     day_months_in,
     decimal_separator_for,
@@ -242,3 +243,39 @@ def test_delivery_timing_sentences() -> None:
     )
     assert not is_delivery_timing("Subject to stock availability.")  # no time unit: a condition
     assert not is_delivery_timing("BRL 5.00 extra for delivery within 3 days.")
+
+
+def test_business_day_words_and_the_calendar_rule() -> None:
+    for text in (
+        "25 dias úteis",
+        "25 dias uteis após pedido",
+        "1 dia útil",
+        "10 días hábiles",
+        "10 dias laborables",
+        "15 giorni lavorativi",
+        "25 BD",
+        "25BD",
+        "20 WD",
+        "30 AT",
+        "5 jours ouvrés",
+        "10 werkdagen",
+    ):
+        assert mentions_working_days(text), text
+        assert mentions_days(text), text
+    for text in ("25 dias", "42 days", "6 Wochen", "bd 25", "wd", "lead time at best 25 days"):
+        assert not mentions_working_days(text), text
+    for text in ("25 dias", "42 days", "30 Tage", "42d", "42 d", "10 jours", "20 giorni"):
+        assert mentions_days(text), text
+    for text in ("6 Wochen", "4 semanas", "6w ARO"):
+        assert not mentions_days(text), text
+    # The rough rule a model may apply itself (never what Bido stores): 5 business days
+    # are a calendar week; partial weeks round up; no holiday calendar.
+    assert [business_days_to_calendar(n) for n in (0, 1, 5, 7, 10, 25, 30)] == [
+        0,
+        2,
+        7,
+        10,
+        14,
+        35,
+        42,
+    ]
