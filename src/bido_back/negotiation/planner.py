@@ -73,6 +73,7 @@ from bido_back.negotiation.strategy import (
     price_position,
     required_by,
 )
+from bido_back.supplier_email.deadlines import reply_by_for
 
 NextAction = Literal[
     "wait", "clarify", "revised_offer", "delivery_date", "bafo", "accept", "hold", "close"
@@ -101,7 +102,8 @@ BAFO_WINDOW: Final = timedelta(hours=24)
 BAFO_REPLY_BUSINESS_DAYS: Final = 2
 # No BAFO when its cut-off is closer than this: the supplier's offer stands.
 MIN_BAFO_NOTICE: Final = timedelta(hours=12)
-# A revised-offer or delivery-date request is answered within this many business days.
+# Emails decided before typed decisions (0034) were answered within this many business
+# days; new requests follow the email standard (`reply_by_date`).
 REPLY_BUSINESS_DAYS: Final = 2
 
 EMAIL_ACTIONS: Final = frozenset({"revised_offer", "delivery_date", "bafo"})
@@ -334,8 +336,18 @@ def end_of_day(day: date) -> datetime:
     return datetime.combine(day, time(23, 59), tzinfo=UTC)
 
 
-def reply_by_date(now: datetime, deadline: datetime | None, country: str | None) -> date:
-    """A request's reply-by: `REPLY_BUSINESS_DAYS` business days, never after the deadline."""
+def reply_by_date(
+    now: datetime,
+    deadline: datetime | None,
+    country: str | None,
+    kind: EmailKind = "delivery_date",
+) -> date:
+    """A request's reply-by as the email standard sets it (`supplier_email.deadlines`): a
+    revised-offer request +3 business days, a delivery-date request +2, in the supplier's
+    country; never after the deadline."""
+    found = reply_by_for(kind, now=now, country=country, deadline=deadline)
+    if found is not None:
+        return found.day
     due = add_business_days(now, REPLY_BUSINESS_DAYS, country).date()
     if deadline is not None:
         due = min(due, deadline.date())
@@ -847,7 +859,7 @@ def plan_supplier(
     email = EmailPlan(
         kind=kind,
         round=counted + 1,
-        reply_by=reply_by_date(ctx.now, ctx.deadline, ctx.country),
+        reply_by=reply_by_date(ctx.now, ctx.deadline, ctx.country, kind),
         cutoff_at=None,
         order_date=ctx.order_date,
         positions=positions,

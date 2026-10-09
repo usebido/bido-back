@@ -299,8 +299,9 @@ def test_a_revised_offer_asks_the_target_only_on_lines_above_it() -> None:
         1,
     )
     assert asks_of(result) == {1: (Decimal("45.67"), None), 2: (Decimal("234.52"), None)}
-    # Reply by: two business days (Friday -> Tuesday), never after the deadline.
-    assert result.email.reply_by == date(2026, 10, 13)
+    # Reply by (the email standard): three business days (Friday -> Wednesday), never after
+    # the deadline.
+    assert result.email.reply_by == date(2026, 10, 14)
     assert plan(facts(ABOVE), deadline=NOW + timedelta(days=2, hours=1)).email is not None
 
 
