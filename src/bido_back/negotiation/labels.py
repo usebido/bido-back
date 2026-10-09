@@ -63,6 +63,12 @@ _REASONS: Final[dict[str, str]] = {
     "revised_offer_due": "Waiting: Bido is preparing a request for a revised offer",
     "delivery_date_due": "Waiting: Bido is preparing a delivery-date request",
     "bafo_due": "Waiting: Bido is preparing the best-and-final request",
+    "revised_offer_with_questions_due": "Waiting: Bido is preparing one email asking for "
+    "what the offer lacks and for a revised offer",
+    "delivery_date_with_questions_due": "Waiting: Bido is preparing one email asking for "
+    "what the offer lacks and for a delivery date",
+    "bafo_with_questions_due": "Waiting: Bido is preparing one email asking for what the "
+    "offer lacks and for the best and final offer",
     "reminder_due": "Waiting: no reply by the reply-by date; Bido is preparing one reminder of "
     "our request",
     # Held for a person.
@@ -131,6 +137,13 @@ _REASONS: Final[dict[str, str]] = {
     "offer stands",
     "offer_meets_last_ask": "Closed: the offer meets our last request (above target); it "
     "stands for your decision",
+}
+
+# The negotiation email a clarification goes before (no room for both in one email).
+_AFTER_ANSWERS: Final[dict[str, str]] = {
+    "revised_offer_after_answers": "the request for a revised offer follows the answers",
+    "delivery_date_after_answers": "the delivery-date request follows the answers",
+    "bafo_after_answers": "the best-and-final request follows the answers",
 }
 
 _WARNINGS: Final[dict[str, str]] = {
@@ -225,6 +238,13 @@ def _details(plan: SupplierPlan) -> list[str]:
                 )
     if reason == "validity_ends_before_decision" and plan.valid_until is not None:
         parts.append(f"valid until {day(plan.valid_until)}")
+    if reason == "clarification_due" and plan.detail in _AFTER_ANSWERS:
+        # The negotiation's own email had no room: it follows the answers.
+        parts.append(_AFTER_ANSWERS[plan.detail])
+    if plan.email is not None and plan.email.deferred:
+        later = [line for line in plan.lines if line.rfq_line_id in plan.email.deferred]
+        if later:
+            parts.append(f"the price request for line(s) {_positions(later)} follows the answers")
     if reason == "email_not_prepared" and plan.detail:
         code, _, problems = plan.detail.partition(":")
         if code == "email_refused":

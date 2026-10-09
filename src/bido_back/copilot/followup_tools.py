@@ -10,6 +10,9 @@
   questions, recorded and proposed as an email that waits for approval (a
   negotiation mandate never approves it); or, with `dismiss`, the questions are
   closed without an email (answered elsewhere).
+- `reopen_supplier_question` (draft): open again a question Bido considered
+  superseded by the supplier's later complete offer (or one the buyer
+  dismissed): the offer waits for the buyer's answer again.
 - `use_current_offer` (draft, two calls): take a supplier's held offer as shown,
   releasing its holds. The first call only shows what is held; the buyer
   confirms in a later message.
@@ -89,7 +92,14 @@ class AskOut(BaseModel):
 class SupplierQuestionOut(BaseModel):
     id: UUID
     question: str = Field(description="The supplier's question, as written (supplier content)")
-    status: str
+    status: str = Field(
+        description="open (waits for the buyer), answered, dismissed, superseded_by_offer "
+        "(the supplier's later offer was complete and asked nothing; never answered)"
+    )
+    note: str | None = Field(
+        default=None,
+        description="What Bido decided about it on its own: say it to the buyer as it is",
+    )
 
 
 class SupplierFollowupOut(BaseModel):
@@ -185,11 +195,19 @@ def _note(state: ledger.SupplierFollowup) -> str:
             return "Not applicable (not sent, declined, or the RFQ is closed)."
 
 
+def _superseded(state: ledger.SupplierFollowup) -> str:
+    """The questions Bido closed on its own, said once (dates only)."""
+    notes = list(dict.fromkeys(q.note for q in state.questions if q.note))
+    if not notes:
+        return ""
+    return " The supplier's earlier question: " + " ".join(notes)
+
+
 def followup_out(name: str, state: ledger.SupplierFollowup) -> SupplierFollowupOut:
     return SupplierFollowupOut(
         supplier_name=name,
         status=_PHASES[state.phase],
-        note=_note(state),
+        note=_note(state) + _superseded(state),
         asked=[
             AskOut(
                 item=_item(a.position, a.field),
@@ -203,7 +221,8 @@ def followup_out(name: str, state: ledger.SupplierFollowup) -> SupplierFollowupO
         still_missing=[_item(i.position, i.field) for i in state.to_ask],
         late_deliveries=[_late(i) for i in state.late],
         questions=[
-            SupplierQuestionOut(id=q.id, question=q.text, status=q.status) for q in state.questions
+            SupplierQuestionOut(id=q.id, question=q.text, status=q.status, note=q.note)
+            for q in state.questions
         ],
         needs_your_decision=[_decision(d) for d in state.decisions],
     )
@@ -255,6 +274,22 @@ class AnswerQuestionOut(BaseModel):
     supplier_name: str
     questions: int
     approval_id: UUID | None = Field(description="The answer email, waiting for approval")
+    note: str
+
+
+class ReopenQuestionIn(BaseModel):
+    rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
+    supplier: str = Field(description="The supplier's name, as what_is_missing shows it")
+    question_id: UUID | None = Field(
+        default=None,
+        description="The question to reopen, as what_is_missing lists it; null: every "
+        "question Bido considered superseded by this supplier's offer",
+    )
+
+
+class ReopenQuestionOut(BaseModel):
+    supplier_name: str
+    questions: int = Field(description="How many questions are open again")
     note: str
 
 
@@ -346,6 +381,36 @@ def followup_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:
             ),
         )
 
+    async def reopen_supplier_question(
+        ctx: ToolContext, args: ReopenQuestionIn
+    ) -> ReopenQuestionOut:
+        principal = _principal(ctx)
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq_id, invite_id, name = await _invite(session, args.rfq, args.supplier)
+            asked = await ledger.questions_for(session, [invite_id])
+        if args.question_id is not None:
+            ids = [q.id for q in asked[invite_id] if q.id == args.question_id]
+            if not ids:
+                raise ToolError(f"{name} has no such question")
+        else:
+            ids = [q.id for q in asked[invite_id] if q.status == "superseded_by_offer"]
+            if not ids:
+                raise ToolError(f"{name} has no question Bido considered superseded")
+        try:
+            for question_id in ids:
+                await questions.reopen_question(db, principal, rfq_id, question_id)
+        except RfqError as exc:
+            raise ToolError(str(exc)) from None
+        return ReopenQuestionOut(
+            supplier_name=name,
+            questions=len(ids),
+            note=(
+                "Open again: the supplier's offer waits for the buyer's answer "
+                "(answer_supplier_question) and Bido sends this supplier nothing on its own "
+                "meanwhile."
+            ),
+        )
+
     async def use_current_offer(ctx: ToolContext, args: UseCurrentOfferIn) -> UseCurrentOfferOut:
         principal = _principal(ctx)
         if deps.conversation_id is None:
@@ -429,6 +494,17 @@ def followup_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:
             AnswerQuestionOut,
             "draft",
             answer_supplier_question,
+        ),
+        Tool(
+            "reopen_supplier_question",
+            "Open again a supplier's question that Bido considered superseded by the "
+            "supplier's later complete offer (what_is_missing says so), or one dismissed "
+            "earlier: the offer then waits for the buyer's answer. Only when the buyer asks "
+            "for it.",
+            ReopenQuestionIn,
+            ReopenQuestionOut,
+            "draft",
+            reopen_supplier_question,
         ),
         Tool(
             "use_current_offer",

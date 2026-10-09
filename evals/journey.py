@@ -1725,10 +1725,10 @@ def golden_rounds(
 
     After each day's replies, from the supplier's offer at that moment:
 
-    - An offer without a price for a requested part leaves an open question: it is asked
-      first (a clarification, which the follow-up sweep writes; the journey runs only the
-      negotiation sweep), so no request goes out. (Extraction cannot yet say that a part
-      was declined.)
+    - An offer without a price for a requested part leaves an open question: the first
+      request asks it too, before its own asks (one email per supplier answer), and the
+      part is never negotiated without a price. (Extraction cannot yet say that a part was
+      declined.)
     - The first request asks the target, rounded down to cents (or the supplier's finer
       precision), on every part above it. A part late for its need-by date also gets one
       delivery-date ask, graded by `late_line_lead_time_asked`.
@@ -1736,8 +1736,10 @@ def golden_rounds(
       concedes on the parts that moved: a quarter of the gap between our last ask and the
       price, half in the last allowed round (the best-and-final request), never at or above
       the price nor above the maximum; a part that did not move keeps its ask.
-    - It stops after an unchanged reply, after the best-and-final request, or at the round
-      cap; nothing is asked when every part is within target or at our last ask.
+    - An unchanged reply gets no request (the buyer decides) until the supplier moves on
+      its own; it stops after the best-and-final request, the supplier's own final offer,
+      or at the round cap; nothing is asked when every part is within target or at our
+      last ask.
     """
     states = expected_states(script)
     result: dict[str, list[tuple[str, Asks]]] = {s.key: [] for s in SUPPLIERS}
@@ -1751,18 +1753,24 @@ def golden_rounds(
             if not todays or key in stopped:
                 continue
             state = states[todays[-1].key]
-            if any(part not in state for part in targets):
-                continue
             rounds = result[key]
             if rounds:
                 action, previous = rounds[-1]
-                moved = any(state[p].price < asked_at[key][p] for p in previous if p in state)
-                if not moved or action == "bafo" or len(rounds) >= max_rounds:
+                if action == "bafo" or len(rounds) >= max_rounds:
                     stopped.add(key)
                     continue
+                moved = any(state[p].price < asked_at[key][p] for p in previous if p in state)
+                if not moved:
+                    continue
+            if todays[-1].kind == "final":
+                # Never a request after the supplier's own final offer.
+                stopped.add(key)
+                continue
             final = len(rounds) + 1 >= max_rounds
             asks: Asks = {}
             for part, target in targets.items():
+                if part not in state:
+                    continue  # no price: its question rides in the request, not a price ask
                 price = state[part].price
                 before = last_ask[key].get(part)
                 if price <= target or (before is not None and price <= before):

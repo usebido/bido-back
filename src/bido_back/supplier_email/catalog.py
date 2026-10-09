@@ -43,6 +43,9 @@ Key = Literal[
     "context.clarification.delivery_many",
     "context.revised.price",
     "context.revised.price_lead",
+    "context.combined.price",
+    "context.combined.price_lead",
+    "context.combined.questions",
     "context.competition",
     "context.delivery.one.date",
     "context.delivery.one.lead",
@@ -150,6 +153,13 @@ _EN: Final[dict[Key, str]] = {
     "context.revised.price": "We ask you to review your prices for the positions below.",
     "context.revised.price_lead": (
         "We ask you to review your prices and lead times for the positions below."
+    ),
+    "context.combined.price": "We ask you to review your prices for {positions}.",
+    "context.combined.price_lead": (
+        "We ask you to review your prices and lead times for {positions}."
+    ),
+    "context.combined.questions": (
+        "We also need the information below to complete our evaluation."
     ),
     "context.competition": (
         "For these positions, your offer is not the most competitive we have received."
@@ -308,6 +318,13 @@ _PT: Final[dict[Key, str]] = {
     "context.revised.price": "Pedimos a gentileza de revisar os preços das posições abaixo.",
     "context.revised.price_lead": (
         "Pedimos a gentileza de revisar os preços e os prazos das posições abaixo."
+    ),
+    "context.combined.price": "Pedimos a gentileza de revisar os preços para {positions}.",
+    "context.combined.price_lead": (
+        "Pedimos a gentileza de revisar os preços e os prazos para {positions}."
+    ),
+    "context.combined.questions": (
+        "Também precisamos das informações abaixo para concluir a avaliação."
     ),
     "context.competition": (
         "Para essas posições, a sua proposta não é a mais competitiva que recebemos."
@@ -469,6 +486,11 @@ _DE: Final[dict[Key, str]] = {
     "context.revised.price_lead": (
         "Wir bitten Sie, Ihre Preise und Lieferzeiten für die folgenden Positionen zu überprüfen."
     ),
+    "context.combined.price": "Wir bitten Sie, Ihre Preise für {positions} zu überprüfen.",
+    "context.combined.price_lead": (
+        "Wir bitten Sie, Ihre Preise und Lieferzeiten für {positions} zu überprüfen."
+    ),
+    "context.combined.questions": ("Für die Prüfung benötigen wir außerdem die folgenden Angaben."),
     "context.competition": (
         "Für diese Positionen ist Ihr Angebot nicht das wettbewerbsfähigste, das uns vorliegt."
     ),
@@ -637,6 +659,13 @@ _FR: Final[dict[Key, str]] = {
     ),
     "context.revised.price_lead": (
         "Nous vous demandons de revoir vos prix et vos délais pour les positions ci-dessous."
+    ),
+    "context.combined.price": "Nous vous demandons de revoir vos prix pour {positions}.",
+    "context.combined.price_lead": (
+        "Nous vous demandons de revoir vos prix et vos délais pour {positions}."
+    ),
+    "context.combined.questions": (
+        "Nous avons également besoin des informations ci-dessous pour terminer notre évaluation."
     ),
     "context.competition": (
         "Pour ces positions, votre offre n'est pas la plus compétitive que nous ayons reçue."
@@ -810,6 +839,13 @@ _IT: Final[dict[Key, str]] = {
     "context.revised.price_lead": (
         "Vi chiediamo di rivedere i prezzi e i tempi di consegna delle posizioni seguenti."
     ),
+    "context.combined.price": "Vi chiediamo di rivedere i prezzi per {positions}.",
+    "context.combined.price_lead": (
+        "Vi chiediamo di rivedere i prezzi e i tempi di consegna per {positions}."
+    ),
+    "context.combined.questions": (
+        "Abbiamo inoltre bisogno delle informazioni seguenti per completare la valutazione."
+    ),
     "context.competition": (
         "Per queste posizioni, la Vostra offerta non è la più competitiva tra quelle ricevute."
     ),
@@ -976,6 +1012,13 @@ _ES: Final[dict[Key, str]] = {
     ),
     "context.revised.price_lead": (
         "Les pedimos que revisen sus precios y plazos de entrega para las posiciones siguientes."
+    ),
+    "context.combined.price": "Les pedimos que revisen sus precios para {positions}.",
+    "context.combined.price_lead": (
+        "Les pedimos que revisen sus precios y plazos de entrega para {positions}."
+    ),
+    "context.combined.questions": (
+        "También necesitamos la información siguiente para completar la evaluación."
     ),
     "context.competition": (
         "Para estas posiciones, su oferta no es la más competitiva que hemos recibido."

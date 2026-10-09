@@ -83,13 +83,18 @@ def test_supplier_script_follows_the_business_rules() -> None:
 
     targets = {p.part: p.target for p in REAL_PARTS if p.buy}
     maxima = {p.part: p.maximum for p in REAL_PARTS if p.buy}
-    # MultiPecas left 000104 unquoted: that open question comes first, no request yet.
-    assert golden_rounds(targets, 2, maxima=maxima)["multipecas"] == []
+    # MultiPecas left 000104 unquoted: the first request asks it too and negotiates the
+    # other parts (one email per answer); its unchanged repeats get nothing until its
+    # revision moves a price: then the best-and-final request.
+    multipecas = golden_rounds(targets, 2, maxima=maxima)["multipecas"]
+    assert [a for a, _ in multipecas] == ["counter", "bafo"]
+    assert all("000104" not in asks for _, asks in multipecas)
     # Two rounds: one request, then the best-and-final request once the supplier moved.
     two = golden_rounds(targets, 2, maxima=maxima)
     assert [a for a, _ in two["metalnova"]] == ["counter", "bafo"]
     assert [a for a, _ in two["precisaosul"]] == ["counter", "bafo"]
-    # Three rounds: MetalNova's lead-time-only change moves nothing that was asked: stop.
+    # Three rounds: MetalNova's lead-time-only change moves nothing that was asked (no
+    # request), and its own final offer ends the requests.
     three = golden_rounds(targets, 3, maxima=maxima)
     assert [a for a, _ in three["metalnova"]] == ["counter", "counter"]
     first, second = (asks for _, asks in three["metalnova"])

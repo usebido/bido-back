@@ -71,7 +71,7 @@ from bido_back.mandates.service import AUTO_TOOLS
 from bido_back.quotes.extract_job import persist_quote, requested_line
 from bido_back.quotes.validation import QuoteSources, validate_quote
 from bido_back.rfqs import service as rfq_service
-from bido_back.rfqs.errors import Forbidden, NotFound
+from bido_back.rfqs.errors import Forbidden, InvalidState, NotFound
 from bido_back.rfqs.service import NewRfqLine
 from bido_back.supplier_email import compose
 from evals.harness import Env, MemoryStorage, new_company
@@ -837,6 +837,157 @@ async def test_a_question_after_an_offer_pauses_the_clarification_until_answered
     assert proposal.fields["_offer_state"]["requires_clarification"] is False
     # Never asked (the email was canceled): asked now.
     assert (await thread.sweep(timedelta(hours=5))).clarifications == 1
+
+
+# --- A later complete offer supersedes the supplier's open question ------------------------------
+
+COMPLETE = f"{INCOMPLETE} {UPLOADED}"
+
+
+def complete() -> QuoteExtractionOutput:
+    """Every line priced, a lead time that meets every need-by date, the validity."""
+    return incomplete().model_copy(
+        update={
+            "validity": ValidityValue(
+                value="30",
+                unit="calendar_days",
+                source=SourceRef(kind="email_body", quote=UPLOADED),
+                confidence=0.95,
+            )
+        }
+    )
+
+
+async def _audit(thread: Thread, action: str) -> list[dict[str, Any]]:
+    async with tenant_session(thread.world.engine, thread.world.tenant_id) as session:
+        return [
+            dict(payload)
+            for payload in await session.scalars(
+                select(AuditEvent.payload).where(
+                    AuditEvent.action == action,
+                    AuditEvent.payload["invite_id"].astext == str(thread.invite_id),
+                )
+            )
+        ]
+
+
+async def test_a_complete_offer_asking_nothing_supersedes_the_question_and_it_can_reopen(
+    thread: Thread,
+) -> None:
+    """The buyer answered the question outside Bido and the supplier sent its full quote:
+    the question is closed as superseded (never "answered"), the buyer sees why, and the
+    offer is no longer held for it. Reopening puts it back in front of the buyer."""
+    await thread.reply(QUESTION, question(), timedelta(hours=3))
+    [asked] = (await thread.state()).open_questions
+    await thread.reply(COMPLETE, complete(), timedelta(days=8))
+    offer_day = thread.world.now.date()
+
+    state = await thread.state()
+    assert state.open_questions == () and state.phase == "nothing_to_ask"
+    proposal, _ = await thread.latest()
+    [closed] = state.questions
+    assert (closed.id, closed.status, closed.superseded_by_proposal_id) == (
+        asked.id,
+        "superseded_by_offer",
+        proposal.id,
+    )
+    # Bido decided, no person; nothing was answered or sent.
+    assert closed.decided_by is None and closed.decided_at is not None
+    assert closed.answer_followup_id is None
+    assert closed.superseded_on == offer_day
+    assert closed.note == (
+        f"Considered superseded by the supplier's offer of {offer_day.isoformat()} "
+        "— reopen if needed."
+    )
+    # The offer no longer waits for the question.
+    assert proposal.fields["_offer_state"]["technical_questions"] == []
+    assert proposal.fields["_offer_state"]["requires_clarification"] is False
+    [event] = await _audit(thread, "rfq.supplier_question_superseded")
+    assert event["question_ids"] == [str(asked.id)]
+    assert event["proposal_id"] == str(proposal.id)
+    assert event["offer_date"] == offer_day.isoformat()
+    assert ASKED not in str(event)
+    # What the buyer reads: the API and the activity feed.
+    view = await service.get_followups(thread.world.engine, thread.world.principal, thread.rfq.id)
+    [shown] = [q for s in view.invites for q in s.questions]
+    assert (shown.status, shown.superseded_by_proposal_id) == ("superseded_by_offer", proposal.id)
+    assert shown.note == closed.note
+    from bido_back.rfqs.activity import rfq_activity
+
+    feed = await rfq_activity(thread.world.engine, thread.world.principal, thread.rfq.id)
+    [line] = [i for i in feed if i.action == "rfq.supplier_question_superseded"]
+    assert line.summary.endswith(
+        f"considered superseded by the supplier's offer of {offer_day.isoformat()} "
+        "— reopen if needed"
+    )
+
+    reopened = await questions.reopen_question(
+        thread.world.engine, thread.world.principal, thread.rfq.id, asked.id
+    )
+    assert (reopened.status, reopened.decided_at, reopened.note) == ("open", None, None)
+    state = await thread.state()
+    assert [q.id for q in state.open_questions] == [asked.id]
+    assert state.phase == "needs_your_answer"
+    proposal, _ = await thread.latest()
+    assert proposal.fields["_offer_state"]["technical_questions"] == [ASKED]
+    [event] = await _audit(thread, "rfq.supplier_question_reopened")
+    assert (event["question_id"], event["was"]) == (str(asked.id), "superseded_by_offer")
+    # An open question is not reopened; once dismissed it may be.
+    with pytest.raises(InvalidState, match="open"):
+        await questions.reopen_question(
+            thread.world.engine, thread.world.principal, thread.rfq.id, asked.id
+        )
+    await questions.dismiss_question(
+        thread.world.engine,
+        thread.world.principal,
+        thread.rfq.id,
+        asked.id,
+        DismissQuestionRequest(reason="Answered by phone"),
+    )
+    again = await questions.reopen_question(
+        thread.world.engine, thread.world.principal, thread.rfq.id, asked.id
+    )
+    assert again.status == "open"
+    async with tenant_session(thread.world.engine, thread.world.tenant_id) as session:
+        row = await session.get(SupplierQuestion, asked.id)
+        assert row is not None and row.answer is None and row.decided_by is None
+
+
+async def test_only_a_complete_offer_that_asks_nothing_supersedes_a_question(
+    thread: Thread,
+) -> None:
+    await thread.reply(QUESTION, question(), timedelta(hours=3))
+    [asked] = (await thread.state()).open_questions
+    # Line 2 neither priced nor declined: the offer is not complete.
+    two_lines = incomplete().model_copy(
+        update={"lines": [line for line in incomplete().lines if line.rfq_line_position != 2]}
+    )
+    await thread.reply(INCOMPLETE, two_lines, timedelta(days=1))
+    proposal, lines = await thread.latest()
+    assert (proposal.version, sorted(lines)) == (1, [1, 3])
+    assert [q.id for q in (await thread.state()).open_questions] == [asked.id]
+    # Complete, but it asks something new: both wait for the buyer.
+    another = "Do you need RoHS certificates?"
+    asking = complete().model_copy(update={"technical_questions": [another]})
+    await thread.reply(f"{COMPLETE} {another}", asking, timedelta(days=2))
+    state = await thread.state()
+    assert [q.text for q in state.open_questions] == [ASKED, another]
+    assert await _audit(thread, "rfq.supplier_question_superseded") == []
+
+
+async def test_another_tenant_cannot_reopen_a_question(
+    thread: Thread, app_engine: AsyncEngine
+) -> None:
+    await thread.reply(QUESTION, question(), timedelta(hours=3))
+    await thread.reply(COMPLETE, complete(), timedelta(days=8))
+    [closed] = (await thread.state()).questions
+    assert closed.status == "superseded_by_offer"
+    other = await new_company(thread.world.env, "ledger-reopen-other")
+    with pytest.raises(NotFound):
+        await questions.reopen_question(app_engine, other, thread.rfq.id, closed.id)
+    async with tenant_session(app_engine, other.tenant_id) as session:
+        assert list(await session.scalars(select(SupplierQuestion.id))) == []
+    assert (await thread.state()).questions[0].status == "superseded_by_offer"
 
 
 # --- The buyer takes a held offer as shown -----------------------------------------------------

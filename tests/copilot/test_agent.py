@@ -63,6 +63,7 @@ EXPECTED_TOOLS = {
     "get_negotiation_outcome": "read",
     "list_extra_offers": "read",
     "answer_supplier_question": "draft",
+    "reopen_supplier_question": "draft",
     "use_current_offer": "draft",
 }
 

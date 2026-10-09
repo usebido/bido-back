@@ -37,6 +37,8 @@ EMAIL_TYPES: Final[tuple[EmailType, ...]] = (
 ANSWER_REQUESTED: Final[frozenset[EmailType]] = frozenset(
     {"reminder", "clarification", "revised_offer", "delivery_date", "bafo"}
 )
+# At most this many numbered asks in one email (the email standard, §2.2).
+MAX_ASKS: Final = 3
 
 # What an offer may lack (the clarification's fields).
 OfferField = Literal["currency", "valid_until", "unit_price", "quantity", "lead_time"]
@@ -234,6 +236,11 @@ class SupplierEmail:
     mention_competition: bool = False
     # The request concerns only some of the RFQ's positions ("no need to resend the others").
     subset: bool = False
+    # A revised-offer, delivery-date or best-and-final request that also asks what the offer
+    # lacks (the clarification ledger's items: one email per supplier answer), those asks
+    # first. `question_positions`: the positions shown for those questions only.
+    with_questions: bool = False
+    question_positions: tuple[int, ...] = ()
     # The model's optional note: empty by default (see `checks.note_problems`).
     note: str = ""
 

@@ -20,11 +20,13 @@ from bido_back.settings import Settings
 from tests.db.conftest import app_engine, migrator_engine
 from tests.followups.test_ledger_db import (
     ASKED,
+    COMPLETE,
     INCOMPLETE,
     QUESTION,
     UPDATE,
     Thread,
     add_member,
+    complete,
     incomplete,
     question,
     scripted,
@@ -53,9 +55,10 @@ async def test_the_new_routes_require_authentication() -> None:
         responses = [
             await http.post(f"/v1/rfqs/{uuid4()}/invites/{uuid4()}/answers", json={"answer": "x"}),
             await http.post(f"/v1/rfqs/{uuid4()}/questions/{uuid4()}/dismiss", json={}),
+            await http.post(f"/v1/rfqs/{uuid4()}/questions/{uuid4()}/reopen"),
             await http.post(f"/v1/proposals/{uuid4()}/use-current-offer", json={}),
         ]
-    assert [r.status_code for r in responses] == [401, 401, 401]
+    assert [r.status_code for r in responses] == [401, 401, 401, 401]
 
 
 class Caller:
@@ -123,6 +126,34 @@ async def test_questions_over_http(
     dismissed = await http.post(f"/v1/rfqs/{rfq_id}/questions/{asked['id']}/dismiss", json={})
     assert dismissed.status_code == 409  # answered already
     unknown = await http.post(f"/v1/rfqs/{rfq_id}/questions/{uuid4()}/dismiss", json={})
+    assert unknown.status_code == 404
+
+
+@pytest.mark.db
+async def test_a_superseded_question_shows_why_and_reopens_over_http(
+    thread: Thread, client: tuple[httpx.AsyncClient, Caller]
+) -> None:
+    http, _ = client
+    rfq_id = thread.rfq.id
+    await thread.reply(QUESTION, question(), timedelta(hours=3))
+    await thread.reply(COMPLETE, complete(), timedelta(days=8))
+    view = (await http.get(f"/v1/rfqs/{rfq_id}/followups")).json()
+    [invite] = view["invites"]
+    assert invite["phase"] == "nothing_to_ask"
+    [closed] = invite["questions"]
+    assert closed["status"] == "superseded_by_offer"
+    assert closed["superseded_by_proposal_id"]
+    assert closed["note"].startswith("Considered superseded by the supplier's offer of ")
+    assert closed["note"].endswith("— reopen if needed.")
+
+    reopened = await http.post(f"/v1/rfqs/{rfq_id}/questions/{closed['id']}/reopen")
+    assert reopened.status_code == 200, reopened.text
+    assert (reopened.json()["status"], reopened.json()["question"]) == ("open", ASKED)
+    view = (await http.get(f"/v1/rfqs/{rfq_id}/followups")).json()
+    assert view["invites"][0]["phase"] == "needs_your_answer"
+    again = await http.post(f"/v1/rfqs/{rfq_id}/questions/{closed['id']}/reopen")
+    assert again.status_code == 409  # open already
+    unknown = await http.post(f"/v1/rfqs/{rfq_id}/questions/{uuid4()}/reopen")
     assert unknown.status_code == 404
 
 

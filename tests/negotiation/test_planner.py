@@ -23,11 +23,13 @@ from bido_back.negotiation.planner import (
     Offer,
     SupplierFacts,
     SupplierPlan,
+    ask_slots,
     bafo_cutoff,
     plan_supplier,
     ready_to_close,
 )
-from bido_back.negotiation.signals import ClarificationState
+from bido_back.negotiation.signals import ClarificationItem, ClarificationState
+from bido_back.supplier_email.model import MAX_ASKS
 
 NOW = datetime(2026, 10, 9, 12, tzinfo=UTC)
 TODAY = NOW.date()
@@ -705,10 +707,23 @@ def test_an_alternative_part_is_never_negotiated_or_accepted_as_the_exact_part()
 # --- Clarifications first ------------------------------------------------------------------------
 
 
-def test_open_questions_come_first_one_request_at_a_time() -> None:
-    to_ask = ClarificationState(to_ask=("valid_until",), lines=frozenset())
-    result = plan(facts(ABOVE, clarification=to_ask))
-    assert (result.action, result.email) == ("clarify", None)
+def to_ask(*items: ClarificationItem) -> ClarificationState:
+    """The ledger's items to ask (the service maps them from `supplier_followups`)."""
+    return ClarificationState(
+        to_ask=tuple(i.code for i in items),
+        items=items,
+        lines=frozenset(i.rfq_line_id for i in items if i.rfq_line_id is not None),
+    )
+
+
+VALIDITY = ClarificationItem(None, None, "valid_until")
+
+
+def test_open_items_alone_go_out_first_one_request_at_a_time() -> None:
+    no_validity = replace(WITHIN, valid_until=None)
+    result = plan(facts(no_validity, clarification=to_ask(VALIDITY)))
+    assert (result.action, result.reason, result.email) == ("clarify", "clarification_due", None)
+    assert result.questions_open
     pending = ClarificationState(pending=True, pending_wait="approval", lines=frozenset({L2}))
     held = plan(facts(ABOVE, clarification=pending))
     assert (held.action, held.phase, held.reason) == (
@@ -732,6 +747,149 @@ def test_questions_asked_once_and_still_open_are_the_buyers_and_other_lines_go_o
     assert result.action == "revised_offer"
     within = plan(facts(WITHIN, clarification=exhausted))
     assert (within.action, within.reason) == ("hold", "clarification_unanswered")
+
+
+# --- One email per supplier answer: the open items with the negotiation's asks --------------------
+
+
+def test_open_items_and_a_price_above_target_go_out_in_one_email() -> None:
+    """The multi_language gap: no validity and a price above target -> ONE email, the
+    validity asked first, then one revised-offer ask; it is the round (not a free email)."""
+    no_validity = replace(ABOVE, valid_until=None)
+    result = plan(facts(no_validity, clarification=to_ask(VALIDITY)), max_rounds=3)
+    assert (result.action, result.phase, result.reason) == (
+        "revised_offer",
+        "waiting",
+        "revised_offer_with_questions_due",
+    )
+    assert result.email is not None
+    assert result.email.clarify == (VALIDITY,)
+    assert result.email.deferred == ()
+    assert result.email.round == 1
+    assert set(asks_of(result)) == {1, 2}
+    assert ask_slots(result.email.clarify, result.email.positions, result.email.kind) == [
+        "offer_terms",
+        "revise_price",
+    ]
+    assert result.questions_open
+    assert "one email asking for what the offer lacks" in phase_label(result)
+
+
+def test_a_line_with_an_open_item_is_asked_about_and_the_others_negotiated() -> None:
+    lead = ClarificationItem(L1, 1, "lead_time")
+    result = plan(facts(ABOVE, clarification=to_ask(lead)), max_rounds=3)
+    assert result.email is not None and result.action == "revised_offer"
+    # Line 1 waits for its answer; line 2's price is asked now.
+    assert set(asks_of(result)) == {2}
+    assert ask_slots(result.email.clarify, result.email.positions, result.email.kind) == [
+        "complete_positions",
+        "revise_price",
+    ]
+    by_line = {p.rfq_line_id: p for p in result.lines}
+    assert by_line[L1].status == "question_open"
+
+
+def test_asks_that_do_not_fit_wait_for_the_next_email_and_the_decision_says_so() -> None:
+    """Three blocking questions use the three asks: the price ask waits for the answers."""
+    items = (
+        VALIDITY,
+        ClarificationItem(L1, 1, "quantity"),
+        ClarificationItem(L2, 2, "delivery_date"),
+    )
+    pricey = offer(quote(L1, "44.90"), quote(L2, "229.00", 12), quote(L3, "125.00", 14))
+    alone = plan(facts(pricey, clarification=to_ask(*items)), max_rounds=3)
+    assert (alone.action, alone.detail, alone.email) == (
+        "clarify",
+        "revised_offer_after_answers",
+        None,
+    )
+    assert "the request for a revised offer follows the answers" in phase_label(alone)
+    # Line 3 also late: its date fits the shared delivery ask, its price waits.
+    late = offer(quote(L1, "44.90"), quote(L2, "229.00", 12), quote(L3, "125.00", 25))
+    result = plan(facts(late, clarification=to_ask(*items)), max_rounds=3)
+    assert result.email is not None
+    assert (result.action, result.email.kind) == ("delivery_date", "delivery_date")
+    assert result.email.deferred == (L3,)
+    assert asks_of(result) == {3: (None, TODAY + timedelta(days=18))}
+    assert ask_slots(result.email.clarify, result.email.positions, result.email.kind) == [
+        "offer_terms",
+        "complete_positions",
+        "deliver_by",
+    ]
+    assert "the price request for line(s) 3 follows the answers" in phase_label(result)
+
+
+def test_a_price_ask_left_for_later_is_asked_next_time_even_without_a_move() -> None:
+    sent = EmailRecord(
+        sequence=1,
+        round=1,
+        kind="delivery_date",
+        state="sent",
+        proposal_id=P1,
+        proposal_version=1,
+        asks=(
+            LineAsk(
+                rfq_line_id=L3,
+                deliver_by=TODAY + timedelta(days=18),
+                offered_delivery=TODAY + timedelta(days=25),
+            ),
+        ),
+        reply_by=TODAY + timedelta(days=2),
+        deferred=frozenset({L3}),
+    )
+    answered = offer(
+        quote(L1, "44.90"), quote(L2, "229.00", 12), quote(L3, "125.00", 25), version=2
+    )
+    result = plan(facts(answered, sent), max_rounds=3)
+    assert result.email is not None
+    assert (result.action, result.email.round) == ("revised_offer", 2)
+    assert asks_of(result)[3][0] is not None
+    # Without the deferral, the same answer is "no progress".
+    plain = replace(sent, deferred=frozenset())
+    stopped = plan(facts(answered, plain), max_rounds=3)
+    assert (stopped.action, stopped.reason) == ("hold", "no_progress")
+
+
+def test_the_best_and_final_request_asks_the_open_items_too() -> None:
+    no_validity = replace(ABOVE, valid_until=None)
+    result = plan(facts(no_validity, clarification=to_ask(VALIDITY)), max_rounds=1)
+    assert result.email is not None
+    assert (result.action, result.reason) == ("bafo", "bafo_with_questions_due")
+    assert result.email.clarify == (VALIDITY,)
+    assert ask_slots(result.email.clarify, result.email.positions, result.email.kind) == [
+        "offer_terms",
+        "final",
+    ]
+
+
+def test_open_items_wait_while_our_request_is_unanswered() -> None:
+    sent = email(sequence=1, round=1, version=1, asks=[asked(L1, "45.67", "48.90")])
+    result = plan(facts(ABOVE, sent, clarification=to_ask(VALIDITY)), max_rounds=3)
+    assert (result.action, result.phase, result.reason) == (
+        "wait",
+        "waiting_for_supplier",
+        "revised_offer_sent",
+    )
+
+
+def test_at_most_three_asks_whatever_the_items() -> None:
+    every = (
+        VALIDITY,
+        ClarificationItem(None, None, "currency"),
+        ClarificationItem(L1, 1, "unit_price"),
+        ClarificationItem(L1, 1, "delivery_date"),
+        ClarificationItem(L2, 2, "lead_time"),
+    )
+    late = offer(quote(L1, "48.90"), quote(L2, "255.00", 12), quote(L3, "125.00", 25))
+    kinds: dict[int, str] = {}
+    for rounds in (1, 3):
+        result = plan(facts(late, clarification=to_ask(*every)), max_rounds=rounds)
+        kinds[rounds] = result.action
+        if result.email is not None:
+            slots = ask_slots(result.email.clarify, result.email.positions, result.email.kind)
+            assert len(slots) <= MAX_ASKS, (rounds, slots)
+    # The best-and-final request has no room after three questions: it waits for the answers.
+    assert kinds == {1: "clarify", 3: "delivery_date"}
 
 
 # --- Warnings and the RFQ -------------------------------------------------------------------------

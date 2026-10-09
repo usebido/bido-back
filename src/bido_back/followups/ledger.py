@@ -1,8 +1,8 @@
 """The clarification ledger: what Bido asked each supplier, and what each supplier asked.
 
-Asks (`clarification_asks`, migration 0036): every item a clarification email
-asks one supplier, at most once per (invite, requested line or the whole offer,
-field), with its status:
+Asks (`clarification_asks`, migrations 0036, 0038): every item an email asks
+one supplier about its offer, at most once per (invite, requested line or the
+whole offer, field), with its status:
 
 - `proposed`: the email awaits approval; `withdrawn` if it is canceled or
   rejected (never asked, so it may be asked again);
@@ -13,6 +13,11 @@ field), with its status:
   decision;
 - `resolved`: the buyer decided ("use the current offer").
 
+The email is a clarification (`followup_id`: proposed with it, opened when it
+goes out), or a negotiation email that asked the items together with its own
+asks, one email per supplier answer (`negotiation_message_id`: recorded `open`
+when it goes out, so a canceled or rejected one never asked anything).
+
 A reply that answers open asks is applied to the offer as an amendment of
 exactly those fields (`bido_back.quotes.state`, `OfferEvent.answers`). A reply
 without an offer (an acknowledgement, "we will answer tomorrow") settles
@@ -20,7 +25,12 @@ nothing: the asks stay open.
 
 Supplier questions (`supplier_questions`): the questions a supplier's reply asks
 the buyer, `open` until the buyer answers or dismisses them. While a supplier
-has an open question, Bido sends it nothing automatically.
+has an open question, Bido sends it nothing automatically. A later offer from
+the same supplier that is complete (every requested line priced or declined)
+and asks nothing supersedes them (`superseded_by_offer`, never "answered": no
+answer went out): the supplier went on without waiting for an answer, which the
+buyer may have given elsewhere. The buyer sees it and may reopen the question
+(`bido_back.followups.questions`). Bido never answers a question on its own.
 
 `supplier_followups` tells, per supplier, what Bido waits for (the one open
 request), which email waits for approval, what needs the buyer's answer and
@@ -36,11 +46,14 @@ from typing import Final, Literal, cast
 from uuid import UUID
 
 from pydantic import JsonValue
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from bido_back.agents.catalog.contracts import FollowupField, FollowupQuestion
 from bido_back.db.models import (
+    AuditEvent,
     ClarificationAsk,
     FollowupMessage,
     Invite,
@@ -66,7 +79,9 @@ from bido_back.quotes.state import AskedField
 from bido_back.quotes.terms import offer_terms
 
 AskStatus = Literal["proposed", "open", "answered", "unusable", "withdrawn", "resolved"]
-QuestionStatus = Literal["open", "answered", "dismissed"]
+QuestionStatus = Literal["open", "answered", "dismissed", "superseded_by_offer"]
+# A question closed without an answer email, which the buyer may open again.
+REOPENABLE: Final = ("superseded_by_offer", "dismissed")
 # A follow-up the send gate refused: its row is `canceled` with this reason, held for the
 # buyer (`bido_back.followups.service`), and never rendered again.
 DRAFT_REFUSED: Final = "draft_refused"
@@ -82,7 +97,8 @@ class Ask:
 
     id: UUID
     invite_id: UUID
-    followup_id: UUID
+    # The email that asked it: a clarification, or a negotiation email (exactly one).
+    followup_id: UUID | None
     rfq_line_id: UUID | None
     position: int | None
     field: FollowupField
@@ -93,6 +109,7 @@ class Ask:
     reply_by: date | None
     answered_by_message_id: UUID | None
     settled_at: datetime | None
+    negotiation_message_id: UUID | None = None
 
     @property
     def key(self) -> ItemKey:
@@ -118,6 +135,7 @@ def _ask(row: ClarificationAsk) -> Ask:
         reply_by=row.reply_by,
         answered_by_message_id=row.answered_by_message_id,
         settled_at=row.settled_at,
+        negotiation_message_id=row.negotiation_message_id,
     )
 
 
@@ -135,9 +153,28 @@ class Question:
     answer_followup_id: UUID | None
     decided_by: UUID | None
     decided_at: datetime | None
+    # Superseded by the supplier's later offer: that offer, and the day it was written.
+    superseded_by_proposal_id: UUID | None = None
+    superseded_on: date | None = None
+
+    @property
+    def note(self) -> str | None:
+        """What the buyer reads about a question Bido closed on its own (never its text)."""
+        if self.status != "superseded_by_offer":
+            return None
+        return superseded_note(self.superseded_on)
 
 
-def _question(row: SupplierQuestion, received_at: datetime) -> Question:
+def superseded_note(on: date | None) -> str:
+    """ "Considered superseded by the supplier's offer of 2026-10-17 — reopen if needed."
+    (codes and dates only: safe to show, log or hand to a model)."""
+    offer = f"the supplier's offer of {on.isoformat()}" if on else "the supplier's later offer"
+    return f"Considered superseded by {offer} — reopen if needed."
+
+
+def _question(
+    row: SupplierQuestion, received_at: datetime, superseded_on: date | None = None
+) -> Question:
     return Question(
         id=row.id,
         invite_id=row.invite_id,
@@ -149,6 +186,8 @@ def _question(row: SupplierQuestion, received_at: datetime) -> Question:
         answer_followup_id=row.answer_followup_id,
         decided_by=row.decided_by,
         decided_at=row.decided_at,
+        superseded_by_proposal_id=row.superseded_by_proposal_id,
+        superseded_on=superseded_on,
     )
 
 
@@ -183,6 +222,56 @@ async def record_asks(
     await session.flush()
 
 
+@dataclass(frozen=True, slots=True)
+class SentItem:
+    """One item a negotiation email asked too (from its decision), recorded as it goes out."""
+
+    rfq_line_id: UUID | None
+    position: int | None
+    field: FollowupField
+    question: FollowupQuestion
+    need_by: date | None = None
+
+
+async def record_sent_asks(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    invite_id: UUID,
+    negotiation_message_id: UUID,
+    items: Sequence[SentItem],
+    reply_by: date | None,
+    at: datetime,
+) -> int:
+    """A negotiation email that also asked the ledger's items went out: each is `open`,
+    asked by that email. An item already live (asked, or being asked) stays as it is:
+    each item is asked once (the unique index decides)."""
+    recorded = 0
+    for item in items:
+        inserted = await session.scalar(
+            insert(ClarificationAsk)
+            .values(
+                tenant_id=tenant_id,
+                invite_id=invite_id,
+                negotiation_message_id=negotiation_message_id,
+                rfq_line_id=item.rfq_line_id,
+                position=item.position if item.rfq_line_id is not None else None,
+                field=item.field,
+                question=item.question,
+                need_by=item.need_by,
+                status="open",
+                asked_at=at,
+                reply_by=reply_by,
+            )
+            .on_conflict_do_nothing()
+            .returning(ClarificationAsk.id)
+        )
+        if inserted is not None:
+            recorded += 1
+    await session.flush()
+    return recorded
+
+
 async def mark_asked(session: AsyncSession, followup_id: UUID, at: datetime) -> int:
     """The clarification went out: its asks are open."""
     result = await session.execute(
@@ -213,16 +302,25 @@ async def withdraw_asks(session: AsyncSession, followup_ids: Sequence[UUID]) -> 
 async def asks_answered_by(
     session: AsyncSession, invite_id: UUID, received_at: datetime
 ) -> list[Ask]:
-    """The open asks a reply received at `received_at` answers: those whose email went
-    out before it. Locked: the reply's extraction settles them."""
+    """The open asks a reply received at `received_at` answers: those whose email (a
+    clarification, or a negotiation email that asked them too) went out before it.
+    Locked: the reply's extraction settles them."""
     rows = await session.scalars(
         select(ClarificationAsk)
-        .join(FollowupMessage, FollowupMessage.id == ClarificationAsk.followup_id)
+        .outerjoin(FollowupMessage, FollowupMessage.id == ClarificationAsk.followup_id)
+        .outerjoin(
+            NegotiationMessage, NegotiationMessage.id == ClarificationAsk.negotiation_message_id
+        )
         .where(
             ClarificationAsk.invite_id == invite_id,
             ClarificationAsk.status == "open",
-            FollowupMessage.sent_at.is_not(None),
-            FollowupMessage.sent_at <= received_at,
+            or_(
+                and_(FollowupMessage.sent_at.is_not(None), FollowupMessage.sent_at <= received_at),
+                and_(
+                    NegotiationMessage.sent_at.is_not(None),
+                    NegotiationMessage.sent_at <= received_at,
+                ),
+            ),
         )
         .order_by(ClarificationAsk.position.nulls_first(), ClarificationAsk.field)
         .with_for_update(of=ClarificationAsk)
@@ -346,15 +444,24 @@ async def questions_for(
     found: dict[UUID, list[Question]] = {invite_id: [] for invite_id in invite_ids}
     if not invite_ids:
         return found
+    # The offer that superseded a question, and the day its email was written.
+    later = aliased(Message)
     rows = await session.execute(
-        select(SupplierQuestion, Message.created_at)
+        select(SupplierQuestion, Message.created_at, later.occurred_at)
         .join(Message, Message.id == SupplierQuestion.message_id)
+        .outerjoin(Proposal, Proposal.id == SupplierQuestion.superseded_by_proposal_id)
+        .outerjoin(later, later.id == Proposal.message_id)
         .where(SupplierQuestion.invite_id.in_(invite_ids))
         .order_by(Message.created_at, SupplierQuestion.ordinal)
     )
-    for row, received_at in rows:
-        found[row.invite_id].append(_question(row, received_at))
+    for row, received_at, superseded_at in rows:
+        found[row.invite_id].append(_question(row, received_at, _day_of(superseded_at)))
     return found
+
+
+def _day_of(moment: datetime | None) -> date | None:
+    """The day of an outer-joined timestamp (None when the join found nothing)."""
+    return moment.date() if moment is not None else None
 
 
 async def open_question_texts(session: AsyncSession, invite_id: UUID) -> list[str]:
@@ -393,6 +500,85 @@ async def sync_offer_questions(session: AsyncSession, invite_id: UUID) -> None:
     if invite is not None and invite.negotiation_evaluated_proposal_id == proposal.id:
         invite.negotiation_evaluated_proposal_id = None
     await session.flush()
+
+
+def supersedes_questions(
+    items: Iterable[OpenItem],
+    *,
+    asks_questions: bool,
+    offer_content: bool,
+    held: bool,
+    reply_kind: str | None,
+) -> bool:
+    """Whether a newly stored offer makes the supplier's earlier open questions moot.
+
+    It does when its reply asks nothing (`asks_questions`), carries an offer
+    (`offer_content`: a quote, or an amendment with values), was applied cleanly (not
+    `held` for review, neither a mere clarification nor a withdrawal), and the offer is
+    complete: every requested line priced or declined, no price left unclear (no
+    `unit_price` among what the offer still lacks, `items`). What else it lacks (the
+    validity, a lead time) is Bido's own clarification, not the supplier's question.
+    """
+    if asks_questions or not offer_content or held:
+        return False
+    if reply_kind in ("clarification", "withdrawal"):
+        return False
+    return not any(item.field == "unit_price" for item in items)
+
+
+async def supersede_questions(
+    session: AsyncSession,
+    *,
+    tenant_id: UUID,
+    invite: Invite,
+    message: Message,
+    proposal: Proposal,
+    at: datetime,
+) -> list[UUID]:
+    """The supplier's open questions asked before `message` (received earlier, written no
+    later) are superseded by the offer it carried (`proposal`): audited (ids only), shown
+    to the buyer with that offer's date, never answered. The caller decided the offer
+    qualifies (`supersedes_questions`) and syncs the offer's open questions afterwards."""
+    asked = aliased(Message)
+    rows = list(
+        await session.scalars(
+            select(SupplierQuestion)
+            .join(asked, asked.id == SupplierQuestion.message_id)
+            .where(
+                SupplierQuestion.invite_id == invite.id,
+                SupplierQuestion.status == "open",
+                SupplierQuestion.message_id != message.id,
+                asked.created_at < message.created_at,
+                asked.occurred_at <= message.occurred_at,
+            )
+            .order_by(asked.created_at, SupplierQuestion.ordinal)
+            .with_for_update(of=SupplierQuestion)
+        )
+    )
+    if not rows:
+        return []
+    for row in rows:
+        row.status = "superseded_by_offer"
+        row.superseded_by_proposal_id = proposal.id
+        row.decided_at = at
+    session.add(
+        AuditEvent(
+            tenant_id=tenant_id,
+            actor_user_id=None,
+            action="rfq.supplier_question_superseded",
+            payload={
+                "rfq_id": str(invite.rfq_id),
+                "invite_id": str(invite.id),
+                "question_ids": [str(row.id) for row in rows],
+                "proposal_id": str(proposal.id),
+                "proposal_version": proposal.version,
+                "message_row_id": str(message.id),
+                "offer_date": message.occurred_at.date().isoformat(),
+            },
+        )
+    )
+    await session.flush()
+    return [row.id for row in rows]
 
 
 async def reopen_questions(session: AsyncSession, invite_id: UUID, followup_id: UUID) -> int:
@@ -642,6 +828,15 @@ def _reply_by(value: JsonValue) -> date | None:
         return None
 
 
+def _reminded(message: NegotiationMessage, rows: Sequence[NegotiationMessage]) -> list[UUID]:
+    """The request a negotiation reminder repeats (its decision's `reminder_of`)."""
+    decision = cast(dict[str, JsonValue], message.terms).get("decision")
+    if message.kind != "reminder" or not isinstance(decision, dict):
+        return []
+    sequence = decision.get("reminder_of")
+    return [r.id for r in rows if isinstance(sequence, int) and r.sequence == sequence]
+
+
 def _open_request(
     rows: _Rows,
     asks: Sequence[Ask],
@@ -655,7 +850,7 @@ def _open_request(
     candidates: list[OpenRequest] = []
     open_asks = [a for a in asks if a.status == "open"]
     by_followup = {f.id: f for f in rows.followups}
-    for followup_id in dict.fromkeys(a.followup_id for a in open_asks):
+    for followup_id in dict.fromkeys(a.followup_id for a in open_asks if a.followup_id):
         sent = by_followup.get(followup_id)
         if sent is None or sent.sent_at is None:
             continue
@@ -675,12 +870,16 @@ def _open_request(
         if version is None or latest_version is None or version < latest_version:
             continue  # the supplier sent an offer since
         terms = cast(dict[str, JsonValue], message.terms)
+        # What it asked from the ledger too (one email per answer); a reminder repeats
+        # what its request asked.
+        asked_in = {message.id, *_reminded(message, rows.negotiations)}
         candidates.append(
             OpenRequest(
                 kind="bafo" if message.action == "bafo" else "counter",
                 sent_at=message.sent_at,
                 reply_by=_reply_by(terms.get("reply_by")) or deadline,
                 message_row_id=outbound.get(message.message_id_header or ""),
+                asks=tuple(a for a in open_asks if a.negotiation_message_id in asked_in),
             )
         )
     if not candidates:

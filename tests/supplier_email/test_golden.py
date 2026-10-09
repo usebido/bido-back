@@ -2,7 +2,8 @@
 
 RFQ-6 (the deployed thread of 2026-10-08) as the standard renders it (§2.7): the
 clarification after the first reply and the delivery-date request after the second, in
-Portuguese and English. Every other type is frozen per language in `all-types.<locale>.txt`;
+Portuguese and English, and one email per supplier answer (the open questions, then the
+revised offer). Every other type is frozen per language in `all-types.<locale>.txt`;
 the German, French, Italian and Spanish catalogs still need a native speaker's review, and
 the review lands as a diff here.
 
@@ -16,6 +17,7 @@ from typing import Final
 
 import pytest
 
+from bido_back.supplier_email.catalog import phrases
 from bido_back.supplier_email.checks import email_problems
 from bido_back.supplier_email.model import SupplierEmail
 from bido_back.supplier_email.render import render
@@ -36,6 +38,8 @@ def _matches(name: str, content: str) -> None:
 CASES: Final[list[tuple[str, Callable[[str], SupplierEmail]]]] = [
     ("rfq6-clarification", rfq6.clarification_a),
     ("rfq6-delivery-date", rfq6.delivery_b),
+    # One email per supplier answer: the clarification's questions, then the revised offer.
+    ("rfq6-revised-with-questions", rfq6.revised_with_questions),
 ]
 
 
@@ -117,3 +121,17 @@ def test_every_type_in_every_language(locale: str) -> None:
         assert email_problems(email, rendered, rfq6.gate(language)) == [], (locale, name)
         parts.append(f"===== {name}\nSubject: {rendered.subject}\n\n{rendered.text}")
     _matches(f"all-types.{locale}.txt", "\n".join(parts))
+
+
+@pytest.mark.parametrize("locale", ["pt", "en", "de", "fr", "it", "es", "es-MX", "de-CH"])
+def test_one_email_per_answer_passes_the_gate_in_every_language(locale: str) -> None:
+    """The questions and the revised offer in one email: three asks, each catalog phrase in
+    the thread's language, the request's purpose line, one reply-by date."""
+    language, _, region = locale.partition("-")
+    email = rfq6.revised_with_questions(language, region or "BR")
+    rendered = render(email)
+    assert email_problems(email, rendered, rfq6.gate(language)) == []
+    words = phrases(email.language)
+    assert words["context.combined.questions"] in rendered.text
+    assert rendered.text.count("\n1. ") == 1 and "\n3. " in rendered.text
+    assert "\n4. " not in rendered.text

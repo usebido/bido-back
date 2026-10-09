@@ -1,5 +1,6 @@
 """The builders: what the services decided becomes the email's typed input, nothing more."""
 
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 
@@ -10,6 +11,8 @@ from bido_back.supplier_email.builders import (
     line_code,
     negotiation_email,
     negotiation_type,
+    position_of,
+    with_questions,
 )
 from bido_back.supplier_email.model import (
     Ask,
@@ -19,6 +22,7 @@ from bido_back.supplier_email.model import (
     OfferedTerms,
     RequiredDelivery,
     RequiredLeadTime,
+    SupplierEmail,
     TargetPrice,
     ValuesToConfirm,
 )
@@ -120,3 +124,64 @@ def test_the_code_is_the_buyers_own_with_a_different_mpn_in_brackets() -> None:
     assert line_code("NCP18XH103", "NCP18XH103") == "NCP18XH103"
     assert line_code(None, "NCP18XH103") == "NCP18XH103"
     assert line_code(None, None) is None
+
+
+# --- One email per supplier answer -------------------------------------------------------------
+
+
+def test_a_request_asks_the_open_questions_first_in_one_email() -> None:
+    email = rfq6.revised_with_questions("en")
+    assert (email.type, email.round, email.with_questions) == ("revised_offer", 1, True)
+    # The questions first (the offer's terms, the values under their positions), then the
+    # request's own ask: three at most.
+    assert email.asks == (
+        Ask("offer_terms", fields=("valid_until",), confirm=False),
+        Ask("complete_positions", positions=(2,)),
+        Ask("revise_price", positions=(1, 3)),
+    )
+    # One positions block for both, each position once, in order; position 2 is shown only
+    # for its question.
+    assert [p.number for p in email.positions] == [1, 2, 3]
+    assert email.question_positions == (2,)
+    assert not email.subset
+    # The request's reply-by date and round.
+    assert email.reply_by == rfq6.revised_offer("en").reply_by
+
+
+def test_the_delivery_dates_of_the_questions_and_the_request_are_one_ask() -> None:
+    need = date(2026, 10, 22)
+    request = negotiation_email(
+        rfq6.header("en"),
+        action="counter",
+        round=1,
+        answered=None,
+        lines=rfq6.LINES,
+        asks=(LineAsk(2, offered_lead=LeadTime(12, "business"), need_by=need),),
+        mention_competition=False,
+        reply_by=None,
+    )
+    questions = with_questions_input(need)
+    email = with_questions(request, questions, lines=rfq6.LINES)
+    assert email.type == "delivery_date"
+    assert email.asks == (
+        Ask("offer_terms", fields=("valid_until",), confirm=False),
+        Ask("deliver_by", positions=(1, 2)),
+    )
+    assert email.question_positions == (1,)
+    assert email.subset
+
+
+def with_questions_input(need: date) -> SupplierEmail:
+    """A clarification asking the validity and whether position 1 arrives by `need`."""
+    base = clarification_email(
+        rfq6.header("en"),
+        answered=None,
+        lines=rfq6.LINES,
+        gaps=(Gap(None, "valid_until", "missing"),),
+        reply_by=None,
+    )
+    return replace(
+        base,
+        positions=(position_of(rfq6.LINES[0], (RequiredDelivery(need),)),),
+        asks=(*base.asks, Ask("deliver_by", positions=(1,))),
+    )

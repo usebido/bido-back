@@ -624,10 +624,10 @@ def _down(value: Decimal, places: int) -> Decimal:
 def golden_actions(persona: Persona, items: Sequence[Item] = ITEMS) -> list[tuple[str, Asks]]:
     """The negotiation emails the buyer's rules send to a persona, in order.
 
-    - A first quote without a price for a requested line leaves an open question: it is
-      asked first (a clarification, which the follow-up sweep writes; this scenario runs
-      only the negotiation sweep), so no negotiation email goes to that supplier. (The
-      quote extraction cannot yet say that a line was declined.)
+    - A first quote without a price for a requested line leaves an open question: the
+      first request asks it too, before its own asks (one email per supplier answer), and
+      that line is never negotiated without a price. (The quote extraction cannot yet say
+      that a line was declined.)
     - Round 1 asks the target on every line above it, and delivery by the required date
       (here the 42-day limit) on every late line.
     - A later round concedes on a line where the supplier moved: a quarter of the gap
@@ -638,8 +638,6 @@ def golden_actions(persona: Persona, items: Sequence[Item] = ITEMS) -> list[tupl
     - It stops when the supplier moved on nothing that was asked, after the best-and-final
       request, or when nothing is left to ask.
     """
-    if any(item.position not in persona.quote(0).prices for item in items):
-        return []
     actions: list[tuple[str, Asks]] = []
     last_ask: dict[int, Decimal] = {}
     asked_at: dict[int, Decimal] = {}

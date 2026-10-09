@@ -38,6 +38,7 @@ from bido_back.supplier_email.catalog import Phrases, phrases
 from bido_back.supplier_email.locale import catalog_language, clock, day, minor_unit, number
 from bido_back.supplier_email.model import (
     ANSWER_REQUESTED,
+    MAX_ASKS,
     EmailType,
     MissingValues,
     Money,
@@ -64,7 +65,6 @@ from bido_back.supplier_email.subject import subject_problems
 
 TEXT_LIMIT: Final = 20_000
 HTML_LIMIT: Final = 100_000
-MAX_ASKS: Final = 3
 NOTE_MAX_WORDS: Final = 40
 NOTE_MAX_SENTENCES: Final = 2
 # Words per type, not counting the positions, the fill-in lines, the legal line and the

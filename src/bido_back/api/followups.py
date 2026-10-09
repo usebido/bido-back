@@ -12,7 +12,9 @@ sent without an approval.
 supplier's open questions and proposes it, as written, for approval (a
 negotiation mandate never approves it). `POST .../questions/{id}/dismiss`
 closes a question that needs no answer. Either way, automatic emails to that
-supplier resume.
+supplier resume. `POST .../questions/{id}/reopen` opens again a question Bido
+considered superseded by the supplier's later offer (or one dismissed): the
+offer waits for the buyer's answer again.
 """
 
 from uuid import UUID
@@ -85,6 +87,23 @@ def followups_router() -> APIRouter:
         """No answer needed (answered elsewhere): automatic emails resume."""
         try:
             return await questions.dismiss_question(db, principal, rfq_id, question_id, body)
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
+
+    @router.post(
+        "/{rfq_id}/questions/{question_id}/reopen",
+        responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT),
+    )
+    async def reopen_question(  # pyright: ignore[reportUnusedFunction]
+        rfq_id: UUID,
+        question_id: UUID,
+        principal: CurrentPrincipal,
+        db: Db,
+    ) -> SupplierQuestionView:
+        """Open again a question considered superseded by the supplier's later offer (or
+        dismissed): the offer waits for your answer, automatic emails pause."""
+        try:
+            return await questions.reopen_question(db, principal, rfq_id, question_id)
         except RfqError as exc:
             raise rfq_http_error(exc) from None
 

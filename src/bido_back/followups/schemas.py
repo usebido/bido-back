@@ -15,7 +15,9 @@ ChaseState = Literal[
     "scheduled", "awaiting_approval", "paused", "done", "disabled", "not_applicable"
 ]
 AskStatusView = Literal["proposed", "open", "answered", "unusable", "withdrawn", "resolved"]
-QuestionStatusView = Literal["open", "answered", "dismissed"]
+# superseded_by_offer: the supplier's later complete offer, asking nothing, made it moot
+# (never answered; the buyer may reopen it).
+QuestionStatusView = Literal["open", "answered", "dismissed", "superseded_by_offer"]
 FollowupPhaseView = Literal[
     "needs_your_answer",
     "needs_your_decision",
@@ -103,7 +105,11 @@ class OpenItemView(BaseModel):
 
 
 class SupplierQuestionView(BaseModel):
-    """A question the supplier asked the buyer. Automatic emails wait while one is open."""
+    """A question the supplier asked the buyer. Automatic emails wait while one is open.
+
+    `superseded_by_offer`: Bido closed it without an answer because the supplier's later
+    offer was complete and asked nothing (`superseded_by_proposal_id`, the date in
+    `note`); the buyer may reopen it (`POST .../questions/{id}/reopen`)."""
 
     id: UUID
     question: str
@@ -111,6 +117,12 @@ class SupplierQuestionView(BaseModel):
     asked_at: datetime
     answer_followup_id: UUID | None
     decided_at: datetime | None
+    superseded_by_proposal_id: UUID | None = None
+    note: str | None = Field(
+        default=None,
+        description="What Bido decided about the question on its own, e.g. considered "
+        "superseded by the supplier's later offer (reopen if needed)",
+    )
 
 
 class WaitingView(BaseModel):

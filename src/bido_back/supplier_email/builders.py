@@ -10,7 +10,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import date
 from decimal import Decimal
-from typing import Literal
+from typing import Final, Literal
 
 from bido_back.db.models import RfqLine
 from bido_back.supplier_email.locale import Locale
@@ -19,6 +19,7 @@ from bido_back.supplier_email.model import (
     OFFER_TERMS,
     Answered,
     Ask,
+    AskKind,
     EmailType,
     Fact,
     LeadTime,
@@ -268,6 +269,63 @@ def negotiation_email(
         round=round if kind == "revised_offer" else None,
         mention_competition=mention_competition and kind in ("revised_offer", "bafo"),
         subset=0 < len(positions) < len(lines),
+    )
+
+
+# The order a combined email numbers its asks: the blocking questions first (the offer's
+# terms, the positions' values, the delivery dates), then the negotiation's own ask.
+_COMBINED_ORDER: Final[tuple[AskKind, ...]] = (
+    "offer_terms",
+    "complete_positions",
+    "deliver_by",
+    "revise_price",
+    "meet_lead_time",
+    "best_and_final",
+)
+
+
+def with_questions(
+    email: SupplierEmail, questions: SupplierEmail, *, lines: Sequence[RequestedLine]
+) -> SupplierEmail:
+    """One email for one supplier answer: a revised-offer, delivery-date or best-and-final
+    request (`email`) that also asks what the offer lacks (`questions`, the clarification
+    of the ledger's items, `clarification_email`).
+
+    The positions block covers both (each position once, its facts together); the asks
+    are numbered in `_COMBINED_ORDER`: the questions first, then the request's own ask,
+    the delivery dates of both in one "can you deliver by" ask. The type, round, reply-by
+    date and competition note are the request's. The caller keeps the asks within
+    `MAX_ASKS` (the planner decides what fits; the send gate refuses more).
+    """
+    positions: dict[int, Position] = {p.number: p for p in email.positions}
+    only_questions: list[int] = []
+    for position in questions.positions:
+        current = positions.get(position.number)
+        if current is None:
+            positions[position.number] = position
+            only_questions.append(position.number)
+        else:
+            facts = (*current.facts, *(f for f in position.facts if f not in current.facts))
+            positions[position.number] = replace(current, facts=facts)
+    by_kind: dict[AskKind, list[Ask]] = {}
+    for ask in (*questions.asks, *email.asks):
+        by_kind.setdefault(ask.kind, []).append(ask)
+    asks: list[Ask] = []
+    for kind in _COMBINED_ORDER:
+        found = by_kind.get(kind, [])
+        if kind == "deliver_by" and found:
+            numbers = sorted({n for ask in found for n in ask.positions})
+            asks.append(Ask("deliver_by", positions=tuple(numbers)))
+        else:
+            asks.extend(found)
+    shown = tuple(positions[number] for number in sorted(positions))
+    return replace(
+        email,
+        positions=shown,
+        asks=tuple(asks),
+        subset=0 < len(shown) < len(lines),
+        with_questions=True,
+        question_positions=tuple(sorted(only_questions)),
     )
 
 

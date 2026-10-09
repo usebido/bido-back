@@ -28,16 +28,20 @@ shape here, so the planner (`bido_back.negotiation.planner`) stays pure:
      only the buyer can answer them. Bido counts them and never reads their
      text into a decision.
 3. `ClarificationState` (the clarification ledger, N2b): per supplier, what is
-   still to ask, what was asked and not answered, and what was asked once and
-   is still unusable. The planner treats `to_ask`, `pending` and `awaiting` as
-   blocking (one open request per supplier: clarify first, then negotiate) and
-   `exhausted` items as buyer decisions for their lines. The service maps it
-   from the ledger (`followups.ledger.supplier_followups`), the same state the
-   follow-up sweep acts on, so a negotiation email never overlaps a
-   clarification and the two agree by construction (both read `to_ask`). A
-   delivery date that cannot be told, or only approximately misses the need-by
-   date, is the clarification's question; a definite late date is the
-   negotiation's delivery-date request ("deliver by <need-by>"), once.
+   still to ask (`to_ask` codes, `items` typed), what was asked and not
+   answered, and what was asked once and is still unusable. One open request
+   per supplier: `pending` and `awaiting` block every other email; items
+   `to_ask` go out in the next email, alone (the follow-up sweep's
+   clarification) or, when the offer also has something to negotiate, in the
+   planner's own email with its asks (one email per supplier answer). Lines
+   with an open item are not negotiated until it is answered; `exhausted`
+   items are buyer decisions for their lines. The service maps it from the
+   ledger (`followups.ledger.supplier_followups`), the same state the
+   follow-up sweep acts on, so the two agree by construction (both read
+   `to_ask`). A delivery date that cannot be told, or only approximately
+   misses the need-by date, is the clarification's question; a definite late
+   date is the negotiation's delivery-date request ("deliver by <need-by>"),
+   once.
 
 Nothing here reads or returns supplier text: codes, ids, numbers and dates only.
 """
@@ -45,7 +49,7 @@ Nothing here reads or returns supplier text: codes, ids, numbers and dates only.
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Literal, cast
+from typing import Final, Literal, cast
 from uuid import UUID
 
 from bido_back.followups.missing import OfferedLine, stored_expected_delivery
@@ -161,19 +165,37 @@ def offer_signals(fields: Mapping[str, object]) -> OfferSignals:
 # --- The clarification ledger (N2b) -------------------------------------------------------
 
 ClarificationWait = Literal["approval", "daily_cap", "mailbox", "mandate_hold", "mandate_paused"]
+# The offer-level fields an item may concern (the rest concern one requested line).
+OFFER_ITEM_FIELDS: Final = frozenset({"currency", "valid_until"})
+
+
+@dataclass(frozen=True, slots=True)
+class ClarificationItem:
+    """One item to ask (the ledger's): the whole offer (no line) or one requested line,
+    and the field (`currency`, `valid_until`, `unit_price`, `quantity`, `lead_time`,
+    `delivery_date`). Codes and ids only."""
+
+    rfq_line_id: UUID | None
+    position: int | None
+    field: str
+
+    @property
+    def code(self) -> str:
+        return self.field if self.position is None else f"pos{self.position}.{self.field}"
 
 
 @dataclass(frozen=True, slots=True)
 class ClarificationState:
     """Where the supplier's clarification stands for its current offer.
 
-    Items are codes such as `valid_until` or `pos2.lead_time` (never text).
-    `lines` are the RFQ lines that open items concern (to ask, pending or
-    awaiting); `exhausted_lines` those whose items were asked once and remain
-    unusable.
+    Items are codes such as `valid_until` or `pos2.lead_time` (never text); `items`
+    are the items `to_ask`, typed. `lines` are the RFQ lines that open items concern
+    (to ask, pending, awaiting, or asked by a negotiation email still unanswered);
+    `exhausted_lines` those whose items were asked once and remain unusable.
     """
 
     to_ask: tuple[str, ...] = ()
+    items: tuple[ClarificationItem, ...] = ()
     pending: bool = False
     pending_wait: ClarificationWait | None = None
     pending_until: datetime | None = None
