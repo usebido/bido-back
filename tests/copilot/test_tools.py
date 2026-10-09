@@ -520,6 +520,11 @@ async def test_nothing_is_created_until_the_buyer_confirms_in_a_later_message(
         ("MLCC 100nF 50V X7R 0603", "pcs"),
         ("Board-to-board connector 40 pin", "pcs"),
     ]
+    # The preview shows the buyer's code and the MPN apart, so the model can confirm both.
+    assert [(line.part_number, line.mpn) for line in proposed.preview.lines] == [
+        ("CAP-0603-104", "GRM188R71H104KA93D"),
+        (None, None),
+    ]
     async with tenant_session(app_engine, principal.tenant_id) as session:
         assert list(await session.scalars(select(Rfq))) == []
     proposal_id = str(proposed.proposal_id)
@@ -536,6 +541,11 @@ async def test_nothing_is_created_until_the_buyer_confirms_in_a_later_message(
     assert [line.description for line in created.lines] == [
         "MLCC 100nF 50V X7R 0603",
         "Board-to-board connector 40 pin",
+    ]
+    # The stored RFQ keeps the MPN the preview showed.
+    assert [(line.part_number, line.mpn) for line in created.lines] == [
+        ("CAP-0603-104", "GRM188R71H104KA93D"),
+        (None, None),
     ]
     assert [call[0].text for call in tools.intake.calls] == ["MLCC and connectors"]
 
