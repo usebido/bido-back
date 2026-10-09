@@ -23,6 +23,7 @@ from bido_back.db.models import (
     Approval,
     AuditEvent,
     Invite,
+    MailboxConnection,
     Message,
     Rfq,
     RfqLine,
@@ -263,6 +264,33 @@ async def test_prepare_send_records_pending_approvals_with_the_exact_email(
     assert item.rfq_email.body == approval.args["body"]
     assert item.rfq_email.rfq_ref == rfq.ref and item.rfq_email.supplier_name == "Rhein"
     assert item.requested_by_me is False
+    # No connected mailbox for the requester yet: no From address to show.
+    assert item.sender_email is None
+
+    # The requester connects a mailbox: the queue names the address the email leaves from.
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        session.add(
+            MailboxConnection(
+                tenant_id=rfq_rows.tenant,
+                user_id=approval.requested_by,
+                provider="google",
+                email_address="buyer@acme.example",
+                token_ciphertext=b"sealed",
+            )
+        )
+    queue = await service.list_approvals(app_engine, approver(rfq_rows), "pending")
+    item = next(i for i in queue if i.id == approval_id)
+    assert item.sender_email == "buyer@acme.example"
+
+    # A revoked connection sends nothing, so it is not shown as the From address.
+    async with tenant_session(app_engine, rfq_rows.tenant) as session:
+        await session.execute(
+            update(MailboxConnection)
+            .where(MailboxConnection.user_id == approval.requested_by)
+            .values(status="revoked", token_ciphertext=None)
+        )
+    queue = await service.list_approvals(app_engine, approver(rfq_rows), "pending")
+    assert next(i for i in queue if i.id == approval_id).sender_email is None
 
 
 async def _tenant_name(engine: AsyncEngine, tenant_id: UUID) -> str:
