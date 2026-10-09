@@ -56,7 +56,13 @@ class FollowupSettingsUpdate(BaseModel):
 
 class FollowupMessageView(BaseModel):
     id: UUID
-    kind: FollowupKindView
+    # A reminder of an unanswered email shows as a chase, the answer to a supplier's
+    # question as a clarification: `followup_kind` tells them apart.
+    kind: Literal["chase", "clarification"]
+    followup_kind: FollowupKindView = Field(
+        description="The follow-up's own kind: chase, clarification, reminder (of an email "
+        "the supplier has not answered) or answer (to the supplier's question)"
+    )
     sequence: int
     status: FollowupStatus
     approval_id: UUID | None
@@ -144,6 +150,11 @@ class InviteFollowups(BaseModel):
     waiting_for_supplier: WaitingView | None = None
     asks: list[AskView] = Field(default_factory=list[AskView])
     open_items: list[OpenItemView] = Field(default_factory=list[OpenItemView])
+    late_deliveries: list[OpenItemView] = Field(
+        default_factory=list[OpenItemView],
+        description="Lines whose stated lead time delivers after the need-by date (a "
+        "negotiation matter, not a clarification)",
+    )
     questions: list[SupplierQuestionView] = Field(default_factory=list[SupplierQuestionView])
     needs_your_decision: list[DecisionView] = Field(default_factory=list[DecisionView])
 

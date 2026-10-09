@@ -59,6 +59,7 @@ from bido_back.followups.missing import (
     OfferedLine,
     OpenItem,
     RequestedLine,
+    late_deliveries,
     open_items,
 )
 from bido_back.quotes.state import AskedField
@@ -472,17 +473,11 @@ def offer_holds(proposal_fields: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(reasons)
 
 
-def proposal_items(
-    proposal: Proposal,
-    lines: Sequence[ProposalLine],
-    requested: Sequence[RequestedLine],
-    *,
-    country: str | None,
-    today: date,
-    expected_delivery: ExpectedDelivery | None,
-) -> list[OpenItem]:
-    """What a stored offer (a proposal and its lines) still lacks."""
-    offered = [
+def offered_lines(
+    proposal: Proposal, lines: Sequence[ProposalLine], country: str | None
+) -> list[OfferedLine]:
+    """A stored offer's lines as the missing-field rules read them."""
+    return [
         OfferedLine(
             rfq_line_id=line.rfq_line_id,
             values={
@@ -496,11 +491,23 @@ def proposal_items(
         )
         for line in lines
     ]
+
+
+def proposal_items(
+    proposal: Proposal,
+    lines: Sequence[ProposalLine],
+    requested: Sequence[RequestedLine],
+    *,
+    country: str | None,
+    today: date,
+    expected_delivery: ExpectedDelivery | None,
+) -> list[OpenItem]:
+    """What a stored offer (a proposal and its lines) still lacks."""
     return open_items(
         header_values={"currency": proposal.currency, "valid_until": proposal.valid_until},
         header_fields=proposal.fields,
         requested=requested,
-        offered=offered,
+        offered=offered_lines(proposal, lines, country),
         declined_positions=declined_positions(proposal.fields),
         reference_date=today,
         expected_delivery=expected_delivery,
@@ -614,6 +621,9 @@ class SupplierFollowup:
     decisions: tuple[Decision, ...] = ()
     # What the latest offer still lacks and Bido has not asked yet.
     to_ask: tuple[OpenItem, ...] = ()
+    # Lines whose stated lead time definitely misses the need-by date: the negotiation's
+    # delivery-date request ("can you deliver by <need-by>?"), typed for it.
+    late: tuple[OpenItem, ...] = ()
     applicable: bool = True
 
     @property
@@ -819,6 +829,7 @@ async def supplier_followups(
         )
         decisions: list[Decision] = []
         to_ask: tuple[OpenItem, ...] = ()
+        late: tuple[OpenItem, ...] = ()
         if proposal is not None and not declined_offer(proposal.fields):
             holds = offer_holds(proposal.fields)
             if holds:
@@ -853,6 +864,15 @@ async def supplier_followups(
             to_ask = tuple(
                 item for item in items if item.key not in settled and item.key not in live
             )
+            late = tuple(
+                late_deliveries(
+                    requested=requested,
+                    offered=offered_lines(proposal, lines[proposal.id], country),
+                    declined_positions=declined_positions(proposal.fields),
+                    reference_date=now.date(),
+                    expected_delivery=expected_delivery,
+                )
+            )
         if (
             request is not None
             and request.reminded_at is not None
@@ -870,6 +890,7 @@ async def supplier_followups(
             pending=pending,
             decisions=tuple(decisions),
             to_ask=to_ask,
+            late=late,
             applicable=applicable,
         )
     return result

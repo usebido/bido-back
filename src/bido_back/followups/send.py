@@ -72,6 +72,13 @@ _FOLLOWUP_NAMESPACE: Final = UUID("0c4f7a52-9d1e-4b8e-a2f3-6e5d8c7b1a90")
 _AUTOMATIC: Final = ("chase", "clarification", "reminder")
 
 
+def published_kind(kind: str) -> Literal["chase", "clarification"]:
+    """A follow-up's kind under the two names the API published first: a reminder of
+    an unanswered email shows as a chase, the answer to a supplier's question as a
+    clarification. Views carry the exact kind in a separate `followup_kind`."""
+    return "chase" if kind in ("chase", "reminder") else "clarification"
+
+
 def followup_id(invite_id: UUID, kind: FollowupKindName, sequence: int) -> UUID:
     """The row id of the `sequence`-th follow-up of `kind` for an invite (stable)."""
     return uuid5(_FOLLOWUP_NAMESPACE, f"{invite_id}:{kind}:{sequence}")

@@ -10,6 +10,7 @@ from bido_back.followups.missing import (
     OfferedLine,
     OpenItem,
     RequestedLine,
+    late_deliveries,
     open_items,
     validity_duration_given,
 )
@@ -215,6 +216,40 @@ def test_a_date_is_asked_only_where_the_lead_time_cannot_be_shown_to_meet_need_b
     # A definite date after the need-by is not a clarification: the negotiation asks it.
     late = {**on_time, SHAFT.id: (19, True)}
     assert items(complete(), helper=_helper(late)) == []
+
+
+def test_a_definite_late_delivery_is_typed_for_the_negotiation() -> None:
+    late = {BEARING.id: (10, True), SHAFT.id: (19, True), WIRE.id: (40, True)}
+    found = late_deliveries(
+        requested=(BEARING, SHAFT, WIRE),
+        offered=complete(),
+        reference_date=TODAY,
+        expected_delivery=_helper(late),
+    )
+    assert [(i.position, i.field, i.question, i.need_by, i.expected) for i in found] == [
+        (2, "delivery_date", "deliver_by", NEED_BY, TODAY + timedelta(days=19))
+    ]
+    # Approximate, unknown, on time or declined: not late (the first two are clarifications).
+    approximate = {**late, SHAFT.id: (19, False)}
+    assert not late_deliveries(
+        requested=(BEARING, SHAFT, WIRE),
+        offered=complete(),
+        reference_date=TODAY,
+        expected_delivery=_helper(approximate),
+    )
+    assert not late_deliveries(
+        requested=(BEARING, SHAFT, WIRE),
+        offered=complete(),
+        declined_positions=frozenset({2}),
+        reference_date=TODAY,
+        expected_delivery=_helper(late),
+    )
+    assert not late_deliveries(
+        requested=(BEARING, SHAFT, WIRE),
+        offered=complete(),
+        reference_date=TODAY,
+        expected_delivery=None,
+    )
 
 
 def test_open_items_are_typed_for_the_email() -> None:

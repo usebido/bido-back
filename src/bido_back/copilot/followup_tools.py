@@ -37,6 +37,7 @@ from bido_back.db import tenant_session
 from bido_back.db.models import Invite, Proposal, Supplier
 from bido_back.followups import ledger, questions
 from bido_back.followups import missing as missing_rules
+from bido_back.followups.missing import OpenItem
 from bido_back.followups.schemas import AnswerQuestionsRequest, DismissQuestionRequest
 from bido_back.rfqs.errors import RfqError
 
@@ -102,6 +103,10 @@ class SupplierFollowupOut(BaseModel):
     still_missing: list[str] = Field(
         description="What the latest offer lacks and Bido has not asked yet"
     )
+    late_deliveries: list[str] = Field(
+        default_factory=list[str],
+        description="Lines whose stated lead time delivers after the need-by date",
+    )
     questions: list[SupplierQuestionOut]
     needs_your_decision: list[str]
 
@@ -113,6 +118,12 @@ def _item(position: int | None, field: str) -> str:
 
 def _day(moment: datetime | None) -> str:
     return moment.date().isoformat() if moment is not None else "?"
+
+
+def _late(item: OpenItem) -> str:
+    expected = item.expected.isoformat() if item.expected else "?"
+    needed = item.need_by.isoformat() if item.need_by else "?"
+    return f"pos {item.position}: delivery expected {expected}, needed by {needed}"
 
 
 def _decision(decision: ledger.Decision) -> str:
@@ -184,6 +195,7 @@ def followup_out(name: str, state: ledger.SupplierFollowup) -> SupplierFollowupO
             if a.status != "withdrawn"
         ],
         still_missing=[_item(i.position, i.field) for i in state.to_ask],
+        late_deliveries=[_late(i) for i in state.late],
         questions=[
             SupplierQuestionOut(id=q.id, question=q.text, status=q.status) for q in state.questions
         ],

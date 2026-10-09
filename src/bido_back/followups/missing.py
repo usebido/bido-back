@@ -217,30 +217,81 @@ def _line_items(
         elif any(_flagged(t.fields, "min_quantity") for t in priced):
             items.append(item("quantity", "confirm", "unclear"))
 
-    given = [t for t in tiers if _lead_time_given(t)]
-    if not given:
+    if not any(_lead_time_given(t) for t in tiers):
         items.append(item("lead_time", "value", "missing", need_by=line.need_by))
-    elif line.need_by is not None and expected_delivery is not None and reference_date is not None:
-        estimates = [expected_delivery(t, reference_date) for t in given]
-        known = [estimate for estimate in estimates if estimate is not None]
-        if not known:
-            # A lead time no date can be computed from ("a few additional days").
-            items.append(item("delivery_date", "deliver_by", "unclear", need_by=line.need_by))
-        elif not any(day <= line.need_by for day, _ in known) and not any(
-            exact for _, exact in known
-        ):
-            # Approximately after the date: ask for one. A definite late date is the
-            # negotiation's delivery-date request, not a clarification.
-            items.append(
-                item(
-                    "delivery_date",
-                    "deliver_by",
-                    "unclear",
-                    need_by=line.need_by,
-                    expected=min(day for day, _ in known),
-                )
-            )
+        return items
+    delivery = _delivery(line, tiers, reference_date, expected_delivery)
+    if delivery is not None and delivery != "late":
+        # No date can be computed ("a few additional days"), or only an approximate one
+        # after the need-by date: ask for a date. A definite late date is not asked here.
+        expected = delivery if isinstance(delivery, date) else None
+        items.append(
+            item("delivery_date", "deliver_by", "unclear", need_by=line.need_by, expected=expected)
+        )
     return items
+
+
+def _delivery(
+    line: RequestedLine,
+    tiers: Sequence[OfferedLine],
+    reference_date: date | None,
+    expected_delivery: ExpectedDelivery | None,
+) -> Literal["unknown", "late"] | date | None:
+    """Whether the stated lead time is shown to meet the line's need-by date: None (it is,
+    or nothing to check), "unknown" (no date can be computed), the approximate date
+    after the need-by, or "late" (a definite date after it)."""
+    if line.need_by is None or expected_delivery is None or reference_date is None:
+        return None
+    given = [t for t in tiers if _lead_time_given(t)]
+    known = [e for e in (expected_delivery(t, reference_date) for t in given) if e is not None]
+    if not known:
+        return "unknown" if given else None
+    if any(day <= line.need_by for day, _ in known):
+        return None
+    if any(exact for _, exact in known):
+        return "late"
+    return min(day for day, _ in known)
+
+
+def late_deliveries(
+    *,
+    requested: Sequence[RequestedLine],
+    offered: Sequence[OfferedLine],
+    declined_positions: frozenset[int] = frozenset(),
+    reference_date: date | None,
+    expected_delivery: ExpectedDelivery | None,
+) -> list[OpenItem]:
+    """Lines whose stated lead time gives a definite delivery after the need-by date.
+
+    Not a clarification (nothing is unclear): the negotiation's delivery-date request,
+    "can you deliver by <need-by>? If not, the earliest date", typed for it.
+    """
+    late: list[OpenItem] = []
+    for line in sorted(requested, key=lambda r: r.position):
+        if line.position in declined_positions:
+            continue
+        tiers = [o for o in offered if o.rfq_line_id == line.id]
+        if _delivery(line, tiers, reference_date, expected_delivery) != "late":
+            continue
+        assert expected_delivery is not None and reference_date is not None
+        dates = [
+            e[0]
+            for e in (expected_delivery(t, reference_date) for t in tiers)
+            if e is not None and e[1]
+        ]
+        late.append(
+            OpenItem(
+                position=line.position,
+                rfq_line_id=line.id,
+                line=line.label,
+                field="delivery_date",
+                question="deliver_by",
+                problem="unclear",
+                need_by=line.need_by,
+                expected=min(dates) if dates else None,
+            )
+        )
+    return late
 
 
 # --- Reading the provenance ---------------------------------------------------------------

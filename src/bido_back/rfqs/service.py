@@ -80,6 +80,7 @@ from bido_back.followups.send import (
     SEND_FOLLOWUP_EMAIL,
     SEND_SUPPLIER_ANSWER,
     SendFollowupEmailArgs,
+    published_kind,
 )
 from bido_back.negotiation.send import SEND_NEGOTIATION_EMAIL, SendNegotiationEmailArgs
 from bido_back.onboarding.standard import TemplateContent
@@ -1320,7 +1321,7 @@ async def list_approvals(
                     drafts[approval.id] = (SendRfqEmailArgs.model_validate(approval.args), "rfq")
                 elif approval.tool in (SEND_FOLLOWUP_EMAIL, SEND_SUPPLIER_ANSWER):
                     followup = SendFollowupEmailArgs.model_validate(approval.args)
-                    drafts[approval.id] = (followup, followup.kind)
+                    drafts[approval.id] = (followup, published_kind(followup.kind))
                 elif approval.tool == SEND_NEGOTIATION_EMAIL:
                     negotiations[approval.id] = SendNegotiationEmailArgs.model_validate(
                         approval.args
@@ -1381,6 +1382,7 @@ async def list_approvals(
             rfq_id, ref, supplier_name = context.get(args.invite_id, (None, None, None))
             email = RfqEmailDraft(
                 kind=kind,
+                followup_kind=args.kind if isinstance(args, SendFollowupEmailArgs) else None,
                 invite_id=args.invite_id,
                 sender_user_id=args.sender_user_id,
                 rfq_id=rfq_id,

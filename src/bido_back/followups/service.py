@@ -109,6 +109,7 @@ from bido_back.followups.send import (
     SendFollowupEmailArgs,
     followup_id,
     followup_proposal_ids,
+    published_kind,
 )
 from bido_back.rfqs.errors import AgentFailed, NotFound
 from bido_back.rfqs.language import supplier_email_language
@@ -327,6 +328,16 @@ def _ask_views(state: ledger.SupplierFollowup) -> list[AskView]:
     ]
 
 
+def _item_view(item: OpenItem) -> OpenItemView:
+    return OpenItemView(
+        position=item.position,
+        field=item.field,
+        question=item.question,
+        need_by=item.need_by,
+        expected_delivery=item.expected,
+    )
+
+
 def _state_views(
     state: ledger.SupplierFollowup | None,
 ) -> dict[str, object]:
@@ -344,16 +355,8 @@ def _state_views(
         if request is not None
         else None,
         "asks": _ask_views(state),
-        "open_items": [
-            OpenItemView(
-                position=i.position,
-                field=i.field,
-                question=i.question,
-                need_by=i.need_by,
-                expected_delivery=i.expected,
-            )
-            for i in state.to_ask
-        ],
+        "open_items": [_item_view(i) for i in state.to_ask],
+        "late_deliveries": [_item_view(i) for i in state.late],
         "questions": [
             SupplierQuestionView(
                 id=q.id,
@@ -422,7 +425,8 @@ async def _view(
                     "messages": [
                         FollowupMessageView(
                             id=f.id,
-                            kind=cast(FollowupKindView, f.kind),
+                            kind=published_kind(f.kind),
+                            followup_kind=cast(FollowupKindView, f.kind),
                             sequence=f.sequence,
                             status=cast(FollowupStatus, f.status),
                             approval_id=f.approval_id,
@@ -734,7 +738,11 @@ async def _clarification(
         .order_by(Proposal.version.desc())
         .limit(1)
     )
-    if proposal_id is None:
+    if proposal_id is None or any(
+        f.kind == "clarification" and f.proposal_id == proposal_id and f.status != "canceled"
+        for f in mine
+    ):
+        # One clarification per offer version (one sent before the ledger recorded its asks).
         return None
     reply_by = reply_by_date(now, target.supplier.country, target.rfq.negotiation_deadline)
     return await _build(
