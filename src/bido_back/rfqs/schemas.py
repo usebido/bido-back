@@ -437,7 +437,10 @@ class RfqActivityItem(BaseModel):
         description="agent: Bido decided; email: something was sent or received; "
         "user: a person acted; system: bookkeeping"
     )
-    action: str = Field(description="Stable code, e.g. rfq.email_sent, approval.approved, reply")
+    action: str = Field(
+        description="Stable code, e.g. rfq.created, rfq.line_updated, rfq.invite_added, "
+        "rfq.email_sent, approval.approved, reply"
+    )
     actor: str | None = Field(
         default=None, description="Who acted: a person's name, 'Bido', or the supplier"
     )

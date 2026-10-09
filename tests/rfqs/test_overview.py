@@ -2,13 +2,14 @@
 
 from collections.abc import AsyncIterator
 from datetime import date
-from uuid import uuid4
+from decimal import Decimal
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
 import pytest_asyncio
 from fastapi import FastAPI
-from sqlalchemy import update
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.api.deps import ApiResources, get_db, get_principal
@@ -16,16 +17,19 @@ from bido_back.api.rfqs import rfqs_router
 from bido_back.auth import Principal
 from bido_back.comparison.loader import load_comparison
 from bido_back.db import create_sessionmaker, tenant_session
-from bido_back.db.models import Message, Proposal
+from bido_back.db.models import AuditEvent, Message, Proposal
+from bido_back.rfqs import service
 from bido_back.rfqs.activity import rfq_activity
+from bido_back.rfqs.audit import changes
 from bido_back.rfqs.errors import NotFound
 from bido_back.rfqs.overview import RfqFacts, derive_next_step, derive_stage, list_rfq_overviews
+from bido_back.rfqs.schemas import AddLineRequest, UpdateLineRequest, UpdateRfqRequest
 from bido_back.settings import Settings
 from tests.approvals.conftest import People
 
-from .conftest import FakeMailboxes
+from .conftest import FakeIntake, FakeMailboxes, user_email
 from .test_corrections import quoted_rfq
-from .test_service import buyer, prepared
+from .test_service import buyer, make_rfq, make_supplier, prepared
 
 UNUSED_DB = "postgresql+asyncpg://app@localhost:5432/unused"
 TODAY = date(2026, 10, 7)
@@ -137,6 +141,114 @@ async def test_comparison_carries_payment_terms(app_engine: AsyncEngine, rfq_row
     comparison = await load_comparison(app_engine, principal, quoted.rfq.id, TODAY)
     [column] = comparison.suppliers
     assert column.payment_terms == "30 days net"
+
+
+def test_audit_changes_are_json_safe_and_only_what_changed() -> None:
+    before = {
+        "quantities": [500],
+        "need_by": None,
+        "description": "x" * 300,
+        "price": Decimal("1.50"),
+        "ref": UUID(int=1),
+    }
+    after = {
+        "quantities": [Decimal(1500)],
+        "need_by": date(2026, 1, 2),
+        "description": "x" * 300,
+        "price": Decimal("1.50"),
+        "ref": UUID(int=2),
+    }
+    assert changes(before, after) == {
+        "quantities": {"from": [500], "to": [1500]},
+        "need_by": {"from": None, "to": "2026-01-02"},
+        "ref": {"from": str(UUID(int=1)), "to": str(UUID(int=2))},
+    }
+
+
+@pytest.mark.db
+async def test_activity_shows_the_rfq_lifecycle_with_its_actor(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    principal = buyer(rfq_rows)
+    me = await user_email(app_engine, rfq_rows.owner)
+    rfq = await make_rfq(app_engine, principal)
+    drafted = await service.draft_rfq_from_text(
+        app_engine, principal, "via the copilot", FakeIntake(), currency="EUR"
+    )
+    from_copilot = await service.store_text_draft(app_engine, principal, drafted, origin="copilot")
+    supplier = await make_supplier(app_engine, principal, "Rhein")
+
+    connectors = rfq.lines[1]
+    await service.update_line(
+        app_engine,
+        principal,
+        rfq.id,
+        connectors.id,
+        UpdateLineRequest(quantities=[Decimal(1500)], part_number="CON-40"),
+    )
+    await service.update_rfq(
+        app_engine,
+        principal,
+        rfq.id,
+        UpdateRfqRequest(response_due=date(2099, 12, 1), incoterm="FCA"),
+    )
+    invite = await service.add_invite(
+        app_engine, principal, rfq.id, supplier.id, supplier.contacts[0].id
+    )
+    added = await service.add_line(
+        app_engine,
+        principal,
+        rfq.id,
+        AddLineRequest(description="Cable", quantities=[Decimal(50)], unit="m"),
+    )
+    await service.remove_line(app_engine, principal, rfq.id, added.lines[-1].id)
+    await service.remove_invite(app_engine, principal, rfq.id, invite.id)
+
+    feed = await rfq_activity(app_engine, principal, rfq.id)
+    assert [(item.action, item.summary) for item in feed] == [
+        ("rfq.invite_removed", "Supplier removed: Rhein"),
+        ("rfq.line_removed", "Line 3 removed: Cable"),
+        ("rfq.line_added", "Line 3 added: Cable"),
+        ("rfq.invite_added", "Supplier added: Rhein"),
+        (
+            "rfq.terms_set",
+            "Terms updated: response deadline 2099-11-01 -> 2099-12-01, "
+            "Incoterm set to FCA on 2 lines",
+        ),
+        ("rfq.line_updated", "Line 2 updated: quantity 500 -> 1500, part number set to CON-40"),
+        ("rfq.created", "RFQ created with 2 lines"),
+    ]
+    assert {item.kind for item in feed} == {"user"}
+    assert {item.actor for item in feed} == {me}
+    assert [item.supplier_name for item in feed if item.action.startswith("rfq.invite")] == [
+        "Rhein",
+        "Rhein",
+    ]
+
+    [created] = [i for i in await rfq_activity(app_engine, principal, from_copilot.id)]
+    assert created.summary == "RFQ created from the Copilot with 2 lines" and created.actor == me
+
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        events = {
+            event.action: event
+            for event in await session.scalars(
+                select(AuditEvent).where(AuditEvent.payload["rfq_id"].astext == str(rfq.id))
+            )
+        }
+    assert all(event.actor_user_id == rfq_rows.owner for event in events.values())
+    assert events["rfq.created"].payload == {
+        "rfq_id": str(rfq.id),
+        "ref": rfq.ref,
+        "origin": "api",
+        "lines": 2,
+        "currency": "EUR",
+    }
+    assert events["rfq.line_updated"].payload["changes"] == {
+        "part_number": {"from": None, "to": "CON-40"},
+        "quantities": {"from": [500], "to": [1500]},
+    }
+    assert events["rfq.terms_set"].payload["line_fields"] == {"incoterm": "FCA"}
+    assert events["rfq.invite_added"].payload["supplier_id"] == str(supplier.id)
 
 
 @pytest.mark.db

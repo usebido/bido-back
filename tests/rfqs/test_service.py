@@ -523,6 +523,11 @@ async def test_approved_send_goes_out_from_the_requesters_mailbox(
         audits = list(
             await session.scalars(select(AuditEvent).where(AuditEvent.action == "rfq.email_sent"))
         )
+        opened = list(
+            await session.scalars(
+                select(AuditEvent).where(AuditEvent.action == "rfq.status_changed")
+            )
+        )
     assert invite is not None and stored_rfq is not None and approval is not None
     assert invite.status == "sent" and invite.sent_at is not None
     assert invite.thread_message_id == email.message_id
@@ -535,6 +540,14 @@ async def test_approved_send_goes_out_from_the_requesters_mailbox(
     assert audit.actor_user_id == rfq_rows.approver
     assert audit.payload["requested_by"] == str(rfq_rows.owner)
     assert audit.payload["approved_by"] == str(rfq_rows.approver)
+    [transition] = opened
+    assert transition.actor_user_id == rfq_rows.approver
+    assert transition.payload == {
+        "rfq_id": str(rfq.id),
+        "from_status": "draft",
+        "to_status": "open",
+        "invite_id": str(invite_id),
+    }
 
     # A redelivered job and a direct re-run send nothing more.
     await executor(approval_execute_envelope(rfq_rows.tenant, approval_id))

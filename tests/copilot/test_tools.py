@@ -14,6 +14,7 @@ from bido_back.agents.tools import ToolError
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
+    AuditEvent,
     CopilotProposal,
     Invite,
     Rfq,
@@ -199,6 +200,20 @@ async def test_prepare_send_records_approvals_and_sends_nothing(
     assert approval is not None and approval.status == "pending"
     assert approval.tool == SEND_RFQ_EMAIL and approval.requested_by == principal.user_id
     assert found is not None and found.status == "pending_approval"
+
+    # The buyer's steps are on the record: the RFQ (from the Copilot) and the invite.
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        events = list(
+            await session.scalars(
+                select(AuditEvent)
+                .where(AuditEvent.payload["rfq_id"].astext == str(created.id))
+                .order_by(AuditEvent.created_at, AuditEvent.id)
+            )
+        )
+    assert [e.action for e in events][:2] == ["rfq.created", "rfq.invite_added"]
+    assert all(e.actor_user_id == principal.user_id for e in events)
+    assert events[0].payload["origin"] == "copilot"
+    assert events[1].payload["supplier_id"] == str(rhein.id)
 
 
 async def test_create_rfq_reads_the_attachments_and_no_tool_acts(

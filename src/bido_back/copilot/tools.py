@@ -1519,7 +1519,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             currency_source=cast(CurrencySource, stored["currency_source"]),
         )
         try:
-            created = await rfq_service.store_text_draft(db, principal, drafted)
+            created = await rfq_service.store_text_draft(db, principal, drafted, origin="copilot")
         except RfqError as exc:
             await proposals.release(db, principal, proposal_id)
             raise _service_error(exc) from None
