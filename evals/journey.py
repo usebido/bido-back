@@ -169,20 +169,10 @@ def mandate_message(deadline: date) -> str:
     return f"Pode negociar com os fornecedores; prazo {deadline:%d/%m/%Y}."
 
 
-# Checks that measure what other workstreams are adding (or a product gap not assigned
-# yet): they may fail on the base code even in mock mode. Every other check must pass in
-# mock mode (tests/evals/test_journey.py).
-PENDING: Final[dict[str, str]] = {
-    "internal_price_estimate": "B",
-    "supplier_performance": "B",
-    "answer_internal_price": "B",
-    "draft_invites": "C",
-    "default_limits": "C",
-    "mandate_proposed_by_copilot": "C",
-    "older_revision_usable": "extraction",
-    "currency_symbol_reais": "extraction",
-    "extra_still_listed": "extraction",
-}
+# Checks that measure what is still being added (or a product gap not assigned yet):
+# they may fail on the base code even in mock mode. Every other check must pass in mock
+# mode (tests/evals/test_journey.py). Empty: every check passes in mock mode.
+PENDING: Final[dict[str, str]] = {}
 
 
 # --- Results ----------------------------------------------------------------------------------
@@ -1898,8 +1888,11 @@ async def step_negotiation(j: Journey, step: Step) -> None:
         owner="negotiation",
     )
     step.check("nothing_held", not held, f"held for a person: {held}", owner="negotiation")
-    step.notes["late_line_lead_time_asked"] = any(
-        a.startswith("metalnova 000104") for a in lead_asks
+    step.check(
+        "late_line_lead_time_asked",
+        any(a.startswith("metalnova 000104") for a in lead_asks),
+        f"MetalNova's late 000104 never had its lead time negotiated; asks: {lead_asks}",
+        owner="negotiation",
     )
     step.notes["emails"] = [
         f"day {sweep.day} -> {', '.join(e.to)}: {e.body[:700]}"
