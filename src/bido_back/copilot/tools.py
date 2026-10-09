@@ -514,10 +514,11 @@ class CreateRfqIn(BaseModel):
         min_length=1,
         max_length=8_000,
         description=(
-            "What to quote: items, quantities, dates, Incoterm and delivery location. Copy the "
-            "buyer's part numbers exactly as they wrote them; never turn them into MPNs. When "
-            "the buyer gives a manufacturer part number as such, say so ('MPN MT-120-ASM'): "
-            "the preview's lines show it as `mpn`, apart from `part_number`"
+            "What to quote: items, quantities, dates, Incoterm and delivery location, in the "
+            "buyer's language (the RFQ's title is written from it). Copy the buyer's part "
+            "numbers exactly as they wrote them; never turn them into MPNs. When the buyer "
+            "gives a manufacturer part number as such, say so ('MPN MT-120-ASM'): the "
+            "preview's lines show it as `mpn`, apart from `part_number`"
         ),
     )
     pending_validation: str | None = Field(
@@ -643,7 +644,12 @@ class SetRfqTermsIn(BaseModel):
     delivery_location: str | None = Field(default=None, description="For every line")
     need_by: date | None = Field(default=None, description="For every line")
     response_due: date | None = Field(default=None, description="When suppliers must answer")
-    title: str | None = Field(default=None, min_length=1, max_length=500)
+    title: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=500,
+        description="The RFQ's title, in the buyer's language (the conversation's)",
+    )
     payment_terms: str | None = Field(
         default=None,
         min_length=1,

@@ -1223,6 +1223,7 @@
             "title": "Response Due"
           },
           "title": {
+            "description": "The RFQ's title, in the buyer's language (the conversation's)",
             "maxLength": 300,
             "minLength": 1,
             "title": "Title",
