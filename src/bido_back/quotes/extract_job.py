@@ -69,6 +69,7 @@ from bido_back.quotes.state import (
     reconcile,
     restore_field,
     restore_quote,
+    revision_marker,
     stamp_quote,
     store_quote,
 )
@@ -466,6 +467,7 @@ async def _events(session: AsyncSession, invite_id: UUID) -> list[OfferEvent]:
                 occurred_at=message.occurred_at,
                 received_at=message.created_at,
                 quote=quote,
+                revision=revision_marker(message.subject, message.body_text),
             )
         )
     # A human correction remains authoritative for its original field evidence.
@@ -651,6 +653,7 @@ async def _persist(
                     occurred_at=message.occurred_at,
                     received_at=message.created_at,
                     quote=event_quote,
+                    revision=revision_marker(message.subject, message.body_text),
                 ),
             ]
         )

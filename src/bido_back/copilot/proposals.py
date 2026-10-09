@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import CopilotProposal
+from bido_back.purchasing.sources.handoff import AssessmentSkippedSupplier, LimitsBasis
 
 type Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
@@ -55,6 +56,12 @@ class ProposedLine(BaseModel):
     need_by: date | None = None
     incoterm: str | None = None
     delivery_location: str | None = None
+    # The negotiation's default limits, in the RFQ's currency (from an assessment: its
+    # internal estimate); null: none. Proposals: the buyer approves limits in the mandate.
+    target_unit_price: Decimal | None = None
+    max_unit_price: Decimal | None = None
+    # Why those limits: the rule, how many received orders, the window, the latest order.
+    limits_basis: LimitsBasis | None = None
 
 
 class ProposedSupplier(BaseModel):
@@ -62,6 +69,12 @@ class ProposedSupplier(BaseModel):
     email: str | None = Field(
         description="The contact the invite would use; null = no email, it would be skipped"
     )
+    # The lines (part numbers) it would be invited for, when the action chooses by line.
+    part_numbers: list[str] = Field(default_factory=list[str])
+    # Bido would first create the supplier with this contact, from the files' company name
+    # and email; or add this email as a contact of the buyer's existing supplier.
+    new_supplier: bool = False
+    new_contact: bool = False
 
 
 class ProposalPreview(BaseModel):
@@ -77,6 +90,12 @@ class ProposalPreview(BaseModel):
         default_factory=list[str],
         description="Lines left out (a preliminary RFQ: no quantity or unit yet), by part number",
     )
+    # Suppliers it would not invite, and why (an RFQ from an assessment).
+    skipped_suppliers: list[AssessmentSkippedSupplier] = Field(
+        default_factory=list[AssessmentSkippedSupplier]
+    )
+    # Positions of the lines that would start without a target and maximum unit price.
+    lines_without_limits: list[int] = Field(default_factory=list[int])
     questions: list[str] = Field(default_factory=list[str])
     issues: list[str] = Field(
         default_factory=list[str], description="What would stop it, if anything"

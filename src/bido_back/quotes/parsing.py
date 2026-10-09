@@ -220,6 +220,8 @@ _CURRENCY_WORDS = {
     "€": "EUR",
     "£": "GBP",
     "us$": "USD",
+    "r$": "BRL",
+    # A bare `$` only: `R$`, `US$`, `C$`, `A$`... are other currencies (see below).
     "$": "USD",
     "zł": "PLN",
     "kč": "CZK",
@@ -245,6 +247,10 @@ def detect_currencies(text: str) -> set[str]:
     for word, code in _CURRENCY_WORDS.items():
         if word.isalpha():
             if re.search(rf"(?<![a-z]){re.escape(word)}(?![a-z])", lowered):
+                found.add(code)
+        elif word[0].isalpha() or word == "$":
+            # `R$ 46,90` is reais: a symbol never matches inside a longer prefix.
+            if re.search(rf"(?<![^\W\d_]){re.escape(word)}", lowered):
                 found.add(code)
         elif word in lowered:
             found.add(code)
@@ -372,3 +378,33 @@ _NONE_WORDS = re.compile(
 
 def mentions_none(text: str) -> bool:
     return _NONE_WORDS.search(text) is not None
+
+
+# --- Per-unit prices ---------------------------------------------------------------
+
+# Units a price can be "per" without a number: one piece, one kilogram, one metre...
+_UNIT_WORDS = (
+    r"pcs?|pç[as]?|pçs|p[cç]as?|peças?|pecas?|pe[cç]a|pieces?|pz|pzs|pezz[oi]|pièces?|stück"
+    r"|stueck|stk|st|units?|unidades?|unid|und|un|ud|uds|ea|each|kg|g|t|m|m2|m3|l|lt|lb|lbs"
+    r"|ft|rolls?|rolos?|sets?|jogos?|kits?|pares?|pairs?|pr"
+)
+_PER_UNIT = re.compile(
+    rf"(?:\b(?:per|por|pro|par|je|cada)\b\s*|/\s*)(?:{_UNIT_WORDS})\b\.?"
+    r"|\b(?:each|cada|unit[aá]ri[oa]|unit\s+price|price\s+per\s+unit|precio\s+unitario"
+    r"|prix\s+unitaire|st[uü]ckpreis|einzelpreis|prezzo\s+unitario)\b",
+    re.IGNORECASE,
+)
+# A stated basis other than one: "per 100 pcs", "/1000", "por cento".
+_PER_QUANTITY = re.compile(
+    r"(?:\b(?:per|por|pro|par|je|cada)\b\s*|/\s*)\d|\b(?:cento|hundred|thousand|mil|mille|tausend)\b",
+    re.IGNORECASE,
+)
+
+
+def mentions_per_unit(text: str) -> bool:
+    """`R$ 46,90 por pcs`, `€ 0.45 each`, `2,45/kg`: a price for ONE unit, stated in words.
+
+    False when the text also states another basis (`per 100 pcs`), so it never
+    stands in for a written number.
+    """
+    return _PER_UNIT.search(text) is not None and _PER_QUANTITY.search(text) is None

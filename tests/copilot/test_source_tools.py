@@ -1,6 +1,7 @@
 """Source assessment stays within the conversation, user and tenant and writes nothing."""
 
 from dataclasses import replace
+from datetime import date
 from decimal import Decimal
 from typing import cast
 from uuid import UUID, uuid4
@@ -42,8 +43,10 @@ from bido_back.purchasing.sources.contracts import (
     SourceAssessment,
     TableProposal,
 )
+from evals.source_fixtures import EXPECTED, SCOPE
 from tests.approvals.conftest import People
 from tests.purchasing.conftest import FakeStorage
+from tests.purchasing.motor_sources import motor_workbook
 from tests.purchasing.test_workbook import XLSX, workbook
 from tests.rfqs.conftest import FakeMailboxes, fake_agents
 
@@ -136,14 +139,56 @@ def test_source_tool_is_read_only_and_has_provider_compatible_inputs() -> None:
     tool = source_tool(engine, TrackingStorage(), SourceMapper(), FakeMailboxes())
 
     assert tool.kind == "read"
-    properties = tool.input_schema()["properties"]
+    schema = tool.input_schema()
+    properties = schema["properties"]
     assert isinstance(properties, dict)
     assert set(properties) == {"upload_ids", "objective", "scope"}
+    definitions = schema["$defs"]
+    assert isinstance(definitions, dict)
+    scope_schema = definitions["ScopeRequestInput"]
+    assert isinstance(scope_schema, dict)
+    scope_properties = scope_schema["properties"]
+    assert isinstance(scope_properties, dict)
+    # The buyer's words, all optional: code settles the rest against the evidence.
+    assert set(scope_properties) == {
+        "product_code",
+        "product",
+        "area",
+        "location",
+        "as_of",
+        "horizon_end",
+        "horizon_days",
+        "safety_stock",
+        "production_lead_days",
+    }
+    assert "required" not in scope_schema
     assert tool.parse_input({"upload_ids": [str(uuid4())], "objective": "What should I buy?"})
+    words = tool.parse_input(
+        {
+            "upload_ids": [str(uuid4())],
+            "objective": "O que comprar para o Motor MTR-100 na Planta A?",
+            "scope": {
+                "product": "Motor MTR-100",
+                "location": "Planta A",
+                "horizon_days": 14,
+                "safety_stock": 0,
+            },
+        }
+    ).scope
+    assert words is not None and (words.product_code, words.as_of, words.horizon_days) == (
+        None,
+        None,
+        14,
+    )
     invalid_inputs: tuple[dict[str, object], ...] = (
         {"upload_ids": [], "objective": "What should I buy?"},
         {"upload_ids": [str(uuid4())] * 11, "objective": "What should I buy?"},
         {"upload_ids": [str(uuid4())], "objective": ""},
+        {
+            "upload_ids": [str(uuid4())],
+            "objective": "Plan",
+            "scope": {"as_of": "2026-10-22", "horizon_end": "2026-10-08"},
+        },
     )
     for args in invalid_inputs:
         with pytest.raises(ValidationError):
@@ -293,6 +338,59 @@ async def test_source_assessment_reads_current_and_earlier_files_without_busines
     assert await business_counts(app_engine, principal.tenant_id) == before
     assert mailboxes.calls == []
     assert mailboxes.sender.sent == []
+
+
+@pytest.mark.db
+async def test_the_buyers_scope_is_resolved_and_saved_with_the_same_request(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    ctx = context_of(principal)
+    storage = TrackingStorage()
+    data, mapper = motor_workbook()
+    upload = await onboarding.store_upload(
+        app_engine, storage, principal, filename="erp.xlsx", content_type=XLSX, data=data
+    )
+    tools = {
+        tool.name: tool
+        for tool in copilot_tools(
+            CopilotToolDeps(
+                db=app_engine,
+                agents=fake_agents(),
+                mailboxes=FakeMailboxes(),
+                storage=storage,
+                source_mapper=mapper,
+                attachment_ids=(upload.id,),
+            )
+        )
+    }
+    scope: dict[str, object] = {
+        "product": "Motor MTR-100",
+        "location": "PLANT A",
+        "horizon_days": 14,
+        "safety_stock": 0,
+    }
+    args: dict[str, object] = {
+        "upload_ids": [str(upload.id)],
+        "objective": "What do we need to buy for the motor in Plant A?",
+        "scope": scope,
+    }
+    analyze, save = tools["analyze_procurement_sources"], tools["save_procurement_assessment"]
+
+    analysis = SourceAssessment.model_validate(await analyze.invoke(ctx, analyze.parse_input(args)))
+    saved = SourceAssessment.model_validate(await save.invoke(ctx, save.parse_input(args)))
+    again = SourceAssessment.model_validate(await save.invoke(ctx, save.parse_input(args)))
+    later = {**args, "scope": {**scope, "horizon_days": 24}}
+    changed = SourceAssessment.model_validate(await save.invoke(ctx, save.parse_input(later)))
+
+    assert analysis.scope == saved.scope == SCOPE
+    assert not analysis.persisted and saved.persisted
+    assert saved.scope_resolution == analysis.scope_resolution
+    assert saved.scope_resolution is not None
+    assert saved.scope_resolution.request.location == "PLANT A"
+    assert {line.part_number: line.calculated_to_buy for line in saved.lines} == EXPECTED
+    assert again.assessment_id == saved.assessment_id != changed.assessment_id
+    assert changed.scope is not None and changed.scope.horizon_end == date(2026, 11, 1)
 
 
 @pytest.mark.db

@@ -39,6 +39,7 @@ from bido_back.copilot.proposals import (
     AwaitingConfirmation,
     ProposalPreview,
     ProposedLine,
+    ProposedSupplier,
 )
 from bido_back.db import tenant_session
 from bido_back.db.models import Contact, Invite, Proposal, Supplier, SupplierContact
@@ -49,15 +50,22 @@ from bido_back.negotiation.schemas import LineLimitsUpdate
 from bido_back.outbound.domains import RecipientCheck
 from bido_back.purchasing import service as purchasing_service
 from bido_back.purchasing.schemas import AnalysisRequest, CurrencyTotalView
-from bido_back.purchasing.sources.contracts import PlanningScope, SourceAssessment
+from bido_back.purchasing.sources.contracts import ScopeRequest, SourceAssessment
+from bido_back.purchasing.sources.handoff import (
+    AssessmentInvitedSupplier,
+    AssessmentSkippedSupplier,
+)
 from bido_back.purchasing.sources.mapping import default_mapper
 from bido_back.purchasing.sources.service import SourceAccessError, analyze_uploads
 from bido_back.purchasing.sources.snapshots import (
+    AssessmentRfqPlan,
     AssessmentRfqRequest,
     AssessmentSnapshotSummary,
     draft_from_snapshot,
     get_snapshot,
     list_snapshots,
+    plan_from_snapshot,
+    rfq_lines,
 )
 from bido_back.purchasing.workbook import WorkbookFileError, WorkbookImportReport, import_workbook
 from bido_back.rfqs import suppliers as supplier_service
@@ -126,8 +134,15 @@ class ImportSpreadsheetIn(BaseModel):
     )
 
 
-class PlanningScopeInput(PlanningScope):
-    safety_stock: ModelDecimal | None = Field(default=None, ge=0, lt=10**12)
+class ScopeRequestInput(ScopeRequest):
+    # A plain number: the decimal string pattern has a lookahead strict schemas reject.
+    safety_stock: ModelDecimal | None = Field(
+        default=None,
+        ge=0,
+        lt=10**12,
+        description="The buyer's explicit safety-stock policy ('sem estoque de segurança "
+        "adicional' = 0); empty = the sources' own policy",
+    )
 
 
 class AnalyzeSourcesIn(BaseModel):
@@ -141,10 +156,14 @@ class AnalyzeSourcesIn(BaseModel):
         max_length=2000,
         description="The buyer's question and explicit clarifications; do not invent assumptions",
     )
-    scope: PlanningScopeInput | None = Field(
+    scope: ScopeRequestInput | None = Field(
         default=None,
-        description="For BOM/production planning: the buyer's product code or area, plant, "
-        "snapshot date, horizon and explicit safety stock. Never invent missing boundaries.",
+        description="Always fill it with the planning boundaries the buyer stated, in their "
+        "words: product (or product_code), area only for a whole area, location, as_of or "
+        "horizon_end as dates, horizon_days for 'the next N days', safety_stock, "
+        "production_lead_days. Leave unknown fields empty: code resolves them against the "
+        "evidence (the reference date from the latest stock snapshot) and asks the rest. When "
+        "saving, pass the same scope as the analysis plus the buyer's answers.",
     )
 
 
@@ -183,6 +202,25 @@ class AssessmentRfqOut(AwaitingConfirmation):
     preliminary: bool | None = None
     # Preliminary only: assessed lines left out (no quantity or unit yet), by part number.
     skipped: list[str] = Field(default_factory=list[str])
+    # The suppliers on the draft as DRAFT invites (nothing is sent), the assessed ones it
+    # could not invite with why, and the lines without default limits.
+    invited: list[AssessmentInvitedSupplier] = Field(
+        default_factory=list[AssessmentInvitedSupplier]
+    )
+    skipped_suppliers: list[AssessmentSkippedSupplier] = Field(
+        default_factory=list[AssessmentSkippedSupplier]
+    )
+    lines_without_limits: list[int] = Field(default_factory=list[int])
+
+
+def _rfq_request(args: CreateAssessmentRfqIn) -> AssessmentRfqRequest:
+    """The handoff request of a tool input (proposed, or stored and confirmed), losing
+    nothing: copying fields one by one silently dropped the ones added later
+    (pending_validation, once), and the request forbids unknown fields, so a field the
+    handoff does not take fails instead of disappearing."""
+    return AssessmentRfqRequest.model_validate(
+        args.model_dump(exclude={"assessment_id", "proposal_id"})
+    )
 
 
 class AddContactOut(BaseModel):
@@ -354,21 +392,15 @@ def _conversation_upload(
 
 
 def _assessment_preview(
-    assessment: SourceAssessment, args: CreateAssessmentRfqIn
+    assessment: SourceAssessment, args: CreateAssessmentRfqIn, plan: AssessmentRfqPlan
 ) -> ProposalPreview:
-    """What `create_rfq_from_assessment` would create from the saved assessment (the same
-    rules as `draft_from_snapshot`, which checks again when it runs)."""
+    """What `create_rfq_from_assessment` would create from the saved assessment: its lines
+    (`rfq_lines`) with their default limits, and the suppliers it would invite or skip
+    (`plan_from_snapshot`). The same rules as `draft_from_snapshot`, which checks again
+    when it runs."""
     preliminary = args.pending_validation is not None
-    lines = [
-        line
-        for line in assessment.lines
-        if line.calculated_to_buy is not None and line.calculated_to_buy > 0 and line.unit
-    ]
-    skipped = [
-        line.part_number
-        for line in assessment.lines
-        if line.calculated_to_buy is None or not line.unit
-    ]
+    lines, skipped = rfq_lines(assessment)
+    limits = {limit.position: limit for limit in plan.limits}
     open_issues = [issue.message for issue in assessment.issues if issue.severity == "blocker"]
     if assessment.status != "assessed":
         open_issues.insert(0, "the assessment still needs review")
@@ -385,8 +417,11 @@ def _assessment_preview(
     issues = [] if preliminary else open_issues
     if not lines:
         issues.append("the assessment has no validated positive purchase requirements")
+    issues.extend(plan.issues)
     return ProposalPreview(
         action="create_rfq_from_assessment",
+        # Set when the assessment already has its draft: confirming returns it as it is.
+        rfq=plan.ref,
         title=(
             preliminary_title(args.title, args.pending_validation)[:300]
             if args.pending_validation is not None
@@ -402,11 +437,27 @@ def _assessment_preview(
                 unit=line.unit or "",
                 need_by=line.need_by,
                 delivery_location=line.location,
+                target_unit_price=found.target_unit_price if found else None,
+                max_unit_price=found.max_unit_price if found else None,
+                limits_basis=found.basis if found else None,
             )
             for position, line in enumerate(lines, start=1)
             if line.calculated_to_buy is not None
+            for found in [limits.get(position)]
+        ],
+        suppliers=[
+            ProposedSupplier(
+                name=supplier.name,
+                email=supplier.email,
+                part_numbers=supplier.part_numbers,
+                new_supplier=supplier.supplier_created,
+                new_contact=supplier.contact_created,
+            )
+            for supplier in plan.invited
         ],
         skipped=skipped if preliminary else [],
+        skipped_suppliers=plan.skipped_suppliers,
+        lines_without_limits=plan.lines_without_limits,
         questions=open_issues if preliminary else [],
         issues=issues,
     )
@@ -515,10 +566,12 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             raise ToolError("this action needs a conversation to ask the buyer in")
         if args.proposal_id is None:
             try:
-                assessment = await get_snapshot(db, principal, args.assessment_id)
+                assessment, plan = await plan_from_snapshot(
+                    db, principal, args.assessment_id, _rfq_request(args)
+                )
             except purchasing_service.PurchasingError as exc:
                 raise ToolError(str(exc)) from None
-            preview = _assessment_preview(assessment, args)
+            preview = _assessment_preview(assessment, args, plan)
             proposal_id = await proposals.propose(
                 db,
                 principal,
@@ -545,15 +598,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         stored = CreateAssessmentRfqIn.model_validate(claimed.args)
         try:
             result = await draft_from_snapshot(
-                db,
-                principal,
-                stored.assessment_id,
-                AssessmentRfqRequest(
-                    title=stored.title,
-                    base_currency=stored.base_currency,
-                    response_due=stored.response_due,
-                    pending_validation=stored.pending_validation,
-                ),
+                db, principal, stored.assessment_id, _rfq_request(stored)
             )
         except purchasing_service.PurchasingError as exc:
             await proposals.release(db, principal, args.proposal_id)
@@ -894,7 +939,10 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             "save_procurement_assessment",
             "Analyze the conversation's procurement sources and save an immutable evidence "
             "snapshot. Returns assessment_id for later retrieval and draft RFQ creation. "
-            "Use when the buyer asks to save the analysis or proceed to an RFQ. Nothing is sent.",
+            "Use when the buyer asks to save the analysis or proceed to an RFQ. Pass the same "
+            "upload_ids, objective and scope as the analyze_procurement_sources call the buyer "
+            "saw (their words plus any answers, not the resolved values), so the saved snapshot "
+            "resolves the same scope. Nothing is sent.",
             AnalyzeSourcesIn,
             SourceAssessment,
             "draft",
@@ -920,11 +968,16 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         Tool(
             "create_rfq_from_assessment",
             "Create one draft RFQ from validated saved source quantities, units, dates and "
-            "evidence. Blocks unresolved assessments. Requires the buyer's RFQ currency. "
-            "No suppliers are invited and nothing is sent; use invite_suppliers next. Two "
-            "calls: the first (no proposal_id) does nothing and answers a preview with a "
-            "proposal_id; show it to the buyer and ask. Call again with that proposal_id only "
-            "after they confirm in their own later message.",
+            "evidence. Blocks unresolved assessments unless pending_validation makes it "
+            "PRELIMINARY. Requires the buyer's RFQ currency. It also invites each line's "
+            "assessed suppliers (suggested first) as DRAFT invites, creating a supplier only "
+            "from the files' company name and email, and gives each line a default "
+            "target/maximum from the internal estimate; skipped_suppliers and "
+            "lines_without_limits say what is missing. Nothing is sent or approved: the buyer "
+            "approves suppliers and limits in the negotiation mandate. Two calls: the first "
+            "(no proposal_id) does nothing and answers a preview with a proposal_id; show it "
+            "to the buyer and ask. Call again with that proposal_id only after they confirm "
+            "in their own later message.",
             CreateAssessmentRfqIn,
             AssessmentRfqOut,
             "draft",
@@ -932,12 +985,27 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         ),
         Tool(
             "analyze_procurement_sources",
-            "Read and cross-reference all attached procurement sources: direct material "
-            "demand, inventory, supplier identities, purchase history, supplier performance "
-            "and consolidated purchase needs. With scope, derives production/BOM demand and "
-            "reconciles stock snapshots, receipts and pending orders. Returns source-reported "
-            "quantities separately from validated calculations, with evidence and specific issues. "
-            "No BOM required for direct demand. Read-only: nothing imported or sent.",
+            "Read every row of the attached procurement sources and cross-reference them: "
+            "production orders and BOMs, stock snapshots, open orders, receipts, purchase "
+            "history, suppliers and direct material demand. Always pass `scope` with the "
+            "buyer's planning boundaries as they said them (product words or code, plant, "
+            "horizon as dates or days, safety stock) and leave unknowns empty: in this same "
+            "call code finds the exact product code and plant, takes the reference date from "
+            "the latest stock snapshot when none was given, and derives production/BOM demand "
+            "netted against stock and timely deliveries. `scope` in the result is the resolved "
+            "scope; `scope_resolution` lists the assumptions to disclose, the questions "
+            "(with options) to ask when a boundary cannot be settled without guessing, and "
+            "where each value came from (buyer, evidence or default). Returns source-reported "
+            "quantities separately from validated calculations, with evidence and specific "
+            "issues. No BOM required for direct demand. Read-only: nothing imported or sent. "
+            'Examples of scope: "Motor MTR-100 na Planta A, da exportação até 14 dias depois, '
+            'sem estoque de segurança adicional" -> {"product": "Motor MTR-100", "location": '
+            '"Planta A", "horizon_days": 14, "safety_stock": 0}; "MTR-100 at Plant A from '
+            '2026-10-08 to 2026-10-22" -> {"product_code": "MTR-100", "location": "Plant A", '
+            '"as_of": "2026-10-08", "horizon_end": "2026-10-22"}; "tudo da área de Manutenção '
+            'até 20/10/2026, a montagem leva 2 dias" -> {"area": "Manutenção", "horizon_end": '
+            '"2026-10-20", "production_lead_days": 2}; "analisa o motor" -> {"product": '
+            '"motor"}.',
             AnalyzeSourcesIn,
             SourceAssessment,
             "read",

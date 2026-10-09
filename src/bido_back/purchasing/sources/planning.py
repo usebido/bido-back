@@ -1,12 +1,12 @@
 """Derive component demand from source evidence and net it in date order."""
 
 from collections import Counter, defaultdict
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from datetime import date, timedelta
 from decimal import Decimal
 
 from bido_back.purchasing.importers import norm
-from bido_back.purchasing.sources.analysis import supplier_evidence
+from bido_back.purchasing.sources.analysis import supplier_country, supplier_evidence
 from bido_back.purchasing.sources.contracts import (
     Assessment,
     AssessmentLine,
@@ -20,53 +20,79 @@ from bido_back.purchasing.sources.contracts import (
 )
 from bido_back.purchasing.sources.evidence import (
     add_issue,
+    categorical,
+    join_key,
     normalize_unit,
+    same_key,
     source_date,
     source_number,
     source_refs,
     source_text,
+    unit_key,
 )
 from bido_back.purchasing.sources.joins import (
     CANCELLED,
     CLOSED,
+    OPEN,
     ZERO,
     coalesce,
     incoming_for,
     inventory_at,
-    receipts_for,
     state,
 )
+from bido_back.purchasing.sources.pricing import ORDER_KEY, OrderFacts, measure, reconcile_order
 
-_ACTIVE_PLANS = frozenset(
-    {"planned", "planejada", "planejado", "released", "liberada", "liberado", "open", "em aberto"}
-)
-_GROSS = frozenset(
-    {"gross", "gross demand", "gross requirement", "bruta", "demanda bruta", "necessidade bruta"}
-)
+# Canonical production-order states (see `vocabulary`) that still consume components.
+_ACTIVE_PLANS = frozenset({"planned", "released"})
+
+
+def code_key(value: str) -> str:
+    """How identifiers compare: case and spacing aside, other punctuation is significant."""
+    return "".join(value.casefold().split())
+
+
+def same_code(left: str | None, right: str | None) -> bool:
+    return left is not None and right is not None and code_key(left) == code_key(right)
+
+
+def same_place(left: str | None, right: str | None) -> bool:
+    """Plants and areas compare without case, accents, spacing or punctuation."""
+    return left is not None and right is not None and bool(norm(left)) and norm(left) == norm(right)
 
 
 def planning_context(records: Sequence[Record]) -> tuple[list[PlanningCandidate], list[date]]:
-    """Expose located product/plant/date choices so the copilot can complete a scoped call."""
-    grouped: dict[tuple[str, str | None], list[Record]] = defaultdict(list)
+    """Expose located product/plant/date choices so the copilot can complete a scoped call.
+
+    Spellings of one code or plant that differ only in case or spacing are one candidate.
+    """
+    grouped: dict[tuple[str, str], list[Record]] = defaultdict(list)
     dates: set[date] = set()
     for row in records:
         if row.kind == "production_plan" and (product := source_text(row, "product_code")):
-            grouped[product, source_text(row, "location")].append(row)
+            grouped[code_key(product), norm(source_text(row, "location") or "")].append(row)
         elif row.kind == "inventory" and (day := source_date(row, "as_of", [])) is not None:
             dates.add(day)
     candidates: list[PlanningCandidate] = []
-    for (product, location), plans in grouped.items():
+    for plans in grouped.values():
+        product = source_text(plans[0], "product_code") or ""
+        location = source_text(plans[0], "location")
         masters = [
-            r for r in records if r.kind == "item" and source_text(r, "part_number") == product
+            r
+            for r in records
+            if r.kind == "item" and same_code(source_text(r, "part_number"), product)
         ]
         descriptions = {source_text(r, "description") for r in masters} - {None}
-        areas = {source_text(r, "area") for r in [*plans, *masters]} - {None}
+        areas = {
+            norm(area): area
+            for r in [*plans, *masters]
+            if (area := source_text(r, "area")) is not None
+        }
         candidates.append(
             PlanningCandidate(
                 product_code=product,
                 location=location,
                 description=next(iter(descriptions)) if len(descriptions) == 1 else None,
-                area=next(iter(areas)) if len(areas) == 1 else None,
+                area=next(iter(areas.values())) if len(areas) == 1 else None,
                 need_dates=sorted(
                     {d for r in plans if (d := source_date(r, "need_by", [])) is not None}
                 ),
@@ -78,7 +104,7 @@ def planning_context(records: Sequence[Record]) -> tuple[list[PlanningCandidate]
 
 def _master(records: Sequence[Record], part: str, issues: list[Issue]) -> Record | None:
     found = coalesce(
-        [r for r in records if r.kind == "item" and source_text(r, "part_number") == part],
+        [r for r in records if r.kind == "item" and same_key(source_text(r, "part_number"), part)],
         ("part_number",),
         issues,
         "conflicting_item_master",
@@ -86,16 +112,28 @@ def _master(records: Sequence[Record], part: str, issues: list[Issue]) -> Record
     return found[0] if len(found) == 1 else None
 
 
+def _part_name(records: Sequence[Record], known: Iterable[str], part: str) -> str:
+    """One display spelling per item: an earlier line's, the item master's or the source's."""
+    for name in known:
+        if same_key(name, part):
+            return name
+    for row in records:
+        spelling = source_text(row, "part_number")
+        if row.kind == "item" and spelling is not None and same_key(spelling, part):
+            return spelling
+    return part
+
+
 def _matches_scope(
     record: Record, records: Sequence[Record], scope: PlanningScope, issues: list[Issue]
 ) -> bool:
     product = source_text(record, "product_code")
-    if scope.product_code is not None and product != scope.product_code:
+    if scope.product_code is not None and not same_code(product, scope.product_code):
         return False
     if scope.area is not None:
         master = _master(records, product or "", issues)
         area = source_text(record, "area") or source_text(master, "area")
-        if area is None and product == scope.product_code:
+        if area is None and same_code(product, scope.product_code):
             add_issue(
                 issues,
                 "unresolved_product_area",
@@ -104,7 +142,8 @@ def _matches_scope(
             )
         if area is None or norm(area) != norm(scope.area):
             return False
-    if source_text(record, "location") is None:
+    location = source_text(record, "location")
+    if location is None:
         add_issue(
             issues,
             "missing_production_location",
@@ -112,9 +151,7 @@ def _matches_scope(
             [record],
         )
         return False
-    if source_text(record, "location") != scope.location:
-        return False
-    return True
+    return same_place(location, scope.location)
 
 
 def _bom_at(
@@ -124,8 +161,11 @@ def _bom_at(
         r
         for r in records
         if r.kind == "bom"
-        and source_text(r, "product_code") == product
-        and source_text(r, "location") in {None, scope.location}
+        and same_key(source_text(r, "product_code"), product)
+        and (
+            source_text(r, "location") is None
+            or same_key(source_text(r, "location"), scope.location)
+        )
     ]
     effective: list[Record] = []
     for row in candidates:
@@ -202,10 +242,7 @@ def _production_demand(
             continue
         master = _master(records, product, issues)
         unit = source_text(plan, "unit")
-        if unit is None or (
-            master is not None
-            and normalize_unit(unit) != normalize_unit(source_text(master, "unit"))
-        ):
+        if unit is None or (master is not None and unit_key(plan) != unit_key(master)):
             add_issue(
                 issues,
                 "production_unit_conflict",
@@ -247,9 +284,7 @@ def _production_demand(
                     [row],
                 )
                 continue
-            if bom_product_unit is not None and normalize_unit(bom_product_unit) != normalize_unit(
-                unit
-            ):
+            if bom_product_unit is not None and unit_key(row, "product_unit") != unit_key(plan):
                 add_issue(
                     issues,
                     "bom_product_unit_conflict",
@@ -257,7 +292,9 @@ def _production_demand(
                     [row, plan],
                 )
                 continue
-            if any(r.kind == "bom" and source_text(r, "product_code") == part for r in records):
+            if any(
+                r.kind == "bom" and same_key(source_text(r, "product_code"), part) for r in records
+            ):
                 add_issue(
                     issues,
                     "nested_bom_requires_review",
@@ -266,6 +303,7 @@ def _production_demand(
                     [row],
                 )
                 continue
+            part = _part_name(records, contributions, part)
             if part in units and normalize_unit(units[part]) != normalize_unit(component_unit):
                 add_issue(
                     issues,
@@ -304,9 +342,15 @@ def _direct_demand(
     issues: list[Issue],
 ) -> None:
     exploded_parts = set(contributions)
+
+    def exploded(part: str) -> bool:
+        return any(same_key(part, name) for name in exploded_parts)
+
     candidates: list[Record] = []
     for row in records:
-        if row.kind != "material_requirement" or source_text(row, "location") != scope.location:
+        if row.kind != "material_requirement" or not same_key(
+            source_text(row, "location"), scope.location
+        ):
             continue
         part = source_text(row, "part_number")
         if part is None:
@@ -314,8 +358,8 @@ def _direct_demand(
         product = source_text(row, "product_code")
         if (
             scope.product_code is not None
-            and product != scope.product_code
-            and part not in exploded_parts
+            and not same_key(product, scope.product_code)
+            and not exploded(part)
         ):
             continue
         if scope.product_code is None:
@@ -327,9 +371,9 @@ def _direct_demand(
         if need is not None and not scope.as_of <= need <= scope.horizon_end:
             continue
         if scope.product_code is not None:
-            if product != scope.product_code:
+            if not same_key(product, scope.product_code):
                 # A direct demand for a BOM component may already include the exploded demand.
-                if part in exploded_parts:
+                if exploded(part):
                     add_issue(
                         issues,
                         "unreconciled_component_requirement",
@@ -353,7 +397,7 @@ def _direct_demand(
         if not scope.as_of <= need <= scope.horizon_end:
             continue
         part = source_text(row, "part_number") or ""
-        if part in exploded_parts:
+        if exploded(part):
             add_issue(
                 issues,
                 "overlapping_demand_sources",
@@ -364,11 +408,7 @@ def _direct_demand(
             continue
         quantity = source_number(row, "quantity", issues)
         unit = source_text(row, "unit")
-        if (
-            quantity is None
-            or unit is None
-            or norm(source_text(row, "demand_basis") or "") not in _GROSS
-        ):
+        if quantity is None or unit is None or categorical(row, "demand_basis") != "gross":
             add_issue(
                 issues,
                 "unresolved_direct_demand",
@@ -376,6 +416,7 @@ def _direct_demand(
                 [row],
             )
             continue
+        part = _part_name(records, contributions, part)
         if part in units and normalize_unit(units[part]) != normalize_unit(unit):
             add_issue(
                 issues, "component_unit_conflict", "Direct demands use incompatible units.", [row]
@@ -392,28 +433,50 @@ def _direct_demand(
         )
 
 
+def _listed_supplier(
+    code: str | None, masters: Sequence[Record], issues: list[Issue], code_on_gap: str, gap: str
+) -> SupplierEvidence:
+    """A supplier without a completed purchase of the item: identity from the masters."""
+    matching = [r for r in masters if same_key(source_text(r, "supplier_code"), code)]
+    names = {source_text(r, "name") for r in matching} - {None}
+    emails = {source_text(r, "email") for r in matching} - {None}
+    if len(names) != 1 or len(emails) > 1:
+        add_issue(issues, code_on_gap, gap, matching, warning=True)
+    return SupplierEvidence(
+        supplier_code=code,
+        name=next(iter(names)) if len(names) == 1 else None,
+        email=next(iter(emails)) if len(emails) == 1 and len(names) == 1 else None,
+        country=supplier_country(matching),
+        evidence=source_refs(matching),
+    )
+
+
 def _history(
     records: Sequence[Record],
     part: str,
     unit: str | None,
     scope: PlanningScope,
     issues: list[Issue],
-) -> list[SupplierEvidence]:
+) -> tuple[list[SupplierEvidence], list[OrderFacts]]:
+    """Suppliers of the item at the plant and its orders reconciled with their receipts.
+
+    Only completed purchases (closed, fully received) set a supplier's last price; every
+    reconciled order, open or closed, is delivery and quality evidence for `measure`.
+    """
     masters = [r for r in records if r.kind == "supplier"]
     performance = [r for r in records if r.kind == "supplier_performance"]
     grouped: dict[str, list[Record]] = defaultdict(list)
-    histories = [
+    candidates = [
         r
         for r in records
         if r.kind == "purchase"
-        and source_text(r, "part_number") == part
-        and source_text(r, "location") == scope.location
-        and state(r) in CLOSED
+        and same_key(source_text(r, "part_number"), part)
+        and same_key(source_text(r, "location"), scope.location)
     ]
+    histories = [r for r in candidates if state(r) in CLOSED]
     verified: list[Record] = []
-    for order in coalesce(
-        histories, ("po_number", "po_line", "location"), issues, "conflicting_purchase_history"
-    ):
+    orders: list[OrderFacts] = []
+    for order in coalesce(histories, ORDER_KEY, issues, "conflicting_purchase_history"):
         ordered_at = source_date(order, "ordered_at", issues)
         if ordered_at is None or ordered_at > scope.as_of:
             continue
@@ -426,27 +489,63 @@ def _history(
                 [order],
                 warning=True,
             )
+            if code is not None:  # Still a delivery: performance does not depend on the unit.
+                orders.append(
+                    reconcile_order(
+                        order,
+                        records,
+                        supplier=code,
+                        ordered_at=ordered_at,
+                        unit=unit,
+                        as_of=scope.as_of,
+                        issues=[],
+                    )
+                )
             continue
         # Keep errors in historical delivery records visible without fabricating received prices.
-        receipt_issues: list[Issue] = []
-        receipts, received = receipts_for(order, records, scope.as_of, receipt_issues)
-        ordered = source_number(order, "quantity", receipt_issues)
-        issues.extend(i.model_copy(update={"severity": "warning"}) for i in receipt_issues)
-        if not receipts or receipt_issues or ordered is None or received != ordered:
+        facts = reconcile_order(
+            order,
+            records,
+            supplier=code,
+            ordered_at=ordered_at,
+            unit=unit,
+            as_of=scope.as_of,
+            issues=issues,
+        )
+        orders.append(facts)
+        if not facts.completed:
             add_issue(
                 issues,
                 "unverified_purchase_receipt",
                 "A closed order lacks a reconciled "
                 "full receipt and is excluded from completed-purchase price references.",
-                [order, *receipts],
+                [order, *facts.receipts],
                 warning=True,
             )
             continue
         verified_order = order.model_copy(deep=True)
-        for i, ref in enumerate(source_refs(receipts)):
+        for i, ref in enumerate(source_refs(facts.receipts)):
             verified_order.evidence[f"receipt#{i}"] = ref
-        grouped[code].append(verified_order)
+        grouped[join_key(code) or code].append(verified_order)
         verified.append(verified_order)
+    # `incoming_for` reports open lines' problems; here they are delivery evidence only.
+    for order in coalesce(
+        [r for r in candidates if state(r) in OPEN], ORDER_KEY, [], "conflicting_purchase_order"
+    ):
+        ordered_at = source_date(order, "ordered_at", [])
+        code = source_text(order, "supplier_code")
+        if ordered_at is not None and ordered_at <= scope.as_of and code is not None:
+            orders.append(
+                reconcile_order(
+                    order,
+                    records,
+                    supplier=code,
+                    ordered_at=ordered_at,
+                    unit=unit,
+                    as_of=scope.as_of,
+                    issues=[],
+                )
+            )
     suppliers = [
         supplier_evidence(
             rows, masters, performance, verified, issues, include_history_evidence=False
@@ -455,8 +554,24 @@ def _history(
     ]
     for supplier in suppliers:
         supplier.last_price_basis = "received_order"
+    for code in dict.fromkeys(order.supplier for order in orders):
+        # Orders, but no completed purchase: no price, yet measured.
+        if (join_key(code) or code) not in grouped:
+            suppliers.append(
+                _listed_supplier(
+                    code,
+                    masters,
+                    issues,
+                    "unresolved_supplier_code",
+                    "A supplier's name or contact is not uniquely established.",
+                )
+            )
     qualifications = coalesce(
-        [r for r in records if r.kind == "supplier_item" and source_text(r, "part_number") == part],
+        [
+            r
+            for r in records
+            if r.kind == "supplier_item" and same_key(source_text(r, "part_number"), part)
+        ],
         ("part_number", "supplier_code"),
         issues,
         "conflicting_supplier_qualification",
@@ -466,31 +581,21 @@ def _history(
         if since is None or since > scope.as_of:
             continue
         code = source_text(qualification, "supplier_code")
-        existing = next((s for s in suppliers if s.supplier_code == code), None)
+        existing = next((s for s in suppliers if same_key(s.supplier_code, code)), None)
         if existing is None:
-            matching = [r for r in masters if source_text(r, "supplier_code") == code]
-            names = {source_text(r, "name") for r in matching} - {None}
-            emails = {source_text(r, "email") for r in matching} - {None}
-            existing = SupplierEvidence(
-                supplier_code=code,
-                name=next(iter(names)) if len(names) == 1 else None,
-                email=next(iter(emails)) if len(emails) == 1 and len(names) == 1 else None,
-                evidence=source_refs(matching),
+            existing = _listed_supplier(
+                code,
+                masters,
+                issues,
+                "unresolved_qualified_supplier",
+                "A qualified supplier's name or contact is not uniquely established.",
             )
-            if len(names) != 1 or len(emails) > 1:
-                add_issue(
-                    issues,
-                    "unresolved_qualified_supplier",
-                    "A qualified supplier's name or contact is not uniquely established.",
-                    matching,
-                    warning=True,
-                )
             suppliers.append(existing)
         existing.qualification_status = source_text(qualification, "status")
         existing.evidence.extend(
             r for r in source_refs([qualification]) if r not in existing.evidence
         )
-    return suppliers
+    return suppliers, orders
 
 
 def _net(line: AssessmentLine) -> None:
@@ -581,10 +686,17 @@ def assess_plan(records: Sequence[Record], scope: PlanningScope) -> Assessment:
                 "No order register was mapped; zero outstanding purchases cannot be established.",
                 [],
             )
-        line.suppliers = _history(records, part, unit, scope, line.issues)
+        line.suppliers, orders = _history(records, part, unit, scope, line.issues)
         if not any(i.severity == "blocker" for i in [*result.issues, *line.issues]):
             _net(line)
         line.ready = line.calculated_to_buy is not None
+        # Supplier performance and the internal price benchmark (an internal reference only).
+        measure(
+            line,
+            {s.supplier_code: s for s in line.suppliers if s.supplier_code is not None},
+            orders,
+            scope.as_of,
+        )
         result.lines.append(line)
     if not demands:
         add_issue(

@@ -368,7 +368,8 @@ def check_field(
     issues.extend(value_issues)
     if parsed is not None and source is not None and source.quote.strip():
         header = _column_header(source, sources) if kind == "days" else None
-        issues.extend(_grounding(kind, parsed, source.quote, decimal, header=header))
+        grounding = _grounding(kind, parsed, source.quote, decimal, header=header)
+        issues.extend(grounding)
     return FieldCheck(name=name, extracted=extracted, parsed=parsed, issues=tuple(issues))
 
 

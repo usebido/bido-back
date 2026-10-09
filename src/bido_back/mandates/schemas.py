@@ -1,6 +1,6 @@
 """Shapes of a negotiation mandate: the approved payload and the API views."""
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
@@ -29,6 +29,9 @@ class MandateLine(BaseModel):
     target_unit_price: Decimal = Field(gt=0)
     max_unit_price: Decimal = Field(gt=0)
     max_lead_time_days: int | None = Field(default=None, ge=0, le=3650)
+    # Set when `max_lead_time_days` was derived from this need-by date (calendar days
+    # from the proposal date), not set by the buyer: shown in what they approve.
+    lead_time_need_by: date | None = None
 
     @model_validator(mode="after")
     def _target_within_max(self) -> "MandateLine":

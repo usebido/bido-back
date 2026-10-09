@@ -104,24 +104,69 @@ analysis, returning only cell locators. It does not generate join code, quantiti
 normalized statuses or SQL. Manifest samples now include late headers and separate
 table blocks with original row numbers rather than only introductory rows.
 
-Both source tools and `POST /v1/procurement-assessments` accept optional `scope`:
+### Any export layout (`source_mapper.v3.md`)
+
+The mapper still returns locators only; code checks and copies everything:
+
+- **Checked columns.** Each column echoes its header text; a mismatch rejects the section
+  (`header_mismatch`). Before records exist, numeric, date, unit and e-mail columns must
+  read as their field for at least 80% of values (`inadmissible_mapping`). Total and
+  subtotal rows (keywords, ERP `*` marks, key-less sums of the rows above) never become
+  transactions. `fill_down` repeats a blank grouping key from the row above, for
+  identifier columns only, disclosed.
+- **Report-level values.** Section `constants` locate a title or header cell (a stock
+  position date, a plant, a currency, a unit in a header) outside the data rows; `text`
+  names the exact part of the cell. A row's own value wins. Continuation pages keep them.
+- **Categorical values.** `value_maps` interpret each distinct spelling of a status,
+  movement, demand/balance basis or unit column as a term of a closed vocabulary
+  (`vocabulary.py`); code checks that the spelling occurs and the term is allowed, and
+  records it in `Record.canonical` next to the source spelling. Contradictions stay
+  unresolved. Built-in synonyms in six languages are the fallback; spellings with two
+  meanings ("fermé"/"ferme") are left out.
+- **Locale.** Ambiguous numbers (`1,000`) and day/month dates (`08/10/2026`) are read only
+  when other values of the column, sheet or source prove the separator or order, or (dates)
+  when the mapper declared the order from the source's language and nothing contradicts it.
+  Each reading is disclosed with the proving cell. Numbers stored as spreadsheet numbers
+  need no separator.
+- **Inline purchase facts.** A register's received date and received/rejected/open
+  quantities stand in for separate receipt and schedule tables of the same order line;
+  when both exist they must agree.
+- **Identifiers.** Joins ignore case, spacing and the zero padding of purely numeric codes
+  (disclosed); two such spellings inside one table are an `identifier_collision` blocker.
+- **Readers.** Formulas are read from their saved values (disclosed); a formula without one
+  is empty. `.xlsm`, `.tsv`, tab/semicolon/pipe-delimited `.txt`, UTF-16 and Windows-1252
+  exports are read.
+
+Both source tools and `POST /v1/procurement-assessments` accept an optional `scope`
+request with the buyer's boundaries as stated, every field optional:
 
 ```json
 {
-  "product_code": "MTR-100",
-  "location": "Plant A",
-  "as_of": "2026-10-08",
-  "horizon_end": "2026-10-22",
-  "safety_stock": 0,
-  "production_lead_days": 0
+  "product": "Motor MTR-100",
+  "location": "Planta A",
+  "horizon_days": 14,
+  "safety_stock": 0
 }
 ```
 
-`area` can select production using the plan or product master instead of a single
-product. Product codes and plant keys match exactly; objective text alone is not
-a filter. Located `planning_candidates` and `snapshot_dates` let the copilot resolve
-identifiers and repeat an initially unscoped call. Saving preserves the same scope;
-scope and contract version are part of the immutable snapshot cache identity.
+The copilot cannot know the export date (and often not the exact code) before the file
+is read, so `purchasing/sources/scope.py` resolves the request in code after mapping and
+before planning, in the same call. The product is found by its code (case, spacing and
+punctuation aside), by a production product's code written in the buyer's words, or by
+the only master description matching them; area and plant compare without case, accents,
+spacing or punctuation, and a product planned at one plant uses it. A missing `as_of` is
+the latest stock snapshot of that plant (older snapshots are never added); the horizon is
+`horizon_end` or `as_of + horizon_days`. Values settled this way are assumptions:
+`scope_resolution.assumptions` and warning issues. Ambiguity never guesses: it returns
+`scope_resolution.questions` with options from the evidence (without a horizon, the
+candidate orders and their dates), a `missing_planning_scope` blocker and no lines, never
+per-material lines of every area. The response's `scope` is the resolved `PlanningScope`;
+today's complete scope fields (`product_code` or `area`, `location`, `as_of`,
+`horizon_end`) remain a valid request and pass through unchanged. Objective text alone is
+not a filter. Sources without production plans keep the unscoped assessment unless the
+request is already complete (`scope_not_applied` discloses that boundaries were ignored).
+The request, not the resolved scope, is part of the snapshot cache identity: saving with
+the analysis request finds the same snapshot and resolves the same scope.
 
 The deterministic planner:
 
@@ -147,8 +192,8 @@ The deterministic planner:
   require reconciled receipts with evidence. Open orders and archived quotation emails
   cannot become the last received price.
 
-`copilot.v20.md` uses these typed boundaries and explains assumptions rather than asking
-buyers to prejoin the workbook. This path performs no import or outbound action.
+`copilot.v22.md` passes the buyer's boundaries in one call, discloses the assumptions and
+asks only the open questions, rather than asking buyers to prejoin the workbook. This path performs no import or outbound action.
 Manufacturing lead time defaults to zero and is disclosed: component deadlines then
 equal the production need date. Coverage is conditional on pending deliveries arriving.
 

@@ -7,7 +7,9 @@ Flow:
    approval of `approve_negotiation_mandate` whose payload lists the suppliers
    and their addresses, per-line target and maximum, the deadline, the round
    cap, the daily cap per supplier, and the initial emails by approval id and
-   args hash.
+   args hash. A line with a need-by date and no lead-time limit gets one: the
+   calendar days from the proposal date to that date (`lead_time_need_by` says
+   so in the payload), so a late delivery is negotiated like a high price.
 2. A person approves it through the normal guard. The worker executes the act
    once (`approve_negotiation_mandate`, below): it saves the negotiation
    settings, records the mandate, and approves exactly the initial emails it
@@ -37,7 +39,7 @@ Logs carry ids, counts and reasons only.
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from typing import Final, cast
 from uuid import UUID, uuid5
 
@@ -122,6 +124,18 @@ def mandate_proposal_ids(rfq_id: UUID, attempt: int) -> tuple[UUID, str]:
 # --- Proposing --------------------------------------------------------------------------
 
 
+def lead_time_until(need_by: date | None, today: date) -> int | None:
+    """The longest lead time (calendar days) that still delivers by `need_by`.
+
+    None without a need-by date, or when it is today or past: no lead time meets it,
+    and a limit of zero days would only ask suppliers for the impossible.
+    """
+    if need_by is None:
+        return None
+    days = (need_by - today).days
+    return min(days, 3650) if days > 0 else None
+
+
 async def propose_mandate(
     db: Db,
     principal: Principal,
@@ -131,6 +145,7 @@ async def propose_mandate(
     writer: EmailWriterAgent,
     mailboxes: MailboxSenderFactory,
     resolver: MxResolver | None = None,
+    now: datetime | None = None,
 ) -> ProposedMandate:
     """Render the initial emails and record the single mandate approval.
 
@@ -141,6 +156,7 @@ async def propose_mandate(
     approval is recorded). Nothing is sent here.
     """
     overrides = {limits.rfq_line_id: limits for limits in request.lines}
+    today = (now or datetime.now(UTC)).date()
     async with tenant_session(db, principal.tenant_id) as session:
         rfq = await session.get(Rfq, rfq_id)
         if rfq is None:
@@ -168,6 +184,11 @@ async def propose_mandate(
             target = o.target_unit_price if o else line.target_unit_price
             maximum = o.max_unit_price if o else line.max_unit_price
             lead = o.max_lead_time_days if o else line.max_lead_time_days
+            lead_set = o is not None and "max_lead_time_days" in o.model_fields_set
+            lead_need_by: date | None = None
+            if lead is None and not lead_set:
+                lead = lead_time_until(line.need_by, today)
+                lead_need_by = line.need_by if lead is not None else None
             if target is None or maximum is None:
                 missing.append(line.position)
                 continue
@@ -179,6 +200,7 @@ async def propose_mandate(
                     target_unit_price=target,
                     max_unit_price=maximum,
                     max_lead_time_days=lead,
+                    lead_time_need_by=lead_need_by,
                 )
             )
         if missing:

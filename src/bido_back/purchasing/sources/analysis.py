@@ -9,9 +9,9 @@ demand balance. Every issue retains the original evidence coordinates.
 import re
 from collections import Counter, defaultdict
 from collections.abc import Sequence
+from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
-from bido_back.purchasing.importers import norm
 from bido_back.purchasing.sources.contracts import (
     Assessment,
     AssessmentLine,
@@ -23,7 +23,10 @@ from bido_back.purchasing.sources.evidence import (
     add_issue as _issue,
 )
 from bido_back.purchasing.sources.evidence import (
-    normalize_unit as _unit,
+    categorical,
+    join_key,
+    same_key,
+    unit_key,
 )
 from bido_back.purchasing.sources.evidence import (
     source_date as _day,
@@ -37,32 +40,17 @@ from bido_back.purchasing.sources.evidence import (
 from bido_back.purchasing.sources.evidence import (
     source_text as _text,
 )
+from bido_back.purchasing.sources.joins import CANCELLED, coalesce, state
+from bido_back.purchasing.sources.pricing import (
+    ORDER_KEY,
+    OrderFacts,
+    measure,
+    reconcile_order,
+    reference_date,
+)
+from bido_back.rfqs.language import country_code
 
 _ZERO = Decimal(0)
-_GROSS = frozenset(
-    {
-        "gross",
-        "gross demand",
-        "gross requirement",
-        "gross requirements",
-        "bruta",
-        "necessidade bruta",
-        "necessidades brutas",
-        "demanda bruta",
-    }
-)
-_NET = frozenset(
-    {
-        "net",
-        "net demand",
-        "net requirement",
-        "net requirements",
-        "liquida",
-        "necessidade liquida",
-        "necessidades liquidas",
-        "demanda liquida",
-    }
-)
 _PLANNING_KINDS = frozenset({"inventory", "material_requirement", "purchase_summary"})
 
 
@@ -115,12 +103,16 @@ def _deduplicate(records: Sequence[Record]) -> list[Record]:
 def _groups(
     records: Sequence[Record], issues: list[Issue]
 ) -> dict[tuple[str, str | None], list[Record]]:
+    """Planning records per item and location, matched by `join_key`; first spelling shown."""
     planning = [record for record in records if record.kind in _PLANNING_KINDS]
-    locations: dict[str, set[str]] = defaultdict(set)
+    names: dict[str | None, str] = {}
+    locations: dict[str, dict[str, str]] = defaultdict(dict)
     for record in planning:
         part, location = _text(record, "part_number"), _text(record, "location")
-        if part is not None and location is not None:
-            locations[part].add(location)
+        if part is not None:
+            names.setdefault(join_key(part), part)
+            if location is not None:
+                locations[names[join_key(part)]].setdefault(join_key(location) or "", location)
     groups: dict[tuple[str, str | None], list[Record]] = defaultdict(list)
     for record in planning:
         part = _text(record, "part_number")
@@ -129,9 +121,12 @@ def _groups(
                 issues, "missing_part_number", "A planning record has no item identifier.", [record]
             )
             continue
+        part = names[join_key(part)]
         location = _text(record, "location")
         if location is None and len(locations[part]) == 1:
-            location = next(iter(locations[part]))
+            location = next(iter(locations[part].values()))
+        elif location is not None:
+            location = locations[part][join_key(location) or ""]
         groups[part, location].append(record)
     return groups
 
@@ -267,8 +262,8 @@ def _calculate(
             [],
         )
         return
-    basis = norm(_text(requirement, "demand_basis") or "")
-    if basis not in _GROSS | _NET:
+    basis = categorical(requirement, "demand_basis")
+    if basis not in ("gross", "net"):
         _issue(
             issues,
             "ambiguous_demand_basis",
@@ -304,7 +299,7 @@ def _calculate(
             "need_by",
             warning=True,
         )
-    if basis in _NET:
+    if basis == "net":
         if not any(issue.severity == "blocker" for issue in issues):
             line.calculated_to_buy = line.demand
         return
@@ -382,7 +377,9 @@ def _planning_line(part: str, location: str | None, records: Sequence[Record]) -
     reported_unit = _text(summary, "unit")
     demand_unit = _text(requirement, "unit")
     inventory_unit = _text(inventory, "unit")
-    units = {_unit(value) for value in (reported_unit, demand_unit, inventory_unit) if value}
+    units = {
+        unit_key(record) for record in (summary, requirement, inventory) if _text(record, "unit")
+    }
     if len(units) > 1:
         _issue(
             issues,
@@ -457,12 +454,24 @@ def _supplier_matches(
     name: str | None,
 ) -> list[Record]:
     if code is not None:
-        return [record for record in records if _text(record, "supplier_code") == code]
+        return [record for record in records if same_key(_text(record, "supplier_code"), code)]
     if name is None:
         return []
     matches = [record for record in records if _name(_text(record, "name")) == _name(name)]
     codes = {_text(record, "supplier_code") for record in matches}
     return matches if len(codes - {None}) <= 1 else []
+
+
+def supplier_country(masters: Sequence[Record]) -> str | None:
+    """The one country the supplier's master rows name (ISO alpha-2), else None.
+
+    Every written value must be a recognizable country and all must agree.
+    """
+    written = {value for record in masters if (value := _text(record, "country")) is not None}
+    codes = {country_code(value) for value in written}
+    if not codes or None in codes or len(codes) != 1:
+        return None
+    return next(iter(codes))
 
 
 def supplier_evidence(
@@ -565,6 +574,7 @@ def supplier_evidence(
         last_price=_number(latest, "unit_price", issues, warning=True),
         currency=_currency(latest, issues),
         ordered_at=_day(latest, "ordered_at", issues),
+        country=supplier_country(matching),
         evidence=_refs(
             [
                 *(purchases if include_history_evidence else [latest or first]),
@@ -601,6 +611,50 @@ def supplier_evidence(
     return result
 
 
+def _supplier_key(code: str | None, name: str | None) -> str | None:
+    if code is not None:
+        return f"code:{join_key(code) or code}"
+    return f"name:{_name(name)}" if name is not None else None
+
+
+def _orders(
+    purchases: Sequence[Record],
+    records: Sequence[Record],
+    unit: str | None,
+    as_of: date | None,
+    issues: list[Issue],
+) -> list[OrderFacts]:
+    """The item's purchase lines at any location, joined to receipts where keyed."""
+    if as_of is None:
+        return []
+    keyed = [r for r in purchases if all(_text(r, field) for field in ORDER_KEY)]
+    conflicts: list[Issue] = []
+    lines = [
+        *coalesce(keyed, ORDER_KEY, conflicts, "conflicting_purchase_history"),
+        *(r for r in purchases if not all(_text(r, field) for field in ORDER_KEY)),
+    ]
+    # Measured history supplements this assessment; it never blocks its quantities.
+    issues.extend(issue.model_copy(update={"severity": "warning"}) for issue in conflicts)
+    orders: list[OrderFacts] = []
+    for order in lines:
+        key = _supplier_key(_text(order, "supplier_code"), _text(order, "supplier_name"))
+        ordered_at = _day(order, "ordered_at", [])
+        if key is None or ordered_at is None or ordered_at > as_of or state(order) in CANCELLED:
+            continue
+        orders.append(
+            reconcile_order(
+                order,
+                records,
+                supplier=key,
+                ordered_at=ordered_at,
+                unit=unit,
+                as_of=as_of,
+                issues=issues,
+            )
+        )
+    return orders
+
+
 def assess(records: Sequence[Record]) -> Assessment:
     """Produce a source-grounded assessment, never write data or propose an action."""
     unique = _deduplicate(records)
@@ -609,10 +663,12 @@ def assess(records: Sequence[Record]) -> Assessment:
     masters = [record for record in unique if record.kind == "supplier"]
     performance = [record for record in unique if record.kind == "supplier_performance"]
     all_purchases = [record for record in unique if record.kind == "purchase"]
-    purchases: dict[str, list[Record]] = defaultdict(list)
+    purchases: dict[str | None, list[Record]] = defaultdict(list)
     for record in unique:
         if record.kind == "purchase" and (part := _text(record, "part_number")) is not None:
-            purchases[part].append(record)
+            purchases[join_key(part)].append(record)
+    # Without a planning scope, history is measured up to the latest date the evidence shows.
+    as_of = reference_date(unique)
     for (part, location), group in grouped.items():
         line = _planning_line(part, location, group)
         if location is None and any(key[0] == part and key[1] is not None for key in grouped):
@@ -627,7 +683,7 @@ def assess(records: Sequence[Record]) -> Assessment:
             )
             line.calculated_to_buy = None
         by_supplier: dict[tuple[str | None, str | None], list[Record]] = defaultdict(list)
-        for record in purchases[part]:
+        for record in purchases[join_key(part)]:
             code = _text(record, "supplier_code")
             name = _text(record, "supplier_name")
             if code is None and name is None:
@@ -639,11 +695,27 @@ def assess(records: Sequence[Record]) -> Assessment:
                     warning=True,
                 )
                 continue
-            by_supplier[code, None if code else _name(name)].append(record)
-        line.suppliers = [
-            supplier_evidence(rows, masters, performance, all_purchases, line.issues)
-            for rows in by_supplier.values()
-        ]
+            by_supplier[join_key(code), None if code else _name(name)].append(record)
+        orders = _orders(purchases[join_key(part)], unique, line.unit, as_of, line.issues)
+        suppliers: dict[str, SupplierEvidence] = {}
+        for (code, name), rows in by_supplier.items():
+            key = _supplier_key(code, name) or ""
+            # A completed purchase (closed, fully received) sets the last price when one
+            # reconciles; otherwise the latest purchase order does, under its disclosed basis.
+            completed = [o.order for o in orders if o.supplier == key and o.completed]
+            suppliers[key] = supplier_evidence(
+                completed or rows,
+                masters,
+                performance,
+                all_purchases,
+                line.issues,
+                include_history_evidence=not completed,
+            )
+            if completed:
+                suppliers[key].last_price_basis = "received_order"
+        line.suppliers = list(suppliers.values())
+        # Supplier performance and the internal price benchmark (an internal reference only).
+        measure(line, suppliers, orders, as_of)
         line.ready = line.calculated_to_buy is not None and not any(
             issue.severity == "blocker" for issue in line.issues
         )

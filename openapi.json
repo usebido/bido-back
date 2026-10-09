@@ -838,6 +838,54 @@
         "title": "ApprovalRequested",
         "type": "object"
       },
+      "AssessmentInvitedSupplier": {
+        "description": "A supplier on the draft RFQ as a DRAFT invite; nothing was sent to it.",
+        "properties": {
+          "contact_created": {
+            "default": false,
+            "title": "Contact Created",
+            "type": "boolean"
+          },
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "name": {
+            "title": "Name",
+            "type": "string"
+          },
+          "part_numbers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Part Numbers",
+            "type": "array"
+          },
+          "supplier_created": {
+            "default": false,
+            "title": "Supplier Created",
+            "type": "boolean"
+          },
+          "supplier_id": {
+            "format": "uuid",
+            "title": "Supplier Id",
+            "type": "string"
+          }
+        },
+        "required": [
+          "supplier_id",
+          "name"
+        ],
+        "title": "AssessmentInvitedSupplier",
+        "type": "object"
+      },
       "AssessmentLine": {
         "properties": {
           "available": {
@@ -923,6 +971,13 @@
             "title": "Evidence",
             "type": "array"
           },
+          "flags": {
+            "items": {
+              "$ref": "#/components/schemas/LineFlag"
+            },
+            "title": "Flags",
+            "type": "array"
+          },
           "inbound": {
             "items": {
               "$ref": "#/components/schemas/InboundEvidence"
@@ -993,6 +1048,16 @@
           "part_number": {
             "title": "Part Number",
             "type": "string"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PriceBenchmark"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "ready": {
             "default": false,
@@ -1083,12 +1148,16 @@
           "scope": {
             "anyOf": [
               {
+                "$ref": "#/components/schemas/ScopeRequest-Input"
+              },
+              {
                 "$ref": "#/components/schemas/PlanningScope-Input"
               },
               {
                 "type": "null"
               }
-            ]
+            ],
+            "title": "Scope"
           },
           "upload_ids": {
             "items": {
@@ -1118,6 +1187,14 @@
             ],
             "title": "Base Currency",
             "type": "string"
+          },
+          "max_suppliers_per_line": {
+            "default": 3,
+            "description": "How many of each line's assessed suppliers (the suggested, best-ranked first) to invite as DRAFT invites. Nothing is sent.",
+            "maximum": 3.0,
+            "minimum": 1.0,
+            "title": "Max Suppliers Per Line",
+            "type": "integer"
           },
           "pending_validation": {
             "anyOf": [
@@ -1166,9 +1243,23 @@
             "title": "Assessment Id",
             "type": "string"
           },
+          "invited": {
+            "items": {
+              "$ref": "#/components/schemas/AssessmentInvitedSupplier"
+            },
+            "title": "Invited",
+            "type": "array"
+          },
           "lines": {
             "title": "Lines",
             "type": "integer"
+          },
+          "lines_without_limits": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Lines Without Limits",
+            "type": "array"
           },
           "preliminary": {
             "default": false,
@@ -1195,6 +1286,13 @@
             "title": "Skipped",
             "type": "array"
           },
+          "skipped_suppliers": {
+            "items": {
+              "$ref": "#/components/schemas/AssessmentSkippedSupplier"
+            },
+            "title": "Skipped Suppliers",
+            "type": "array"
+          },
           "title": {
             "default": "",
             "title": "Title",
@@ -1209,6 +1307,80 @@
           "reused"
         ],
         "title": "AssessmentRfqResult",
+        "type": "object"
+      },
+      "AssessmentSkippedSupplier": {
+        "description": "An assessed supplier that was not invited.",
+        "properties": {
+          "email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Email"
+          },
+          "name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Name"
+          },
+          "part_numbers": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Part Numbers",
+            "type": "array"
+          },
+          "reason": {
+            "description": "no_contact_email: no address in the evidence nor on the buyer's supplier; invalid_email: the evidence's email is not one valid address; no_company_name: an address no supplier of the buyer has, without a company name to create one; ambiguous_identity: the email or name matches several of the buyer's suppliers; disqualified: the buyer's approved-source data blocks it",
+            "enum": [
+              "no_contact_email",
+              "invalid_email",
+              "no_company_name",
+              "ambiguous_identity",
+              "disqualified"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "supplier_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Code"
+          },
+          "supplier_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Id"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "AssessmentSkippedSupplier",
         "type": "object"
       },
       "AssessmentSnapshotSummary": {
@@ -5698,6 +5870,52 @@
         "title": "LineDecisionView",
         "type": "object"
       },
+      "LineFlag": {
+        "properties": {
+          "code": {
+            "enum": [
+              "no_history",
+              "single_source",
+              "price_up",
+              "supplier_late",
+              "quality_issue",
+              "broker_source",
+              "mixed_currency",
+              "covered_by_stock"
+            ],
+            "title": "Code",
+            "type": "string"
+          },
+          "supplier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "title": "LineFlag",
+        "type": "object"
+      },
       "LineLimitsUpdate": {
         "additionalProperties": false,
         "properties": {
@@ -7576,6 +7794,134 @@
           "approval_id"
         ],
         "title": "PreparedInvite",
+        "type": "object"
+      },
+      "PriceBenchmark": {
+        "description": "Bido's internal price estimate from reconciled completed purchases.\n\nAn internal reference before any supplier contact: never a quotation, an accepted\nprice or an approved negotiation limit until the buyer approves it.",
+        "properties": {
+          "avg_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Avg Price",
+            "type": "string"
+          },
+          "basis": {
+            "const": "received_orders",
+            "default": "received_orders",
+            "title": "Basis",
+            "type": "string"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "estimated_cost_at_last": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Cost At Last"
+          },
+          "estimated_cost_at_target": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Estimated Cost At Target"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "last_ordered_at": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Ordered At"
+          },
+          "last_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Last Price",
+            "type": "string"
+          },
+          "last_supplier": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Supplier"
+          },
+          "max_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Max Price",
+            "type": "string"
+          },
+          "min_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Min Price",
+            "type": "string"
+          },
+          "observations": {
+            "minimum": 1.0,
+            "title": "Observations",
+            "type": "integer"
+          },
+          "target_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Target Price",
+            "type": "string"
+          },
+          "trend_pct": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Trend Pct"
+          },
+          "window_days": {
+            "minimum": 1.0,
+            "title": "Window Days",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "currency",
+          "observations",
+          "window_days",
+          "last_price",
+          "avg_price",
+          "min_price",
+          "target_price",
+          "max_price"
+        ],
+        "title": "PriceBenchmark",
         "type": "object"
       },
       "ProductView": {
@@ -10083,6 +10429,448 @@
         "title": "ScanView",
         "type": "object"
       },
+      "ScopeAssumption": {
+        "description": "A boundary code settled from the evidence; the copilot discloses it.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "field": {
+            "enum": [
+              "product_code",
+              "area",
+              "location",
+              "as_of",
+              "horizon_end",
+              "safety_stock",
+              "production_lead_days"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Value"
+          }
+        },
+        "required": [
+          "code",
+          "field",
+          "message"
+        ],
+        "title": "ScopeAssumption",
+        "type": "object"
+      },
+      "ScopeOption": {
+        "properties": {
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "value": {
+            "title": "Value",
+            "type": "string"
+          }
+        },
+        "required": [
+          "value",
+          "label"
+        ],
+        "title": "ScopeOption",
+        "type": "object"
+      },
+      "ScopeProvenance": {
+        "description": "Where one value of the resolved scope came from.",
+        "properties": {
+          "evidence": {
+            "items": {
+              "$ref": "#/components/schemas/SourceRef"
+            },
+            "title": "Evidence",
+            "type": "array"
+          },
+          "field": {
+            "enum": [
+              "product_code",
+              "area",
+              "location",
+              "as_of",
+              "horizon_end",
+              "safety_stock",
+              "production_lead_days"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "source": {
+            "enum": [
+              "buyer",
+              "evidence",
+              "default"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "field",
+          "source"
+        ],
+        "title": "ScopeProvenance",
+        "type": "object"
+      },
+      "ScopeQuestion": {
+        "description": "A boundary the evidence cannot settle without guessing: ask the buyer.",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "field": {
+            "enum": [
+              "product_code",
+              "area",
+              "location",
+              "as_of",
+              "horizon_end",
+              "safety_stock",
+              "production_lead_days"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "message": {
+            "title": "Message",
+            "type": "string"
+          },
+          "options": {
+            "items": {
+              "$ref": "#/components/schemas/ScopeOption"
+            },
+            "title": "Options",
+            "type": "array"
+          }
+        },
+        "required": [
+          "code",
+          "field",
+          "message"
+        ],
+        "title": "ScopeQuestion",
+        "type": "object"
+      },
+      "ScopeRequest-Input": {
+        "description": "The buyer's planning boundaries as they stated them; every field is optional.\n\nCode resolves the request against the mapped evidence into a `PlanningScope`\n(`bido_back.purchasing.sources.scope`), or asks a question. A complete request\n(product code or area, location, as_of and horizon_end) is a planning scope.",
+        "properties": {
+          "area": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only when the buyer asks for a whole area or department, not one product",
+            "title": "Area"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The reference (export/snapshot) date, only when the buyer gave one; empty = the latest stock snapshot of the plant",
+            "title": "As Of"
+          },
+          "horizon_days": {
+            "anyOf": [
+              {
+                "maximum": 365.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A horizon given in days after the reference date ('next 14 days' = 14)",
+            "title": "Horizon Days"
+          },
+          "horizon_end": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The last need date to include (inclusive), when given as a date",
+            "title": "Horizon End"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The plant or site as the buyer wrote it (e.g. 'Planta A')",
+            "title": "Location"
+          },
+          "product": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The product as the buyer named it, in their words (e.g. 'Motor MTR-100'); its exact code is found in the sources",
+            "title": "Product"
+          },
+          "product_code": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The product's exact code, only when the buyer gave it (e.g. MTR-100)",
+            "title": "Product Code"
+          },
+          "production_lead_days": {
+            "default": 0,
+            "description": "Days before the production date that components are needed, when given",
+            "maximum": 365.0,
+            "minimum": 0.0,
+            "title": "Production Lead Days",
+            "type": "integer"
+          },
+          "safety_stock": {
+            "anyOf": [
+              {
+                "exclusiveMaximum": 1000000000000.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The buyer's explicit safety-stock policy ('no additional safety stock' = 0); empty = the sources' own policy",
+            "title": "Safety Stock"
+          }
+        },
+        "title": "ScopeRequest",
+        "type": "object"
+      },
+      "ScopeRequest-Output": {
+        "description": "The buyer's planning boundaries as they stated them; every field is optional.\n\nCode resolves the request against the mapped evidence into a `PlanningScope`\n(`bido_back.purchasing.sources.scope`), or asks a question. A complete request\n(product code or area, location, as_of and horizon_end) is a planning scope.",
+        "properties": {
+          "area": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Only when the buyer asks for a whole area or department, not one product",
+            "title": "Area"
+          },
+          "as_of": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The reference (export/snapshot) date, only when the buyer gave one; empty = the latest stock snapshot of the plant",
+            "title": "As Of"
+          },
+          "horizon_days": {
+            "anyOf": [
+              {
+                "maximum": 365.0,
+                "minimum": 0.0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A horizon given in days after the reference date ('next 14 days' = 14)",
+            "title": "Horizon Days"
+          },
+          "horizon_end": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The last need date to include (inclusive), when given as a date",
+            "title": "Horizon End"
+          },
+          "location": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The plant or site as the buyer wrote it (e.g. 'Planta A')",
+            "title": "Location"
+          },
+          "product": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The product as the buyer named it, in their words (e.g. 'Motor MTR-100'); its exact code is found in the sources",
+            "title": "Product"
+          },
+          "product_code": {
+            "anyOf": [
+              {
+                "maxLength": 200,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The product's exact code, only when the buyer gave it (e.g. MTR-100)",
+            "title": "Product Code"
+          },
+          "production_lead_days": {
+            "default": 0,
+            "description": "Days before the production date that components are needed, when given",
+            "maximum": 365.0,
+            "minimum": 0.0,
+            "title": "Production Lead Days",
+            "type": "integer"
+          },
+          "safety_stock": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The buyer's explicit safety-stock policy ('no additional safety stock' = 0); empty = the sources' own policy",
+            "title": "Safety Stock"
+          }
+        },
+        "title": "ScopeRequest",
+        "type": "object"
+      },
+      "ScopeResolution": {
+        "properties": {
+          "assumptions": {
+            "items": {
+              "$ref": "#/components/schemas/ScopeAssumption"
+            },
+            "title": "Assumptions",
+            "type": "array"
+          },
+          "provenance": {
+            "items": {
+              "$ref": "#/components/schemas/ScopeProvenance"
+            },
+            "title": "Provenance",
+            "type": "array"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/ScopeQuestion"
+            },
+            "title": "Questions",
+            "type": "array"
+          },
+          "request": {
+            "$ref": "#/components/schemas/ScopeRequest-Output"
+          }
+        },
+        "required": [
+          "request"
+        ],
+        "title": "ScopeResolution",
+        "type": "object"
+      },
       "SearchHit": {
         "properties": {
           "created_at": {
@@ -10512,6 +11300,16 @@
               }
             ]
           },
+          "scope_resolution": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ScopeResolution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "snapshot_dates": {
             "items": {
               "format": "date",
@@ -10528,6 +11326,13 @@
             ],
             "title": "Status",
             "type": "string"
+          },
+          "totals": {
+            "items": {
+              "$ref": "#/components/schemas/SpendTotal"
+            },
+            "title": "Totals",
+            "type": "array"
           }
         },
         "title": "SourceAssessment",
@@ -10585,6 +11390,36 @@
           "column"
         ],
         "title": "SourceRef",
+        "type": "object"
+      },
+      "SpendTotal": {
+        "properties": {
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "lines": {
+            "title": "Lines",
+            "type": "integer"
+          },
+          "total_at_last_price": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total At Last Price",
+            "type": "string"
+          },
+          "total_at_target": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total At Target",
+            "type": "string"
+          }
+        },
+        "required": [
+          "currency",
+          "lines",
+          "total_at_target",
+          "total_at_last_price"
+        ],
+        "title": "SpendTotal",
         "type": "object"
       },
       "StartLogoUploadRequest": {
@@ -10901,6 +11736,41 @@
       },
       "SupplierEvidence": {
         "properties": {
+          "avg_lead_time_days": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Lead Time Days"
+          },
+          "avg_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Avg Price"
+          },
+          "country": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Country"
+          },
           "currency": {
             "anyOf": [
               {
@@ -10911,6 +11781,11 @@
               }
             ],
             "title": "Currency"
+          },
+          "delivery_observations": {
+            "default": 0,
+            "title": "Delivery Observations",
+            "type": "integer"
           },
           "email": {
             "anyOf": [
@@ -10951,6 +11826,18 @@
             "title": "Last Price Basis",
             "type": "string"
           },
+          "last_received_at": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Received At"
+          },
           "lead_time_days": {
             "anyOf": [
               {
@@ -10963,6 +11850,18 @@
             ],
             "title": "Lead Time Days"
           },
+          "min_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Min Price"
+          },
           "name": {
             "anyOf": [
               {
@@ -10973,6 +11872,18 @@
               }
             ],
             "title": "Name"
+          },
+          "on_time_rate": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "On Time Rate"
           },
           "ordered_at": {
             "anyOf": [
@@ -10985,6 +11896,11 @@
               }
             ],
             "title": "Ordered At"
+          },
+          "orders": {
+            "default": 0,
+            "title": "Orders",
+            "type": "integer"
           },
           "otif_pct": {
             "anyOf": [
@@ -11009,6 +11925,11 @@
             ],
             "title": "Qualification Status"
           },
+          "quality_observations": {
+            "default": 0,
+            "title": "Quality Observations",
+            "type": "integer"
+          },
           "quality_pct": {
             "anyOf": [
               {
@@ -11020,6 +11941,35 @@
               }
             ],
             "title": "Quality Pct"
+          },
+          "quality_rate": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quality Rate"
+          },
+          "quantity": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quantity"
+          },
+          "suggested": {
+            "default": false,
+            "title": "Suggested",
+            "type": "boolean"
           },
           "supplier_code": {
             "anyOf": [
@@ -11037,7 +11987,7 @@
         "type": "object"
       },
       "SupplierPerformance": {
-        "description": "Observed purchase-line outcomes for this supplier and requested item only.",
+        "description": "Observed purchase-line outcomes for this supplier and requested item only.\n\n`basis` says where they come from: purchase orders imported into Bido\n(`imported_history`, evidenced by `evidence_po_line_ids`), or, when none is\nin the policy window, the supplier statistics measured by the source\nassessment the RFQ line was drafted from (`source_assessment`, evidenced by\nthe line's `source_evidence`). The two are never mixed.",
         "properties": {
           "accepted_quantity_rate": {
             "anyOf": [
@@ -11050,6 +12000,15 @@
               }
             ],
             "title": "Accepted Quantity Rate"
+          },
+          "basis": {
+            "default": "imported_history",
+            "enum": [
+              "imported_history",
+              "source_assessment"
+            ],
+            "title": "Basis",
+            "type": "string"
           },
           "delivery_samples": {
             "default": 0,
@@ -18004,6 +18963,7 @@
         ]
       },
       "post": {
+        "description": "Assess the uploads and save the evidence snapshot.\n\n`scope` carries the buyer's planning boundaries as stated, all optional (a product\nname or code, plant, reference date, horizon end or days, safety stock). They are\nresolved against the mapped evidence: `scope` in the response is the resolved scope\nand `scope_resolution` the assumptions made and the questions still open.",
         "operationId": "create_assessment_v1_procurement_assessments_post",
         "parameters": [
           {

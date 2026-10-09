@@ -1,5 +1,7 @@
 """Source readers preserve evidence and disclose extraction limits without model calls."""
 
+import io
+import zipfile
 from datetime import date, datetime
 
 import pytest
@@ -65,7 +67,7 @@ def test_text_reader_keeps_lines_for_grounded_slices() -> None:
     assert table.source_id == "text-1"
 
 
-def test_formula_cache_is_disclosed_and_missing_results_are_not_invented() -> None:
+def test_formula_without_a_saved_value_is_empty_and_disclosed_not_blocking() -> None:
     source = SourceDocument(
         "formula-1",
         "needs.xlsx",
@@ -76,7 +78,102 @@ def test_formula_cache_is_disclosed_and_missing_results_are_not_invented() -> No
     tables, issues = read_source(source)
 
     assert tables[0].rows[1] == ["P-01", None]
-    assert [(issue.code, issue.severity) for issue in issues] == [("formula_cache", "blocker")]
+    assert [(issue.code, issue.severity) for issue in issues] == [
+        ("formula_without_value", "warning")
+    ]
+
+
+def _with_saved_values(data: bytes, *, macro: bool = False) -> bytes:
+    """What Excel writes: each formula keeps its last computed value (or error)."""
+    source = zipfile.ZipFile(io.BytesIO(data))
+    out = io.BytesIO()
+    with zipfile.ZipFile(out, "w") as target:
+        for item in source.infolist():
+            content = source.read(item.filename)
+            if item.filename == "xl/worksheets/sheet1.xml":
+                text = content.decode()
+                text = text.replace("<f>10+5</f><v />", "<f>10+5</f><v>15</v>")
+                text = text.replace(
+                    '<c r="C2"><f>1/0</f><v />', '<c r="C2" t="e"><f>1/0</f><v>#DIV/0!</v>'
+                )
+                content = text.encode()
+            if macro and item.filename == "[Content_Types].xml":
+                content = content.replace(
+                    b"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",
+                    b"application/vnd.ms-excel.sheet.macroEnabled.main+xml",
+                )
+            target.writestr(item, content)
+    return out.getvalue()
+
+
+@pytest.mark.parametrize("filename", ["needs.xlsx", "needs.xlsm"])
+def test_saved_formula_values_are_read_and_disclosed_and_errors_are_empty(filename: str) -> None:
+    rows: list[list[object]] = [
+        ["Material", "Need", "Ratio", "Price"],
+        ["P-01", "=10+5", "=1/0", 1.125],
+    ]
+    data = _with_saved_values(build_xlsx({"Needs": rows}), macro=filename.endswith(".xlsm"))
+
+    tables, issues = read_source(SourceDocument("formula-2", filename, XLSX, data))
+
+    assert tables[0].rows[1] == ["P-01", "15", None, "1.125"]
+    # Cells the workbook stored as numbers carry no locale: "1.125" is not one thousand.
+    assert tables[0].numbers == {(2, 2), (2, 4)}
+    assert [(issue.code, issue.severity) for issue in issues] == [
+        ("formula_values", "warning"),
+        ("formula_without_value", "warning"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("filename", "content_type", "data"),
+    [
+        ("stock.tsv", "text/tab-separated-values", b"Material\tQtd\n000101\t1.234,50\n"),
+        ("stock.txt", "text/plain", b"Material\tQtd\n000101\t1.234,50\n"),
+        ("stock.csv", "text/csv", b"Material;Qtd\n000101;1.234,50\n"),
+        ("stock.txt", "text/plain", b"Material|Qtd\n000101|1.234,50\n"),
+        ("stock", "text/csv", b"Material;Qtd\n000101;1.234,50\n"),
+        ("stock.tsv", "text/plain", "Material\tQtd\n000101\t1.234,50\n".encode("utf-16")),
+    ],
+)
+def test_delimited_exports_become_tables(filename: str, content_type: str, data: bytes) -> None:
+    tables, issues = read_source(SourceDocument("delimited", filename, content_type, data))
+
+    assert issues == []
+    [table] = tables
+    assert table.layout == "table"
+    assert table.rows == [["Material", "Qtd"], ["000101", "1.234,50"]]
+
+
+def test_framed_list_export_drops_frames_and_rules() -> None:
+    data = (
+        b"Pedidos de compra 08.10.2026\n"
+        b"|----------|------|\n"
+        b"| Pedido   | Qtd  |\n"
+        b"|----------|------|\n"
+        b"| 510044   | 24,5 |\n"
+        b"| 510063   | 120  |\n"
+    )
+
+    tables, _ = read_source(SourceDocument("sap-list", "list.txt", "text/plain", data))
+
+    assert tables[0].rows == [
+        ["Pedidos de compra 08.10.2026"],
+        [],
+        ["Pedido", "Qtd"],
+        [],
+        ["510044", "24,5"],
+        ["510063", "120"],
+    ]
+
+
+def test_windows_encoded_csv_keeps_accents_and_discloses_the_encoding() -> None:
+    data = "Emissão;Situação\n08/10/2026;Não recebido\n".encode("cp1252")
+
+    tables, issues = read_source(SourceDocument("legacy", "agenda.csv", "text/csv", data))
+
+    assert tables[0].rows == [["Emissão", "Situação"], ["08/10/2026", "Não recebido"]]
+    assert [(issue.code, issue.severity) for issue in issues] == [("source_encoding", "warning")]
 
 
 def test_native_excel_dates_are_canonical_calendar_dates() -> None:

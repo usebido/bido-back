@@ -87,8 +87,8 @@ def rfq_email_writer(model: str = DEFAULT_MODEL) -> AgentDefinition[RfqEmailLoca
 def quote_extraction(model: str = EXTRACTION_MODEL) -> AgentDefinition[QuoteExtractionOutput]:
     return AgentDefinition(
         name="quote_extraction",
-        prompt_file="quote_extraction.v3.md",
-        prompt_version=3,
+        prompt_file="quote_extraction.v4.md",
+        prompt_version=4,
         model=model,
         output_model=QuoteExtractionOutput,
         max_turns=_MAX_TURNS,
@@ -196,8 +196,8 @@ SHEET_MAPPER: Final = sheet_mapper()
 
 # A number next to a currency symbol or code: `12.50 EUR`, `€ 0,45`, `USD 3`.
 _PRICE = re.compile(
-    r"(?:[€$£¥]|\b(?:EUR|USD|GBP|CHF|CNY|JPY|RMB)\b)\s?\d"
-    r"|\d(?:[\d.,]*\d)?\s?(?:[€$£¥]|\b(?:EUR|USD|GBP|CHF|CNY|JPY|RMB)\b)",
+    r"(?:[€$£¥]|\b(?:EUR|USD|GBP|CHF|CNY|JPY|RMB|BRL)\b)\s?\d"
+    r"|\d(?:[\d.,]*\d)?\s?(?:[€$£¥]|\b(?:EUR|USD|GBP|CHF|CNY|JPY|RMB|BRL)\b)",
     re.IGNORECASE,
 )
 
@@ -246,10 +246,10 @@ def followup_email_problems(task: FollowupEmailInput, draft: FollowupEmailOutput
 # --- Deterministic checks on a negotiation draft ---------------------------------------
 
 _MAX_NEGOTIATION_CHARS: Final = 5000
-_NUMBER = re.compile(r"\d+(?:[.,\s']\d{3})*(?:[.,]\d+)?")
+_NUMBER = re.compile(r"\d+(?:[.,\s']\d{3}(?!\d))*(?:[.,]\d+)?")
 _PRICED_NUMBER = re.compile(
-    r"(?:[€$£¥]|\b(?:EUR|USD|GBP|CHF|CNY|JPY|RMB)\b)\s?(\d[\d.,\s']*\d|\d)"
-    r"|(\d[\d.,\s']*\d|\d)\s?(?:[€$£¥]|\b(?:EUR|USD|GBP|CHF|CNY|JPY|RMB)\b)",
+    r"(?:[€$£¥]|\b(?:EUR|USD|GBP|CHF|CNY|JPY|RMB|BRL)\b)\s?(\d[\d.,\s']*\d|\d)"
+    r"|(\d[\d.,\s']*\d|\d)\s?(?:[€$£¥]|\b(?:EUR|USD|GBP|CHF|CNY|JPY|RMB|BRL)\b)",
     re.IGNORECASE,
 )
 

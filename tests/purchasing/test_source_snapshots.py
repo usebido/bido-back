@@ -289,6 +289,7 @@ async def test_draft_preserves_decimal_units_evidence_and_does_not_send(
         assert line.source_evidence == {
             "assessment_id": str(source.assessment_id),
             "line": source.lines[0].model_dump(mode="json"),
+            "supplier_links": [],
         }
         for model in (Approval, Message, Invite):
             assert await session.scalar(select(func.count()).select_from(model)) == 0

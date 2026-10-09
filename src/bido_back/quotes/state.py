@@ -16,6 +16,7 @@ from pydantic import BaseModel, JsonValue
 
 from bido_back.agents.catalog.contracts import (
     ExtractedValue,
+    ExtraOfferDraft,
     ProposalLineDraft,
     QuoteExtractionOutput,
 )
@@ -64,6 +65,8 @@ class OfferEvent:
     occurred_at: datetime
     received_at: datetime
     quote: ValidatedQuote
+    # The supplier's explicit revision number ("Revisão 2", "Rev. 3", "R01"), if any.
+    revision: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,13 +195,45 @@ def stamp_quote(quote: ValidatedQuote, message_id: UUID) -> ValidatedQuote:
     )
 
 
+# "Revisão 2", "Revision 3", "Rev. 4", "Revisión 2", "Révision 2", "Revisione 2", "Rev-02".
+_REVISION_WORD = re.compile(
+    r"\b(?:revis(?:ão|ao|ion|ión|ione|ões|oes)|révision|rev)\b\.?\s*(?:n[º°o.]?\s*)?[-#]?\s*"
+    r"(\d{1,3})\b",
+    re.IGNORECASE,
+)
+# "R01", "R2" ending a subject ("Proposta 123 - R01", "Cotação (R2)"); never a part number.
+_REVISION_CODE = re.compile(r"(?:^|[\s_(\[])R(\d{1,2})[)\]]?\s*$")
+
+
+def revision_marker(subject: str | None, body: str | None = None) -> int | None:
+    """The one revision number a supplier wrote in its own subject or body, else None.
+
+    Quoted earlier messages (lines starting with `>`) are ignored. Two different
+    numbers are no evidence at all.
+    """
+    found: set[int] = set()
+    if subject:
+        found.update(int(n) for n in _REVISION_WORD.findall(subject))
+        found.update(int(n) for n in _REVISION_CODE.findall(subject))
+    if body:
+        own = "\n".join(line for line in body.splitlines() if not line.lstrip().startswith(">"))
+        found.update(int(n) for n in _REVISION_WORD.findall(own))
+    return next(iter(found)) if len(found) == 1 else None
+
+
 def _ordered(events: list[OfferEvent]) -> tuple[list[OfferEvent], tuple[str, ...]]:
-    """Known reply ancestry wins; receipt time bounds untrusted supplier dates."""
+    """Known reply ancestry wins; receipt time bounds untrusted supplier dates.
+
+    Messages delivered in another order than their Date headers say are
+    ordered by those dates only when the supplier's explicit revision numbers
+    agree; otherwise the chronology is uncertain and the offer is held.
+    """
     by_header = {event.message_header.strip(): event for event in events if event.message_header}
     pending = sorted(
         events,
         key=lambda event: (
             min(event.occurred_at, event.received_at),
+            event.revision if event.revision is not None else -1,
             event.received_at,
             str(event.message_id),
         ),
@@ -230,7 +265,18 @@ def _ordered(events: list[OfferEvent]) -> tuple[list[OfferEvent], tuple[str, ...
         directly_related = (current.in_reply_to or "").strip() == (
             previous.message_header or ""
         ).strip() and current.in_reply_to is not None
-        if not directly_related and (
+        if directly_related:
+            continue
+        if (
+            previous.revision is not None
+            and current.revision is not None
+            and previous.revision != current.revision
+        ):
+            # Two explicit revision numbers: they must agree with the dates.
+            if previous.revision > current.revision:
+                issues.append("uncertain_message_chronology")
+            continue
+        if (
             current.received_at < previous.received_at
             or current.occurred_at == previous.occurred_at
         ):
@@ -372,17 +418,35 @@ def _amend(previous: ValidatedQuote, event: OfferEvent) -> ValidatedQuote:
     return replace(current, header=header, lines=tuple(lines), issues=previous.issues)
 
 
+def _extra_key(offer: ExtraOfferDraft) -> str:
+    if offer.mpn and offer.mpn.strip():
+        return "mpn:" + "".join(c for c in offer.mpn.upper() if c.isalnum())
+    return "text:" + normalize_text(offer.description)
+
+
 def reconcile(events: list[OfferEvent]) -> OfferState:
     if not events:
         raise ValueError("offer events are required")
     ordered, chronology_issues = _ordered(events)
     effective: ValidatedQuote | None = None
     active = ordered[0]
+    # Unrequested offers stay until the supplier withdraws its whole offer; a
+    # later mention of the same item (same MPN or description) replaces it.
+    extras: dict[str, ExtraOfferDraft] = {}
     for raw_event in ordered:
         event = replace(raw_event, quote=stamp_quote(raw_event.quote, raw_event.message_id))
         current = event.quote
         kind = current.output.reply_kind
         active = event
+        if (
+            kind == "withdrawal"
+            and not current.output.withdrawn_line_positions
+            and current.output.update_evidence.value is not None
+            and "unverified:update_evidence" not in current.issues
+        ):
+            extras.clear()
+        for offer in current.output.extra_offers:
+            extras[_extra_key(offer)] = offer
         if kind == "replacement":
             effective = current
         elif kind == "amendment":
@@ -423,6 +487,10 @@ def reconcile(events: list[OfferEvent]) -> OfferState:
         if current.output.technical_questions:
             effective = _hold(effective, "supplier_clarification_required")
     assert effective is not None
+    effective = replace(
+        effective,
+        output=effective.output.model_copy(update={"extra_offers": list(extras.values())}),
+    )
     effective = _hold(effective, *chronology_issues) if chronology_issues else effective
     return OfferState(
         quote=effective,
