@@ -17,6 +17,7 @@ from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
+    ClarificationAsk,
     FollowupMessage,
     Invite,
     Message,
@@ -120,6 +121,13 @@ class World:
         )
         await self.approve(prepared.approvals[0].approval_id)
         self.rfq_id, self.invite_id = rfq.id, invite.id
+        # Quotes due today: chases follow the schedule from now on (never before that date).
+        await service.update_followups(
+            self.engine,
+            principal,
+            rfq.id,
+            FollowupSettingsUpdate(response_due=datetime.now(UTC).date()),
+        )
         async with tenant_session(self.engine, self.people.tenant) as session:
             stored = await session.get(Invite, invite.id)
             assert stored is not None and stored.sent_at is not None
@@ -278,7 +286,25 @@ async def test_a_stale_chase_is_skipped_by_the_send_tool(
 ) -> None:
     await world.sweep(writer, world.sent_at + timedelta(days=5))
     [chase] = await world.followups()
-    # The supplier answered after the approval (no intake hook ran: worst case).
+    # The supplier sent its offer after the approval (no intake hook ran: worst case).
+    await decide_approval(
+        world.engine,
+        approver(world.people),
+        chase.approval_id or chase.id,
+        "approve",
+        jobs=world.jobs,
+    )
+    await _store_proposal(world, complete=True)
+    await world.executor(world.jobs.jobs[-1])
+
+    assert len(world.mailboxes.sender.sent) == 1  # only the RFQ email
+    [chase] = await world.followups()
+    assert (chase.status, chase.canceled_reason) == ("canceled", "offer_received")
+
+
+async def test_a_declined_invite_is_never_chased(world: World, writer: FakeFollowupWriter) -> None:
+    await world.sweep(writer, world.sent_at + timedelta(days=5))
+    [chase] = await world.followups()
     await decide_approval(
         world.engine,
         approver(world.people),
@@ -288,13 +314,13 @@ async def test_a_stale_chase_is_skipped_by_the_send_tool(
     )
     async with tenant_session(world.engine, world.people.tenant) as session:
         await session.execute(
-            update(Invite).where(Invite.id == world.invite_id).values(status="responded")
+            update(Invite).where(Invite.id == world.invite_id).values(status="declined")
         )
     await world.executor(world.jobs.jobs[-1])
 
-    assert len(world.mailboxes.sender.sent) == 1  # only the RFQ email
+    assert len(world.mailboxes.sender.sent) == 1
     [chase] = await world.followups()
-    assert (chase.status, chase.canceled_reason) == ("canceled", "invite_responded")
+    assert (chase.status, chase.canceled_reason) == ("canceled", "invite_declined")
 
 
 async def test_an_auto_reply_pauses_chasing(
@@ -380,22 +406,45 @@ async def test_a_clarification_asks_for_exactly_what_is_missing(
     [clarification] = await world.followups()
     assert (clarification.kind, clarification.proposal_id) == ("clarification", proposal_id)
     task = writer.calls[-1]
-    assert [(i.position, i.field, i.problem) for i in task.open_items] == [
-        (None, "valid_until", "missing"),
-        (1, "lead_time", "missing"),
-        (2, "unit_price", "missing"),
-        (2, "quantity", "missing"),
-        (2, "lead_time", "missing"),
+    # Line 2 has no price: one question about it ("the price, or tell us you do not
+    # quote it"); line 1's single price applies to the requested quantity.
+    assert [(i.position, i.field, i.problem, i.question) for i in task.open_items] == [
+        (None, "valid_until", "missing", "value"),
+        (1, "lead_time", "missing", "value"),
+        (2, "unit_price", "missing", "price_or_decline"),
     ]
-    # Once per proposal.
+    assert task.reply_by is not None and task.reply_by > now.date()
+    assert clarification.reply_by == task.reply_by
+    # The ledger: asked once, in this email, waiting for approval.
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        asks = list(
+            await session.scalars(
+                select(ClarificationAsk).where(ClarificationAsk.invite_id == world.invite_id)
+            )
+        )
+    assert sorted((a.position or 0, a.field, a.status) for a in asks) == [
+        (0, "valid_until", "proposed"),
+        (1, "lead_time", "proposed"),
+        (2, "unit_price", "proposed"),
+    ]
+    assert {a.followup_id for a in asks} == {clarification.id}
+    # One email at a time: nothing more while it waits.
     assert (await world.sweep(writer, now)).clarifications == 0
 
-    # A newer, complete offer: the old clarification is canceled, nothing new is asked.
+    # A newer, complete offer: the old clarification is canceled (nothing was asked), and
+    # nothing new is asked.
     await _store_proposal(world, complete=True)
     result = await world.sweep(writer, now)
     assert (result.canceled, result.clarifications) == (1, 0)
     [clarification] = await world.followups()
     assert (clarification.status, clarification.canceled_reason) == ("canceled", "newer_offer")
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        statuses = set(
+            await session.scalars(
+                select(ClarificationAsk.status).where(ClarificationAsk.invite_id == world.invite_id)
+            )
+        )
+    assert statuses == {"withdrawn"}
 
 
 async def test_a_failing_writer_skips_and_retries_next_time(world: World) -> None:

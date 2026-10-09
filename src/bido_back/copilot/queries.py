@@ -5,7 +5,6 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Any, cast
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
@@ -117,14 +116,6 @@ async def latest_proposals(session: AsyncSession, rfq_id: UUID) -> list[LatestPr
     for line, position in line_rows:
         by_id[line.proposal_id].lines.append((line, position))
     return sorted(latest.values(), key=lambda item: item.supplier_name)
-
-
-def missing_fields(proposal: Proposal) -> list[str]:
-    review: object = proposal.fields.get("_review")
-    if not isinstance(review, dict):
-        return []
-    found: object = cast(dict[str, Any], review).get("missing_fields")
-    return [str(f) for f in cast(list[object], found)] if isinstance(found, list) else []
 
 
 @dataclass(frozen=True, slots=True)

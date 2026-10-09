@@ -701,6 +701,7 @@ _FIELD: Final[dict[str, dict[str, str]]] = {
         "unit_price": "o preço unitário",
         "quantity": "a quantidade (ou faixa de quantidade) a que o preço se aplica",
         "lead_time": "o prazo de entrega",
+        "delivery_date": "a data de entrega",
     },
     "de": {
         "currency": "die Währung der Preise",
@@ -708,6 +709,7 @@ _FIELD: Final[dict[str, dict[str, str]]] = {
         "unit_price": "den Stückpreis",
         "quantity": "die Menge bzw. Mengenstaffel, für die der Preis gilt",
         "lead_time": "die Lieferzeit",
+        "delivery_date": "den Liefertermin",
     },
     "en": {
         "currency": "the currency of the prices",
@@ -715,6 +717,7 @@ _FIELD: Final[dict[str, dict[str, str]]] = {
         "unit_price": "the unit price",
         "quantity": "the quantity or quantity tier the price applies to",
         "lead_time": "the lead time",
+        "delivery_date": "the delivery date",
     },
 }
 _WHERE: Final = {"pt": ("Proposta", "Item"), "de": ("Angebot", "Pos."), "en": ("Offer", "Position")}

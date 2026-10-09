@@ -51,6 +51,12 @@ from bido_back.comparison.compute import Recommendation
 from bido_back.comparison.loader import load_comparison
 from bido_back.comparison.policy import ComparisonPolicy
 from bido_back.copilot import proposals, queries
+from bido_back.copilot.followup_tools import (
+    SupplierFollowupOut,
+    followup_tools,
+    missing_items,
+    supplier_followups,
+)
 from bido_back.copilot.journey_tools import journey_tools, reply_by_explained
 from bido_back.copilot.proposals import (
     PROPOSAL_ARG,
@@ -254,6 +260,8 @@ class WhoRespondedOut(BaseModel):
 
 class SupplierGap(BaseModel):
     supplier_name: str
+    # What the offer lacks, by the rules Bido's clarification emails follow: asked and
+    # waiting, or not asked yet (`followups.missing`), never the model's own list.
     missing_fields: list[str]
     lines_needing_review: int
 
@@ -263,6 +271,8 @@ class WhatIsMissingOut(BaseModel):
     awaiting_suppliers: list[InviteItem]
     lines_without_quote: list[LineItem]
     proposal_gaps: list[SupplierGap]
+    # Every invited supplier: what Bido waits for, or what the buyer must do.
+    suppliers: list[SupplierFollowupOut] = Field(default_factory=list[SupplierFollowupOut])
 
 
 # --- list_proposals ----------------------------------------------------------------------
@@ -1141,12 +1151,14 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             lines = await queries.lines(session, rfq.id)
             invites = _invite_items(await queries.invites(session, rfq.id))
             proposals = await queries.latest_proposals(session, rfq.id)
+            followups = await supplier_followups(session, rfq.id, deps.today())
         quoted = {
             line.rfq_line_id
             for item in proposals
             for line, _ in item.lines
             if line.unit_price is not None and line.rfq_line_id is not None
         }
+        missing = {out.supplier_name: missing_items(out) for out in followups}
         return WhatIsMissingOut(
             ref=rfq.ref,
             awaiting_suppliers=[i for i in invites if i.status in queries.AWAITING_STATUSES],
@@ -1154,19 +1166,22 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             proposal_gaps=[
                 SupplierGap(
                     supplier_name=item.supplier_name,
-                    missing_fields=queries.missing_fields(item.proposal),
+                    missing_fields=missing.get(item.supplier_name, []),
                     lines_needing_review=sum(1 for line, _ in item.lines if line.needs_review),
                 )
                 for item in proposals
-                if queries.missing_fields(item.proposal)
+                if missing.get(item.supplier_name)
                 or any(line.needs_review for line, _ in item.lines)
             ],
+            suppliers=followups,
         )
 
     async def list_proposals(ctx: ToolContext, args: RfqRef) -> ListProposalsOut:
         async with tenant_session(db, ctx.tenant_id) as session:
             rfq = await _rfq(session, args.rfq)
             proposals = await queries.latest_proposals(session, rfq.id)
+            followups = await supplier_followups(session, rfq.id, deps.today())
+        missing = {out.supplier_name: missing_items(out) for out in followups}
         return ListProposalsOut(
             ref=rfq.ref,
             proposals=[
@@ -1178,7 +1193,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                     valid_until=item.proposal.valid_until,
                     incoterm=item.proposal.incoterm,
                     payment_terms=item.proposal.payment_terms,
-                    missing_fields=queries.missing_fields(item.proposal),
+                    missing_fields=missing.get(item.supplier_name, []),
                     lines=[
                         ProposalLineItem(
                             rfq_line_position=position,
@@ -2057,7 +2072,9 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         Tool(
             "what_is_missing",
             "What an RFQ still needs: suppliers who have not answered, lines nobody "
-            "priced, and proposals with missing or unverified fields." + rfq_ref_hint,
+            "priced, proposals with missing or unverified fields, and per supplier where it "
+            "stands: what Bido asked and waits for, the supplier's questions waiting for the "
+            "buyer's answer, and what needs the buyer's decision." + rfq_ref_hint,
             RfqRef,
             WhatIsMissingOut,
             "read",
@@ -2290,4 +2307,5 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             artifact_kind="approvals",
         ),
         *journey_tools(deps),
+        *followup_tools(deps),
     )

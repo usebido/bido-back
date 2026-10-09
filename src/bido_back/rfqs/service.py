@@ -76,7 +76,11 @@ from bido_back.db.models import (
     User,
 )
 from bido_back.email.recipients import MxResolver, default_resolver
-from bido_back.followups.send import SEND_FOLLOWUP_EMAIL, SendFollowupEmailArgs
+from bido_back.followups.send import (
+    SEND_FOLLOWUP_EMAIL,
+    SEND_SUPPLIER_ANSWER,
+    SendFollowupEmailArgs,
+)
 from bido_back.negotiation.send import SEND_NEGOTIATION_EMAIL, SendNegotiationEmailArgs
 from bido_back.onboarding.standard import TemplateContent
 from bido_back.outbound.domains import RecipientCheck, check_recipients, recipients_in_args
@@ -1314,7 +1318,7 @@ async def list_approvals(
             try:
                 if approval.tool == SEND_RFQ_EMAIL:
                     drafts[approval.id] = (SendRfqEmailArgs.model_validate(approval.args), "rfq")
-                elif approval.tool == SEND_FOLLOWUP_EMAIL:
+                elif approval.tool in (SEND_FOLLOWUP_EMAIL, SEND_SUPPLIER_ANSWER):
                     followup = SendFollowupEmailArgs.model_validate(approval.args)
                     drafts[approval.id] = (followup, followup.kind)
                 elif approval.tool == SEND_NEGOTIATION_EMAIL:

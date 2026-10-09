@@ -210,15 +210,17 @@ _W: Final[dict[str, dict[str, str]]] = {
 }
 _FIELD: Final[dict[str, dict[str, str]]] = {
     "de": {"currency": "Währung", "valid_until": "Gültigkeit des Angebots",
-           "unit_price": "Stückpreis", "quantity": "Menge", "lead_time": "Lieferzeit"},
+           "unit_price": "Stückpreis", "quantity": "Menge", "lead_time": "Lieferzeit",
+           "delivery_date": "Liefertermin"},
     "it": {"currency": "valuta", "valid_until": "validità dell'offerta",
            "unit_price": "prezzo unitario", "quantity": "quantità",
-           "lead_time": "tempi di consegna"},
+           "lead_time": "tempi di consegna", "delivery_date": "data di consegna"},
     "fr": {"currency": "devise", "valid_until": "validité de l'offre",
            "unit_price": "prix unitaire", "quantity": "quantité",
-           "lead_time": "délai de livraison"},
+           "lead_time": "délai de livraison", "delivery_date": "date de livraison"},
     "en": {"currency": "currency", "valid_until": "offer validity",
-           "unit_price": "unit price", "quantity": "quantity", "lead_time": "lead time"},
+           "unit_price": "unit price", "quantity": "quantity", "lead_time": "lead time",
+           "delivery_date": "delivery date"},
 }  # fmt: skip
 
 

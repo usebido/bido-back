@@ -14,8 +14,15 @@ Payload: `{"message_id": "<uuid>"}`; the tenant comes from the envelope.
    proposal references the message (a concurrent delivery may have won), and
    insert the next proposal version with its lines and per-field provenance.
    The message becomes `extracted`. A reply that is not a quote (out-of-office,
-   question, refusal) creates no proposal; a refusal marks the invite
-   `declined`.
+   question, refusal, "we will answer tomorrow") creates no proposal; a refusal
+   marks the invite `declined`.
+
+The clarification ledger (`bido_back.followups.ledger`) takes part in step 4:
+a reply with an offer that arrives after our clarification went out answers its
+open asks, so it is applied as an amendment of exactly those fields, and the
+asks are settled (answered, or unusable when still missing). The questions a
+reply asks the buyer are stored, whatever else it says, and pause the automatic
+emails to that supplier: pending ones are canceled.
 
 An agent-run failure marks the message `failed` and returns normally: the job
 is done, a retry is a deliberate re-enqueue (a `failed` message is extracted
@@ -52,6 +59,7 @@ from bido_back.agents.runner import Completed, Failed, run_to_completion
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Attachment,
+    AuditEvent,
     Invite,
     Message,
     Proposal,
@@ -61,12 +69,17 @@ from bido_back.db.models import (
     Supplier,
 )
 from bido_back.documents import DocumentText, extract_text, render_documents
+from bido_back.followups import ledger
+from bido_back.followups import missing as missing_rules
+from bido_back.followups.hooks import pause_on_question
 from bido_back.negotiation.hooks import cancel_on_new_offer
 from bido_back.quotes.parsing import decimal_separator_for
 from bido_back.quotes.state import (
     OfferEvent,
     StoredField,
+    has_offer_content,
     reconcile,
+    released_message_id,
     restore_field,
     restore_quote,
     revision_marker,
@@ -193,7 +206,7 @@ async def handle_quote_extract(
         "model": agent.model,
         "run_id": str(context.run_id),
     }
-    await _persist(db, tenant_id, loaded, validated, meta)
+    await _persist(db, tenant_id, loaded, validated, meta, today or datetime.now(UTC).date())
 
 
 def quote_extract_handler(
@@ -451,6 +464,13 @@ async def _events(session: AsyncSession, invite_id: UUID) -> list[OfferEvent]:
             )
         ).all()
     )
+    # Replies that answered our clarification, and offers the buyer released.
+    answers = await ledger.answers_by_message(session, invite_id)
+    released = {
+        message_id
+        for proposal, _ in rows
+        if (message_id := released_message_id(proposal.fields.get("_offer_state"))) is not None
+    }
     events: list[OfferEvent] = []
     for proposal, message in rows:
         event_record: object = proposal.fields.get("_quote_event")
@@ -468,6 +488,8 @@ async def _events(session: AsyncSession, invite_id: UUID) -> list[OfferEvent]:
                 received_at=message.created_at,
                 quote=quote,
                 revision=revision_marker(message.subject, message.body_text),
+                answers=answers.get(message.id, ()),
+                released=message.id in released,
             )
         )
     # A human correction remains authoritative for its original field evidence.
@@ -587,12 +609,28 @@ async def _mark_failed(db: Db, tenant_id: UUID, message_id: UUID) -> None:
             message.status = "failed"
 
 
+def _updates_offer(validated: ValidatedQuote, has_offer: bool) -> bool:
+    """A reply that is not a whole quote but changes the stored offer: an amendment, a
+    withdrawal, or (with an offer to apply it to) a clarification that states something
+    or asks the buyer something. A reply with neither ("we will answer tomorrow") leaves
+    the offer, and our open questions, as they are."""
+    output = validated.output
+    if output.reply_kind in {"amendment", "withdrawal"}:
+        return True
+    return (
+        output.reply_kind == "clarification"
+        and has_offer
+        and (has_offer_content(validated) or bool(output.technical_questions or output.conflicts))
+    )
+
+
 async def _persist(
     db: Db,
     tenant_id: UUID,
     loaded: _Loaded,
     validated: ValidatedQuote,
     meta: _RunMeta,
+    today: date,
 ) -> None:
     async with tenant_session(db, tenant_id) as session:
         # Corrections and negotiation preparation lock the RFQ first. Replay
@@ -623,17 +661,40 @@ async def _persist(
                 validated, output=validated.output.model_copy(update={"reply_kind": "withdrawal"})
             )
             invite.status = "declined"
-        updates_state = validated.output.reply_kind in {"amendment", "withdrawal"} or (
-            validated.output.reply_kind == "clarification" and bool(previous_events)
+        # What the supplier asks the buyer waits for the buyer, whatever else it says:
+        # nothing automatic goes to this supplier meanwhile.
+        asked_buyer = await ledger.store_questions(
+            session,
+            tenant_id=tenant_id,
+            invite_id=invite.id,
+            message_id=message.id,
+            questions=validated.output.technical_questions,
         )
-        if not validated.is_quote and not updates_state:
+        if asked_buyer:
+            await pause_on_question(session, invite.id)
+            await cancel_on_new_offer(session, invite.id, reason="supplier_question")
+            session.add(
+                AuditEvent(
+                    tenant_id=tenant_id,
+                    actor_user_id=None,
+                    action="rfq.supplier_question",
+                    payload={
+                        "rfq_id": str(invite.rfq_id),
+                        "invite_id": str(invite.id),
+                        "message_row_id": str(message.id),
+                        "questions": asked_buyer,
+                    },
+                )
+            )
+        if not validated.is_quote and not _updates_offer(validated, bool(previous_events)):
             message.status = "extracted"
             if validated.output.declined:
                 invite.status = "declined"
             logger.info(
-                "quote.extract: not a quote message=%s declined=%s run=%s",
+                "quote.extract: not a quote message=%s declined=%s questions=%s run=%s",
                 loaded.message_id,
                 validated.output.declined,
+                asked_buyer,
                 meta["run_id"],
             )
             return
@@ -643,6 +704,14 @@ async def _persist(
             select(func.max(Proposal.version)).where(Proposal.invite_id == invite.id)
         )
         event_quote = stamp_quote(validated, message.id)
+        # Its first reply with an offer after our clarification went out answers it.
+        asks = (
+            await ledger.asks_answered_by(session, invite.id, message.created_at)
+            if previous_events
+            and has_offer_content(validated)
+            and validated.output.reply_kind != "withdrawal"
+            else []
+        )
         state = reconcile(
             [
                 *previous_events,
@@ -654,14 +723,22 @@ async def _persist(
                     received_at=message.created_at,
                     quote=event_quote,
                     revision=revision_marker(message.subject, message.body_text),
+                    answers=tuple(ask.asked_field for ask in asks),
                 ),
             ]
         )
         effective = state.quote
+        offer_state = state.provenance()
+        # Every question the buyer has not answered yet holds the offer for the buyer.
+        open_questions = await ledger.open_question_texts(session, invite.id)
+        offer_state["technical_questions"] = list(open_questions)
+        offer_state["requires_clarification"] = (
+            bool(state.issues) or state.reply_kind == "clarification" or bool(open_questions)
+        )
         fields = effective.provenance()
         fields["_quote_event"] = store_quote(event_quote)
         fields["_offer_snapshot"] = store_quote(effective)
-        fields["_offer_state"] = state.provenance()
+        fields["_offer_state"] = offer_state
         fields["_extraction"] = {key: value for key, value in meta.items()}
         # Offers for things not requested: kept as written, never compared or priced.
         fields["extra_offers"] = [
@@ -685,15 +762,36 @@ async def _persist(
         # A counter-offer awaiting approval answered an older offer: cancel it.
         if state.active_message_id == message.id or state.issues:
             await cancel_on_new_offer(session, invite.id)
+        if asks:
+            # Each answered item is answered, or unusable (asked once, still missing).
+            country = await session.scalar(
+                select(Supplier.country).where(Supplier.id == invite.supplier_id)
+            )
+            still_missing = ledger.quote_items(
+                effective,
+                offer_state,
+                await ledger.requested_lines(session, invite.rfq_id),
+                country=country,
+                today=today,
+                expected_delivery=missing_rules.DEFAULT_EXPECTED_DELIVERY,
+            )
+            await ledger.settle_asks(
+                session,
+                asks,
+                message_id=message.id,
+                still_missing=[item.key for item in still_missing],
+                at=message.created_at,
+            )
         await session.flush()
         logger.info(
             "quote.extract: proposal stored message=%s proposal=%s version=%s lines=%s "
-            "needs_review=%s run=%s",
+            "needs_review=%s answered_asks=%s run=%s",
             loaded.message_id,
             proposal.id,
             proposal.version,
             len(effective.lines),
             effective.needs_review,
+            len(asks),
             meta["run_id"],
         )
 

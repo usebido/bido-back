@@ -170,9 +170,15 @@ async def test_who_responded_and_what_is_missing(
     assert [i.supplier_name for i in who.not_responded] == ["Lyon"]
     assert [i.supplier_name for i in missing.awaiting_suppliers] == ["Lyon"]
     assert [line.position for line in missing.lines_without_quote] == [2]
+    # One list with the clarification emails: the rules in code, never the model's own
+    # `missing_fields` (it said payment terms; the RFQ never asked for them).
     assert [
         (g.supplier_name, g.missing_fields, g.lines_needing_review) for g in missing.proposal_gaps
-    ] == [("Rhein", ["payment_terms"], 1)]
+    ] == [("Rhein", ["pos 2: unit price"], 1)]
+    by_name = {s.supplier_name: s for s in missing.suppliers}
+    assert by_name["Rhein"].still_missing == ["pos 2: unit price"]
+    # A draft RFQ: Bido sends nobody anything on its own.
+    assert {s.status for s in missing.suppliers} == {"not applicable"}
 
 
 async def test_prepare_send_records_approvals_and_sends_nothing(

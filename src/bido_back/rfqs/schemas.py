@@ -327,13 +327,14 @@ class PrepareSendResponse(BaseModel):
 ApprovalStatus = Literal["pending", "approved", "rejected", "executed", "expired"]
 
 
-EmailKind = Literal["rfq", "chase", "clarification"]
+EmailKind = Literal["rfq", "chase", "clarification", "reminder", "answer"]
 
 
 class RfqEmailDraft(BaseModel):
     """The exact email an approver approves (the stored, hashed arguments)."""
 
-    # The RFQ email itself, a reminder (chase) or a clarification question.
+    # The RFQ email itself, a chase, a clarification question, a reminder of an
+    # unanswered email, or the buyer's answer to a supplier's question.
     kind: EmailKind = "rfq"
     invite_id: UUID
     rfq_id: UUID | None

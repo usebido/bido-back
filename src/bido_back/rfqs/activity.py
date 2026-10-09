@@ -37,11 +37,18 @@ BIDO: Final = "Bido"
 _TOOLS: Final[Mapping[str, str]] = {
     "send_rfq_email": "RFQ email",
     "send_followup_email": "follow-up email",
+    "send_supplier_answer": "answer to a supplier's question",
     "send_negotiation_email": "negotiation email",
     "award_rfq": "award",
     "send_purchase_order": "purchase order",
     "send_award_notice": "not-selected notice",
     "approve_negotiation_mandate": "negotiation mandate",
+}
+_FOLLOWUP_KINDS: Final[Mapping[str, str]] = {
+    "chase": "Reminder",
+    "clarification": "Clarification question",
+    "reminder": "Reminder of our unanswered email",
+    "answer": "Answer to the supplier's question",
 }
 _NEGOTIATION_ACTIONS: Final[Mapping[str, str]] = {
     "counter": "Counter-offer",
@@ -197,8 +204,17 @@ def _event_item(
         case "rfq.email_sent":
             kind, summary = "email", f"RFQ sent{to}"
         case "rfq.followup_sent":
-            what = "Clarification question" if data.get("kind") == "clarification" else "Reminder"
+            what = _FOLLOWUP_KINDS.get(str(data.get("kind")), "Reminder")
             kind, summary = "email", f"{what} sent{to}"
+        case "rfq.supplier_question":
+            kind, actor = "agent", BIDO
+            summary = f"Question from the supplier{_from(supplier)}: needs your answer"
+        case "rfq.supplier_question_answered":
+            kind, summary = "user", f"Supplier's question answered{to} (email awaits approval)"
+        case "rfq.supplier_question_dismissed":
+            kind, summary = "user", f"Supplier's question closed without an email{_from(supplier)}"
+        case "proposal.hold_released":
+            kind, summary = "user", f"Offer{_from(supplier)} taken as shown: hold released"
         case "rfq.negotiation_sent":
             action = _NEGOTIATION_ACTIONS.get(str(data.get("action")), "Negotiation email")
             kind, summary = "email", f"{action} (round {data.get('round', '?')}) sent{to}"
@@ -320,6 +336,10 @@ def _value(value: object) -> str:
     if isinstance(value, list):
         return "/".join(_value(item) for item in cast(list[object], value))
     return str(value)
+
+
+def _from(supplier: str | None) -> str:
+    return f" from {supplier}" if supplier else ""
 
 
 def _supplier(value: object, suppliers: Mapping[UUID, str]) -> str | None:

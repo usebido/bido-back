@@ -49,6 +49,7 @@ rejected one while concurrent prepares of the same attempt still do.
 
 import asyncio
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Annotated, Final
@@ -143,12 +144,19 @@ class SendRfqEmailResult(BaseModel):
     already_sent: bool
 
 
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
+
+
 @dataclass(frozen=True, slots=True)
 class RfqActDeps:
     db: AsyncEngine | async_sessionmaker[AsyncSession]
     email_domain: str
     # Default: the buyer's connected mailbox (bido_back.mailbox, imported lazily).
     mailbox_senders: MailboxSenderFactory = field(default=default_mailbox_sender)
+    # When a follow-up went out (its schedule and the clarification ledger read it);
+    # evals pin it to their simulated clock.
+    clock: Callable[[], datetime] = field(default=_utc_now)
 
 
 @dataclass(frozen=True, slots=True)

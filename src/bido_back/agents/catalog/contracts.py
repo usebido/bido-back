@@ -294,7 +294,13 @@ class RfqTemplateBuilderOutput(BaseModel):
 # --- rfq_followup_writer: a chase or a clarification question, in the thread ----
 
 FollowupKind = Literal["chase", "clarification"]
-FollowupField = Literal["currency", "valid_until", "unit_price", "quantity", "lead_time"]
+FollowupField = Literal[
+    "currency", "valid_until", "unit_price", "quantity", "lead_time", "delivery_date"
+]
+# How an item is asked (`bido_back.followups.missing`): the value; confirm an unclear one;
+# "can you deliver by `need_by`? If not, the earliest date"; "the price, or tell us you do
+# not quote it".
+FollowupQuestion = Literal["value", "confirm", "deliver_by", "price_or_decline"]
 
 
 class FollowupItem(BaseModel):
@@ -304,6 +310,10 @@ class FollowupItem(BaseModel):
     line: str | None = Field(description="The line's description and MPN, as requested")
     field: FollowupField
     problem: Literal["missing", "unclear"]
+    question: FollowupQuestion = "value"
+    need_by: date | None = Field(
+        default=None, description="The date the line is needed by (delivery questions)"
+    )
 
 
 class FollowupEmailInput(BaseModel):
@@ -318,6 +328,10 @@ class FollowupEmailInput(BaseModel):
     original_sent_on: date | None = None
     response_due: date | None = None
     open_items: list[FollowupItem] = Field(default_factory=list[FollowupItem])
+    # The date this email asks the supplier to answer by (clarifications and reminders).
+    reply_by: date | None = None
+    # A reminder: the date of our earlier email the supplier has not answered.
+    reminder_of: date | None = None
 
 
 class FollowupEmailOutput(BaseModel):

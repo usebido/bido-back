@@ -29,6 +29,7 @@ from bido_back.db.models import (
 )
 from bido_back.followups import service as followup_service
 from bido_back.followups.calendar import add_business_days
+from bido_back.followups.schemas import FollowupSettingsUpdate
 from bido_back.followups.send import register_followup_act_tools
 from bido_back.negotiation import service
 from bido_back.negotiation.hooks import cancel_on_new_offer
@@ -393,6 +394,13 @@ async def test_the_deadline_closes_with_the_best_offers_and_stops_follow_ups(
     app_engine: AsyncEngine, rfq_rows: People
 ) -> None:
     world = await World(app_engine, rfq_rows).setup(silent=True)
+    # Quotes were due today: chasing the silent supplier may start (never before that).
+    await followup_service.update_followups(
+        world.engine,
+        buyer(world.people),
+        world.rfq_id,
+        FollowupSettingsUpdate(response_due=datetime.now(UTC).date()),
+    )
     # A week: the first chase (2 business days, US calendar for the silent
     # supplier) must fall before the deadline even across a holiday weekend.
     deadline = datetime.now(UTC) + timedelta(days=7)
