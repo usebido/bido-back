@@ -60,6 +60,12 @@ async def rfqs(session: AsyncSession, status: str | None, limit: int) -> list[Rf
     return list(await session.scalars(query))
 
 
+async def rfq_counts(session: AsyncSession) -> dict[str, int]:
+    """How many of the company's RFQs are in each status, regardless of any filter."""
+    rows = await session.execute(select(Rfq.status, func.count()).group_by(Rfq.status))
+    return {status: count for status, count in rows}
+
+
 async def lines(session: AsyncSession, rfq_id: UUID) -> list[RfqLine]:
     return list(
         await session.scalars(
