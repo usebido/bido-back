@@ -87,6 +87,22 @@ def test_canonical_values_are_machine_form_only() -> None:
         assert parse_canonical(text) is None
 
 
+def test_numbers_inside_identifiers_are_not_values() -> None:
+    quote = "Ímã cód. 000105: 220 pcs a R$ 21,90 por pcs, prazo de entrega de 4 dias"
+    assert not find_number(Decimal("105"), quote).found
+    assert find_number(Decimal("4"), quote).found
+    assert find_number(Decimal("220"), quote).found
+    assert find_number(Decimal("21.90"), quote, decimal=",").found
+    assert not find_number(Decimal("100"), "Motor MTR-100").found
+    assert find_number(Decimal("100"), "Motor MTR-100, 100 pcs").found
+    assert not find_number(Decimal("6"), "Ref. RFQ-6").found
+    assert not find_number(Decimal("4711"), "Art.-Nr. 4711, 30 Stk").found
+    assert find_number(Decimal("30"), "Art.-Nr. 4711, 30 Stk").found
+    # Ranges and currencies written against the amount are values, not codes.
+    assert find_number(Decimal("15"), "entrega em 10-15 dias").found
+    assert find_number(Decimal("10"), "EUR10 each").found
+
+
 def test_find_number_in_supplier_text() -> None:
     assert find_number(Decimal("0.45"), "Stückpreis 0,45 € netto").found
     assert find_number(Decimal("100"), "Pos 1 100 pcs").found

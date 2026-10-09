@@ -328,6 +328,20 @@ def test_a_lead_time_number_not_in_its_quote_is_not_grounded() -> None:
     assert result.lines[0].fields["lead_time_days"].conversion is None
 
 
+def test_a_part_code_is_not_evidence_for_a_lead_time() -> None:
+    # Live journey run: "Ímã cód. 000105 ... prazo de entrega de 4 dias" came back as
+    # 105 days, grounded on the part code. A number inside an identifier is no value.
+    quote = "Ímã cód. 000105: 220 pcs a R$ 21,90 por pcs, prazo de entrega de 4 dias"
+    body = BODY + quote + ".\n"
+
+    wrong = validate(output(line(lead_time_days=ev("105", quote))), body=body)
+    right = validate(output(line(lead_time_days=ev("4", quote))), body=body)
+
+    assert "not_grounded" in issues_of(wrong, "lead_time_days")
+    assert issues_of(right, "lead_time_days") == ()
+    assert right.lines[0].parsed("lead_time_days") == 4
+
+
 def test_header_values_are_checked_against_their_quotes() -> None:
     result = validate(
         output(

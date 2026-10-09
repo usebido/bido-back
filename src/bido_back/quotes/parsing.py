@@ -124,16 +124,71 @@ class NumberMatch:
     ambiguous: bool = False
 
 
+# A label that introduces an identifier, ending right before the digits: "cód. 000105",
+# "Art.-Nr. 4711", "ref: 205", "P/N 3300".
+_CODE_LABEL = re.compile(
+    r"(?:\bc[óo]d(?:igo)?|\bcode|\bart(?:ikel|icolo|\.-?nr)?|\bref|\bp/?n|\bmpn|\bsku"
+    r"|\bn[º°]|\bnr)\.?\s*[:#]?\s*$",
+    re.IGNORECASE,
+)
+
+
+# Letters (and digits) written against the number, optionally joined by - _ /: "MTR-100",
+# "RFQ-6", "X100". Digits alone before a dash are a range ("10-15 dias"), not a code.
+_CODE_PREFIX = re.compile(r"([A-Za-z][A-Za-z0-9]*)[-_/]?$|#$")
+
+
+def _is_code(text: str, start: int, token: str) -> bool:
+    """Whether the number at `start` is part of an identifier rather than a value.
+
+    An identifier is never evidence for a price, a quantity or a lead time: the 105 in
+    "cód. 000105", the 100 in "MTR-100" or the 6 in "RFQ-6".
+    """
+    before = text[:start]
+    attached = _CODE_PREFIX.search(before)
+    if attached is not None:
+        word = attached.group(1)
+        # "BRL10" / "EUR10": a currency written against its amount is not a code.
+        if word is None or word.upper() not in ISO_CURRENCIES:
+            return True
+    if token.isdigit() and len(token) >= 3 and token.startswith("0"):
+        return True  # zero-padded identifiers ("000105")
+    return _CODE_LABEL.search(before[-20:]) is not None
+
+
+def _value_tokens(text: str) -> list[list[Reading]]:
+    """`number_tokens`, without the numbers that are part of identifiers."""
+    tokens: list[list[Reading]] = []
+    for match in _NUMBER_TOKEN.finditer(text):
+        token, start = match.group(), match.start()
+        while token.strip():
+            start += len(token) - len(token.lstrip())
+            token = token.strip()
+            if not _is_code(text, start, token):
+                tokens.extend(number_tokens(token))
+                break
+            # Drop the identifier's digits; a number may follow in the same run
+            # ("MTR-100, 100 pcs").
+            code = re.match(r"\d+", token)
+            head = code.end() if code is not None else len(token)
+            gap = re.match(r"[^\d]*", token[head:])
+            skip = head + (gap.end() if gap is not None else 0)
+            start += skip
+            token = token[skip:]
+    return tokens
+
+
 def find_number(
     value: Decimal, text: str, *, decimal: DecimalSeparator | None = None
 ) -> NumberMatch:
     """Whether `value` is one reading of a number in `text`.
 
     Ambiguous when the only tokens it matches have several readings and either
-    no locale is known or the matching reading is not the locale's.
+    no locale is known or the matching reading is not the locale's. Numbers inside
+    identifiers ("cód. 000105", "MTR-100") never match: they are not values.
     """
     ambiguous_match = False
-    for token in number_tokens(text):
+    for token in _value_tokens(text):
         matching = [r for r in token if r.value == value]
         if not matching:
             continue
