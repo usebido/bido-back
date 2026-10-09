@@ -586,6 +586,13 @@ async def test_a_refused_clarification_is_held_once_per_offer(
         "canceled",
         "draft_refused",
     )
+    # The buyer sees it: nothing was asked (no asks in the ledger), the buyer decides.
+    view = await service.get_followups(world.engine, buyer(world.people), world.rfq_id)
+    [invite_view] = view.invites
+    assert invite_view.phase == "needs_your_decision" and invite_view.asks == []
+    assert [(d.kind, d.reasons) for d in invite_view.needs_your_decision] == [
+        ("email_held", ["clarification"])
+    ]
     # A newer (still incomplete) offer gets its own clarification.
     monkeypatch.undo()
     await _store_proposal(world, complete=False)

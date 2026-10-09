@@ -4118,12 +4118,13 @@
             "title": "Field"
           },
           "kind": {
-            "description": "unusable_answer: asked once, the answer did not give it; asked_before: answered once, missing again; offer_held: the latest reply could not be applied (see reasons); no_answer: no answer even after the reminder",
+            "description": "unusable_answer: asked once, the answer did not give it; asked_before: answered once, missing again; offer_held: the latest reply could not be applied (see reasons); no_answer: no answer even after the reminder; email_held: the checks refused the follow-up Bido wrote (its kind in reasons), it was not sent",
             "enum": [
               "unusable_answer",
               "asked_before",
               "offer_held",
-              "no_answer"
+              "no_answer",
+              "email_held"
             ],
             "title": "Kind",
             "type": "string"

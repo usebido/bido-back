@@ -65,6 +65,7 @@ from bido_back.mandates.service import AUTO_TOOLS
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.errors import Forbidden, NotFound
 from bido_back.rfqs.service import NewRfqLine
+from bido_back.supplier_email import compose
 from evals.harness import Env, MemoryStorage, new_company
 from evals.personas import Persona
 from evals.scripted import ScriptedModel
@@ -452,6 +453,32 @@ async def test_one_open_request_then_one_reminder_after_its_reply_by(thread: Thr
     assert state.phase == "needs_your_decision"
     kinds = sorted((f.kind, f.status) for f in await thread.followups())
     assert kinds == [("clarification", "sent"), ("reminder", "sent")]
+
+
+async def test_a_refused_reminder_is_held_once_and_is_the_one_reminder(
+    thread: Thread, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    await thread.reply(INCOMPLETE, incomplete(), timedelta(hours=1))
+    await thread.sweep(timedelta(hours=2))
+    await thread.approve_pending()
+
+    # The send gate refuses the reminder (a rendering bug): held for the buyer, once.
+    def refused(*_: object) -> list[str]:
+        return ["number_not_decided"]
+
+    monkeypatch.setattr(compose, "email_problems", refused)
+    result = await thread.sweep(timedelta(days=6, hours=3))
+    assert (result.reminders, result.held) == (0, 1)
+    assert (await thread.sweep(timedelta(days=6, hours=4))) == service.SweepResult()
+    [held] = [f for f in await thread.followups() if f.kind == "reminder"]
+    assert (held.status, held.canceled_reason) == ("canceled", "draft_refused")
+    assert held.regarding_message_id is not None
+    state = await thread.state()
+    assert [(d.kind, d.reasons) for d in state.decisions] == [("email_held", ("reminder",))]
+    assert state.phase == "needs_your_decision"
+    # Fixed later: it was the one reminder, nothing is sent again on its own.
+    monkeypatch.undo()
+    assert (await thread.sweep(timedelta(days=8))).reminders == 0
 
 
 async def test_a_reply_without_an_offer_keeps_our_clarification_and_asks_nothing_twice(
