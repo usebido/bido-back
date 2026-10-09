@@ -578,6 +578,17 @@ def test_meeting_our_last_ask_ends_the_asks() -> None:
     )
     stop = plan(facts(above_target, FIRST, second), max_rounds=4)
     assert (stop.action, stop.reason) == ("close", "offer_meets_last_ask")
+    # Met on price but late on another line: that is the buyer's decision, not "final".
+    late = offer(quote(L1, "45.80"), quote(L2, "229.00", 25), quote(L3, "112.00", 14), version=3)
+    asked_date = replace(
+        second,
+        asks=(
+            *second.asks,
+            LineAsk(rfq_line_id=L2, deliver_by=TODAY + timedelta(days=14)),
+        ),
+    )
+    held = plan(facts(late, FIRST, asked_date), max_rounds=4)
+    assert (held.action, held.reason) == ("hold", "delivery_still_late")
 
 
 def test_a_late_line_is_asked_once_then_the_buyer_decides() -> None:

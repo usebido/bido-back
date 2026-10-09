@@ -748,9 +748,22 @@ def plan_supplier(
                 status="accepted",
                 order_by=order_by,
             )
-        if all(p.price_status in ("in_target", "ask_met") for p in priced) and any(
-            p.price_status == "ask_met" for p in priced
-        ):
+        # Only the price stands between this offer and an acceptance, and the supplier
+        # met what we last asked: nothing more to ask; the buyer decides on the above-
+        # target price at award time.
+        met_only = (
+            any(p.price_status == "ask_met" for p in priced)
+            and all(
+                p.price_status in ("in_target", "ask_met")
+                and p.delivery is not None
+                and p.delivery.acceptable
+                and not {"moq_above_quantity", "clarification_unanswered"} & set(p.reasons)
+                for p in priced
+            )
+            and not any(p.status == "blocked" for p in plans)
+            and not _accept_blockers(warnings)
+        )
+        if met_only:
             return _final(base, plans, warnings, "offer_meets_last_ask")
         return replace(
             base,
