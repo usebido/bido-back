@@ -21,9 +21,15 @@ otherwise.
 
 Matching headings to line data uses the template's ORIGINAL labels (the
 language the synonyms are written for); the email shows the localized ones.
+
+Quantities, units and dates follow the supplier's locale, as in every later email
+of the thread (`bido_back.supplier_email.locale`): `12,5`, `1.250 pç`, `22/10/2026`,
+`22 Oct 2026`. The subject is `[RFQ-n] <type label>: <title>`, without a type word
+the title repeats (`supplier_email.subject.first_subject`).
 """
 
 import html
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
@@ -31,6 +37,8 @@ from decimal import Decimal
 from typing import Final
 
 from bido_back.onboarding.standard import TemplateContent
+from bido_back.supplier_email.locale import Locale, day, number, unit_label
+from bido_back.supplier_email.subject import first_subject
 from bido_back.templates.required import (
     LINE_HEADINGS,
     REQUIRED_FIELDS,
@@ -190,6 +198,14 @@ def phrases(language: str) -> dict[str, str]:
     return _PHRASES.get(language, _PHRASES["en"])
 
 
+def subject_language(subject: str) -> str | None:
+    """The language of an RFQ email's subject, read from its type label (`] Angebotsanfrage:`)."""
+    for language, words in _PHRASES.items():
+        if f"] {words['subject']}: " in subject:
+            return language
+    return None
+
+
 def _headings(language: str) -> dict[str, str]:
     return LINE_HEADINGS.get(language, LINE_HEADINGS["en"])
 
@@ -229,6 +245,12 @@ class RenderInput:
     # The buyer's commercial terms, stated after the questions when set; never guessed.
     payment_terms: str | None = None
     quote_validity_days: int | None = None
+    # The supplier's country (ISO 3166-1 alpha-2): es-MX and de-CH write a decimal point.
+    region: str | None = None
+
+    @property
+    def locale(self) -> Locale:
+        return Locale.of(self.language, self.region)
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,13 +283,13 @@ def format_quantity(quantity: Decimal) -> str:
 
 
 def format_date(value: date, language: str) -> str:
-    match language:
-        case "de":
-            return value.strftime("%d.%m.%Y")
-        case "pt" | "fr" | "es" | "it":
-            return value.strftime("%d/%m/%Y")
-        case _:
-            return value.isoformat()
+    """22/10/2026, 22.10.2026, or 22 Oct 2026 in English (and the English skeleton)."""
+    return day(value, Locale.of(language))
+
+
+def display_quantity(quantity: Decimal, locale: Locale) -> str:
+    """A quantity as the supplier's locale writes it (`1.250`, `12,5`); never rounded."""
+    return number(quantity, locale)
 
 
 def _part(line: RenderLine) -> str:
@@ -288,7 +310,7 @@ def _incoterm(line: RenderLine) -> str:
     return " ".join(p for p in (line.incoterm, line.delivery_location) if p)
 
 
-def _cell(key: str | None, line: RenderLine, language: str) -> str:
+def _cell(key: str | None, line: RenderLine, locale: Locale) -> str:
     match key:
         case "position":
             return str(line.position)
@@ -305,11 +327,11 @@ def _cell(key: str | None, line: RenderLine, language: str) -> str:
         case "manufacturer":
             return line.manufacturer or ""
         case "quantity":
-            return " / ".join(format_quantity(q) for q in line.quantities)
+            return " / ".join(display_quantity(q, locale) for q in line.quantities)
         case "unit":
-            return line.unit
+            return unit_label(line.unit, locale)
         case "need_by":
-            return format_date(line.need_by, language) if line.need_by else ""
+            return day(line.need_by, locale) if line.need_by else ""
         case "qualification":
             return line.qualification or ""
         case "incoterm":
@@ -366,7 +388,7 @@ def table(data: RenderInput) -> tuple[list[str], list[list[str]], str | None]:
             at = keys.index("position") + 1 if key == "description" else len(keys)
             keys.insert(at, key)
             headings.insert(at, shown_headings["mpn" if key == "mpn_only" else key])
-    rows = [[_cell(key, line, data.language) for key in keys] for line in lines]
+    rows = [[_cell(key, line, data.locale) for key in keys] for line in lines]
     # A column Bido fills that is empty on every line (a template's "Prazo" when no line
     # has a need-by date) says nothing: drop it. Columns the supplier fills (key None)
     # stay empty on purpose, and the core columns always stay.
@@ -423,8 +445,11 @@ def _text_table(headings: list[str], rows: list[list[str]]) -> str:
 _CELL: Final = "border:1px solid #d0d4dc;padding:6px 10px;vertical-align:top"
 
 
+_NUMERIC: Final = re.compile(r"[\d.,’'\u202f]+(?: / [\d.,’'\u202f]+)*")
+
+
 def _numeric(cell: str) -> bool:
-    return bool(cell) and all(part.replace(".", "").isdigit() for part in cell.split(" / "))
+    return bool(_NUMERIC.fullmatch(cell)) and any(c.isdigit() for c in cell)
 
 
 def _html_table(headings: list[str], rows: list[list[str]]) -> str:
@@ -473,11 +498,9 @@ def render_rfq(data: RenderInput) -> RenderedRfq:
     incoterm_label = required_field("incoterm_place").label(data.language)
     headings, rows, incoterm = table(data)
     questions = asks(data)
-    subject = f"[{data.rfq_ref}] {words['subject']}: {data.rfq_title}"
+    subject = first_subject(data.rfq_ref, words["subject"], data.rfq_title)
     due = (
-        words["due"].format(date=format_date(data.response_due, data.language))
-        if data.response_due
-        else None
+        words["due"].format(date=day(data.response_due, data.locale)) if data.response_due else None
     )
     reference = words["reference"].format(ref=data.rfq_ref)
     terms: list[str] = []

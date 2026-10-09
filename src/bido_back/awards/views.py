@@ -59,3 +59,5 @@ class ThreadEmailApprovalView(BaseModel):
     cc: list[str]
     subject: str
     body: str
+    # The same email as HTML, when the proposal has one (the "not selected" notice).
+    html_body: str | None = None

@@ -386,6 +386,23 @@ class AwardNoticeOutput(BaseModel):
     body: str = Field(description="Plain text. The subject is set by code (Re: the RFQ email).")
 
 
+# --- The thread writers since their v2 prompts: an optional note, nothing else ------------
+#
+# Code renders every follow-up, negotiation and notice email (`bido_back.supplier_email`):
+# salutation, positions, questions, numbers, dates, reply-by, legal line, closing and
+# signature. The writers keep their input contracts above and return only this note;
+# the v1 output contracts stay for the released v1 prompts.
+
+
+class EmailNoteOutput(BaseModel):
+    note: str = Field(
+        description=(
+            "Empty by default. At most two short sentences in the supplier's language: no "
+            "digits, numbers, amounts, dates, names, links, greeting, list or signature."
+        )
+    )
+
+
 # --- sheet_mapper: an arbitrary workbook -> import sections ------------------------------
 
 SheetImportType = Literal[

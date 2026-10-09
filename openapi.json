@@ -6863,6 +6863,17 @@
             "title": "Cc",
             "type": "array"
           },
+          "html_body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Html Body"
+          },
           "invite_id": {
             "format": "uuid",
             "title": "Invite Id",
@@ -12653,6 +12664,17 @@
             },
             "title": "Cc",
             "type": "array"
+          },
+          "html_body": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Html Body"
           },
           "invite_id": {
             "format": "uuid",

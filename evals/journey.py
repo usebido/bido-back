@@ -66,7 +66,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, JsonValue, ValidationError
 from sqlalchemy import func, select, update
 
-from bido_back.agents.catalog.contracts import NegotiationEmailInput, NegotiationEmailOutput
+from bido_back.agents.catalog.contracts import NegotiationEmailInput
 from bido_back.agents.config import RunnerConfig
 from bido_back.agents.context import ToolContext
 from bido_back.agents.tools import AnyTool, ToolError
@@ -139,7 +139,7 @@ from evals.journey_workbook import (
     mock_case,
     real_case,
 )
-from evals.scripted import ScriptedModel, negotiation
+from evals.scripted import ScriptedModel
 from evals.world import Captured, World
 
 REPORTS: Final = Path(__file__).parent / "reports"
@@ -444,48 +444,12 @@ _NOT_REQUESTED: Final = re.compile(
 )
 
 
-# --- A Portuguese negotiation writer for mock mode --------------------------------------------
-
-
-def _pt_number(value: Decimal) -> str:
-    return format(value.normalize(), "f").replace(".", ",")
-
-
-def negotiation_pt(task: NegotiationEmailInput) -> NegotiationEmailOutput:
-    """Mock mode's negotiation writer for Brazilian suppliers: every number as given."""
-    if task.supplier_language != "pt":
-        return negotiation(task)
-    opening = (
-        "Pedimos sua melhor e última oferta para:"
-        if task.action == "bafo"
-        else "Pedimos que revisem as condições abaixo:"
-    )
-    lines = [f"Agradecemos a proposta para a {task.rfq_ref}. {opening}"]
-    if task.mention_competition:
-        lines.insert(0, "Recebemos uma oferta mais competitiva.")
-    for ask in task.lines:
-        if ask.target_unit_price is not None:
-            lines.append(
-                f"Item {ask.position} {ask.line}: preço alvo R$ {_pt_number(ask.target_unit_price)}"
-                f" por {ask.unit}"
-            )
-        if ask.required_lead_time_days is not None:
-            lines.append(
-                f"Item {ask.position} {ask.line}: prazo de entrega de até "
-                f"{ask.required_lead_time_days} dias"
-            )
-    if task.reply_by is not None:
-        lines.append(f"Pedimos retorno até {task.reply_by:%d/%m/%Y}.")
-    body = "\n".join(lines)
-    return NegotiationEmailOutput(body=f"Prezados,\n\n{body}\n\nAtenciosamente,\n{task.buyer_name}")
+# --- The scripted model ----------------------------------------------------------------------
 
 
 class JourneyModel(ScriptedModel):
-    """The flow evals' scripted model, with Portuguese counter-offers."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self._scripts["rfq_negotiation_writer"] = negotiation_pt
+    """The flow evals' scripted model. Code renders the negotiation emails in the supplier's
+    language (`bido_back.supplier_email`); the scripted writer adds no note."""
 
 
 # --- The copilot, live or scripted ------------------------------------------------------------
@@ -515,7 +479,8 @@ class SweepRecord:
     at: datetime
     replied: list[str]
     tasks: list[NegotiationEmailInput]
-    drafts: list[str]
+    # The writers' optional notes (code renders the emails).
+    notes: list[str]
     sent: list[Captured]
 
 
@@ -1612,7 +1577,7 @@ async def run_timeline(j: Journey) -> None:
                 at=world.now,
                 replied=sorted({e.supplier.key for e in today}),
                 tasks=[task for task, _ in new],
-                drafts=[out.body.strip() for _, out in new if out is not None],
+                notes=[out.note for _, out in new if out is not None and out.note],
                 sent=world.outbox.sent[sent:],
             )
         )
@@ -1838,7 +1803,6 @@ async def step_negotiation(j: Journey, step: Step) -> None:
             owner="negotiation",
         )
     step.check("no_ask_above_max", not above, "; ".join(above), owner="negotiation")
-    drafts = {d for s in j.sweeps for d in s.drafts}
     states = expected_states()
     own: dict[str, set[Decimal]] = defaultdict(set)
     for email in SCRIPT:
@@ -1851,8 +1815,8 @@ async def step_negotiation(j: Journey, step: Step) -> None:
         hidden = {m.normalize() for m in maxima.values()} - own[supplier.key] - disclosed
         for email in [e for e in j.world.outbox.to(supplier.email) if e not in j.rfq_emails]:
             body = email.body
-            if body.strip() not in drafts:
-                problems["as_drafted"].append(supplier.key)
+            if email.html is None:
+                problems["html_part"].append(supplier.key)
             if numbers(body) & hidden:
                 problems["no_max_revealed"].append(
                     f"{supplier.key}: {sorted(numbers(body) & hidden)}"
@@ -1865,7 +1829,7 @@ async def step_negotiation(j: Journey, step: Step) -> None:
                 problems["no_commitment_language"].append(supplier.key)
             if language_of(body) != "pt":
                 problems["negotiation_language"].append(f"{supplier.key}: {language_of(body)}")
-    for name in ("as_drafted", "no_max_revealed", "no_competitor_leak", "no_commitment_language",
+    for name in ("html_part", "no_max_revealed", "no_competitor_leak", "no_commitment_language",
                  "negotiation_language"):  # fmt: skip
         step.check(name, not problems[name], "; ".join(problems[name][:4]), owner="negotiation")
     stalled = [a for a, _ in got[MULTIPECAS_KEY]]

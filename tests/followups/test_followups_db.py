@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from bido_back.agents.catalog.contracts import FollowupEmailInput, FollowupEmailOutput
+from bido_back.agents.catalog.contracts import EmailNoteOutput, FollowupEmailInput
 from bido_back.agents.context import ToolContext
 from bido_back.approvals import ActToolRegistry, ApprovalExecutor, decide_approval
 from bido_back.auth import Principal
@@ -51,20 +51,18 @@ EMAIL_DOMAIN = "quotes.example.test"
 
 
 class FakeFollowupWriter:
-    def __init__(self, *, fail: bool = False) -> None:
+    """The writer agent: code renders the email, the agent returns at most a note."""
+
+    def __init__(self, *, fail: bool = False, note: str = "") -> None:
         self.calls: list[FollowupEmailInput] = []
         self.fail = fail
+        self.note = note
 
-    async def __call__(self, task: FollowupEmailInput, context: ToolContext) -> FollowupEmailOutput:
+    async def __call__(self, task: FollowupEmailInput, context: ToolContext) -> EmailNoteOutput:
         self.calls.append(task)
         if self.fail:
             raise AgentFailed("writer down")
-        if task.kind == "chase":
-            return FollowupEmailOutput(body=f"Reminder {task.chase_number} about {task.rfq_ref}.")
-        asks = "; ".join(f"{i.position}:{i.field}:{i.problem}" for i in task.open_items)
-        return FollowupEmailOutput(
-            body=f"Thanks for your offer on {task.rfq_ref}. Please send {asks}."
-        )
+        return EmailNoteOutput(note=self.note)
 
 
 @pytest.fixture
@@ -184,7 +182,13 @@ async def test_a_due_chase_is_proposed_once_then_sent_in_the_thread(
     assert followup_email.in_reply_to == rfq_email.message_id
     assert followup_email.references == (rfq_email.message_id,)
     assert followup_email.subject == f"Re: {rfq_email.subject}"
-    assert followup_email.text_body.startswith("Reminder 1 about RFQ-")
+    # Rendered by code in the thread's language (Rhein got its RFQ email in German).
+    ref = rfq_email.subject.split("]")[0].lstrip("[")
+    assert followup_email.text_body.startswith(
+        f"Sehr geehrte Damen und Herren,\n\nErinnerung – {ref}\n"
+    )
+    assert "Bitte antworten Sie auf diese E-Mail bis " in followup_email.text_body
+    assert followup_email.html_body is not None and '<html lang="de">' in followup_email.html_body
     [chase] = await world.followups()
     assert chase.status == "sent" and chase.sent_at is not None
     async with tenant_session(world.engine, world.people.tenant) as session:
@@ -387,6 +391,15 @@ async def test_a_clarification_asks_for_exactly_what_is_missing(
         (2, "quantity", "missing"),
         (2, "lead_time", "missing"),
     ]
+    # The email asks exactly that: the validity, then the values marked per position, by a
+    # reply-by date; no price in a clarification.
+    approval = await world.approval(clarification.approval_id)
+    body = str(approval.args["body"])
+    assert "Bitte nennen Sie uns die Gültigkeit Ihres Angebots." in body
+    assert "   Fehlt: Lieferzeit\n" in body
+    assert "   Fehlt: Stückpreis, Menge, für die der Preis gilt, Lieferzeit\n" in body
+    assert "Bitte antworten Sie auf diese E-Mail bis " in body
+    assert "EUR" not in body and "€" not in body
     # Once per proposal.
     assert (await world.sweep(writer, now)).clarifications == 0
 
@@ -398,12 +411,36 @@ async def test_a_clarification_asks_for_exactly_what_is_missing(
     assert (clarification.status, clarification.canceled_reason) == ("canceled", "newer_offer")
 
 
-async def test_a_failing_writer_skips_and_retries_next_time(world: World) -> None:
+async def test_a_failing_writer_still_proposes_the_email_without_a_note(world: World) -> None:
     later = world.sent_at + timedelta(days=5)
     result = await world.sweep(FakeFollowupWriter(fail=True), later)
-    assert (result.chases, result.skipped) == (0, 1)
-    assert await world.followups() == []
-    assert (await world.sweep(FakeFollowupWriter(), later)).chases == 1
+    # Code renders the email: a writer problem never means "no email".
+    assert (result.chases, result.skipped) == (1, 0)
+    [chase] = await world.followups()
+    assert chase.status == "proposed"
+
+
+async def test_the_writers_note_is_kept_when_it_follows_the_rules_and_dropped_when_not(
+    world: World,
+) -> None:
+    later = world.sent_at + timedelta(days=5)
+    note = "Wir freuen uns auf Ihre Rückmeldung."
+    await world.sweep(FakeFollowupWriter(note=note), later)
+    [chase] = await world.followups()
+    approval = await world.approval(chase.approval_id)
+    assert note in str(approval.args["body"]) and note in str(approval.args["html_body"])
+
+    # A note with a price never reaches the email; the email still goes to approval.
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        await session.execute(
+            update(FollowupMessage).where(FollowupMessage.id == chase.id).values(status="rejected")
+        )
+    priced = "Ein anderer Lieferant bietet 0,40 EUR."
+    await world.sweep(FakeFollowupWriter(note=priced), later + timedelta(days=7))
+    second = (await world.followups())[-1]
+    assert second.sequence == 2
+    body = str((await world.approval(second.approval_id)).args["body"])
+    assert "0,40" not in body and "Lieferant" not in body
 
 
 async def test_the_scheduled_job_finds_tenants_through_the_lookup_function(

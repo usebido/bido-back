@@ -1,0 +1,151 @@
+===== 01-reminder
+Subject: Re: [RFQ-6] Angebotsanfrage: Komponenten für Motor MTR-100
+
+Sehr geehrte Damen und Herren,
+
+Erinnerung – RFQ-6
+Unsere Angebotsanfrage vom 08.10.2026 ist noch offen, und Ihr Angebot liegt uns noch nicht vor.
+
+1. Können Sie uns ein Angebot senden? Falls Sie kein Angebot abgeben möchten, teilen Sie uns dies bitte mit.
+
+Bitte antworten Sie auf diese E-Mail bis Dienstag, 20.10.2026.
+
+Diese Nachricht ist weder ein Auftrag noch die Annahme Ihres Angebots; Biduuuuu ist nur durch einen schriftlichen Auftrag gebunden.
+
+Mit freundlichen Grüßen
+Biduuuuu
+
+===== 02-clarification-delivery
+Subject: Re: [RFQ-6] Angebotsanfrage: Komponenten für Motor MTR-100
+
+Sehr geehrte Damen und Herren,
+
+Bitte um Klärung – RFQ-6
+Vielen Dank für Ihr Angebot vom 08.10.2026. Für die Prüfung müssen wir noch die Lieferung von zwei Positionen klären.
+
+Pos. 1 · Rolamento motor MTR-100 · Art.-Nr. 000101 · 70 Stk.
+   Genannte Lieferzeit: ca. 10 Arbeitstage nach Auftragserteilung
+   Benötigte Lieferung: bis 22.10.2026
+Pos. 2 · Eixo motor MTR-100 · Art.-Nr. 000102 · 15 Stk.
+   Genannte Lieferzeit: ca. 10 Arbeitstage + einige zusätzliche Tage nach Auftragserteilung
+   Benötigte Lieferung: bis 22.10.2026
+
+1. Können Sie die Positionen 1 und 2 bis 22.10.2026 liefern? Falls nicht, nennen Sie bitte für jede Position den Liefertermin, den Sie bestätigen können.
+
+Bitte antworten Sie auf diese E-Mail bis Dienstag, 13.10.2026, zum Beispiel:
+   Pos. 1 – Lieferung bis: __.__.____
+   Pos. 2 – Lieferung bis: __.__.____
+
+Diese Nachricht ist weder ein Auftrag noch die Annahme Ihres Angebots; Biduuuuu ist nur durch einen schriftlichen Auftrag gebunden.
+
+Mit freundlichen Grüßen
+Biduuuuu
+
+===== 03-clarification-missing
+Subject: Re: [RFQ-6] Angebotsanfrage: Komponenten für Motor MTR-100
+
+Sehr geehrte Damen und Herren,
+
+Bitte um Klärung – RFQ-6
+Vielen Dank für Ihr Angebot vom 08.10.2026. Für die Prüfung benötigen wir noch die folgenden Angaben.
+
+Pos. 1 · Rolamento motor MTR-100 · Art.-Nr. 000101 · 70 Stk.
+   Bitte bestätigen: Lieferzeit
+Pos. 2 · Eixo motor MTR-100 · Art.-Nr. 000102 · 15 Stk.
+   Fehlt: Stückpreis, Lieferzeit
+
+1. Bitte nennen Sie uns die Gültigkeit Ihres Angebots.
+2. Bitte ergänzen Sie für jede Position oben die fehlenden Angaben und bestätigen Sie die übrigen markierten Angaben.
+
+Bitte antworten Sie auf diese E-Mail bis Dienstag, 13.10.2026.
+
+Diese Nachricht ist weder ein Auftrag noch die Annahme Ihres Angebots; Biduuuuu ist nur durch einen schriftlichen Auftrag gebunden.
+
+Mit freundlichen Grüßen
+Biduuuuu
+
+===== 04-revised-offer
+Subject: Re: [RFQ-6] Angebotsanfrage: Komponenten für Motor MTR-100
+
+Sehr geehrte Damen und Herren,
+
+Bitte um ein überarbeitetes Angebot – RFQ-6, Runde 1
+Vielen Dank für Ihre Antwort vom 08.10.2026. Wir bitten Sie, Ihre Preise für die folgenden Positionen zu überprüfen. Für diese Positionen ist Ihr Angebot nicht das wettbewerbsfähigste, das uns vorliegt.
+
+Pos. 1 · Rolamento motor MTR-100 · Art.-Nr. 000101 · 70 Stk.
+   Ihr Angebot: BRL 19.50/Stk.
+   Zielpreis: BRL 17.90/Stk.
+Pos. 3 · Fio de cobre esmaltado · Art.-Nr. 000104 · 12.5 kg
+   Ihr Angebot: BRL 95.00/kg
+   Zielpreis: BRL 90.00/kg
+
+1. Bitte senden Sie uns ein überarbeitetes Angebot für die Positionen 1 und 3.
+
+Bitte antworten Sie auf diese E-Mail bis Mittwoch, 14.10.2026, zum Beispiel:
+   Pos. 1 – überarbeiteter Stückpreis: ________
+   Pos. 3 – überarbeiteter Stückpreis: ________
+Die übrigen Positionen müssen Sie nicht erneut senden.
+
+Diese Nachricht ist weder ein Auftrag noch die Annahme Ihres Angebots; Biduuuuu ist nur durch einen schriftlichen Auftrag gebunden.
+
+Mit freundlichen Grüßen
+Biduuuuu
+
+===== 05-delivery-date
+Subject: Re: [RFQ-6] Angebotsanfrage: Komponenten für Motor MTR-100
+
+Sehr geehrte Damen und Herren,
+
+Anfrage zum Liefertermin – RFQ-6
+Vielen Dank für Ihre Antwort vom 08.10.2026. Diese Anfrage betrifft nur Position 2: Die genannte Lieferzeit erfüllt unseren benötigten Termin nicht.
+
+Pos. 2 · Eixo motor MTR-100 · Art.-Nr. 000102 · 15 Stk.
+   Ihr Angebot: BRL 89.00/Stk. · 12 Arbeitstage nach Auftragserteilung
+   Benötigte Lieferung: bis 22.10.2026
+
+1. Können Sie alle 15 Stück bis 22.10.2026 liefern? Falls nicht, welchen frühesten Termin können Sie bestätigen?
+
+Bitte antworten Sie auf diese E-Mail bis Mittwoch, 14.10.2026. Die übrigen Positionen müssen Sie nicht erneut senden.
+
+Diese Nachricht ist weder ein Auftrag noch die Annahme Ihres Angebots; Biduuuuu ist nur durch einen schriftlichen Auftrag gebunden.
+
+Mit freundlichen Grüßen
+Biduuuuu
+
+===== 06-bafo
+Subject: Re: [RFQ-6] Angebotsanfrage: Komponenten für Motor MTR-100
+
+Sehr geehrte Damen und Herren,
+
+Bitte um Ihr letztes und bestes Angebot – RFQ-6
+Vielen Dank für Ihre Antwort vom 14.10.2026. Dies ist die letzte Runde dieser Angebotsanfrage: Wir beabsichtigen, ohne weitere Verhandlung zu entscheiden.
+
+Pos. 1 · Rolamento motor MTR-100 · Art.-Nr. 000101 · 70 Stk.
+   Ihr Angebot: BRL 18.40/Stk.
+   Zielpreis: BRL 17.90/Stk.
+Pos. 3 · Fio de cobre esmaltado · Art.-Nr. 000104 · 12.5 kg
+   Ihr Angebot: BRL 92.00/kg
+   Zielpreis: BRL 90.00/kg
+
+1. Bitte senden Sie uns Ihr letztes und bestes Angebot für die Positionen 1 und 3 oder bestätigen Sie, dass Ihr aktuelles Angebot gilt.
+
+Bitte antworten Sie auf diese E-Mail bis Freitag, 16.10.2026, 18:00 Uhr (UTC), zum Beispiel:
+   Pos. 1 – endgültiger Stückpreis: ________
+   Pos. 3 – endgültiger Stückpreis: ________
+Die übrigen Positionen müssen Sie nicht erneut senden.
+
+Diese Nachricht ist weder ein Auftrag noch die Annahme Ihres Angebots; Biduuuuu ist nur durch einen schriftlichen Auftrag gebunden.
+
+Mit freundlichen Grüßen
+Biduuuuu
+
+===== 07-not-selected
+Subject: Re: [RFQ-6] Angebotsanfrage: Komponenten für Motor MTR-100
+
+Sehr geehrte Damen und Herren,
+
+Ergebnis der Angebotsanfrage – RFQ-6
+Vielen Dank für Ihr Angebot vom 08.10.2026 und die Zeit, die Sie unserer Anfrage gewidmet haben. Nach Prüfung der eingegangenen Angebote haben wir uns entschieden, Ihr Angebot diesmal nicht weiterzuverfolgen.
+
+Mit freundlichen Grüßen
+Biduuuuu

@@ -13,11 +13,11 @@ mock mode scripts; live mode reads the same email with the real model.
 empty; "7 business days" is written as 7 with its source, and deterministic
 code decides what business days mean.
 
-The mock writers (`followup_writer`, `negotiation_writer`) follow the released
-writer prompts literally, in Portuguese, German or English: they sign "with
-the buyer's name and company" and mention a reply-by date only where the
-prompt asks for one. Mock mode therefore checks the harness and the
-deterministic code, never a model.
+The mock writers (`followup_writer`, `negotiation_writer`) follow the v2
+writer prompts: code renders every email (`bido_back.supplier_email`) and the
+writers may only add an optional note, empty by default, so they return none.
+Mock mode therefore checks the harness and the deterministic code, never a
+model.
 """
 
 from collections.abc import Sequence
@@ -27,12 +27,11 @@ from decimal import Decimal
 from typing import Final
 
 from bido_back.agents.catalog.contracts import (
+    EmailNoteOutput,
     ExtractedValue,
     ExtraOfferDraft,
     FollowupEmailInput,
-    FollowupEmailOutput,
     NegotiationEmailInput,
-    NegotiationEmailOutput,
     ProposalLineDraft,
     QuoteExtractionInput,
     QuoteExtractionOutput,
@@ -671,182 +670,20 @@ DE_REVISED: Final = "vielen Dank für Ihre Rückmeldung zu {ref}. Unser überarb
 DE_FINAL: Final = "zu {ref} senden wir Ihnen unser bestes und letztes Angebot:"
 
 
-# --- Mock writers: the released prompts, followed literally ----------------------------------
-
-_SIGN_OFF: Final = {"pt": "Atenciosamente,", "de": "Mit freundlichen Grüßen", "en": "Best regards,"}
-
-
-def _lang(language: str) -> str:
-    return language if language in _SIGN_OFF else "en"
+# --- Mock writers: the v2 prompts, followed literally ------------------------------------
+#
+# Code renders every follow-up and negotiation email (`bido_back.supplier_email`); the
+# writers may only add an optional note, empty by default. A correct model returns none.
 
 
-def _signature(language: str, name: str, company: str) -> str:
-    """ "Sign with the buyer's name and company", exactly as the prompts say."""
-    return f"{_SIGN_OFF[language]}\n{name}\n{company}"
+def followup_writer(task: FollowupEmailInput) -> EmailNoteOutput:
+    """The follow-up writer (v2 prompt): no note."""
+    return EmailNoteOutput(note="")
 
 
-def _date(language: str, value: date) -> str:
-    return {"pt": pt_date, "de": de_date}.get(language, date.isoformat)(value)
-
-
-def _number(language: str, value: Decimal) -> str:
-    text = format(value.normalize(), "f")
-    return text if language == "en" else text.replace(".", ",")
-
-
-_FIELD: Final[dict[str, dict[str, str]]] = {
-    "pt": {
-        "currency": "a moeda dos preços",
-        "valid_until": "por quanto tempo a proposta é válida",
-        "unit_price": "o preço unitário",
-        "quantity": "a quantidade (ou faixa de quantidade) a que o preço se aplica",
-        "lead_time": "o prazo de entrega",
-    },
-    "de": {
-        "currency": "die Währung der Preise",
-        "valid_until": "wie lange das Angebot gültig ist",
-        "unit_price": "den Stückpreis",
-        "quantity": "die Menge bzw. Mengenstaffel, für die der Preis gilt",
-        "lead_time": "die Lieferzeit",
-    },
-    "en": {
-        "currency": "the currency of the prices",
-        "valid_until": "how long it is valid",
-        "unit_price": "the unit price",
-        "quantity": "the quantity or quantity tier the price applies to",
-        "lead_time": "the lead time",
-    },
-}
-_WHERE: Final = {"pt": ("Proposta", "Item"), "de": ("Angebot", "Pos."), "en": ("Offer", "Position")}
-_CONFIRM: Final = {
-    "pt": "confirmar {x}",
-    "de": "bitte bestätigen Sie {x}",
-    "en": "please confirm {x}",
-}
-
-
-def followup_writer(task: FollowupEmailInput) -> FollowupEmailOutput:
-    """The follow-up writer (v1 prompt): a chase, or exactly the open items."""
-    lang = _lang(task.supplier_language)
-    sign = _signature(lang, task.buyer_name, task.buyer_company)
-    if task.kind == "chase":
-        sent = _date(lang, task.original_sent_on) if task.original_sent_on else ""
-        due = _date(lang, task.response_due) if task.response_due else None
-        text = {
-            "pt": (
-                f"Prezados, {task.supplier_name},\n\nGostaríamos de lembrar a nossa solicitação "
-                f"de cotação {task.rfq_ref} ({task.rfq_title}), enviada em {sent}. Poderiam nos "
-                "informar se enviarão uma proposta?"
-                + (f" Pedimos o retorno até {due}." if due else "")
-                + (" Em breve vamos comparar as propostas recebidas." if task.chase_number > 1
-                   else "")
-            ),
-            "de": (
-                f"Sehr geehrte Damen und Herren der {task.supplier_name},\n\nwir möchten Sie an "
-                f"unsere Anfrage {task.rfq_ref} ({task.rfq_title}) vom {sent} erinnern. Werden Sie "
-                "uns ein Angebot senden?"
-                + (f" Bitte antworten Sie bis zum {due}." if due else "")
-                + (" In Kürze vergleichen wir die eingegangenen Angebote."
-                   if task.chase_number > 1 else "")
-            ),
-            "en": (
-                f"Dear {task.supplier_name},\n\nWe would like to remind you of our request for "
-                f"quotation {task.rfq_ref} ({task.rfq_title}), sent on {sent}. Could you let us "
-                "know whether you will send a quote?"
-                + (f" Please answer by {due}." if due else "")
-                + (" We will soon compare the offers received." if task.chase_number > 1 else "")
-            ),
-        }[lang]  # fmt: skip
-        return FollowupEmailOutput(body=f"{text}\n\n{sign}")
-    fields = _FIELD[lang]
-    offer, position = _WHERE[lang]
-    items: list[str] = []
-    for item in task.open_items:
-        wanted = fields[item.field]
-        if item.problem == "unclear":
-            wanted = _CONFIRM[lang].format(x=wanted)
-        where = offer if item.position is None else f"{position} {item.position} – {item.line}"
-        items.append(f"{where}: {wanted}.")
-    intro = {
-        "pt": f"Prezados, {task.supplier_name},\n\nObrigado pela proposta para a {task.rfq_ref}. "
-        "Para concluirmos a análise, poderiam nos informar:",
-        "de": f"Sehr geehrte Damen und Herren der {task.supplier_name},\n\nvielen Dank für Ihr "
-        f"Angebot zu {task.rfq_ref}. Bitte teilen Sie uns noch Folgendes mit:",
-        "en": f"Dear {task.supplier_name},\n\nThank you for your offer for {task.rfq_ref}. Could "
-        "you please provide the following missing information?",
-    }[lang]
-    return FollowupEmailOutput(body=intro + "\n" + "\n".join(items) + f"\n\n{sign}")
-
-
-def negotiation_writer(task: NegotiationEmailInput) -> NegotiationEmailOutput:
-    """The negotiation writer (v1 prompt): every number as given, by `reply_by`."""
-    lang = _lang(task.supplier_language)
-    sign = _signature(lang, task.buyer_name, task.buyer_company)
-    words = {
-        "pt": {
-            "hello": f"Prezados, {task.supplier_name},",
-            "thanks": f"Obrigado pela proposta para a {task.rfq_ref}.",
-            "competition": "Recebemos propostas mais competitivas.",
-            "counter": "Pedimos que revisem as condições abaixo:",
-            "bafo": "Esta é a última rodada antes da nossa decisão: pedimos a sua melhor e "
-            "última oferta para os itens abaixo:",
-            "price": "{where}: preço unitário de {price} por {unit}, para {qty} {unit}",
-            "lead": "{where}: prazo de entrega de no máximo {days} dias",
-            "where": "Item {p} – {line}",
-            "by_counter": "Por favor, enviem a proposta revisada até {date}.",
-            "by_bafo": "Por favor, enviem a sua melhor e última oferta até {date}.",
-        },
-        "de": {
-            "hello": "Sehr geehrte Damen und Herren,",
-            "thanks": f"vielen Dank für Ihr Angebot zu {task.rfq_ref}.",
-            "competition": "Uns liegen wettbewerbsfähigere Angebote vor.",
-            "counter": "Wir bitten Sie, folgende Punkte zu überprüfen:",
-            "bafo": "Dies ist die letzte Runde vor unserer Entscheidung: Bitte senden Sie uns "
-            "Ihr bestes und letztes Angebot für folgende Positionen:",
-            "price": "{where}: Stückpreis {price} pro {unit} für {qty} {unit}",
-            "lead": "{where}: Lieferzeit von höchstens {days} Tagen",
-            "where": "Pos. {p} {line}",
-            "by_counter": "Bitte senden Sie uns Ihr überarbeitetes Angebot bis zum {date}.",
-            "by_bafo": "Bitte senden Sie uns Ihr bestes und letztes Angebot bis zum {date}.",
-        },
-        "en": {
-            "hello": f"Dear {task.supplier_name},",
-            "thanks": f"Thank you for your offer for {task.rfq_ref}.",
-            "competition": "We have received more competitive offers.",
-            "counter": "We ask you to review the following:",
-            "bafo": "This is the last round before we decide: please send your best and final "
-            "offer for the items below:",
-            "price": "{where}: a unit price of {price} per {unit}, for {qty} {unit}",
-            "lead": "{where}: a lead time of at most {days} days",
-            "where": "Position {p} – {line}",
-            "by_counter": "Please send a revised offer by {date}.",
-            "by_bafo": "Please send your best and final offer by {date}.",
-        },
-    }[lang]
-    head = [words["thanks"]]
-    if task.mention_competition:
-        head.append(words["competition"])
-    head.append(words[task.action])
-    lines: list[str] = []
-    for ask in task.lines:
-        where = words["where"].format(p=ask.position, line=ask.line)
-        if ask.target_unit_price is not None:
-            amount = _number(lang, ask.target_unit_price)
-            price = f"R$ {amount}" if ask.currency == "BRL" else f"{amount} {ask.currency}"
-            lines.append(
-                "- "
-                + words["price"].format(
-                    where=where, price=price, unit=ask.unit, qty=_number(lang, ask.quantity)
-                )
-            )
-        if ask.required_lead_time_days is not None:
-            lines.append("- " + words["lead"].format(where=where, days=ask.required_lead_time_days))
-    tail: list[str] = []
-    if task.reply_by is not None:
-        key = "by_bafo" if task.action == "bafo" else "by_counter"
-        tail.append(words[key].format(date=_date(lang, task.reply_by)))
-    body = "\n".join([words["hello"], "", " ".join(head), *lines, *tail, "", sign])
-    return NegotiationEmailOutput(body=body)
+def negotiation_writer(task: NegotiationEmailInput) -> EmailNoteOutput:
+    """The negotiation writer (v2 prompt): no note."""
+    return EmailNoteOutput(note="")
 
 
 class ScenarioModel(ScriptedModel):

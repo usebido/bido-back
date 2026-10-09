@@ -15,12 +15,15 @@ does, per tenant, per RFQ whose negotiation is open:
    the best eligible offer per line is kept as the outcome, pending emails are
    canceled, follow-ups stop. Nothing is awarded: that is the buyer's step.
 3. Evaluate: each supplier's latest offer, not evaluated yet, goes through the
-   strategy (`bido_back.negotiation.strategy`, pure code). A counter-offer or a
-   best-and-final request is written by the negotiation writer, checked
-   (`negotiation_email_problems`: the numbers are the strategy's), and
-   recorded as a PENDING approval of `send_negotiation_email` requested on
-   behalf of the buyer who sent the RFQ email; another person approves and the
-   worker sends it once, in the thread (`bido_back.negotiation.send`).
+   strategy (`bido_back.negotiation.strategy`, pure code). A counter-offer (a
+   revised-offer request, or a delivery-date request when only lead times are
+   asked) or a best-and-final request is rendered by code in the standard layout
+   (`bido_back.supplier_email`) with exactly the strategy's numbers; the
+   negotiation writer may only add an optional note. The send gate checks it
+   (`supplier_email.checks`), and it is recorded as a PENDING approval of
+   `send_negotiation_email` requested on behalf of the buyer who sent the RFQ
+   email; a person approves and the worker sends it once, in the thread
+   (`bido_back.negotiation.send`).
 4. Early close: when every invited supplier answered and every line has an
    offer within target, the RFQ becomes `ready_to_close` (the buyer sees
    "pronto pra fechar" and closes, or waits for the deadline).
@@ -43,14 +46,13 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.agents.approvals import ApprovalProposal
 from bido_back.agents.catalog.contracts import NegotiationEmailInput, NegotiationLineAsk
-from bido_back.agents.catalog.definitions import negotiation_email_problems
 from bido_back.agents.context import ToolContext
 from bido_back.agents.events import args_hash
 from bido_back.approvals.audit import approval_audit
 from bido_back.approvals.errors import ApprovalConflict
 from bido_back.approvals.sink import PostgresApprovalSink
 from bido_back.auth import Principal
-from bido_back.comparison.compute import Comparison
+from bido_back.comparison.compute import Comparison, SupplierColumn
 from bido_back.comparison.loader import load_comparison
 from bido_back.comparison.policy import ComparisonPolicy
 from bido_back.comparison.rules import policy_blockers
@@ -71,7 +73,6 @@ from bido_back.db.models import (
     Tenant,
     User,
 )
-from bido_back.followups.service import reply_subject
 from bido_back.negotiation.agents import NegotiationWriter
 from bido_back.negotiation.history import PriceHistory, quoted_price_history
 from bido_back.negotiation.schemas import (
@@ -104,9 +105,22 @@ from bido_back.negotiation.strategy import (
     ready_to_close,
 )
 from bido_back.rfqs.errors import AgentFailed, InvalidState, NotFound
-from bido_back.rfqs.language import supplier_email_language
 from bido_back.rfqs.send import SEND_RFQ_EMAIL, send_proposal_ids
 from bido_back.rfqs.service import buyer_display_name
+from bido_back.supplier_email.builders import (
+    Header,
+    LineAsk,
+    email_line,
+    negotiation_email,
+    negotiation_type,
+)
+from bido_back.supplier_email.checks import GateContext, problems_text
+from bido_back.supplier_email.compose import Refused, compose
+from bido_back.supplier_email.deadlines import reply_by_for
+from bido_back.supplier_email.language import thread_language, thread_locale
+from bido_back.supplier_email.model import Answered, LeadTime, Money, Signature, SupplierEmail
+from bido_back.supplier_email.render import RenderedEmail
+from bido_back.supplier_email.subject import reply_subject
 
 logger = logging.getLogger(__name__)
 
@@ -732,7 +746,9 @@ class _Due:
     status: InviteNegotiationStatus
     sender_user_id: UUID
     to: str
-    subject: str
+    email: SupplierEmail
+    gate: GateContext
+    # What the writer agent sees when it may add its optional note.
     task: NegotiationEmailInput
     terms: dict[str, JsonValue]
 
@@ -820,8 +836,11 @@ def _terms(decision: SupplierDecision, currency: str) -> dict[str, JsonValue]:
     return {"currency": currency, "lines": lines}
 
 
-async def _sender(session: AsyncSession, invite: Invite) -> UUID | None:
-    """The buyer who requested the RFQ email (its executed approval): their mailbox."""
+async def _rfq_email(
+    session: AsyncSession, invite: Invite
+) -> tuple[UUID, dict[str, JsonValue]] | None:
+    """The buyer who requested the RFQ email (its executed approval; their mailbox sends),
+    and that approval's arguments (the email as it went out)."""
     original = await session.scalar(
         select(Approval).where(
             Approval.tool == SEND_RFQ_EMAIL,
@@ -832,9 +851,44 @@ async def _sender(session: AsyncSession, invite: Invite) -> UUID | None:
     if original is None:
         return None
     try:
-        return UUID(str(original.args.get("sender_user_id")))
+        return UUID(str(original.args.get("sender_user_id"))), original.args
     except ValueError:
         return None
+
+
+def _line_asks(
+    lines: Sequence[_Line], decision: SupplierDecision, column: SupplierColumn, currency: str
+) -> list[LineAsk]:
+    """What the email shows per line: the supplier's own quote as quoted (its currency and
+    price basis), and exactly what the strategy asks (target in the RFQ's currency)."""
+    by_id = {line.row.id: line for line in lines}
+    cells = {cell.rfq_line_id: cell for cell in column.cells if cell.tier == 0}
+    asks: list[LineAsk] = []
+    for d in decision.lines:
+        if d.kind not in ("counter", "above_max"):
+            continue
+        if d.ask_price is None and d.ask_lead_days is None:
+            continue
+        cell = cells.get(d.rfq_line_id)
+        offered = (
+            Money(cell.unit_price, cell.currency, cell.price_basis_quantity)
+            if cell is not None and cell.unit_price is not None and cell.currency
+            else None
+        )
+        asks.append(
+            LineAsk(
+                position=by_id[d.rfq_line_id].row.position,
+                offered=offered,
+                offered_lead=(
+                    LeadTime(cell.lead_time_days)
+                    if cell is not None and cell.lead_time_days is not None
+                    else None
+                ),
+                target=Money(d.ask_price, currency) if d.ask_price is not None else None,
+                lead_days=d.ask_lead_days,
+            )
+        )
+    return asks
 
 
 async def _due(
@@ -847,17 +901,22 @@ async def _due(
     proposal_id: UUID,
     next_round: int,
     correction_revision: int,
+    *,
+    column: SupplierColumn,
+    others: tuple[str, ...],
+    now: datetime,
 ) -> _Due | None:
     if invite.thread_message_id is None:
         return None
     contact_email = await session.scalar(
         select(Contact.email).where(Contact.id == invite.contact_id)
     )
-    sender_user_id = await _sender(session, invite)
+    original = await _rfq_email(session, invite)
     tenant = await session.get(Tenant, rfq.tenant_id)
-    if contact_email is None or sender_user_id is None or tenant is None:
+    if contact_email is None or original is None or tenant is None:
         logger.warning("negotiation: cannot address invite=%s", invite.id)
         return None
+    sender_user_id, rfq_email_args = original
     user = await session.get(User, sender_user_id)
     if user is None:
         return None
@@ -873,6 +932,45 @@ async def _due(
     )
     action = cast(NegotiationActionName, decision.action)
     round_number = next_round
+    buyer_name = await buyer_display_name(session, user, tenant.name)
+    language = thread_language(
+        rfq_email_args=rfq_email_args,
+        first_subject=first_subject,
+        supplier_language=supplier.language,
+        supplier_country=supplier.country,
+    )
+    line_asks = _line_asks(lines, decision, column, rfq.base_currency)
+    reply_by = reply_by_for(
+        negotiation_type(action, line_asks),
+        now=now,
+        country=supplier.country,
+        deadline=rfq.negotiation_deadline,
+    )
+    answered: Answered | None = None
+    proposal = await session.get(Proposal, proposal_id)
+    if proposal is not None:
+        received = await session.scalar(
+            select(Message.occurred_at).where(Message.id == proposal.message_id)
+        )
+        if received is not None:
+            answered = Answered("offer" if proposal.version == 1 else "reply", received.date())
+    email = negotiation_email(
+        Header(
+            rfq_ref=rfq.ref,
+            subject=reply_subject(first_subject, rfq.ref, rfq.title),
+            locale=thread_locale(language, supplier.country),
+            supplier_name=supplier.name,
+            buyer_company=tenant.name,
+            signature=Signature(name=buyer_name, company=tenant.name),
+        ),
+        action=action,
+        round=round_number,
+        answered=answered,
+        lines=[email_line(line.row) for line in lines],
+        asks=line_asks,
+        mention_competition=decision.mention_competition,
+        reply_by=reply_by,
+    )
     return _Due(
         invite_id=invite.id,
         rfq_id=rfq.id,
@@ -882,17 +980,23 @@ async def _due(
         status=decision.status,
         sender_user_id=sender_user_id,
         to=contact_email,
-        subject=reply_subject(first_subject, rfq.ref, rfq.title),
+        email=email,
+        gate=GateContext(
+            thread_language=language,
+            first_subject=first_subject,
+            rfq_title=rfq.title,
+            other_suppliers=others,
+        ),
         task=NegotiationEmailInput(
             action=action,
             rfq_ref=rfq.ref,
             rfq_title=rfq.title,
             buyer_company=tenant.name,
-            buyer_name=await buyer_display_name(session, user, tenant.name),
+            buyer_name=buyer_name,
             supplier_name=supplier.name,
-            supplier_language=supplier_email_language(supplier),
+            supplier_language=language,
             round=round_number,
-            reply_by=rfq.negotiation_deadline.date() if rfq.negotiation_deadline else None,
+            reply_by=reply_by.day if reply_by is not None else None,
             mention_competition=decision.mention_competition,
             lines=asks,
         ),
@@ -1010,6 +1114,9 @@ async def evaluate_rfq(
                     column.proposal_id,
                     max((m.round for m in mine), default=0) + 1,
                     column.correction_revision,
+                    column=column,
+                    others=tuple(s.name for i, s in rows if i.id != invite.id),
+                    now=at,
                 )
                 if built is not None:
                     due.append(built)
@@ -1045,23 +1152,32 @@ async def evaluate_rfq(
     sink = PostgresApprovalSink(db)
     for item in due:
         context = ToolContext(tenant_id=tenant_id, user_id=item.sender_user_id, run_id=uuid4())
-        try:
-            draft = await writer(item.task, context)
-        except AgentFailed:
-            skipped += 1
-            continue
-        problems = negotiation_email_problems(item.task, draft)
-        if problems:
+
+        async def note(item: _Due = item, context: ToolContext = context) -> str:
+            try:
+                return (await writer(item.task, context)).note
+            except AgentFailed:
+                return ""
+
+        composed = await compose(item.email, item.gate, note)
+        if isinstance(composed, Refused):
             logger.warning(
-                "negotiation draft refused tenant=%s invite=%s action=%s problems=%s",
+                "negotiation email refused tenant=%s invite=%s action=%s problems=%s",
                 tenant_id,
                 item.invite_id,
                 item.action,
-                ",".join(problems),
+                problems_text(composed.problems),
             )
             skipped += 1
             continue
-        approval_id = await _propose(db, sink, tenant_id, item, draft.body.strip())
+        if composed.note_dropped:
+            logger.info(
+                "negotiation note left out tenant=%s invite=%s problems=%s",
+                tenant_id,
+                item.invite_id,
+                problems_text(composed.note_dropped),
+            )
+        approval_id = await _propose(db, sink, tenant_id, item, composed.rendered)
         if approval_id is not None:
             proposed.append(approval_id)
     if became_ready:
@@ -1075,7 +1191,7 @@ async def evaluate_rfq(
 
 
 async def _propose(
-    db: Db, sink: PostgresApprovalSink, tenant_id: UUID, item: _Due, body: str
+    db: Db, sink: PostgresApprovalSink, tenant_id: UUID, item: _Due, rendered: RenderedEmail
 ) -> UUID | None:
     """Record the approval, then the row and the supplier's state; once per (invite, round)."""
     row_id = negotiation_message_id(item.invite_id, item.round)
@@ -1086,8 +1202,9 @@ async def _propose(
         round=item.round,
         sender_user_id=item.sender_user_id,
         to=[item.to],
-        subject=item.subject,
-        body=body,
+        subject=rendered.subject,
+        body=rendered.text,
+        html_body=rendered.html,
     )
     payload = cast(dict[str, JsonValue], args.model_dump(mode="json"))
     run_id, call_id = negotiation_proposal_ids(row_id)
