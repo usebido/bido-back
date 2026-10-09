@@ -1728,14 +1728,18 @@ async def step_replies(j: Journey, step: Step) -> None:
         f"held: issues={late.issues if late else None}",
         owner="extraction",
     )
-    # A "melhor e última oferta" is a declared final offer, nothing else is; a declined
-    # line is kept as declined (never a missing price).
+    # A "melhor e última oferta" and a "não conseguimos reduzir os preços" are declared
+    # final positions (the extraction prompt's "we cannot go any lower"); nothing else is.
+    # A declined line is kept as declined (never a missing price).
     misread = [
         f"{e.key}: final={snap.final}, declined={list(snap.declined)}"
         for e in SCRIPT
         if (snap := j.snapshots.get(e.key)) is not None
         and snap.version is not None
-        and (snap.final != (e.kind == "final") or not set(e.declined) <= set(snap.declined))
+        and (
+            snap.final != (e.kind in ("final", "repeat"))
+            or not set(e.declined) <= set(snap.declined)
+        )
     ]
     step.check("offer_signals_read", not misread, "; ".join(misread[:4]), owner="extraction")
     held = {
@@ -1856,15 +1860,20 @@ def _request(
 
 
 def declared_finals(j: Journey) -> dict[str, frozenset[int]]:
-    """Per supplier, the stored offer versions its "melhor e última oferta" e-mails made
-    (the script's truth): an e-mail that stored no new version marks nothing."""
+    """Per supplier, the stored offer versions its final positions made ("melhor e última
+    oferta", "não conseguimos reduzir os preços"; the script's truth): an e-mail that
+    stored no new version marks nothing."""
     finals: dict[str, set[int]] = defaultdict(set)
     previous: dict[str, int | None] = {}
     for email in sorted(SCRIPT, key=lambda e: (e.day, e.hour)):
         snap = j.snapshots.get(email.key)
         version = snap.version if snap is not None else None
         key = email.supplier.key
-        if email.kind == "final" and version is not None and version != previous.get(key):
+        if (
+            email.kind in ("final", "repeat")
+            and version is not None
+            and version != previous.get(key)
+        ):
             finals[key].add(version)
         previous[key] = version
     return {key: frozenset(versions) for key, versions in finals.items()}

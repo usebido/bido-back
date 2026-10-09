@@ -197,6 +197,8 @@ def day_text(value: date) -> str:
 # What a supplier writes to decline a line, and to say its offer is final.
 DECLINE: Final = "não temos condições de fornecer este item"
 FINAL: Final = "melhor e última oferta"
+# "We cannot go any lower" is a final position too (quote_extraction.v6 `final_offer`).
+NO_LOWER: Final = "não conseguimos reduzir os preços"
 _OPENING: Final[dict[ReplyKind, str]] = {
     "offer": "Obrigado pela solicitação {ref}. Segue nossa proposta:",
     "revised": "Sobre a {ref}, segue nossa proposta revisada:",
@@ -390,7 +392,13 @@ def write(
         payment_terms=_ev("28 dias após a NF", "Pagamento em 28 dias após a NF"),
         lines=drafts,
         extra_offers=extras,
-        final_offer=_ev(FINAL, FINAL) if email.kind == "final" else _NONE,
+        final_offer=(
+            _ev(FINAL, FINAL)
+            if email.kind == "final"
+            else _ev(NO_LOWER, NO_LOWER)
+            if email.kind == "repeat"
+            else _NONE
+        ),
         declined_lines=declined,
     )
     return Written(subject, "\n\n".join(parts), truth)

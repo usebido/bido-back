@@ -1092,10 +1092,35 @@ def _unanswered(
     return replace(base, phase="waiting_for_supplier", reason="reply_overdue", until=ctx.deadline)
 
 
+# Problems a final offer can still have besides its price, most important first: no more
+# emails go out, but the buyer is told what is still wrong instead of reading "closed".
+# A late line that was never asked about can no longer be asked: it reads as late_final.
+_FINAL_OPEN_PROBLEMS: Final = (
+    ("delivery_need_by_unreachable", "delivery_need_by_unreachable"),
+    ("delivery_still_late", "delivery_still_late"),
+    ("delivery_late", "delivery_late_final"),
+    ("delivery_unknown", "delivery_unknown"),
+    ("clarification_unanswered", "clarification_unanswered"),
+    ("moq_above_quantity", "moq_above_quantity"),
+    ("validity_unknown", "validity_unknown"),
+    ("validity_ends_before_decision", "validity_ends_before_decision"),
+    ("payment_terms_shorter", "payment_terms_shorter"),
+)
+
+
 def _final(
     base: SupplierPlan, plans: Sequence[LinePlan], warnings: Sequence[PlanWarning], reason: str
 ) -> SupplierPlan:
-    del warnings
+    """The supplier's last word: no more emails. A delivery, validity, MOQ or payment
+    problem that remains is the buyer's decision and is named; otherwise the offer stands."""
+    codes = {r for p in plans if p.status == "priced" for r in p.reasons} | {
+        w.code for w in warnings
+    }
+    for code, shown in _FINAL_OPEN_PROBLEMS:
+        if code in codes:
+            return replace(
+                base, action="close", phase="needs_decision", reason=shown, status=_verdict(plans)
+            )
     return replace(base, action="close", phase="closed", reason=reason, status=_verdict(plans))
 
 

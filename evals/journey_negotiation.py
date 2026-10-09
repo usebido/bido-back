@@ -58,7 +58,8 @@ for, or a shorter lead time on a line it asked a date for.
    decision" (or "Needs your answer" to its question, a clarification, or
    "Closed" because it declined, withdrew or the negotiation closed).
 10. `request_when_due`: an offer to negotiate (a supplier's first offer, or one
-    that moved on our last request; not declared final, as written or as stored)
+    that moved on our last request; not declared final, as written or as stored, in
+    this reply or an earlier one: a final position stays final)
     with a price above target and above our last ask, rounds left and the final
     round still open, gets its request in the sweep that sees it, or the buyer sees
     why not (a question, a review, a clarification, an e-mail on its way).
@@ -730,7 +731,9 @@ def _to_negotiate(n: Negotiation, supplier: str, sweep: int) -> tuple[Offer, Req
         return None
     version = view.offer_version
     offer = n.offers.get(supplier, {}).get(version)
-    if offer is None or version in n.final_versions(supplier):
+    # A final position stays final: once a reply declared it, later replies are not
+    # negotiated (they only update the standing offer).
+    if offer is None or any(v <= version for v in n.final_versions(supplier)):
         return None
     sent = n.sent_before(supplier, sweep)
     if not sent:

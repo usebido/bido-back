@@ -275,6 +275,9 @@ class _Supplier:
     received_on: date | None = None
     rows: list[NegotiationMessage] = field(default_factory=list[NegotiationMessage])
     followups: list[FollowupMessage] = field(default_factory=list[FollowupMessage])
+    # An earlier reply already declared the supplier's final position ("best and final",
+    # "we cannot go any lower"): it stays final, Bido asks nothing more of this supplier.
+    final_before: bool = False
 
 
 @dataclass(slots=True)
@@ -373,6 +376,14 @@ async def _load(
             item = by_invite[proposal.invite_id]
             if item.proposal is None or proposal.version > item.proposal.version:
                 item.proposal = proposal
+        for proposal in proposals:
+            item = by_invite[proposal.invite_id]
+            if (
+                item.proposal is not None
+                and proposal.version < item.proposal.version
+                and offer_signals(proposal.fields).final_offer
+            ):
+                item.final_before = True
         latest = {s.proposal.id: s for s in suppliers if s.proposal is not None}
         if latest:
             for line in await session.scalars(
@@ -859,7 +870,7 @@ def _offer(
         # The supplier's questions the buyer has not answered or dismissed yet (the
         # ledger's); the offer's own count without a ledger.
         questions=len(ledger.open_questions) if ledger is not None else signals.questions,
-        declared_final=signals.final_offer,
+        declared_final=signals.final_offer or item.final_before,
         declined_lines=frozenset(positions[p] for p in declined if p in positions),
         payment_terms_shorter=offered is not None and requested is not None and offered < requested,
         holds_released=item.invite.negotiation_released_proposal_id == proposal.id,

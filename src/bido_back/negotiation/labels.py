@@ -98,6 +98,8 @@ _REASONS: Final[dict[str, str]] = {
     "supplier_clarification_requires_buyer": "Needs your decision: the supplier's last reply "
     "needs your review",
     "delivery_still_late": "Needs your decision: still late after our delivery-date request",
+    "delivery_late_final": "Needs your decision: the supplier's final offer delivers after the "
+    "need-by date",
     "delivery_need_by_unreachable": "Needs your decision: the need-by date can no longer be met",
     "delivery_unknown": "Needs your decision: the lead time is unknown",
     "clarification_unanswered": "Needs your decision: questions to the supplier remain unanswered",

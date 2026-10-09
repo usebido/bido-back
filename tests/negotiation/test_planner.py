@@ -1033,3 +1033,24 @@ def test_an_offer_on_hold_never_makes_the_rfq_ready_to_close() -> None:
     )
     assert released.phase == "accepted_internally" and not released.offer_held
     assert ready_to_close(line_ids=ids, waiting_suppliers=0, plans=[released])
+
+
+def test_a_final_offer_still_late_names_the_problem_for_the_buyer() -> None:
+    # Live journey: MetalNova's copper stayed late after our delivery-date request and its
+    # best-and-final read "Closed". No more emails go out, but the buyer is told why.
+    late = offer(quote(L1, "44.90"), quote(L2, "229.00", 12), quote(L3, "112.00", 30), version=2)
+    final = replace(late, declared_final=True)
+    result = plan(facts(final, FIRST), max_rounds=3)
+    assert (result.action, result.email) == ("close", None)
+    assert (result.phase, result.reason) == ("needs_decision", "delivery_late_final")
+    assert "Needs your decision" in phase_label(result)
+
+
+def test_a_final_offer_whose_only_gap_is_price_stands_as_closed() -> None:
+    final = replace(MOVED, declared_final=True)
+    result = plan(facts(final, FIRST), max_rounds=3)
+    assert (result.action, result.phase, result.reason) == (
+        "close",
+        "closed",
+        "supplier_declared_final",
+    )
