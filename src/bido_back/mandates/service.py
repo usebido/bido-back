@@ -654,6 +654,12 @@ async def _rounds_problem(
     and one best-and-final request at most. Canceled and rejected emails do not count,
     except a canceled one whose send was interrupted after its Message-ID was claimed
     (it may have reached the supplier)."""
+    kind = await session.scalar(
+        select(NegotiationMessage.kind).where(NegotiationMessage.id == args.negotiation_message_id)
+    )
+    if kind == "reminder":
+        # The one reminder of a request already sent: no round of its own.
+        return None
     sent = list(
         await session.scalars(
             select(NegotiationMessage.action).where(
@@ -663,6 +669,7 @@ async def _rounds_problem(
                     (NegotiationMessage.status == "canceled")
                     & NegotiationMessage.message_id_header.is_not(None)
                 ),
+                NegotiationMessage.kind.is_distinct_from("reminder"),
                 NegotiationMessage.id != args.negotiation_message_id,
             )
         )

@@ -3,7 +3,7 @@
 Fake writer and fake mailbox; real strategy, approvals, guard and executor.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import cast
 from uuid import UUID, uuid4
@@ -33,6 +33,7 @@ from bido_back.db.models import (
 )
 from bido_back.followups import service as followup_service
 from bido_back.followups.calendar import add_business_days
+from bido_back.followups.schemas import FollowupSettingsUpdate
 from bido_back.followups.send import register_followup_act_tools
 from bido_back.negotiation import service
 from bido_back.negotiation.hooks import cancel_on_new_offer
@@ -652,6 +653,13 @@ async def test_the_deadline_closes_with_the_best_offers_and_stops_follow_ups(
     app_engine: AsyncEngine, rfq_rows: People
 ) -> None:
     world = await World(app_engine, rfq_rows).setup(silent=True)
+    # Quotes were due today: chasing the silent supplier may start (never before that).
+    await followup_service.update_followups(
+        world.engine,
+        buyer(world.people),
+        world.rfq_id,
+        FollowupSettingsUpdate(response_due=datetime.now(UTC).date()),
+    )
     # A week: the first chase (2 business days, US calendar for the silent
     # supplier) must fall before the deadline even across a holiday weekend.
     deadline = datetime.now(UTC) + timedelta(days=7)
@@ -1174,3 +1182,40 @@ async def test_an_interrupted_send_counts_as_sent(world: World) -> None:
         (1, 1, "canceled"),
         (2, 2, "proposed"),
     ]
+
+
+async def test_an_unanswered_request_gets_one_reminder(world: World) -> None:
+    await world.configure()
+    writer = FakeNegotiationWriter()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.sweep(writer)
+    [counter] = await world.messages("rhein")
+    await world.approve(counter.approval_id or counter.id)
+    reply_by = date.fromisoformat(str((await world.messages("rhein"))[0].terms["reply_by"]))
+    # No reply by the reply-by date: the same request once more, with a new reply-by date.
+    after = datetime.combine(reply_by + timedelta(days=1), time(10), tzinfo=UTC)
+    assert (await world.sweep(writer, now=after)).proposed == 1
+    rows = await world.messages("rhein")
+    assert [(m.sequence, m.round, m.kind, m.status) for m in rows] == [
+        (1, 1, "revised_offer", "sent"),
+        (2, 1, "reminder", "proposed"),
+    ]
+    reminder = rows[1]
+    assert reminder.terms["decision"]["reminder_of"] == 1
+    assert date.fromisoformat(str(reminder.terms["reply_by"])) > reply_by
+    await world.approve(reminder.approval_id or reminder.id)
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id, now=after)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    # A reminder is no round.
+    assert rhein.rounds_used == 1
+    assert rhein.state is not None and rhein.state.reason == "reminder_sent"
+    assert [m.kind for m in rhein.messages] == ["revised_offer", "reminder"]
+    # Never a second one: unanswered after it, the last offer stands.
+    much_later = after + timedelta(days=7)
+    assert (await world.sweep(writer, now=much_later)).proposed == 0
+    view = await service.get_negotiation(
+        world.engine, buyer(world.people), world.rfq_id, now=much_later
+    )
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.state is not None and rhein.state.reason == "no_reply_after_reminder"
+    assert len(await world.messages("rhein")) == 2

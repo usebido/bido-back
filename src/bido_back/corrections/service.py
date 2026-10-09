@@ -15,6 +15,17 @@ Sending the value a field already has records a confirmation: nothing
 changes but the field leaves review. Any member of the tenant may correct;
 every row says who did.
 
+"Use the current offer" (`use_current_offer`) is the buyer's decision on a
+held offer: the supplier's latest reply could not be applied as it was (no
+"other terms unchanged", a change nobody asked about, conflicting statements,
+an unclear chronology) or an asked item stayed unusable. The offer as shown
+becomes the offer: its holds are released (on the proposal and its lines, and
+for every later rebuild of the offer, `quotes.state`), the unusable asks are
+resolved, and the negotiation evaluates it again. Never automatic. It follows
+the approval rules: the RFQ's buyer may decide when the company allows
+self-approval, otherwise an approver or owner who is not that buyer; an
+approver or owner always may. Audited with ids and reason codes only.
+
 Review issues a correction resolves (the issue strings come from
 `bido_back.quotes.validation`):
 - `missing:<field>` and `currency_mismatch:<field>` when `<field>` is corrected;
@@ -34,9 +45,10 @@ from typing import Any, Final, cast
 from uuid import UUID
 
 from pydantic import JsonValue
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from bido_back.approvals.guard import APPROVER_ROLES
 from bido_back.auth import Principal
 from bido_back.corrections.schemas import (
     FieldCorrectionView,
@@ -44,15 +56,28 @@ from bido_back.corrections.schemas import (
     LineCorrectionRequest,
     ProposalLineView,
     ProposalView,
+    UseCurrentOfferRequest,
 )
 from bido_back.db import tenant_session
-from bido_back.db.models import FieldCorrection, Invite, Proposal, ProposalLine, Rfq, RfqLine
+from bido_back.db.models import (
+    AuditEvent,
+    FieldCorrection,
+    Invite,
+    Membership,
+    Proposal,
+    ProposalLine,
+    Rfq,
+    RfqLine,
+    Tenant,
+)
+from bido_back.followups.ledger import resolve_asks
 from bido_back.negotiation.hooks import cancel_on_new_offer
-from bido_back.rfqs.errors import InvalidState, NotFound
+from bido_back.rfqs.errors import Forbidden, InvalidState, NotFound
 
 Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
 _REVIEW: Final = "_review"
+_OFFER_STATE: Final = "_offer_state"
 _PROVENANCE_ONLY: Final = frozenset(
     {
         "qualification",
@@ -224,6 +249,104 @@ async def _record(
     }
 
 
+async def use_current_offer(
+    db: Db, principal: Principal, proposal_id: UUID, request: UseCurrentOfferRequest
+) -> ProposalView:
+    """The buyer takes the supplier's latest offer as shown: its holds are released."""
+    now = datetime.now(UTC)
+    async with tenant_session(db, principal.tenant_id) as session:
+        proposal, rfq_id = await _proposal(session, proposal_id, lock=True)
+        rfq = await session.get(Rfq, rfq_id)
+        if rfq is None:
+            raise NotFound(f"rfq {rfq_id} not found")
+        await _may_decide(session, principal, rfq)
+        latest = await session.scalar(
+            select(func.max(Proposal.version)).where(Proposal.invite_id == proposal.invite_id)
+        )
+        if proposal.version != latest:
+            raise InvalidState(f"proposal {proposal_id} is not the supplier's latest offer")
+        raw = proposal.fields.get(_OFFER_STATE)
+        offer_state = dict(cast(Mapping[str, Any], raw)) if isinstance(raw, Mapping) else {}
+        holds = [str(issue) for issue in cast(list[object], offer_state.get("issues") or [])]
+        if offer_state.get("reply_kind") == "clarification":
+            holds.append("supplier_clarification_required")
+        holds = list(dict.fromkeys(holds))
+        resolved_asks = await resolve_asks(
+            session, proposal.invite_id, by=principal.user_id, at=now
+        )
+        if not holds and not resolved_asks:
+            raise InvalidState(f"proposal {proposal_id} is not held")
+        questions = offer_state.get("technical_questions")
+        offer_state.update(
+            {
+                "issues": [],
+                "held_message_ids": [],
+                "reply_kind": "amendment"
+                if offer_state.get("reply_kind") == "clarification"
+                else offer_state.get("reply_kind"),
+                "requires_clarification": bool(questions),
+                "released": {
+                    "message_id": offer_state.get("active_message_id"),
+                    "by": str(principal.user_id),
+                    "at": now.isoformat(),
+                    "issues": holds,
+                    "reason": request.reason,
+                },
+            }
+        )
+        fields = _copy(proposal.fields)
+        fields[_OFFER_STATE] = offer_state
+        _resolve(fields, set(holds))
+        proposal.fields = fields
+        lines = await _lines(session, proposal_id, lock=True)
+        for line in lines:
+            line_fields = _copy(line.fields)
+            line.needs_review = _resolve(line_fields, set(holds))
+            line.fields = line_fields
+        await _invalidate_negotiation(session, proposal.invite_id, rfq_id)
+        session.add(
+            AuditEvent(
+                tenant_id=principal.tenant_id,
+                actor_user_id=principal.user_id,
+                action="proposal.hold_released",
+                payload={
+                    "rfq_id": str(rfq_id),
+                    "invite_id": str(proposal.invite_id),
+                    "proposal_id": str(proposal_id),
+                    "issues": holds,
+                    "resolved_asks": resolved_asks,
+                },
+            )
+        )
+        await session.flush()
+        return _proposal_view(proposal, rfq_id, lines)
+
+
+async def _may_decide(session: AsyncSession, principal: Principal, rfq: Rfq) -> None:
+    """Who may take an offer as shown: like an approval of what Bido prepared for the
+    RFQ's buyer (`approvals.guard`). Roles are read now, never from the token."""
+    role = await session.scalar(
+        select(Membership.role)
+        .where(
+            Membership.tenant_id == principal.tenant_id,
+            Membership.user_id == principal.user_id,
+        )
+        .with_for_update(read=True)
+    )
+    if role is None:
+        raise Forbidden("only a member of the company can decide")
+    own = rfq.created_by == principal.user_id
+    if own:
+        allowed = await session.scalar(
+            select(Tenant.allow_self_approval).where(Tenant.id == principal.tenant_id)
+        )
+        if allowed:
+            return
+        raise Forbidden("this company requires a second person: the RFQ's buyer cannot decide")
+    if role not in APPROVER_ROLES:
+        raise Forbidden("the approver or owner role is required")
+
+
 def _resolve(fields: dict[str, Any], resolved: set[str]) -> bool:
     """Mark `resolved` issues answered and recompute the row's needs_review."""
     review = _copy(fields.get(_REVIEW))
@@ -368,6 +491,24 @@ def _line_view(line: ProposalLine) -> ProposalLineView:
     )
 
 
+def _holds(fields: Mapping[str, Any]) -> tuple[list[str], datetime | None]:
+    """Why the offer is held, and when a person released it (`_offer_state`)."""
+    raw = fields.get(_OFFER_STATE)
+    if not isinstance(raw, Mapping):
+        return [], None
+    state = cast(Mapping[str, Any], raw)
+    holds = [str(i) for i in cast(list[object], state.get("issues") or [])]
+    if state.get("reply_kind") == "clarification" and not holds:
+        holds.append("supplier_clarification_required")
+    released = state.get("released")
+    at = cast(Mapping[str, Any], released).get("at") if isinstance(released, Mapping) else None
+    try:
+        released_at = datetime.fromisoformat(at) if isinstance(at, str) else None
+    except ValueError:
+        released_at = None
+    return holds, released_at
+
+
 def _proposal_view(proposal: Proposal, rfq_id: UUID, lines: Sequence[ProposalLine]) -> ProposalView:
     review = proposal.fields.get(_REVIEW)
     needs_review = (
@@ -375,6 +516,7 @@ def _proposal_view(proposal: Proposal, rfq_id: UUID, lines: Sequence[ProposalLin
         if isinstance(review, Mapping)
         else bool(_review_fields(proposal.fields))
     )
+    holds, released_at = _holds(proposal.fields)
     return ProposalView(
         id=proposal.id,
         invite_id=proposal.invite_id,
@@ -388,6 +530,8 @@ def _proposal_view(proposal: Proposal, rfq_id: UUID, lines: Sequence[ProposalLin
         review_fields=_review_fields(proposal.fields),
         corrected_fields=corrected_fields(proposal.fields),
         lines=[_line_view(line) for line in lines],
+        holds=holds,
+        released_at=released_at,
     )
 
 

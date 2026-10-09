@@ -365,11 +365,43 @@ def test_after_a_request_is_sent_bido_waits_for_the_supplier_until_the_reply_by_
     )
     assert result.until is not None and result.until.date() == TODAY + timedelta(days=2)
     assert phase_label(result).startswith("Waiting for the supplier")
+    # No reply by the reply-by date: ONE reminder, the same request with a new reply-by.
     later = plan(facts(ABOVE, first), now=NOW + timedelta(days=4))
-    assert (later.phase, later.reason, later.until) == (
+    assert (later.action, later.phase, later.reason) == ("reminder", "waiting", "reminder_due")
+    assert later.email is not None
+    assert (later.email.reminder_of, later.email.round, later.email.kind) == (
+        1,
+        1,
+        "revised_offer",
+    )
+    assert later.email.reply_by > TODAY + timedelta(days=4)
+    reminder = replace(first, sequence=2, reminder_of=1, reply_by=TODAY + timedelta(days=7))
+    reminded = plan(facts(ABOVE, first, reminder), now=NOW + timedelta(days=5))
+    # A reminder is no round: the supplier is still in round 1.
+    assert (reminded.phase, reminded.reason, reminded.status) == (
+        "waiting_for_supplier",
+        "reminder_sent",
+        "countered",
+    )
+    # Unanswered after the reminder: the offer stands; never a second reminder.
+    after = plan(facts(ABOVE, first, reminder), now=NOW + timedelta(days=8))
+    assert (after.action, after.phase, after.reason, after.email) == (
+        "close",
+        "closed",
+        "no_reply_after_reminder",
+        None,
+    )
+    # A new offer after the reminder: the next request is round 2.
+    answered = plan(facts(MOVED, first, reminder), now=NOW + timedelta(days=5), max_rounds=3)
+    assert answered.email is not None and answered.email.round == 2
+    # Never a reminder after the negotiation deadline.
+    overdue = plan(
+        facts(ABOVE, first), now=NOW + timedelta(days=4), deadline=NOW + timedelta(days=3)
+    )
+    assert (overdue.phase, overdue.reason, overdue.email) == (
         "waiting_for_supplier",
         "reply_overdue",
-        DEADLINE,
+        None,
     )
 
 

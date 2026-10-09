@@ -13,6 +13,10 @@ class InvalidState(RfqError):
     """The operation does not fit the current status of the RFQ or invite."""
 
 
+class Forbidden(RfqError):
+    """The caller's role does not allow this decision (re-read from `memberships`)."""
+
+
 class ReplyByRequired(InvalidState):
     """An RFQ email needs a reply-by date (`rfqs.response_due`) of today or later.
 

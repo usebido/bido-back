@@ -1,9 +1,13 @@
 """The interfaces the planner reads from other workstreams, and the email it decides."""
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from typing import cast
 from uuid import UUID, uuid4
 
+from bido_back.agents.catalog.contracts import FollowupField
+from bido_back.followups.ledger import AskStatus
 from bido_back.negotiation.decision import (
     DecisionLine,
     QuotedTerms,
@@ -60,9 +64,12 @@ def test_lead_times_are_read_as_stated_and_converted_from_the_order_date() -> No
         days=9, fields=stated(LeadTime(unit="date", delivery_date=date(2026, 10, 18)))
     )
     assert extraction_expected_delivery(by_date, date(2026, 10, 12)) == (date(2026, 10, 18), True)
-    # Before extraction v5 (or corrected by a person): calendar days, the fallback.
+    # Before extraction v5: calendar days, never exact (the unit written is unknown); the
+    # same helper as the follow-ups', so the ledger and the planner agree on every date.
     legacy = QuotedLeadTime(days=12)
-    assert extraction_expected_delivery(legacy, FRIDAY) == (FRIDAY + timedelta(days=12), True)
+    assert extraction_expected_delivery(legacy, FRIDAY) == (FRIDAY + timedelta(days=12), False)
+    corrected = QuotedLeadTime(days=12, fields={"lead_time_days": {"corrected": True}})
+    assert extraction_expected_delivery(corrected, FRIDAY) == (FRIDAY + timedelta(days=12), True)
     assert calendar_expected_delivery(QuotedLeadTime(days=None), FRIDAY) is None
 
 
@@ -310,66 +317,150 @@ def test_a_best_and_final_request_carries_the_common_cut_off() -> None:
     assert "23:59" in rendered.text and "R$ 84,50" in rendered.text
 
 
-# --- The default clarification ledger -------------------------------------------------------
+# --- The clarification ledger, as the planner reads it ----------------------------------------
 
 
-def test_an_unanswered_clarification_expires_into_the_buyers_items() -> None:
-    from bido_back.db.models import (
-        FollowupMessage,
-        Invite,
-        Proposal,
-        ProposalLine,
-        Rfq,
-        RfqLine,
-        Supplier,
+def test_the_ledger_maps_to_the_planners_clarification_state() -> None:
+    from bido_back.db.models import Invite, Proposal, Rfq, RfqLine, Supplier
+    from bido_back.followups.ledger import (
+        Ask,
+        Decision,
+        OpenRequest,
+        PendingEmail,
+        SupplierFollowup,
     )
+    from bido_back.followups.missing import OpenItem
     from bido_back.negotiation import service
     from bido_back.negotiation.planner import LineTerms
 
-    row = RfqLine(id=SHAFT, position=2, description="Eixo motor MTR-100", mpn=None)
-    proposal = Proposal(id=uuid4(), version=1, currency="BRL", valid_until=None, fields={})
-    offered = ProposalLine(
-        proposal_id=proposal.id,
-        rfq_line_id=SHAFT,
-        unit_price=Decimal("89"),
-        min_quantity=Decimal(15),
-        lead_time_days=12,
-        fields={},
-    )
-    sent_at = datetime(2026, 10, 9, 12, tzinfo=UTC)
-    asked = FollowupMessage(
-        kind="clarification", proposal_id=proposal.id, status="sent", sent_at=sent_at
-    )
+    proposal = Proposal(id=uuid4(), version=1, currency="BRL", fields={})
     item = service._Supplier(  # pyright: ignore[reportPrivateUsage]
-        invite=Invite(status="responded"),
+        invite=Invite(id=uuid4(), status="responded"),
         supplier=Supplier(country="BR"),
         proposal=proposal,
-        proposal_lines=[offered],
-        followups=[asked],
     )
-    loaded = service._Loaded(  # pyright: ignore[reportPrivateUsage]
-        rfq=Rfq(),
-        lines=[
-            service._Line(  # pyright: ignore[reportPrivateUsage]
-                row=row,
-                terms=LineTerms(rfq_line_id=SHAFT, position=2, quantity=Decimal(15)),
-                facts=LINES[SHAFT],
-            )
-        ],
-        suppliers=[item],
-        versions={},
-        approvals={},
-        waits={},
+    sent = datetime(2026, 10, 9, 12, tzinfo=UTC)
+    followup_id = uuid4()
+
+    def ask(field: str, status: str, position: int | None = 2) -> Ask:
+        return Ask(
+            id=uuid4(),
+            invite_id=item.invite.id,
+            followup_id=followup_id,
+            rfq_line_id=SHAFT if position == 2 else None,
+            position=position,
+            field=cast(FollowupField, field),
+            question="deliver_by" if field == "delivery_date" else "value",
+            need_by=NEED_BY if field == "delivery_date" else None,
+            status=cast(AskStatus, status),
+            asked_at=sent,
+            reply_by=date(2026, 10, 14),
+            answered_by_message_id=None,
+            settled_at=None,
+        )
+
+    def state(
+        *,
+        asks: tuple[Ask, ...] = (),
+        request: OpenRequest | None = None,
+        pending: tuple[PendingEmail, ...] = (),
+        decisions: tuple[Decision, ...] = (),
+        to_ask: tuple[OpenItem, ...] = (),
+    ) -> ClarificationState:
+        followup = SupplierFollowup(
+            invite_id=item.invite.id,
+            invite_status="responded",
+            has_offer=True,
+            asks=asks,
+            request=request,
+            pending=pending,
+            decisions=decisions,
+            to_ask=to_ask,
+        )
+        loaded = service._Loaded(  # pyright: ignore[reportPrivateUsage]
+            rfq=Rfq(),
+            lines=[
+                service._Line(  # pyright: ignore[reportPrivateUsage]
+                    row=RfqLine(id=SHAFT, position=2, description="Eixo", mpn=None),
+                    terms=LineTerms(rfq_line_id=SHAFT, position=2, quantity=Decimal(15)),
+                    facts=LINES[SHAFT],
+                )
+            ],
+            suppliers=[item],
+            versions={},
+            approvals={},
+            waits={},
+            ledger={item.invite.id: followup},
+        )
+        return service._clarification(item, loaded, sent)  # pyright: ignore[reportPrivateUsage]
+
+    validity = OpenItem(
+        position=None,
+        rfq_line_id=None,
+        line=None,
+        field="valid_until",
+        question="value",
+        problem="missing",
     )
-    clarification = service._clarification  # pyright: ignore[reportPrivateUsage]
-    # Two Brazilian business days to answer (12/10 is a holiday): until Wednesday 14/10.
-    waiting = clarification(item, loaded, datetime(2026, 10, 14, 20, tzinfo=UTC))
-    assert waiting.awaiting and waiting.awaiting_until is not None
-    assert waiting.awaiting_until.date() == date(2026, 10, 14)
-    # Unanswered past it: the validity is the buyer's now; the offer is negotiated as it is.
-    expired = clarification(item, loaded, datetime(2026, 10, 15, 9, tzinfo=UTC))
-    assert (expired.awaiting, expired.blocking, expired.exhausted) == (
+    lead = OpenItem(
+        position=2,
+        rfq_line_id=SHAFT,
+        line="Eixo",
+        field="delivery_date",
+        question="deliver_by",
+        problem="unclear",
+        need_by=NEED_BY,
+    )
+    # Not asked yet: clarify first.
+    to_ask = state(to_ask=(validity, lead))
+    assert (to_ask.to_ask, to_ask.lines, to_ask.blocking) == (
+        ("valid_until", "pos2.delivery_date"),
+        frozenset({SHAFT}),
+        True,
+    )
+    # Waiting for approval, then sent and unanswered: wait, until its (reminder's) reply-by.
+    pending = state(
+        asks=(ask("delivery_date", "proposed"),),
+        pending=(PendingEmail(kind="clarification", created_at=sent, approval_id=None),),
+    )
+    assert (pending.pending, pending.lines) == (True, frozenset({SHAFT}))
+    request = OpenRequest(
+        kind="clarification",
+        sent_at=sent,
+        reply_by=date(2026, 10, 14),
+        message_row_id=uuid4(),
+        asks=(ask("delivery_date", "open"),),
+    )
+    awaiting = state(asks=request.asks, request=request)
+    assert awaiting.awaiting and awaiting.awaiting_until is not None
+    assert awaiting.awaiting_until.date() == date(2026, 10, 14)
+    reminded = state(
+        asks=request.asks,
+        request=replace(request, reminded=True, reminder_reply_by=date(2026, 10, 19)),
+    )
+    assert reminded.awaiting_until is not None
+    assert reminded.awaiting_until.date() == date(2026, 10, 19)
+    # Unanswered after the reminder, answered unusably, or held by the gate: the buyer's.
+    silent = state(
+        asks=request.asks,
+        request=request,
+        decisions=(Decision(kind="no_answer", since=sent),),
+    )
+    assert (silent.blocking, silent.exhausted, silent.exhausted_lines) == (
         False,
-        False,
-        ("valid_until",),
+        ("pos2.delivery_date",),
+        frozenset({SHAFT}),
     )
+    unusable = state(
+        asks=(ask("valid_until", "unusable", position=None),),
+        decisions=(Decision(kind="unusable_answer", field="valid_until"),),
+    )
+    assert (unusable.blocking, unusable.exhausted) == (False, ("valid_until",))
+    held = state(
+        to_ask=(validity,),
+        decisions=(Decision(kind="email_held", reasons=("clarification",), since=sent),),
+    )
+    assert (held.blocking, held.exhausted) == (False, ("valid_until",))
+    # A counter-offer the supplier has not answered is the negotiation's, not a clarification.
+    counter = state(request=replace(request, kind="counter", asks=()))
+    assert not counter.blocking

@@ -29,9 +29,18 @@ SupplierPhase = Literal[
     "closed",
 ]
 NextActionName = Literal[
-    "wait", "clarify", "revised_offer", "delivery_date", "bafo", "accept", "hold", "close"
+    "wait",
+    "clarify",
+    "revised_offer",
+    "delivery_date",
+    "bafo",
+    "reminder",
+    "accept",
+    "hold",
+    "close",
 ]
-EmailKindName = Literal["revised_offer", "delivery_date", "bafo"]
+# `reminder`: the one reminder of an unanswered revised-offer or delivery-date request.
+EmailKindName = Literal["revised_offer", "delivery_date", "bafo", "reminder"]
 # A negotiation email's exact state (`status` keeps the older, coarser values).
 EmailStateName = Literal["decided", "proposed", "sent", "canceled", "rejected", "held"]
 LinePriceStatus = Literal["in_target", "ask_met", "in_range", "above_max", "no_target"]
@@ -110,7 +119,7 @@ class NegotiationMessageView(BaseModel):
     # The negotiation round: emails sent before it, plus one (a replacement repeats it).
     round: int
     action: NegotiationActionName
-    # `decided` and `held` read as `proposed` here; `state` has the exact value.
+    # `decided` reads as `proposed` and `held` as `canceled` here; `state` is exact.
     status: NegotiationMessageStatus
     approval_id: UUID | None
     proposal_id: UUID
@@ -124,9 +133,11 @@ class NegotiationMessageView(BaseModel):
     reply_by: date | None = None
     # A best-and-final request's cut-off (the same for every supplier of the RFQ).
     cutoff_at: datetime | None = None
-    # Drafts tried; `held_reason` says why it waits for the buyer after the last one.
+    # Times rendered; `held_reason` says why it waits for the buyer.
     attempts: int = 0
     held_reason: str | None = None
+    # A reminder: the sequence of the request it repeats.
+    reminder_of: int | None = None
     asks: list[MessageAskView] = Field(default_factory=list[MessageAskView])
 
 

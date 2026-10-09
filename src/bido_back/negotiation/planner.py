@@ -15,8 +15,10 @@ buyer's limits and the deadlines, and decides ONE action:
 - `clarify`: open questions come first (the ledger's items; the follow-up
   sweep writes that email);
 - `revised_offer` / `delivery_date` / `bafo`: one email, decided here with
-  every number and date (`EmailPlan`); the service persists it before any
-  draft is written;
+  every number and date (`EmailPlan`); the service persists it before the
+  email is rendered;
+- `reminder`: the one reminder of an unanswered revised-offer or delivery-date
+  request (the same request, a new reply-by date);
 - `accept`: accepted internally, nothing to ask (no email);
 - `hold`: the buyer decides or answers (`needs_decision` / `needs_answer`);
 - `close`: nothing more to negotiate with this supplier.
@@ -34,7 +36,11 @@ First match wins:
 4. The clarification ledger: an open clarification (to ask, pending, sent and
    unanswered) comes first.
 5. Our last email is unanswered: wait for the supplier (until its reply-by
-   date, or the cut-off of a BAFO; after a BAFO's cut-off the offer stands).
+   date, or the cut-off of a BAFO; after a BAFO's cut-off the offer stands). A
+   revised-offer or delivery-date request gets ONE reminder after its reply-by
+   date (the same request again, with a new reply-by date; never after the
+   negotiation deadline, never for a BAFO); unanswered after it, the offer
+   stands (closed).
 6. After a BAFO answer, or the supplier's own declared final offer: accept if
    everything is acceptable, else close (the final offer stands). Never a BAFO
    after the supplier's final offer.
@@ -51,8 +57,8 @@ First match wins:
    only). A request identical to the last one sent is never repeated: it
    becomes the BAFO.
 
-Rounds count SENT emails only: a canceled or rejected email never consumes a
-round, and a replacement repeats the round it replaces.
+Rounds count SENT requests only: a canceled or rejected email never consumes a
+round, a replacement repeats the round it replaces, and a reminder is no round.
 """
 
 from collections.abc import Mapping, Sequence
@@ -76,7 +82,15 @@ from bido_back.negotiation.strategy import (
 from bido_back.supplier_email.deadlines import reply_by_for
 
 NextAction = Literal[
-    "wait", "clarify", "revised_offer", "delivery_date", "bafo", "accept", "hold", "close"
+    "wait",
+    "clarify",
+    "revised_offer",
+    "delivery_date",
+    "bafo",
+    "reminder",
+    "accept",
+    "hold",
+    "close",
 ]
 Phase = Literal[
     "not_started",
@@ -102,11 +116,11 @@ BAFO_WINDOW: Final = timedelta(hours=24)
 BAFO_REPLY_BUSINESS_DAYS: Final = 2
 # No BAFO when its cut-off is closer than this: the supplier's offer stands.
 MIN_BAFO_NOTICE: Final = timedelta(hours=12)
-# Emails decided before typed decisions (0036) were answered within this many business
+# Emails decided before typed decisions (0037) were answered within this many business
 # days; new requests follow the email standard (`reply_by_date`).
 REPLY_BUSINESS_DAYS: Final = 2
 
-EMAIL_ACTIONS: Final = frozenset({"revised_offer", "delivery_date", "bafo"})
+EMAIL_ACTIONS: Final = frozenset({"revised_offer", "delivery_date", "bafo", "reminder"})
 
 
 # --- Inputs --------------------------------------------------------------------------------
@@ -213,6 +227,10 @@ class EmailRecord:
     wait: EmailWait | None = None
     # The order date the email's delivery dates were computed from.
     order_date: date | None = None
+    # A reminder: the sequence of the request it repeats (no round of its own).
+    reminder_of: int | None = None
+    # It was decided as a typed decision (a reminder repeats one; not older emails).
+    typed: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +315,8 @@ class EmailPlan:
     mention_competition: bool
     # This BAFO sets the RFQ's common cut-off (the first one).
     sets_cutoff: bool = False
+    # A reminder of the request with this sequence: the same email, a new reply-by date.
+    reminder_of: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -638,7 +658,10 @@ def plan_supplier(
         return SupplierPlan("wait", "not_started", "negotiation_not_started")
 
     emails = supplier.emails
-    sent = sorted((e for e in emails if e.state == "sent"), key=lambda e: e.sequence)
+    sent = sorted(
+        (e for e in emails if e.state == "sent" and e.reminder_of is None),
+        key=lambda e: e.sequence,
+    )
     counted = len(sent)
     last = sent[-1] if sent else None
     bafo_sent = any(e.kind == "bafo" for e in sent)
@@ -736,14 +759,7 @@ def plan_supplier(
             if cutoff is not None and ctx.now < cutoff:
                 return replace(base, phase="waiting_for_supplier", reason="bafo_sent", until=cutoff)
             return _final(base, plans, warnings, "final_round_ended")
-        due = end_of_day(last.reply_by) if last.reply_by is not None else None
-        if due is not None and ctx.now <= due:
-            return replace(
-                base, phase="waiting_for_supplier", reason=f"{last.kind}_sent", until=due
-            )
-        return replace(
-            base, phase="waiting_for_supplier", reason="reply_overdue", until=ctx.deadline
-        )
+        return _unanswered(base, plans, warnings, last, emails, ctx)
 
     quoted = [p for p in plans if p.status in ("priced", "blocked", "question_open")]
     if not quoted:
@@ -866,6 +882,44 @@ def plan_supplier(
         mention_competition=any(p.better_offer_exists for p in positions),
     )
     return replace(base, action=kind, phase="waiting", reason=f"{kind}_due", email=email)
+
+
+def _unanswered(
+    base: SupplierPlan,
+    plans: Sequence[LinePlan],
+    warnings: Sequence[PlanWarning],
+    last: EmailRecord,
+    emails: Sequence[EmailRecord],
+    ctx: Context,
+) -> SupplierPlan:
+    """Our revised-offer or delivery-date request is unanswered: wait until its reply-by
+    date, then remind once (the same request, a new reply-by date), then the offer
+    stands."""
+    reminders = [
+        e for e in emails if e.reminder_of == last.sequence and e.state not in ("canceled",)
+    ]
+    reminder = max(reminders, key=lambda e: e.sequence) if reminders else None
+    if reminder is not None and reminder.state == "sent":
+        due = end_of_day(reminder.reply_by) if reminder.reply_by is not None else None
+        if due is not None and ctx.now <= due:
+            return replace(base, phase="waiting_for_supplier", reason="reminder_sent", until=due)
+        return _final(base, plans, warnings, "no_reply_after_reminder")
+    due = end_of_day(last.reply_by) if last.reply_by is not None else None
+    if due is not None and ctx.now <= due:
+        return replace(base, phase="waiting_for_supplier", reason=f"{last.kind}_sent", until=due)
+    if reminder is None and last.typed and (ctx.deadline is None or ctx.now < ctx.deadline):
+        email = EmailPlan(
+            kind=last.kind,
+            round=last.round,
+            reply_by=reply_by_date(ctx.now, ctx.deadline, ctx.country, last.kind),
+            cutoff_at=None,
+            order_date=last.order_date or ctx.order_date,
+            positions=(),
+            mention_competition=False,
+            reminder_of=last.sequence,
+        )
+        return replace(base, action="reminder", phase="waiting", reason="reminder_due", email=email)
+    return replace(base, phase="waiting_for_supplier", reason="reply_overdue", until=ctx.deadline)
 
 
 def _final(

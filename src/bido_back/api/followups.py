@@ -1,9 +1,18 @@
-"""Follow-up settings and history of an RFQ: `/v1/rfqs/{rfq_id}/followups`.
+"""Follow-ups of an RFQ: `/v1/rfqs/{rfq_id}/followups` and the supplier questions.
 
-GET shows the chase schedule and, per invite, where chasing stands and every
-chase or clarification proposed. PATCH changes the schedule (and the response
-date); the sweeper applies it on its next run. Any member of the tenant may
-change it: nothing is sent without an approval.
+GET shows the chase schedule and, per invite, where it stands (`phase`: waiting
+for the supplier, an email waiting for approval, needs your answer, needs your
+decision...), what Bido asked and when (the clarification ledger), what the
+latest offer still lacks, the supplier's questions, and every follow-up
+proposed. PATCH changes the schedule (and the response date); the sweeper
+applies it on its next run. Any member of the tenant may change it: nothing is
+sent without an approval.
+
+`POST .../invites/{invite_id}/answers` records the buyer's answer to the
+supplier's open questions and proposes it, as written, for approval (a
+negotiation mandate never approves it). `POST .../questions/{id}/dismiss`
+closes a question that needs no answer. Either way, automatic emails to that
+supplier resume.
 """
 
 from uuid import UUID
@@ -11,8 +20,15 @@ from uuid import UUID
 from fastapi import APIRouter, status
 
 from bido_back.api.rfqs import CurrentPrincipal, Db, error_responses, rfq_http_error
-from bido_back.followups import service
-from bido_back.followups.schemas import FollowupSettingsUpdate, RfqFollowups
+from bido_back.followups import questions, service
+from bido_back.followups.schemas import (
+    AnsweredQuestions,
+    AnswerQuestionsRequest,
+    DismissQuestionRequest,
+    FollowupSettingsUpdate,
+    RfqFollowups,
+    SupplierQuestionView,
+)
 from bido_back.rfqs.errors import RfqError
 
 
@@ -34,6 +50,41 @@ def followups_router() -> APIRouter:
     ) -> RfqFollowups:
         try:
             return await service.update_followups(db, principal, rfq_id, body)
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
+
+    @router.post(
+        "/{rfq_id}/invites/{invite_id}/answers",
+        status_code=status.HTTP_201_CREATED,
+        responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT),
+    )
+    async def answer_questions(  # pyright: ignore[reportUnusedFunction]
+        rfq_id: UUID,
+        invite_id: UUID,
+        body: AnswerQuestionsRequest,
+        principal: CurrentPrincipal,
+        db: Db,
+    ) -> AnsweredQuestions:
+        """Answer the supplier's questions: the email waits for approval."""
+        try:
+            return await questions.answer_questions(db, principal, rfq_id, invite_id, body)
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
+
+    @router.post(
+        "/{rfq_id}/questions/{question_id}/dismiss",
+        responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT),
+    )
+    async def dismiss_question(  # pyright: ignore[reportUnusedFunction]
+        rfq_id: UUID,
+        question_id: UUID,
+        body: DismissQuestionRequest,
+        principal: CurrentPrincipal,
+        db: Db,
+    ) -> SupplierQuestionView:
+        """No answer needed (answered elsewhere): automatic emails resume."""
+        try:
+            return await questions.dismiss_question(db, principal, rfq_id, question_id, body)
         except RfqError as exc:
             raise rfq_http_error(exc) from None
 

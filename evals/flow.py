@@ -77,7 +77,7 @@ from bido_back.db.models import (
 )
 from bido_back.email.recipients import is_test_domain
 from bido_back.email.types import OutboundEmail
-from bido_back.followups.calendar import add_business_days
+from bido_back.followups.service import first_chase_due
 from bido_back.mandates import service as mandates
 from bido_back.mandates.policy import commitment_language
 from bido_back.mandates.schemas import ProposeMandateRequest
@@ -475,8 +475,13 @@ async def scenario_followups(world: World, case: str, result: RunResult) -> None
     async with tenant_session(world.engine, world.tenant_id) as session:
         row = await session.get(Rfq, rfq.id)
     assert row is not None
-    first_after = row.followup_first_after_days
-    due = add_business_days(invite.sent_at, first_after, persona.country)
+    # The first chase: `first_after` business days after the RFQ, never before its reply-by.
+    due = first_chase_due(
+        sent_at=invite.sent_at,
+        first_after=row.followup_first_after_days,
+        response_due=row.response_due,
+        country=persona.country,
+    )
 
     if case == "chase":
         world.at(due - timedelta(hours=2))
@@ -541,7 +546,8 @@ async def scenario_followups(world: World, case: str, result: RunResult) -> None
 
     elif case == "out_of_office":
         world.at(world.now + timedelta(hours=2))
-        back = (world.now + timedelta(days=8)).date()
+        # Away past the day the first chase is due.
+        back = (due + timedelta(days=3)).date()
         subject, body = out_of_office(persona, subject=thread.subject, back=back)
         stored = await world.deliver(persona, subject=subject, body=body, auto_reply=True)
         result.check(

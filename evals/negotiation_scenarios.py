@@ -1164,13 +1164,13 @@ def _supplier_status(view: View, key: str) -> str | None:
 def grade_pacing(view: View, step: StepResult) -> None:
     """One organized email per supplier answer: whatever Bido needs to ask after a reply
     (missing information, a counter-offer) goes out together, not as separate emails.
-    Chases (no answer yet) are their own schedule."""
+    Chases and reminders (no answer yet) are their own schedule."""
     crowded: list[str] = []
     for key in view.run.invites:
         replies = sorted(t for k, t in view.run.replies if k == key)
         answers: dict[datetime, list[SentEmail]] = defaultdict(list)
         for email in view.sent(key):
-            if email.kind in ("rfq", "chase"):
+            if email.kind in ("rfq", "chase", "reminder"):
                 continue
             before = [t for t in replies if t <= email.at]
             if before:
@@ -1847,8 +1847,17 @@ def no_reply(view: View, step: StepResult) -> None:
     chases = view.sent(NORTE, "chase")
     expected: list[date] = []
     previous = run.t0
+    # The first chase never before the RFQ's reply-by date: on that day (the next
+    # business day if it is none), at the earliest CHASE_EVERY business days after the RFQ.
+    reply_by = datetime.combine(
+        run.start + timedelta(days=run.scenario.response_due_days), run.t0.timetz()
+    )
+    while not is_business_day(reply_by.date(), "BR"):
+        reply_by += DAY
     for index in range(MAX_CHASES):
         due = add_business_days(previous, CHASE_EVERY, "BR")
+        if index == 0:
+            due = max(due, reply_by)
         expected.append(due.date())
         previous = chases[index].at if index < len(chases) else due
     got = [c.at.date() for c in chases]
@@ -1856,7 +1865,7 @@ def no_reply(view: View, step: StepResult) -> None:
         "chases_on_schedule",
         got == expected,
         f"sent {[str(d) for d in got]}, want {[str(d) for d in expected]} "
-        f"(every {CHASE_EVERY} business days, Brazil)",
+        f"(from the reply-by date, every {CHASE_EVERY} business days, Brazil)",
         owner="followups",
     )
     weekend = [str(d) for d in got if not is_business_day(d, "BR")]
@@ -1871,12 +1880,14 @@ def no_reply(view: View, step: StepResult) -> None:
 
 NO_REPLY: Final = Scenario(
     name="no_reply",
-    title="No answer: chases every 2 business days (Brazil), at most 3, then the buyer knows",
+    title="No answer: chases from the reply-by date, every 2 business days (Brazil), at most "
+    "3, then the buyer knows",
     rfq_title="Componentes do motor MTR-100",
     currency="BRL",
     parts=MTR,
     suppliers=(br(NORTE, "Componentes Norte Ltda"),),
-    response_due_days=20,
+    # Chases start on the reply-by date at the earliest: it falls inside the silence.
+    response_due_days=4,
     deadline_days=21,
     steps=(
         StepSpec(
@@ -2650,6 +2661,15 @@ GAPS: Final[dict[str, Gap]] = {
         "the email standard (N3) rendering the planner's decision with the ledger's items "
         "(N2b), instead of today's two writers.",
     ),
+    "question_answered_outside": Gap(
+        "followups/visibility",
+        "followups/ledger.py supplier questions; followups/questions.py",
+        "The buyer answered the supplier's question outside Bido: the question stays open in "
+        "the ledger until the buyer answers or dismisses it in Bido, so the full quote that "
+        "followed waits for the buyer ('needs your answer', every automatic email paused) "
+        "instead of being accepted internally. Let a later offer without questions propose "
+        "closing them, or show the buyer the one click that dismisses them.",
+    ),
 }
 
 # A check that means the same thing in every scenario -> its gaps.
@@ -2707,6 +2727,7 @@ SCENARIO_GAPS: Final[dict[tuple[str, str], tuple[str, ...]]] = {
     ),
     ("clarification_answered", "ready_to_close"): ("answers_need_preservation",),
     ("multi_language", "asks_above_target_only"): ("questions_before_counter",),
+    ("supplier_asks_question", "visible_accepted"): ("question_answered_outside",),
     ("clarification_answered", "visible_accepted"): (
         "answers_need_preservation",
         "copilot_status",
@@ -2730,24 +2751,10 @@ def diagnosis(scenario: str, check: str) -> tuple[str, ...]:
 # refused_drafts and the lead-time ask as a date from the need-by date.
 EXPECTED_MOCK_FAILURES: Final[frozenset[tuple[str, str, str]]] = frozenset(
     {
-        ("rfq6_replay", "first_reply", "no_quantity_tier_asked"),
-        ("partial_quote", "third_line", "offer_completed"),
-        ("partial_quote", "third_line", "offer_usable"),
-        ("partial_quote", "third_line", "nothing_to_ask"),
-        ("partial_quote", "third_line", "ready_to_close"),
-        ("partial_quote", "third_line", "visible_accepted"),
+        # The question stays open in the ledger until the buyer closes it in Bido.
+        ("supplier_asks_question", "quote", "visible_accepted"),
         # One request per supplier: the validity question first, the counter after it.
         ("multi_language", "first_offer", "asks_above_target_only"),
-        *(
-            ("clarification_answered", "answers", check)
-            for check in (
-                "answers_kept",
-                "offer_usable",
-                "nothing_asked_twice",
-                "ready_to_close",
-                "visible_accepted",
-            )
-        ),
     }
 )
 

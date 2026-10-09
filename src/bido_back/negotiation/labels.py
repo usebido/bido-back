@@ -50,6 +50,7 @@ _REASONS: Final[dict[str, str]] = {
     "revised_offer_sent": "Waiting for the supplier's revised offer",
     "delivery_date_sent": "Waiting for the supplier to confirm a delivery date",
     "bafo_sent": "Waiting for the supplier's best and final offer",
+    "reminder_sent": "Waiting for the supplier: reminded of our request (the one reminder)",
     "reply_overdue": "Waiting for the supplier: no reply to our last request; its current "
     "offer stands",
     # Waiting for Bido's own email.
@@ -62,6 +63,8 @@ _REASONS: Final[dict[str, str]] = {
     "revised_offer_due": "Waiting: Bido is preparing a request for a revised offer",
     "delivery_date_due": "Waiting: Bido is preparing a delivery-date request",
     "bafo_due": "Waiting: Bido is preparing the best-and-final request",
+    "reminder_due": "Waiting: no reply by the reply-by date; Bido is preparing one reminder of "
+    "our request",
     # Held for a person.
     "email_awaiting_approval": "Held for your approval: the next email to the supplier",
     "clarification_awaiting_approval": "Held for your approval: questions to the supplier",
@@ -121,6 +124,8 @@ _REASONS: Final[dict[str, str]] = {
     "final_round_ended": "Closed: no answer to the best-and-final request by the cut-off; the "
     "last offer stands",
     "round_limit_reached": "Closed: round limit reached; the last offer stands",
+    "no_reply_after_reminder": "Closed: no reply to our request after a reminder; the last "
+    "offer stands",
     "final_round_closed": "Closed: the final round's cut-off passed; the last offer stands",
     "no_time_for_final_round": "Closed: too close to the deadline for a final round; the last "
     "offer stands",

@@ -1,6 +1,8 @@
-"""Business days, auto-reply pauses, the chase plan and the open items. No database."""
+"""Business days, auto-reply pauses, the chase and reminder plans and the open items. No
+database."""
 
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import uuid4
 
@@ -8,12 +10,15 @@ from bido_back.agents.catalog.contracts import FollowupEmailInput, FollowupEmail
 from bido_back.agents.catalog.definitions import followup_email_problems
 from bido_back.followups.autoreply import paused_until, stated_return_date
 from bido_back.followups.calendar import add_business_days, is_business_day
+from bido_back.followups.ledger import OpenRequest
 from bido_back.followups.missing import OfferedLine, RequestedLine, open_items
 from bido_back.followups.service import (
     ChasePlan,
     ChaseRow,
     Schedule,
+    first_chase_due,
     plan_chase,
+    plan_reminder,
     reply_subject,
 )
 
@@ -110,33 +115,100 @@ def test_a_chase_whose_draft_was_refused_is_used_not_retried_every_sweep() -> No
     assert plan(now=MONDAY, schedule=off).state == "disabled"
 
 
-def test_open_items_name_exactly_what_is_missing_or_unclear() -> None:
-    capacitor = RequestedLine(id=uuid4(), position=1, description="MLCC 100nF", mpn="GRM188")
-    connector = RequestedLine(id=uuid4(), position=2, description="Connector 40p", mpn=None)
-    offered = [
-        OfferedLine(
-            rfq_line_id=capacitor.id,
-            values={"unit_price": Decimal("0.01"), "min_quantity": None, "lead_time_days": 42},
-            fields={"lead_time_days": {"needs_review": True}},
-        )
-    ]
-
-    items = open_items(
-        header_values={"currency": "EUR", "valid_until": None},
-        header_fields={"currency": {"needs_review": False}},
-        requested=[connector, capacitor],
-        offered=offered,
+def test_chases_never_before_the_rfqs_reply_by_date() -> None:
+    # Quotes due Friday 16 Oct: no chase on Wednesday 7 Oct, but on the 16th, at 09:00.
+    due = plan_chase(
+        invite_status="sent",
+        rfq_status="open",
+        sent_at=MONDAY,
+        chases=[],
+        schedule=SCHEDULE,
+        country="DE",
+        paused=None,
+        now=MONDAY,
+        response_due=date(2026, 10, 16),
     )
+    assert due.due_at == datetime(2026, 10, 16, 9, 0, tzinfo=UTC)
+    # A reply-by date on a weekend: the next business day.
+    weekend = plan_chase(
+        invite_status="sent",
+        rfq_status="open",
+        sent_at=MONDAY,
+        chases=[],
+        schedule=SCHEDULE,
+        country="DE",
+        paused=None,
+        now=MONDAY,
+        response_due=date(2026, 10, 17),
+    )
+    assert weekend.due_at == datetime(2026, 10, 19, 9, 0, tzinfo=UTC)
+    # A reply-by date already past: the usual 2 business days.
+    assert first_chase_due(
+        sent_at=MONDAY, first_after=2, response_due=date(2026, 10, 1), country="DE"
+    ) == datetime(2026, 10, 7, 9, 0, tzinfo=UTC)
 
-    assert [(i.position, i.field, i.problem) for i in items] == [
-        (None, "valid_until", "missing"),
-        (1, "quantity", "missing"),
-        (1, "lead_time", "unclear"),
-        (2, "unit_price", "missing"),
-        (2, "quantity", "missing"),
-        (2, "lead_time", "missing"),
-    ]
-    assert items[1].line == "MLCC 100nF (GRM188)"
+
+def test_a_reply_without_an_offer_does_not_stop_chasing() -> None:
+    replied = datetime(2026, 10, 7, 15, 0, tzinfo=UTC)  # "we will send it next week"
+    chasing = plan_chase(
+        invite_status="responded",
+        rfq_status="open",
+        sent_at=MONDAY,
+        chases=[],
+        schedule=SCHEDULE,
+        country="DE",
+        paused=None,
+        now=replied,
+        last_reply_at=replied,
+        awaiting_offer=True,
+    )
+    # Never right after it wrote: two business days after its reply.
+    assert (chasing.state, chasing.due_at) == (
+        "scheduled",
+        datetime(2026, 10, 9, 15, 0, tzinfo=UTC),
+    )
+    offer = plan_chase(
+        invite_status="responded",
+        rfq_status="open",
+        sent_at=MONDAY,
+        chases=[],
+        schedule=SCHEDULE,
+        country="DE",
+        paused=None,
+        now=replied,
+        awaiting_offer=False,
+    )
+    assert offer.state == "not_applicable"
+
+
+def request(**changes: object) -> OpenRequest:
+    base = OpenRequest(
+        kind="clarification",
+        sent_at=datetime(2026, 10, 9, 14, 0, tzinfo=UTC),  # Friday
+        reply_by=date(2026, 10, 14),
+        message_row_id=uuid4(),
+    )
+    return replace(base, **changes)  # type: ignore[arg-type]
+
+
+def test_one_reminder_the_business_day_after_the_reply_by_date() -> None:
+    # Brazil: Monday 12 Oct is a holiday; reply by Wednesday 14 -> remind Thursday 15.
+    assert plan_reminder(request(), country="BR", every=2, last_reply_at=None) == datetime(
+        2026, 10, 15, 14, 0, tzinfo=UTC
+    )
+    # Reminded once already (sent, waiting or turned down): never again.
+    assert plan_reminder(request(reminded=True), country="BR", every=2, last_reply_at=None) is None
+    # Nothing to refer to, or no date asked: no reminder.
+    assert plan_reminder(request(reply_by=None), country="BR", every=2, last_reply_at=None) is None
+    assert (
+        plan_reminder(request(message_row_id=None), country="BR", every=2, last_reply_at=None)
+        is None
+    )
+    # The supplier wrote meanwhile without answering ("tomorrow"): give it two business days.
+    wrote = datetime(2026, 10, 15, 9, 0, tzinfo=UTC)
+    assert plan_reminder(request(), country="BR", every=2, last_reply_at=wrote) == datetime(
+        2026, 10, 19, 9, 0, tzinfo=UTC
+    )
 
 
 def test_a_complete_offer_has_no_open_items() -> None:

@@ -7,14 +7,16 @@ shape here, so the planner (`bido_back.negotiation.planner`) stays pure:
    ordered on a given day. Signature: `expected_delivery(line, reference_date)
    -> (date, exact) | None`. `exact` is False when the supplier hedged
    ("approximately"), the period starts after payment or approval, or ends ex
-   works. The default, `extraction_expected_delivery`, reads the lead time the
+   works. The default, `extraction_expected_delivery`, is the follow-ups' own
+   helper (`followups.missing.stored_expected_delivery`), so the clarification
+   ledger and the planner never disagree on a date: it reads the lead time the
    extraction stored as data (`quotes.terms.line_terms`: amount, unit, basis,
    the supplier's holiday calendar, the offer-level lead time for lines without
    their own) and converts it with `quotes.lead_time.expected_delivery` from the
-   reference date (today: a hypothetical order placed now). Never from
-   `proposal_lines.lead_time_days`, which counts from the offer date and goes
-   stale; that value (calendar days) is only the fallback for offers extracted
-   before prompt v5 or corrected by a person (`calendar_expected_delivery`).
+   reference date (today: a hypothetical order placed now); a stated lead time
+   that needs review gives no date. `proposal_lines.lead_time_days` (calendar
+   days from the offer date) is only read for offers extracted before prompt v5
+   (never exact) or corrected by a person.
 2. `OfferSignals` (quote extraction, N2a): facts about the supplier's latest
    reply that change what Bido may do, read by `offer_signals` from the
    proposal's typed terms (`quotes.terms.offer_terms(...).signals`):
@@ -29,13 +31,13 @@ shape here, so the planner (`bido_back.negotiation.planner`) stays pure:
    still to ask, what was asked and not answered, and what was asked once and
    is still unusable. The planner treats `to_ask`, `pending` and `awaiting` as
    blocking (one open request per supplier: clarify first, then negotiate) and
-   `exhausted` items as buyer decisions for their lines. The default adapter
-   (`followup_clarifications` in the service) mirrors today's follow-up sweep:
-   it reads `followup_messages` and recomputes the open items with
-   `followups.missing.open_items`, so a negotiation email never overlaps a
-   clarification of the same offer. N2b's ledger replaces it with the same
-   shape; the follow-up sweep and the planner then agree by construction
-   (both read `to_ask`).
+   `exhausted` items as buyer decisions for their lines. The service maps it
+   from the ledger (`followups.ledger.supplier_followups`), the same state the
+   follow-up sweep acts on, so a negotiation email never overlaps a
+   clarification and the two agree by construction (both read `to_ask`). A
+   delivery date that cannot be told, or only approximately misses the need-by
+   date, is the clarification's question; a definite late date is the
+   negotiation's delivery-date request ("deliver by <need-by>"), once.
 
 Nothing here reads or returns supplier text: codes, ids, numbers and dates only.
 """
@@ -46,8 +48,8 @@ from datetime import date, datetime, timedelta
 from typing import Literal, cast
 from uuid import UUID
 
+from bido_back.followups.missing import OfferedLine, stored_expected_delivery
 from bido_back.quotes.lead_time import StoredLeadTime
-from bido_back.quotes.lead_time import expected_delivery as lead_time_delivery
 from bido_back.quotes.terms import line_terms, offer_terms
 
 # --- Delivery dates (N2a) ---------------------------------------------------------------
@@ -89,17 +91,22 @@ def stated_lead_time(line: QuotedLeadTime) -> StoredLeadTime | None:
 def extraction_expected_delivery(
     line: QuotedLeadTime, reference_date: date
 ) -> tuple[date, bool] | None:
-    """The default: the stated lead time converted from the order date (N2a's helper:
-    business days skip the supplier's holidays, a stated date stays that date);
-    calendar days from `lead_time_days` for offers without it."""
-    stated = stated_lead_time(line)
-    if stated is None:
-        return calendar_expected_delivery(line, reference_date)
+    """The default: the follow-ups' helper (`followups.missing.stored_expected_delivery`):
+    the stated lead time converted from the order date (business days skip the
+    supplier's holidays, a stated date stays that date); None when it needs review."""
     try:
-        found = lead_time_delivery(stated, reference_date)
+        return stored_expected_delivery(
+            OfferedLine(
+                rfq_line_id=None,
+                values={"lead_time_days": line.days},
+                fields=line.fields,
+                offer_fields=line.offer_fields,
+                supplier_country=line.country,
+            ),
+            reference_date,
+        )
     except ValueError:
-        return calendar_expected_delivery(line, reference_date)
-    return found.delivery_date, found.exact
+        return None
 
 
 def latest_order_date(

@@ -270,7 +270,7 @@ class Rfq(Base):
     negotiation_closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     negotiation_outcome: Mapped[list[Any] | None] = mapped_column(JSONB)
     # The one best-and-final cut-off for every supplier, set by the first
-    # best-and-final request (migration 0036).
+    # best-and-final request (migration 0037).
     negotiation_cutoff_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     # Every PO of the RFQ closed or cancelled, at least one closed (migration 0035).
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
@@ -406,7 +406,7 @@ class Invite(Base):
         ForeignKey("proposals.id", ondelete="SET NULL")
     )
     # The negotiation planner's last recorded decision for this supplier: action,
-    # buyer-visible phase, reason code, offer version and when (migration 0036).
+    # buyer-visible phase, reason code, offer version and when (migration 0037).
     negotiation_decision: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     # The offer version whose holds the buyer released (negotiated as it is).
     negotiation_released_proposal_id: Mapped[UUID | None] = mapped_column(
@@ -740,10 +740,14 @@ class FileText(Base):
 
 
 class FollowupMessage(Base):
-    """A chase or clarification email Bido proposed for an invite (migration 0008).
+    """A chase, clarification, reminder or answer email Bido proposed for an invite
+    (migrations 0008, 0036).
 
     The id is derived from (invite, kind, sequence). The approved text lives in
-    the approval's args; once sent, in `messages`.
+    the approval's args; once sent, in `messages`. `reply_by` is the date the
+    email asks the supplier to answer by; `regarding_message_id` is the email a
+    reminder is about (our outbound `messages` row), or the supplier's email an
+    answer replies to.
     """
 
     __tablename__ = "followup_messages"
@@ -760,10 +764,73 @@ class FollowupMessage(Base):
     canceled_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     sent_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reply_by: Mapped[date | None] = mapped_column(Date)
+    regarding_message_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL")
+    )
+
+
+class ClarificationAsk(Base):
+    """One thing a clarification email asked one supplier (migration 0036).
+
+    `rfq_line_id`/`position` are NULL for the whole offer. Each (invite, line,
+    field) is asked at most once: a unique index keeps one row per item that is
+    not `withdrawn`. Statuses: proposed, open, answered, unusable, withdrawn,
+    resolved (see `bido_back.followups.ledger`).
+    """
+
+    __tablename__ = "clarification_asks"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    invite_id: Mapped[UUID] = mapped_column(ForeignKey("invites.id", ondelete="CASCADE"))
+    followup_id: Mapped[UUID] = mapped_column(
+        ForeignKey("followup_messages.id", ondelete="CASCADE")
+    )
+    rfq_line_id: Mapped[UUID | None] = mapped_column(ForeignKey("rfq_lines.id", ondelete="CASCADE"))
+    position: Mapped[int | None] = mapped_column(Integer)
+    field: Mapped[str] = mapped_column(Text)
+    question: Mapped[str] = mapped_column(Text)
+    need_by: Mapped[date | None] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'proposed'"))
+    asked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    reply_by: Mapped[date | None] = mapped_column(Date)
+    answered_by_message_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("messages.id", ondelete="SET NULL")
+    )
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    resolved_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class SupplierQuestion(Base):
+    """A question a supplier's reply asked the buyer (migration 0036).
+
+    `question` and `answer` are customer content: never logged. While a
+    question is `open`, no automatic email goes to that supplier.
+    """
+
+    __tablename__ = "supplier_questions"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    invite_id: Mapped[UUID] = mapped_column(ForeignKey("invites.id", ondelete="CASCADE"))
+    message_id: Mapped[UUID] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"))
+    ordinal: Mapped[int] = mapped_column(Integer)
+    question: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'open'"))
+    answer: Mapped[str | None] = mapped_column(Text)
+    answer_followup_id: Mapped[UUID | None] = mapped_column(
+        ForeignKey("followup_messages.id", ondelete="SET NULL")
+    )
+    decided_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
 class NegotiationMessage(Base):
-    """A supplier email the negotiation planner decided (migrations 0013, 0036).
+    """A supplier email the negotiation planner decided (migrations 0013, 0037).
 
     The id is derived from (invite, sequence). The row is written when the
     email is decided (`decided`), before the email is rendered; then `proposed`

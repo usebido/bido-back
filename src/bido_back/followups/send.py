@@ -1,9 +1,13 @@
-"""The `send_followup_email` act tool: send one approved chase or clarification.
+"""The follow-up act tools: send one approved chase, clarification, reminder or answer.
 
-Like `send_rfq_email` (`bido_back.rfqs.send`), it is never offered to a model.
-The sweeper (`bido_back.followups.service`) records a proposal for it; an
-approver approves; the worker's `ApprovalExecutor` runs this handler once,
-with the APPROVED arguments.
+Like `send_rfq_email` (`bido_back.rfqs.send`), they are never offered to a model.
+The sweeper (`bido_back.followups.service`) records a proposal for
+`send_followup_email` (chases, clarifications, reminders); the buyer's answer to
+a supplier question is proposed for `send_supplier_answer`
+(`bido_back.followups.questions`), a separate tool so that a negotiation mandate,
+which may approve only the tools it lists, can never approve it: a person
+always decides the answer. An approver approves; the worker's `ApprovalExecutor`
+runs this handler once, with the APPROVED arguments.
 
 It goes out from the connected mailbox of the buyer who sent the RFQ email
 (`sender_user_id`, also the approval's requester), as a reply in the invite's
@@ -12,10 +16,12 @@ from the RFQ email's Message-ID to it (`supplier_email.threading`), so the
 mailbox sender puts it in the same provider thread. The approved text and HTML
 parts (`html_body`, rendered by code) go out as multipart/alternative.
 
-Stale proposals are not sent. A chase whose invite got an answer in the
-meantime (the invite is no longer `sent`), or any follow-up whose row was
-canceled, ends as `canceled` and the handler returns `skipped`: approving an
-old reminder never sends it after the supplier replied.
+Stale proposals are not sent: a row no longer `proposed` (a reply canceled
+it), a chase whose supplier has sent an offer or declined, a clarification
+for an offer the supplier has replaced, or any automatic follow-up while the
+supplier waits for the buyer's answer, ends as `canceled` and the handler
+returns `skipped`. A clarification that goes out opens its asks in the
+ledger (`bido_back.followups.ledger`); a rejected one withdraws them.
 
 Idempotency follows `send_rfq_email`: the Message-ID is claimed and committed
 on the `followup_messages` row before sending, and reused on a retry; the
@@ -25,12 +31,11 @@ no-op.
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Annotated, Final, Literal
 from uuid import UUID, uuid5
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -46,11 +51,14 @@ from bido_back.db.models import (
     FollowupMessage,
     Invite,
     Message,
+    Proposal,
+    SupplierQuestion,
     Tenant,
     User,
 )
 from bido_back.email.addresses import make_message_id
 from bido_back.email.types import OutboundEmail
+from bido_back.followups.ledger import mark_asked, reopen_questions, withdraw_asks
 from bido_back.rfqs.errors import InvalidState, NotFound
 from bido_back.rfqs.schemas import EmailAddress
 from bido_back.rfqs.send import RfqActDeps
@@ -59,10 +67,19 @@ from bido_back.supplier_email.threading import reply_headers
 logger = logging.getLogger(__name__)
 
 SEND_FOLLOWUP_EMAIL: Final = "send_followup_email"
-FollowupKindName = Literal["chase", "clarification"]
+SEND_SUPPLIER_ANSWER: Final = "send_supplier_answer"
+FollowupKindName = Literal["chase", "clarification", "reminder", "answer"]
 
 _MESSAGES_UNIQUE = "messages_tenant_id_message_id_header_key"
 _FOLLOWUP_NAMESPACE: Final = UUID("0c4f7a52-9d1e-4b8e-a2f3-6e5d8c7b1a90")
+_AUTOMATIC: Final = ("chase", "clarification", "reminder")
+
+
+def published_kind(kind: str) -> Literal["chase", "clarification"]:
+    """A follow-up's kind under the two names the API published first: a reminder of
+    an unanswered email shows as a chase, the answer to a supplier's question as a
+    clarification. Views carry the exact kind in a separate `followup_kind`."""
+    return "chase" if kind in ("chase", "reminder") else "clarification"
 
 
 def followup_id(invite_id: UUID, kind: FollowupKindName, sequence: int) -> UUID:
@@ -70,9 +87,9 @@ def followup_id(invite_id: UUID, kind: FollowupKindName, sequence: int) -> UUID:
     return uuid5(_FOLLOWUP_NAMESPACE, f"{invite_id}:{kind}:{sequence}")
 
 
-def followup_proposal_ids(row_id: UUID) -> tuple[UUID, str]:
+def followup_proposal_ids(row_id: UUID, tool: str = SEND_FOLLOWUP_EMAIL) -> tuple[UUID, str]:
     """The (run_id, tool_call_id) under which a follow-up is proposed."""
-    call_id = f"{SEND_FOLLOWUP_EMAIL}:{row_id}"
+    call_id = f"{tool}:{row_id}"
     return uuid5(_FOLLOWUP_NAMESPACE, call_id), call_id
 
 
@@ -108,9 +125,40 @@ class _Claim:
     possibly_sent: bool = False
 
 
+async def _stale_reason(session: AsyncSession, row: FollowupMessage, invite: Invite) -> str | None:
+    """Why a proposed follow-up must not go out now; None when it may."""
+    if invite.thread_message_id is None:
+        return "no_thread"
+    if row.kind in _AUTOMATIC:
+        waiting = await session.scalar(
+            select(func.count()).where(
+                SupplierQuestion.invite_id == invite.id, SupplierQuestion.status == "open"
+            )
+        )
+        if waiting:
+            return "supplier_question"
+    if row.kind == "chase":
+        if invite.status not in ("sent", "responded"):
+            return f"invite_{invite.status}"
+        offered = await session.scalar(select(func.count()).where(Proposal.invite_id == invite.id))
+        if offered:
+            return "offer_received"
+    if row.kind == "clarification" and row.proposal_id is not None:
+        latest = await session.scalar(
+            select(func.max(Proposal.version)).where(Proposal.invite_id == invite.id)
+        )
+        version = await session.scalar(
+            select(Proposal.version).where(Proposal.id == row.proposal_id)
+        )
+        if latest is not None and version is not None and version < latest:
+            return "newer_offer"
+    return None
+
+
 class _SendFollowupEmail:
-    def __init__(self, deps: RfqActDeps) -> None:
+    def __init__(self, deps: RfqActDeps, tool: str) -> None:
         self._deps = deps
+        self._tool = tool
 
     async def __call__(
         self, ctx: ToolContext, args: SendFollowupEmailArgs
@@ -134,14 +182,16 @@ class _SendFollowupEmail:
     async def _claim(
         self, ctx: ToolContext, args: SendFollowupEmailArgs
     ) -> _Claim | SendFollowupEmailResult:
-        _, call_id = followup_proposal_ids(args.followup_id)
+        if (args.kind == "answer") != (self._tool == SEND_SUPPLIER_ANSWER):
+            raise InvalidState(f"followup {args.followup_id}: wrong tool for a {args.kind}")
+        _, call_id = followup_proposal_ids(args.followup_id, self._tool)
         async with tenant_session(self._deps.db, ctx.tenant_id) as session:
             proposal = (
                 await session.execute(
                     select(Approval.requested_by, Approval.status).where(
                         Approval.run_id == str(ctx.run_id),
                         Approval.tool_call_id == call_id,
-                        Approval.tool == SEND_FOLLOWUP_EMAIL,
+                        Approval.tool == self._tool,
                     )
                 )
             ).one_or_none()
@@ -169,19 +219,15 @@ class _SendFollowupEmail:
             )
             if invite is None:
                 raise NotFound(f"invite {args.invite_id} not found")
-            stale = row.status != "proposed" or (row.kind == "chase" and invite.status != "sent")
-            if stale or invite.thread_message_id is None:
+            reason = "not_proposed" if row.status != "proposed" else None
+            reason = reason or await _stale_reason(session, row, invite)
+            if reason is not None or invite.thread_message_id is None:
                 if row.status == "proposed":
                     row.status = "canceled"
-                    row.canceled_reason = (
-                        "no_thread"
-                        if invite.thread_message_id is None
-                        else "invite_" + invite.status
-                    )
+                    row.canceled_reason = reason or "no_thread"
+                    await withdraw_asks(session, [row.id])
                 await session.flush()
-                logger.info(
-                    "followup %s skipped: row %s, invite %s", row.id, row.status, invite.status
-                )
+                logger.info("followup %s skipped: %s", row.id, reason)
                 return SendFollowupEmailResult(followup_id=row.id, outcome="skipped")
             reused = row.message_id_header is not None
             if row.message_id_header is None:
@@ -196,7 +242,7 @@ class _SendFollowupEmail:
     async def _send_and_record(
         self, ctx: ToolContext, args: SendFollowupEmailArgs, claim: _Claim
     ) -> str:
-        now = datetime.now(UTC)
+        now = self._deps.clock()
         async with tenant_session(self._deps.db, ctx.tenant_id) as session:
             row = await session.scalar(
                 select(FollowupMessage)
@@ -264,6 +310,9 @@ class _SendFollowupEmail:
             row.status = "sent"
             row.sent_at = now
             row.message_id_header = message_id
+            if row.kind == "clarification":
+                # What it asks is now asked: each item at most once.
+                await mark_asked(session, row.id, now)
             session.add(
                 AuditEvent(
                     tenant_id=ctx.tenant_id,
@@ -289,28 +338,56 @@ def send_followup_email_tool(
 ) -> Tool[SendFollowupEmailArgs, SendFollowupEmailResult]:
     return Tool(
         name=SEND_FOLLOWUP_EMAIL,
-        description="Send one approved chase or clarification email in an RFQ thread.",
+        description="Send one approved chase, clarification or reminder email in an RFQ thread.",
         input_model=SendFollowupEmailArgs,
         output_model=SendFollowupEmailResult,
         kind="act",
-        handler=_SendFollowupEmail(deps),
+        handler=_SendFollowupEmail(deps, SEND_FOLLOWUP_EMAIL),
+    )
+
+
+def send_supplier_answer_tool(
+    deps: RfqActDeps,
+) -> Tool[SendFollowupEmailArgs, SendFollowupEmailResult]:
+    return Tool(
+        name=SEND_SUPPLIER_ANSWER,
+        description="Send the buyer's approved answer to a supplier's question in an RFQ thread.",
+        input_model=SendFollowupEmailArgs,
+        output_model=SendFollowupEmailResult,
+        kind="act",
+        handler=_SendFollowupEmail(deps, SEND_SUPPLIER_ANSWER),
     )
 
 
 async def release_rejected_followup(session: AsyncSession, approval: Approval) -> None:
-    """A rejected follow-up is not sent; a rejected chase still counts as one attempt."""
+    """A rejected follow-up is not sent; a rejected chase still counts as one attempt,
+    a rejected clarification asked nothing."""
     args = SendFollowupEmailArgs.model_validate(approval.args)
     await session.execute(
         update(FollowupMessage)
         .where(FollowupMessage.id == args.followup_id, FollowupMessage.status == "proposed")
         .values(status="rejected")
     )
+    await withdraw_asks(session, [args.followup_id])
+
+
+async def release_rejected_answer(session: AsyncSession, approval: Approval) -> None:
+    """A rejected answer is not sent: the questions it answered wait for the buyer again."""
+    args = SendFollowupEmailArgs.model_validate(approval.args)
+    await session.execute(
+        update(FollowupMessage)
+        .where(FollowupMessage.id == args.followup_id, FollowupMessage.status == "proposed")
+        .values(status="rejected")
+    )
+    await reopen_questions(session, args.invite_id, args.followup_id)
 
 
 FOLLOWUP_REJECT_HOOKS: Final[dict[str, RejectHook]] = {
-    SEND_FOLLOWUP_EMAIL: release_rejected_followup
+    SEND_FOLLOWUP_EMAIL: release_rejected_followup,
+    SEND_SUPPLIER_ANSWER: release_rejected_answer,
 }
 
 
 def register_followup_act_tools(registry: ActToolRegistry, deps: RfqActDeps) -> None:
     registry.register(send_followup_email_tool(deps))
+    registry.register(send_supplier_answer_tool(deps))

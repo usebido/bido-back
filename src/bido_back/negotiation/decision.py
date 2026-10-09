@@ -128,10 +128,20 @@ class EmailDecision(BaseModel):
     language: str | None = None
     mention_competition: bool = False
     positions: list[PositionDecision]
+    # A reminder of the request with this sequence: the same email, a new reply-by date.
+    reminder_of: int | None = None
+
+
+def reminder_decision(original: EmailDecision, *, sequence: int, reply_by: date) -> EmailDecision:
+    """A reminder of a request the supplier has not answered: the same email (positions,
+    asks, the offer it answers), a new sequence and reply-by date, no round of its own."""
+    return original.model_copy(
+        update={"sequence": sequence, "reply_by": reply_by, "reminder_of": original.sequence}
+    )
 
 
 def decision_of(terms: Mapping[str, object]) -> EmailDecision | None:
-    """The typed decision stored in a negotiation email's terms (None before 0036)."""
+    """The typed decision stored in a negotiation email's terms (None before 0037)."""
     raw = terms.get("decision")
     if not isinstance(raw, dict):
         return None

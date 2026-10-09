@@ -75,7 +75,7 @@ _NAMESPACE: Final = UUID("5b0d8e3c-2a7f-4c61-9e84-7d1f3a6c2b95")
 def negotiation_message_id(invite_id: UUID, sequence: int) -> UUID:
     """The row id of the `sequence`-th negotiation email decided for an invite (stable).
 
-    Rows written before migration 0036 used their round number, equal to their sequence.
+    Rows written before migration 0037 used their round number, equal to their sequence.
     """
     return uuid5(_NAMESPACE, f"{invite_id}:{sequence}")
 
@@ -368,6 +368,7 @@ class _SendNegotiationEmail:
                         "invite_id": str(args.invite_id),
                         "action": args.action,
                         "round": args.round,
+                        "reminder": row.kind == "reminder",
                         "message_row_id": str(message_row) if message_row else None,
                         "requested_by": str(args.sender_user_id),
                         "approved_by": str(ctx.user_id) if ctx.user_id else None,

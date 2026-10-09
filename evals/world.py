@@ -211,7 +211,12 @@ class World:
         self.mailboxes = guarded(self.outbox)
         self.jobs = MemoryQueue()
         self.registry = ActToolRegistry()
-        deps = RfqActDeps(db=self.engine, email_domain=EMAIL_DOMAIN, mailbox_senders=self.mailboxes)
+        deps = RfqActDeps(
+            db=self.engine,
+            email_domain=EMAIL_DOMAIN,
+            mailbox_senders=self.mailboxes,
+            clock=lambda: self.now,
+        )
         register_act_tools(self.registry, deps)
         register_followup_act_tools(self.registry, deps)
         register_negotiation_act_tools(self.registry, deps)

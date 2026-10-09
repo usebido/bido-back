@@ -1,7 +1,7 @@
 """Negotiation stages: decisions persisted before writing, rounds apart from email sequence.
 
-Revision ID: 0036
-Revises: 0035
+Revision ID: 0037
+Revises: 0036
 Create Date: 2026-10-09
 
 `negotiation_messages` becomes the record of each supplier email the negotiation
@@ -14,7 +14,8 @@ planner decides (`bido_back.negotiation.planner`), written BEFORE the email:
   already SENT to that supplier, plus one. A canceled or rejected email never
   consumes a round. The old unique key on (invite, round) moves to (invite,
   sequence): a replacement email repeats the round of the one it replaces.
-* `kind`: what the email asks (`revised_offer`, `delivery_date`, `bafo`);
+* `kind`: what the email asks (`revised_offer`, `delivery_date`, `bafo`), or
+  `reminder` (the one reminder of an unanswered request: no round of its own);
   existing rows get `bafo` or `revised_offer` from their action.
 * `attempts`, `held_reason`: a decided email the send gate refuses (or that
   cannot be addressed) is `held` with the reason: it waits for the buyer and the
@@ -54,14 +55,14 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0036"
-down_revision: str | Sequence[str] | None = "0035"
+revision: str = "0037"
+down_revision: str | Sequence[str] | None = "0036"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 _STATUSES = "('decided', 'proposed', 'sent', 'canceled', 'rejected', 'held')"
 _OLD_STATUSES = "('proposed', 'sent', 'canceled', 'rejected')"
-_KINDS = "('revised_offer', 'delivery_date', 'bafo')"
+_KINDS = "('revised_offer', 'delivery_date', 'bafo', 'reminder')"
 
 
 def _backfill(*statements: str) -> None:

@@ -101,8 +101,13 @@ from bido_back.db.models import (
     User,
 )
 from bido_back.followups.calendar import add_business_days
-from bido_back.followups.missing import OfferedLine, open_items
-from bido_back.followups.missing import RequestedLine as MissingLine
+from bido_back.followups.ledger import (
+    Ask,
+    SupplierFollowup,
+    declined_positions,
+    supplier_followups,
+)
+from bido_back.followups.missing import DEFAULT_EXPECTED_DELIVERY, OpenItem
 from bido_back.mandates.schemas import ApproveMandateArgs
 from bido_back.mandates.waits import MandateWait, approval_waits
 from bido_back.negotiation.agents import NegotiationWriter
@@ -113,6 +118,7 @@ from bido_back.negotiation.decision import (
     build_decision,
     decision_of,
     legacy_lines,
+    reminder_decision,
     supplier_email,
     writer_task,
 )
@@ -121,6 +127,7 @@ from bido_back.negotiation.labels import line_reasons, phase_label, warning_text
 from bido_back.negotiation.planner import (
     REPLY_BUSINESS_DAYS,
     Context,
+    EmailPlan,
     EmailRecord,
     EmailState,
     EmailWait,
@@ -210,8 +217,6 @@ _REFUSED: Final = "email_refused"
 # How a refused email is recorded (N1): `canceled`, this reason, the codes in its terms.
 DRAFT_REFUSED: Final = "draft_refused"
 DRAFT_REFUSED_REASON: Final = "draft_refused_requires_buyer"
-# Until the clarification ledger gives one: a clarification's nominal reply-by.
-_CLARIFICATION_REPLY_DAYS: Final = 2
 _DAYS: Final = re.compile(r"\d{1,3}")
 # Planner decisions written to the audit log when they change (by action, then phase).
 _EVENTS: Final[Mapping[str, str]] = {
@@ -273,6 +278,8 @@ class _Loaded:
     versions: dict[UUID, int]
     approvals: dict[UUID, Approval]
     waits: dict[UUID, MandateWait]
+    # Per invite: the clarification ledger (`followups.ledger.supplier_followups`).
+    ledger: dict[UUID, SupplierFollowup] = field(default_factory=dict[UUID, SupplierFollowup])
 
 
 async def _derived_lead_lines(session: AsyncSession, rfq: Rfq) -> set[UUID]:
@@ -416,7 +423,10 @@ async def _load(
         ):
             approvals[approval.id] = approval
     waits = await approval_waits(session, rfq.id, list(approvals.values()), now)
-    return _Loaded(rfq, lines, suppliers, versions, approvals, waits)
+    ledger = await supplier_followups(
+        session, rfq.id, now=now, expected_delivery=DEFAULT_EXPECTED_DELIVERY
+    )
+    return _Loaded(rfq, lines, suppliers, versions, approvals, waits, ledger)
 
 
 def _email_wait(approval: Approval | None, waits: Mapping[UUID, MandateWait]) -> EmailWait:
@@ -454,7 +464,7 @@ def _clarification_wait(
 
 
 def stored_decision(row: NegotiationMessage) -> EmailDecision | None:
-    """The typed decision a negotiation email was written from (None before 0036)."""
+    """The typed decision a negotiation email was written from (None before 0037)."""
     return decision_of(cast(dict[str, object], row.terms))
 
 
@@ -544,7 +554,7 @@ def _record(row: NegotiationMessage, loaded: _Loaded) -> EmailRecord:
         reply_by, cutoff = decision.reply_by, decision.cutoff_at
         order_date: date | None = decision.order_date
     else:
-        # Written before typed decisions (0036): a request was answered within
+        # Written before typed decisions (0037): a request was answered within
         # `REPLY_BUSINESS_DAYS`, a best-and-final by the negotiation deadline.
         asks = _legacy_asks(row)
         kind = "bafo" if row.action == "bafo" else "revised_offer"
@@ -566,6 +576,8 @@ def _record(row: NegotiationMessage, loaded: _Loaded) -> EmailRecord:
         held_reason=row.held_reason,
         wait=_email_wait(approval, loaded.waits) if row.status == "proposed" else None,
         order_date=order_date,
+        reminder_of=decision.reminder_of if decision is not None else None,
+        typed=decision is not None,
     )
 
 
@@ -573,76 +585,96 @@ def _item_code(position: int | None, item_field: str) -> str:
     return item_field if position is None else f"pos{position}.{item_field}"
 
 
-def _clarification(item: _Supplier, loaded: _Loaded, now: datetime) -> ClarificationState:
-    """The default clarification ledger: today's follow-up sweep, mirrored.
+def _item_codes(items: Sequence[OpenItem | Ask]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys(_item_code(i.position, i.field) for i in items))
 
-    The follow-up sweep proposes one clarification per offer version with open
-    items (`followups.missing.open_items`). So, for the current offer: items
-    and no clarification yet -> to ask (the follow-up sweep writes it); one
-    proposed -> pending; sent -> awaiting the answer; canceled or rejected ->
-    the items are the buyer's (never asked again for this version). N2b's
-    ledger replaces this with the same `ClarificationState`.
+
+def _item_lines(items: Sequence[OpenItem | Ask]) -> frozenset[UUID]:
+    return frozenset(i.rfq_line_id for i in items if i.rfq_line_id is not None)
+
+
+def _clarification(item: _Supplier, loaded: _Loaded, now: datetime) -> ClarificationState:
+    """The clarification ledger (`followups.ledger.supplier_followups`) for this supplier,
+    as the planner reads it: the same state the follow-up sweep acts on.
+
+    - to ask: what the latest offer lacks and nobody asked (the follow-up sweep asks it);
+    - pending: a clarification, or its reminder, waits for approval (a person, the
+      mandate's checks or daily cap, a mailbox);
+    - awaiting: our clarification is unanswered, until its reply-by date (its
+      reminder's, once reminded);
+    - exhausted: items answered unusably, asked before and still missing, never
+      answered after the reminder, or whose clarification the send gate held: the
+      buyer decides on those lines; the rest of the offer is negotiated.
     """
-    proposal = item.proposal
-    if proposal is None or item.invite.status != "responded":
-        return NO_CLARIFICATION
-    review = proposal.fields.get("_review")
-    if isinstance(review, dict) and cast(dict[str, object], review).get("declined") is True:
+    del now
+    state = loaded.ledger.get(item.invite.id)
+    if state is None or item.proposal is None or not state.applicable:
         return NO_CLARIFICATION
     by_position = {line.row.position: line.row.id for line in loaded.lines}
-    items = open_items(
-        header_values={"currency": proposal.currency, "valid_until": proposal.valid_until},
-        header_fields=proposal.fields,
-        requested=[
-            MissingLine(
-                id=line.row.id,
-                position=line.row.position,
-                description=line.row.description,
-                mpn=line.row.mpn,
-            )
-            for line in loaded.lines
-        ],
-        offered=[
-            OfferedLine(
-                rfq_line_id=line.rfq_line_id,
-                values={
-                    "unit_price": line.unit_price,
-                    "min_quantity": line.min_quantity,
-                    "lead_time_days": line.lead_time_days,
-                },
-                fields=line.fields,
-            )
-            for line in item.proposal_lines
-        ],
+    exhausted: list[str] = []
+    exhausted_lines: set[UUID] = set()
+    for decision in state.decisions:
+        if decision.kind in ("unusable_answer", "asked_before") and decision.field is not None:
+            exhausted.append(_item_code(decision.position, decision.field))
+            if decision.position is not None and decision.position in by_position:
+                exhausted_lines.add(by_position[decision.position])
+    to_ask: Sequence[OpenItem] = state.to_ask
+    if to_ask and any(
+        d.kind == "email_held" and "clarification" in d.reasons for d in state.decisions
+    ):
+        # The send gate refused the clarification: the buyer decides on what it asked.
+        exhausted += _item_codes(to_ask)
+        exhausted_lines |= _item_lines(to_ask)
+        to_ask = ()
+    request = state.request if state.request and state.request.kind == "clarification" else None
+    if request is not None and any(d.kind == "no_answer" for d in state.decisions):
+        # Unanswered after its reminder: those items are the buyer's now.
+        exhausted += _item_codes(request.asks)
+        exhausted_lines |= _item_lines(request.asks)
+        request = None
+    settled = ClarificationState(
+        exhausted=tuple(dict.fromkeys(exhausted)),
+        exhausted_lines=frozenset(exhausted_lines),
     )
-    if not items:
-        return NO_CLARIFICATION
-    codes = tuple(_item_code(i.position, i.field) for i in items)
-    concerned = frozenset(
-        by_position[i.position]
-        for i in items
-        if i.position is not None and i.position in by_position
-    )
-    current = [
-        f for f in item.followups if f.kind == "clarification" and f.proposal_id == proposal.id
-    ]
-    if not current:
-        return ClarificationState(to_ask=codes, lines=concerned)
-    latest = current[-1]
-    if latest.status == "proposed":
-        approval = loaded.approvals.get(latest.approval_id) if latest.approval_id else None
+    waiting = [p for p in state.pending if p.kind in ("clarification", "reminder")]
+    if waiting:
+        last = max(waiting, key=lambda p: p.created_at)
+        approval = loaded.approvals.get(last.approval_id) if last.approval_id else None
         wait, until = _clarification_wait(approval, loaded.waits)
-        return ClarificationState(
-            pending=True, pending_wait=wait, pending_until=until, lines=concerned
+        asked = [a for a in state.asks if a.status in ("proposed", "open")]
+        return replace(
+            settled, pending=True, pending_wait=wait, pending_until=until, lines=_item_lines(asked)
         )
-    if latest.status == "sent":
-        sent_at = latest.sent_at or now
-        until = add_business_days(sent_at, _CLARIFICATION_REPLY_DAYS, item.supplier.country)
-        if now <= end_of_day(until.date()):
-            return ClarificationState(awaiting=True, awaiting_until=until, lines=concerned)
-        # Asked once, unanswered past its reply-by date: those items are the buyer's now;
-        # the rest of the offer is negotiated as it is.
-    return ClarificationState(exhausted=codes, exhausted_lines=concerned)
+    if request is not None:
+        day = request.reminder_reply_by if request.reminded else request.reply_by
+        return replace(
+            settled,
+            awaiting=True,
+            awaiting_until=end_of_day(day) if day is not None else None,
+            lines=_item_lines(request.asks),
+        )
+    if to_ask:
+        return replace(settled, to_ask=_item_codes(to_ask), lines=_item_lines(to_ask))
+    return settled
+
+
+def _holds(
+    column_holds: Sequence[str], item: _Supplier, ledger: SupplierFollowup | None
+) -> tuple[str, ...]:
+    """The comparison's holds on the offer, less a question the buyer answered.
+
+    A supplier question holds the offer until the buyer answers or dismisses it in the
+    ledger (`followups.questions`); a reply that could not be applied stays held.
+    """
+    holds = list(column_holds)
+    question = "supplier_clarification_requires_buyer"
+    if ledger is None or question not in holds or ledger.open_questions:
+        return tuple(holds)
+    raw = item.proposal.fields.get("_offer_state") if item.proposal is not None else None
+    state = cast(dict[str, object], raw) if isinstance(raw, dict) else {}
+    if state.get("reply_kind") == "clarification" or state.get("requires_clarification") is True:
+        return tuple(holds)
+    return tuple(h for h in holds if h != question)
 
 
 def _payment_days(text: str | None) -> int | None:
@@ -786,11 +818,14 @@ def _offer(
     if proposal is None:
         return None
     signals = offer_signals(proposal.fields)
+    ledger = loaded.ledger.get(item.invite.id)
     positions = {line.row.position: line.row.id for line in loaded.lines}
     offered, requested = (
         _payment_days(proposal.payment_terms),
         _payment_days(loaded.rfq.payment_terms),
     )
+    # Declined or withdrawn positions, those of earlier replies included (the ledger's).
+    declined = signals.declined_positions | declined_positions(proposal.fields)
     return Offer(
         proposal_id=proposal.id,
         version=proposal.version,
@@ -798,11 +833,11 @@ def _offer(
         valid_until=proposal.valid_until,
         received_on=item.received_on,
         holds=tuple(holds),
-        questions=signals.questions,
+        # The supplier's questions the buyer has not answered or dismissed yet (the
+        # ledger's); the offer's own count without a ledger.
+        questions=len(ledger.open_questions) if ledger is not None else signals.questions,
         declared_final=signals.final_offer,
-        declined_lines=frozenset(
-            positions[p] for p in signals.declined_positions if p in positions
-        ),
+        declined_lines=frozenset(positions[p] for p in declined if p in positions),
         payment_terms_shorter=offered is not None and requested is not None and offered < requested,
         holds_released=item.invite.negotiation_released_proposal_id == proposal.id,
     )
@@ -868,7 +903,14 @@ def _plan(
     common cut-off; every supplier is then planned again with it."""
     rfq = loaded.rfq
     quotes, shown = _quotes(comparison, loaded, now.date(), expected_delivery)
-    holds = {c.invite_id: c.negotiation_holds for c in comparison.suppliers}
+    by_invite = {item.invite.id: item for item in loaded.suppliers}
+    holds = {
+        c.invite_id: _holds(
+            c.negotiation_holds, by_invite[c.invite_id], loaded.ledger.get(c.invite_id)
+        )
+        for c in comparison.suppliers
+        if c.invite_id in by_invite
+    }
     terms = [line.terms for line in loaded.lines]
     facts: dict[UUID, SupplierFacts] = {}
     for item in loaded.suppliers:
@@ -1082,9 +1124,12 @@ def _message_views(
                 created_at=row.created_at,
                 sent_at=row.sent_at,
                 sequence=row.sequence,
-                kind=decision.kind
+                kind="reminder"
+                if row.kind == "reminder"
+                else decision.kind
                 if decision is not None
                 else ("bafo" if row.action == "bafo" else "revised_offer"),
+                reminder_of=decision.reminder_of if decision is not None else None,
                 state=state,
                 reply_by=decision.reply_by if decision is not None else None,
                 cutoff_at=decision.cutoff_at if decision is not None else None,
@@ -1156,7 +1201,7 @@ async def _view(
     for item in loaded.suppliers:
         plan = planned.plans[item.invite.id]
         column = columns.get(item.invite.id)
-        sent = [r for r in item.rows if r.status == "sent"]
+        sent = [r for r in item.rows if r.status == "sent" and r.kind != "reminder"]
         chases_sent = sum(1 for f in item.followups if f.kind == "chase" and f.status == "sent")
         invites.append(
             InviteNegotiation(
@@ -1671,6 +1716,39 @@ def _event(plan: SupplierPlan) -> str | None:
     return _EVENTS.get(plan.action) or _EVENTS.get(plan.phase)
 
 
+async def _new_decision(
+    session: AsyncSession,
+    item: _Supplier,
+    email: EmailPlan,
+    lines: Sequence[_Line],
+    quoted: Mapping[UUID, QuotedTerms],
+    sequence: int,
+    rfq: Rfq,
+) -> tuple[EmailDecision, NegotiationMessage | None] | None:
+    """The typed decision of an email the planner decided, and for a reminder the row of
+    the request it repeats (None: nothing typed to repeat, an email from before 0037)."""
+    if email.reminder_of is not None:
+        original = next((r for r in item.rows if r.sequence == email.reminder_of), None)
+        repeated = stored_decision(original) if original is not None else None
+        if original is None or repeated is None:
+            return None
+        return reminder_decision(repeated, sequence=sequence, reply_by=email.reply_by), original
+    proposal = item.proposal
+    assert proposal is not None
+    thread = await _thread(session, item.invite, item.supplier)
+    decision = build_decision(
+        email,
+        sequence=sequence,
+        currency=rfq.base_currency,
+        offer_version=proposal.version,
+        offer_received_on=item.received_on,
+        language=thread.language if thread is not None else None,
+        lines={line.row.id: line.facts for line in lines},
+        quoted=quoted,
+    )
+    return decision, None
+
+
 async def _record_decision(
     session: AsyncSession,
     rfq: Rfq,
@@ -1688,60 +1766,61 @@ async def _record_decision(
     row: NegotiationMessage | None = None
     if plan.email is not None and proposal is not None:
         sequence = max((r.sequence for r in item.rows), default=0) + 1
-        thread = await _thread(session, invite, item.supplier)
-        decision = build_decision(
-            plan.email,
-            sequence=sequence,
-            currency=rfq.base_currency,
-            offer_version=proposal.version,
-            offer_received_on=item.received_on,
-            language=thread.language if thread is not None else None,
-            lines={line.row.id: line.facts for line in lines},
-            quoted=quoted,
-        )
-        row_id = negotiation_message_id(invite.id, sequence)
-        terms: dict[str, JsonValue] = {
-            "decision": cast(dict[str, JsonValue], decision.model_dump(mode="json")),
-            "currency": rfq.base_currency,
-            "lines": legacy_lines(decision, plan.lines),
-            "correction_revision": correction_revision,
-            "comparison_policy_hash": _policy_hash(rfq),
-        }
-        inserted = await session.scalar(
-            insert(NegotiationMessage)
-            .values(
-                id=row_id,
-                tenant_id=rfq.tenant_id,
-                invite_id=invite.id,
-                proposal_id=proposal.id,
-                sequence=sequence,
-                round=plan.email.round,
-                action="bafo" if plan.email.kind == "bafo" else "counter",
-                kind=plan.email.kind,
-                status="decided",
-                terms=terms,
-            )
-            .on_conflict_do_nothing()
-            .returning(NegotiationMessage.id)
-        )
-        if inserted is not None:
-            row = await session.get(NegotiationMessage, row_id)
-            session.add(
-                AuditEvent(
+        made = await _new_decision(session, item, plan.email, lines, quoted, sequence, rfq)
+        if made is not None:
+            decision, original = made
+            row_id = negotiation_message_id(invite.id, sequence)
+            kind = "reminder" if original is not None else decision.kind
+            terms: dict[str, JsonValue] = {
+                "decision": cast(dict[str, JsonValue], decision.model_dump(mode="json")),
+                # What the clarification ledger reads of an open request (its reply-by).
+                "reply_by": decision.reply_by.isoformat(),
+                "currency": rfq.base_currency,
+                "lines": cast(dict[str, JsonValue], original.terms).get("lines", [])
+                if original is not None
+                else legacy_lines(decision, plan.lines),
+                "correction_revision": correction_revision,
+                "comparison_policy_hash": _policy_hash(rfq),
+            }
+            inserted = await session.scalar(
+                insert(NegotiationMessage)
+                .values(
+                    id=row_id,
                     tenant_id=rfq.tenant_id,
-                    actor_user_id=None,
-                    action="rfq.negotiation_decided",
-                    payload={
-                        "rfq_id": str(rfq.id),
-                        "invite_id": str(invite.id),
-                        "negotiation_message_id": str(row_id),
-                        "kind": plan.email.kind,
-                        "round": plan.email.round,
-                        "sequence": sequence,
-                        "proposal_version": proposal.version,
-                    },
+                    invite_id=invite.id,
+                    proposal_id=proposal.id,
+                    sequence=sequence,
+                    round=decision.round,
+                    action=original.action
+                    if original is not None
+                    else "bafo"
+                    if decision.kind == "bafo"
+                    else "counter",
+                    kind=kind,
+                    status="decided",
+                    terms=terms,
                 )
+                .on_conflict_do_nothing()
+                .returning(NegotiationMessage.id)
             )
+            if inserted is not None:
+                row = await session.get(NegotiationMessage, row_id)
+                session.add(
+                    AuditEvent(
+                        tenant_id=rfq.tenant_id,
+                        actor_user_id=None,
+                        action="rfq.negotiation_decided",
+                        payload={
+                            "rfq_id": str(rfq.id),
+                            "invite_id": str(invite.id),
+                            "negotiation_message_id": str(row_id),
+                            "kind": kind,
+                            "round": decision.round,
+                            "sequence": sequence,
+                            "proposal_version": proposal.version,
+                        },
+                    )
+                )
     if _changed(invite, plan, version):
         event = _event(plan)
         if event is not None:

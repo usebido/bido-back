@@ -1,10 +1,14 @@
 """`/v1/proposals`: a supplier's extracted quote, and correcting its values.
 
 `GET /v1/proposals/{id}` shows a proposal with its lines, what is still
-flagged for review and what a person corrected. The two `PATCH` routes
-correct (or, with the current value, confirm) header and line fields; each
-field becomes a `field_corrections` row and the comparison uses the new
+flagged for review, what a person corrected and what holds it. The two `PATCH`
+routes correct (or, with the current value, confirm) header and line fields;
+each field becomes a `field_corrections` row and the comparison uses the new
 value. Any member of the tenant may correct.
+
+`POST /v1/proposals/{id}/use-current-offer` takes the supplier's latest offer
+as shown and releases what holds it (the buyer's decision; approval rules
+apply, see `bido_back.corrections.service.use_current_offer`).
 """
 
 from typing import Annotated
@@ -23,6 +27,7 @@ from bido_back.corrections.schemas import (
     LineCorrectionRequest,
     ProposalLineView,
     ProposalView,
+    UseCurrentOfferRequest,
 )
 from bido_back.rfqs.errors import RfqError
 
@@ -69,6 +74,19 @@ def proposals_router() -> APIRouter:
         """Correct or confirm a quoted line: price, quantity break, MPN, lead time."""
         try:
             return await service.correct_line(db, principal, proposal_id, line_id, body)
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
+
+    @router.post(
+        "/{proposal_id}/use-current-offer",
+        responses=error_responses(status.HTTP_404_NOT_FOUND, status.HTTP_409_CONFLICT),
+    )
+    async def use_current_offer(  # pyright: ignore[reportUnusedFunction]
+        proposal_id: UUID, body: UseCurrentOfferRequest, principal: CurrentPrincipal, db: Db
+    ) -> ProposalView:
+        """Take the supplier's latest offer as shown: release what holds it for you."""
+        try:
+            return await service.use_current_offer(db, principal, proposal_id, body)
         except RfqError as exc:
             raise rfq_http_error(exc) from None
 

@@ -26,6 +26,7 @@ from bido_back.rfqs.errors import (
     AgentFailed,
     CurrencyRequired,
     Duplicate,
+    Forbidden,
     InvalidState,
     MailboxNotConfigured,
     MailboxNotConnected,
@@ -70,6 +71,8 @@ def rfq_http_error(exc: RfqError) -> HTTPException:
     """Map a service refusal to an HTTP error. Messages carry ids only."""
     if isinstance(exc, NotFound):
         return HTTPException(status.HTTP_404_NOT_FOUND, str(exc))
+    if isinstance(exc, Forbidden):
+        return HTTPException(status.HTTP_403_FORBIDDEN, str(exc))
     if isinstance(exc, MailboxNotConnected):
         return HTTPException(
             status.HTTP_409_CONFLICT,

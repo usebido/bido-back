@@ -746,6 +746,70 @@
         "title": "AnalysisView",
         "type": "object"
       },
+      "AnswerQuestionsRequest": {
+        "additionalProperties": false,
+        "description": "The buyer's answer, sent to the supplier as written once a person approves it.",
+        "properties": {
+          "answer": {
+            "description": "The email text, in the supplier's language",
+            "maxLength": 5000,
+            "minLength": 1,
+            "title": "Answer",
+            "type": "string"
+          },
+          "question_ids": {
+            "description": "The questions it answers; empty: every open question of this supplier",
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "maxItems": 20,
+            "title": "Question Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "answer"
+        ],
+        "title": "AnswerQuestionsRequest",
+        "type": "object"
+      },
+      "AnsweredQuestions": {
+        "description": "The answer is recorded; its email waits for approval (`approval_id`).",
+        "properties": {
+          "approval_id": {
+            "format": "uuid",
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "followup_id": {
+            "format": "uuid",
+            "title": "Followup Id",
+            "type": "string"
+          },
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          },
+          "question_ids": {
+            "items": {
+              "format": "uuid",
+              "type": "string"
+            },
+            "title": "Question Ids",
+            "type": "array"
+          }
+        },
+        "required": [
+          "invite_id",
+          "followup_id",
+          "approval_id",
+          "question_ids"
+        ],
+        "title": "AnsweredQuestions",
+        "type": "object"
+      },
       "ApprovalQueueItem": {
         "properties": {
           "award": {
@@ -895,6 +959,118 @@
           "approval_id"
         ],
         "title": "ApprovalRequested",
+        "type": "object"
+      },
+      "AskView": {
+        "description": "One item a clarification asked (the ledger): each is asked at most once.",
+        "properties": {
+          "asked_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Asked At"
+          },
+          "field": {
+            "enum": [
+              "currency",
+              "valid_until",
+              "unit_price",
+              "quantity",
+              "lead_time",
+              "delivery_date"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "need_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need By"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "RFQ line position; null for the whole offer",
+            "title": "Position"
+          },
+          "question": {
+            "enum": [
+              "value",
+              "confirm",
+              "deliver_by",
+              "price_or_decline"
+            ],
+            "title": "Question",
+            "type": "string"
+          },
+          "reply_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply By"
+          },
+          "settled_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Settled At"
+          },
+          "status": {
+            "description": "proposed (awaiting approval), open (asked), answered, unusable (still missing after the supplier's answer: your decision), withdrawn (never sent), resolved (you decided)",
+            "enum": [
+              "proposed",
+              "open",
+              "answered",
+              "unusable",
+              "withdrawn",
+              "resolved"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "position",
+          "field",
+          "question",
+          "need_by",
+          "status",
+          "asked_at",
+          "reply_by",
+          "settled_at"
+        ],
+        "title": "AskView",
         "type": "object"
       },
       "AssessmentInvitedSupplier": {
@@ -4011,6 +4187,77 @@
         "title": "DecisionResponse",
         "type": "object"
       },
+      "DecisionView": {
+        "description": "Something only the buyer can settle for this supplier.",
+        "properties": {
+          "field": {
+            "anyOf": [
+              {
+                "enum": [
+                  "currency",
+                  "valid_until",
+                  "unit_price",
+                  "quantity",
+                  "lead_time",
+                  "delivery_date"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Field"
+          },
+          "kind": {
+            "description": "unusable_answer: asked once, the answer did not give it; asked_before: answered once, missing again; offer_held: the latest reply could not be applied (see reasons); no_answer: no answer even after the reminder; email_held: the checks refused the follow-up Bido wrote (its kind in reasons), it was not sent",
+            "enum": [
+              "unusable_answer",
+              "asked_before",
+              "offer_held",
+              "no_answer",
+              "email_held"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "since": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since"
+          }
+        },
+        "required": [
+          "kind"
+        ],
+        "title": "DecisionView",
+        "type": "object"
+      },
       "DemandAllocationView": {
         "properties": {
           "gross_required": {
@@ -4178,6 +4425,26 @@
           "max_bytes"
         ],
         "title": "DirectUploadView",
+        "type": "object"
+      },
+      "DismissQuestionRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why no answer is needed (e.g. answered by phone)",
+            "title": "Reason"
+          }
+        },
+        "title": "DismissQuestionRequest",
         "type": "object"
       },
       "DocumentView": {
@@ -4744,6 +5011,17 @@
             "title": "Created At",
             "type": "string"
           },
+          "followup_kind": {
+            "description": "The follow-up's own kind: chase, clarification, reminder (of an email the supplier has not answered) or answer (to the supplier's question)",
+            "enum": [
+              "chase",
+              "clarification",
+              "reminder",
+              "answer"
+            ],
+            "title": "Followup Kind",
+            "type": "string"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -4756,6 +5034,18 @@
             ],
             "title": "Kind",
             "type": "string"
+          },
+          "reply_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply By"
           },
           "sent_at": {
             "anyOf": [
@@ -4787,6 +5077,7 @@
         "required": [
           "id",
           "kind",
+          "followup_kind",
           "sequence",
           "status",
           "approval_id",
@@ -4810,7 +5101,7 @@
             "type": "integer"
           },
           "first_after_business_days": {
-            "description": "First chase this many business days after the RFQ email",
+            "description": "First chase this many business days after the RFQ email, and never before its response date",
             "title": "First After Business Days",
             "type": "integer"
           },
@@ -5248,6 +5539,13 @@
       },
       "InviteFollowups": {
         "properties": {
+          "asks": {
+            "items": {
+              "$ref": "#/components/schemas/AskView"
+            },
+            "title": "Asks",
+            "type": "array"
+          },
           "chase_state": {
             "enum": [
               "scheduled",
@@ -5273,11 +5571,26 @@
             "title": "Invite Status",
             "type": "string"
           },
+          "late_deliveries": {
+            "description": "Lines whose stated lead time delivers after the need-by date (a negotiation matter, not a clarification)",
+            "items": {
+              "$ref": "#/components/schemas/OpenItemView"
+            },
+            "title": "Late Deliveries",
+            "type": "array"
+          },
           "messages": {
             "items": {
               "$ref": "#/components/schemas/FollowupMessageView"
             },
             "title": "Messages",
+            "type": "array"
+          },
+          "needs_your_decision": {
+            "items": {
+              "$ref": "#/components/schemas/DecisionView"
+            },
+            "title": "Needs Your Decision",
             "type": "array"
           },
           "next_chase_at": {
@@ -5292,6 +5605,13 @@
             ],
             "title": "Next Chase At"
           },
+          "open_items": {
+            "items": {
+              "$ref": "#/components/schemas/OpenItemView"
+            },
+            "title": "Open Items",
+            "type": "array"
+          },
           "paused_until": {
             "anyOf": [
               {
@@ -5303,6 +5623,28 @@
               }
             ],
             "title": "Paused Until"
+          },
+          "phase": {
+            "default": "not_applicable",
+            "enum": [
+              "needs_your_answer",
+              "needs_your_decision",
+              "email_pending",
+              "waiting_for_supplier",
+              "awaiting_offer",
+              "will_ask",
+              "nothing_to_ask",
+              "not_applicable"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "questions": {
+            "items": {
+              "$ref": "#/components/schemas/SupplierQuestionView"
+            },
+            "title": "Questions",
+            "type": "array"
           },
           "sent_at": {
             "anyOf": [
@@ -5319,6 +5661,16 @@
           "supplier_name": {
             "title": "Supplier Name",
             "type": "string"
+          },
+          "waiting_for_supplier": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/WaitingView"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "required": [
@@ -7278,6 +7630,7 @@
               "revised_offer",
               "delivery_date",
               "bafo",
+              "reminder",
               "accept",
               "hold",
               "close"
@@ -7522,7 +7875,8 @@
                 "enum": [
                   "revised_offer",
                   "delivery_date",
-                  "bafo"
+                  "bafo",
+                  "reminder"
                 ],
                 "type": "string"
               },
@@ -7536,6 +7890,17 @@
             "format": "uuid",
             "title": "Proposal Id",
             "type": "string"
+          },
+          "reminder_of": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reminder Of"
           },
           "reply_by": {
             "anyOf": [
@@ -7961,6 +8326,77 @@
           "default_template"
         ],
         "title": "OnboardingState",
+        "type": "object"
+      },
+      "OpenItemView": {
+        "description": "Something the latest offer lacks that Bido has not asked yet.",
+        "properties": {
+          "expected_delivery": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Delivery"
+          },
+          "field": {
+            "enum": [
+              "currency",
+              "valid_until",
+              "unit_price",
+              "quantity",
+              "lead_time",
+              "delivery_date"
+            ],
+            "title": "Field",
+            "type": "string"
+          },
+          "need_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Need By"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position"
+          },
+          "question": {
+            "enum": [
+              "value",
+              "confirm",
+              "deliver_by",
+              "price_or_decline"
+            ],
+            "title": "Question",
+            "type": "string"
+          }
+        },
+        "required": [
+          "position",
+          "field",
+          "question",
+          "need_by",
+          "expected_delivery"
+        ],
+        "title": "OpenItemView",
         "type": "object"
       },
       "OutboundDomains": {
@@ -8841,6 +9277,14 @@
             ],
             "title": "Currency"
           },
+          "holds": {
+            "description": "Why the offer is held for you (its latest reply could not be applied as it was); empty when it is not. `use-current-offer` releases them",
+            "items": {
+              "type": "string"
+            },
+            "title": "Holds",
+            "type": "array"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
@@ -8883,6 +9327,19 @@
               }
             ],
             "title": "Payment Terms"
+          },
+          "released_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When a person took this offer as shown, releasing its holds",
+            "title": "Released At"
           },
           "review_fields": {
             "items": {
@@ -10664,6 +11121,24 @@
             },
             "title": "Cc",
             "type": "array"
+          },
+          "followup_kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "chase",
+                  "clarification",
+                  "reminder",
+                  "answer"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A follow-up's own kind: chase, clarification, reminder (of an email the supplier has not answered) or answer (to the supplier's question); null for the RFQ email",
+            "title": "Followup Kind"
           },
           "html_body": {
             "anyOf": [
@@ -13240,6 +13715,68 @@
         "title": "SupplierPerformance",
         "type": "object"
       },
+      "SupplierQuestionView": {
+        "description": "A question the supplier asked the buyer. Automatic emails wait while one is open.",
+        "properties": {
+          "answer_followup_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Answer Followup Id"
+          },
+          "asked_at": {
+            "format": "date-time",
+            "title": "Asked At",
+            "type": "string"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "question": {
+            "title": "Question",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "open",
+              "answered",
+              "dismissed"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "question",
+          "status",
+          "asked_at",
+          "answer_followup_id",
+          "decided_at"
+        ],
+        "title": "SupplierQuestionView",
+        "type": "object"
+      },
       "SupplierStatView": {
         "properties": {
           "avg_price": {
@@ -13366,6 +13903,7 @@
               "revised_offer",
               "delivery_date",
               "bafo",
+              "reminder",
               "accept",
               "hold",
               "close"
@@ -14599,6 +15137,27 @@
         "title": "UploadView",
         "type": "object"
       },
+      "UseCurrentOfferRequest": {
+        "additionalProperties": false,
+        "description": "Take the supplier's offer as shown, releasing what holds it for the buyer.",
+        "properties": {
+          "reason": {
+            "anyOf": [
+              {
+                "maxLength": 500,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why, for the review history",
+            "title": "Reason"
+          }
+        },
+        "title": "UseCurrentOfferRequest",
+        "type": "object"
+      },
       "ValidationError": {
         "properties": {
           "ctx": {
@@ -14657,6 +15216,57 @@
           "category"
         ],
         "title": "VariantRequest",
+        "type": "object"
+      },
+      "WaitingView": {
+        "description": "The email the supplier has not answered yet.",
+        "properties": {
+          "kind": {
+            "enum": [
+              "clarification",
+              "counter",
+              "bafo"
+            ],
+            "title": "Kind",
+            "type": "string"
+          },
+          "reminded_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reminded At"
+          },
+          "reply_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply By"
+          },
+          "sent_at": {
+            "format": "date-time",
+            "title": "Sent At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "sent_at",
+          "reply_by",
+          "reminded_at"
+        ],
+        "title": "WaitingView",
         "type": "object"
       },
       "WorkbookImportReport": {
@@ -21030,6 +21640,133 @@
         ]
       }
     },
+    "/v1/proposals/{proposal_id}/use-current-offer": {
+      "post": {
+        "description": "Take the supplier's latest offer as shown: release what holds it for you.",
+        "operationId": "use_current_offer_v1_proposals__proposal_id__use_current_offer_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "proposal_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Proposal Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UseCurrentOfferRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProposalView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Use Current Offer",
+        "tags": [
+          "proposals"
+        ]
+      }
+    },
     "/v1/purchase-orders": {
       "get": {
         "operationId": "list_purchase_orders_v1_purchase_orders_get",
@@ -24985,6 +25722,143 @@
         ]
       }
     },
+    "/v1/rfqs/{rfq_id}/invites/{invite_id}/answers": {
+      "post": {
+        "description": "Answer the supplier's questions: the email waits for approval.",
+        "operationId": "answer_questions_v1_rfqs__rfq_id__invites__invite_id__answers_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "invite_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Invite Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AnswerQuestionsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AnsweredQuestions"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Answer Questions",
+        "tags": [
+          "followups"
+        ]
+      }
+    },
     "/v1/rfqs/{rfq_id}/invites/{invite_id}/document.pdf": {
       "get": {
         "description": "The PDF attached to this invite's email: the approved one once a send was\nproposed, else as it would be prepared now. Addressed to this supplier only.",
@@ -26572,6 +27446,143 @@
         "summary": "Release Hold",
         "tags": [
           "negotiation"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/questions/{question_id}/dismiss": {
+      "post": {
+        "description": "No answer needed (answered elsewhere): automatic emails resume.",
+        "operationId": "dismiss_question_v1_rfqs__rfq_id__questions__question_id__dismiss_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "question_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Question Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DismissQuestionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SupplierQuestionView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Dismiss Question",
+        "tags": [
+          "followups"
         ]
       }
     },
