@@ -243,6 +243,30 @@ def test_negotiation_email_checks_the_numbers() -> None:
     assert negotiation_email_problems(task, NegotiationEmailOutput(body=" ")) == ["empty"]
 
 
+def test_a_target_with_more_than_three_decimals_is_read_whole() -> None:
+    """`45,7164` is one number, not the group `45,716` followed by a `4`."""
+    ask = NegotiationLineAsk(
+        position=1,
+        line="Rolamento",
+        quantity=Decimal(50),
+        unit="pcs",
+        currency="BRL",
+        offered_unit_price=Decimal("46.90"),
+        target_unit_price=Decimal("45.7164"),
+    )
+    task = _task(supplier_language="pt", lines=[ask])
+    body = "Sobre a RFQ-7: Item 1 Rolamento: preço alvo R$ 45,7164 por pcs."
+    assert negotiation_email_problems(task, NegotiationEmailOutput(body=body)) == []
+    grouped = "Sobre a RFQ-7: preço alvo R$ 1.234,5 e R$ 45,7164."
+    assert negotiation_email_problems(task, NegotiationEmailOutput(body=grouped)) == [
+        "unknown_amount"
+    ]
+    reais = "Sobre a RFQ-7: preço alvo R$ 45,7164; outro: 44,00 BRL."
+    assert negotiation_email_problems(task, NegotiationEmailOutput(body=reais)) == [
+        "unknown_amount"
+    ]
+
+
 def test_stalled_sent_rounds_stop_instead_of_repeating_the_target() -> None:
     from bido_back.negotiation.strategy import PreviousRound
 

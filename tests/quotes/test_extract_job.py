@@ -6,7 +6,7 @@ tests/db/conftest.py).
 
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
@@ -79,6 +79,7 @@ class Seeded:
         with_sheet: bool = True,
         occurred_at: datetime | None = None,
         in_reply_to: str | None = None,
+        subject: str = "AW: [RFQ-12] LDO regulators",
     ) -> UUID:
         async with tenant_session(self.engine, self.tenant_id) as session:
             message = Message(
@@ -86,7 +87,7 @@ class Seeded:
                 invite_id=self.invite_id,
                 direction="in",
                 message_id_header=f"<{uuid4().hex}@supplier.test>",
-                subject="AW: [RFQ-12] LDO regulators",
+                subject=subject,
                 body_text=body,
                 status="stored",
                 occurred_at=occurred_at or datetime.now(UTC),
@@ -324,7 +325,7 @@ async def test_reply_becomes_a_proposal_with_provenance(seeded: Seeded, script: 
         "declined": False,
     }
     assert proposal.fields["_extraction"]["agent"] == "quote_extraction"
-    assert proposal.fields["_extraction"]["prompt_version"] == 3
+    assert proposal.fields["_extraction"]["prompt_version"] == 4
     assert proposal.fields["extra_offers"] == []
 
     assert [(pl.min_quantity, pl.unit_price) for pl in lines] == [
@@ -617,3 +618,44 @@ async def test_refusal_after_offer_prevents_recommending_stale_terms(
     proposal, lines = (await proposals_of(seeded))[-1]
     assert all(line.needs_review for line in lines)
     assert proposal.fields["_offer_state"]["requires_clarification"] is True
+
+
+async def test_an_older_revision_delivered_late_keeps_the_newer_offer_usable(
+    seeded: Seeded, script: Script
+) -> None:
+    """Revisão 2 arrives first; Revisão 1, written earlier, arrives later. The Date
+    headers and the supplier's revision numbers agree: no hold, Revisão 2 stays."""
+    now = datetime.now(UTC)
+    newer = await seeded.add_message(
+        subject="AW: [RFQ-12] LDO regulators - Revisão 2", occurred_at=now - timedelta(hours=1)
+    )
+    script(
+        final(
+            **quote_output(),
+            extra_offers=[
+                {
+                    "description": "Wartungsset",
+                    "mpn": "WS-1",
+                    "quantity": None,
+                    "unit_price": "12.00",
+                    "currency": "EUR",
+                    "conditions": None,
+                    "quote": "Wartungsset WS-1: 12,00 EUR",
+                }
+            ],
+        )
+    )
+    await run_job(seeded, newer)
+    older = await seeded.add_message(
+        subject="AW: [RFQ-12] LDO regulators - Revisão 1", occurred_at=now - timedelta(hours=2)
+    )
+    script(final(**quote_output()))
+    await run_job(seeded, older)
+
+    proposal, lines = (await proposals_of(seeded))[-1]
+    state = proposal.fields["_offer_state"]
+    assert state["active_message_id"] == str(newer)
+    assert state["issues"] == []
+    assert not any(line.needs_review for line in lines)
+    # The first reply's unrequested offer is still listed after the second reply.
+    assert [offer["mpn"] for offer in proposal.fields["extra_offers"]] == ["WS-1"]

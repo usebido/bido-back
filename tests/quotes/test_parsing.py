@@ -12,6 +12,7 @@ from bido_back.quotes.parsing import (
     detect_currencies,
     find_number,
     incoterms_in,
+    mentions_per_unit,
     mentions_weeks,
     mentions_working_days,
     parse_amount,
@@ -100,6 +101,25 @@ def test_currency_detection() -> None:
     assert detect_currencies("USD 3 / EUR 2") == {"USD", "EUR"}
     assert detect_currencies("price ¥ 20") == set()  # JPY or CNY: never guessed
     assert detect_currencies("the fee") == set()
+
+
+def test_reais_are_never_read_as_dollars() -> None:
+    assert detect_currencies("R$ 46,90 por pcs") == {"BRL"}
+    assert detect_currencies("r$46,90") == {"BRL"}
+    assert detect_currencies("US$ 5.00") == {"USD"}
+    assert detect_currencies("$5.00 each") == {"USD"}
+    assert detect_currencies("5 $") == {"USD"}
+    # Another dollar (Canadian, Australian...): no currency, never USD.
+    assert detect_currencies("C$ 5.00") == set()
+    assert detect_currencies("R$ 1.234,00 ou US$ 300") == {"BRL", "USD"}
+
+
+def test_a_price_for_one_unit_in_words() -> None:
+    for text in ("R$ 46,90 por pcs", "0,45 €/Stk", "$2 each", "R$ 112,00 por kg",
+                 "preço unitário R$ 2,45", "EUR 5 per unit"):  # fmt: skip
+        assert mentions_per_unit(text), text
+    for text in ("R$ 46,90 por 100 pcs", "46,90 / 1000 pcs", "R$ 46,90", "5 pcs at 2.00"):
+        assert not mentions_per_unit(text), text
 
 
 def test_dates_in_common_written_forms() -> None:

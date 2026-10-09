@@ -386,6 +386,46 @@ def test_price_in_another_currency_than_the_header() -> None:
     assert "currency_mismatch:tooling_cost" in result.lines[0].issues
 
 
+def test_reais_are_the_brl_header_currency_not_a_mismatch() -> None:
+    body = "Item 1: R$ 46,90 por pcs. Moeda: BRL.\n"
+    result = validate(
+        output(
+            line(
+                offered_mpn=NONE,
+                min_quantity=NONE,
+                unit=NONE,
+                lead_time_days=NONE,
+                origin_country=NONE,
+                unit_price=ev("46.90", "R$ 46,90 por pcs"),
+            ),
+            currency=ev("BRL", "Moeda: BRL"),
+            valid_until=NONE,
+            incoterm=NONE,
+            payment_terms=NONE,
+        ),
+        body=body,
+    )
+
+    assert not result.lines[0].issues
+    assert not result.needs_review
+
+
+def test_a_basis_of_one_unit_stated_in_words_is_grounded() -> None:
+    body = BODY + "Preis: 0,45 € je Stück; ab 100 Stück: 40,00 € per 100 pcs.\n"
+    per_unit = validate(output(line(price_basis_quantity=ev("1", "0,45 € je Stück"))), body=body)
+    assert issues_of(per_unit, "price_basis_quantity") == ()
+    assert per_unit.lines[0].fields["price_basis_quantity"].parsed == Decimal(1)
+
+    # A basis of one is never inferred where the supplier wrote another basis.
+    other_basis = validate(
+        output(line(price_basis_quantity=ev("1", "40,00 € per 100 pcs"))), body=body
+    )
+    assert "not_grounded" in issues_of(other_basis, "price_basis_quantity")
+    # Nor any other number from a per-unit sentence.
+    wrong = validate(output(line(price_basis_quantity=ev("10", "0,45 € je Stück"))), body=body)
+    assert "not_grounded" in issues_of(wrong, "price_basis_quantity")
+
+
 def test_expired_validity_needs_review() -> None:
     body = BODY + "Gültig bis 01.10.2026.\n"
     result = validate(output(valid_until=ev("2026-10-01", "Gültig bis 01.10.2026")), body=body)
