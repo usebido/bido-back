@@ -40,7 +40,7 @@ from collections import Counter, defaultdict
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final
 from uuid import UUID
@@ -563,39 +563,89 @@ PER_DAY: Final = 2
 Asks = dict[int, tuple[Decimal | None, int | None]]
 
 
-def golden_asks(quote: Quote, items: Sequence[Item] = ITEMS) -> Asks:
-    """What the buyer asks next, from the buyer's rules: per line, the target price when the
-    offer is above it, the maximum lead time when the offer is later; nothing on a line
-    within target and on time, nothing on a line not offered."""
-    asks: Asks = {}
-    for item in items:
-        price = quote.prices.get(item.position)
-        if price is None:
-            continue
-        late = quote.lead > item.max_lead
-        ask_price = item.target if price > item.target else None
-        if ask_price is None and not late:
-            continue
-        asks[item.position] = (ask_price, item.max_lead if late else None)
-    return asks
+def _places(price: Decimal) -> int:
+    """Decimals an ask may use: cents, or the supplier's own finer precision (at most 4)."""
+    exponent = price.normalize().as_tuple().exponent
+    written = -exponent if isinstance(exponent, int) and exponent < 0 else 0
+    return max(2, min(written, 4))
 
 
-def golden_actions(persona: Persona) -> list[tuple[str, Asks]]:
-    """Expected sends, stopping after two unchanged supplier replies.
+def _down(value: Decimal, places: int) -> Decimal:
+    return value.quantize(Decimal(1).scaleb(-places), rounding=ROUND_FLOOR)
 
-    The final allowed productive round is best-and-final; stagnant negotiations
-    are held for the buyer rather than spending another automatic round.
+
+def golden_actions(persona: Persona, items: Sequence[Item] = ITEMS) -> list[tuple[str, Asks]]:
+    """The negotiation emails the buyer's rules send to a persona, in order.
+
+    - A first quote without a price for a requested line leaves an open question: it is
+      asked first (a clarification, which the follow-up sweep writes; this scenario runs
+      only the negotiation sweep), so no negotiation email goes to that supplier. (The
+      quote extraction cannot yet say that a line was declined.)
+    - Round 1 asks the target on every line above it, and delivery by the required date
+      (here the 42-day limit) on every late line.
+    - A later round concedes on a line where the supplier moved: a quarter of the gap
+      between our last ask and its price, half in the last allowed round (the best-and-
+      final request), rounded down to cents or the supplier's own finer precision, never
+      at or above its price; a line that did not move keeps its ask; a late line is asked
+      once.
+    - It stops when the supplier moved on nothing that was asked, after the best-and-final
+      request, or when nothing is left to ask.
     """
+    if any(item.position not in persona.quote(0).prices for item in items):
+        return []
     actions: list[tuple[str, Asks]] = []
+    last_ask: dict[int, Decimal] = {}
+    asked_at: dict[int, Decimal] = {}
+    asked_lead: dict[int, int] = {}
     for round in range(1, MAX_ROUNDS + 1):
-        if round >= 3 and persona.quote(round - 1) == persona.quote(round - 2) == persona.quote(
-            round - 3
-        ):
-            break
-        asks = golden_asks(persona.quote(round - 1))
+        quote = persona.quote(round - 1)
+        if actions:
+            _, previous = actions[-1]
+            moved = False
+            for position, (ask, lead) in previous.items():
+                price = quote.prices.get(position)
+                if ask is not None and price is not None and price < asked_at[position]:
+                    moved = True
+                if lead is not None and quote.lead < asked_lead[position]:
+                    moved = True
+            if not moved:
+                break
+        final = round == MAX_ROUNDS
+        asks: Asks = {}
+        for item in items:
+            price = quote.prices.get(item.position)
+            if price is None:
+                continue
+            ask: Decimal | None = None
+            before = last_ask.get(item.position)
+            if price > item.target and not (before is not None and price <= before):
+                if before is None:
+                    ask = _down(item.target, _places(price))
+                else:
+                    ask = before
+                    if price < asked_at[item.position] and price <= item.max_price:
+                        share = Decimal("0.5") if final else Decimal("0.25")
+                        step = _down(before + (price - before) * share, _places(price))
+                        if before < step < price:
+                            ask = step
+            lead = (
+                item.max_lead
+                if quote.lead > item.max_lead and item.position not in asked_lead
+                else None
+            )
+            if ask is not None or lead is not None:
+                asks[item.position] = (ask, lead)
         if not asks:
             break
-        actions.append(("bafo" if round == MAX_ROUNDS else "counter", asks))
+        actions.append(("bafo" if final else "counter", asks))
+        for position, (ask, lead) in asks.items():
+            if ask is not None:
+                last_ask[position] = ask
+                asked_at[position] = quote.prices[position]
+            if lead is not None:
+                asked_lead[position] = quote.lead
+        if final:
+            break
     return actions
 
 
@@ -709,6 +759,8 @@ def _check_negotiation_emails(
         others = [p for p in NEGOTIATION_CAST + (WITHIN, ABOVE) if p.key != persona.key]
         own = {_n(v) for q in persona.quotes for v in q.prices.values()}
         own |= {_n(i.target) for i in ITEMS}
+        # What Bido decided to ask this supplier is its own number, whatever others quote.
+        own |= {a for t in tasks for a, _ in _asked(t).values() if a is not None}
         maxima = {_n(i.max_price) for i in ITEMS} - own
         rivals = {_n(v) for p in others for q in p.quotes for v in q.prices.values()} - own
         for index, email in enumerate(emails, 1):

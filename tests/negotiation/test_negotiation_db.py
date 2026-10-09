@@ -5,7 +5,7 @@ Fake writer and fake mailbox; real strategy, approvals, guard and executor.
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select, update
@@ -41,7 +41,7 @@ from bido_back.negotiation.send import (
 )
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs import suppliers
-from bido_back.rfqs.errors import InvalidState, NotFound
+from bido_back.rfqs.errors import AgentFailed, InvalidState, NotFound
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
 from bido_back.rfqs.send import RfqActDeps, register_act_tools
 from bido_back.worker.envelope import Envelope
@@ -75,6 +75,16 @@ class FakeNegotiationWriter:
         )
         extra = " Another supplier offers 0.0123 EUR." if self.invent else ""
         return NegotiationEmailOutput(body=f"About {task.rfq_ref} ({task.action}): {asks}.{extra}")
+
+
+class FailingNegotiationWriter(FakeNegotiationWriter):
+    """The writer's model is down: every call fails."""
+
+    async def __call__(
+        self, task: NegotiationEmailInput, context: ToolContext
+    ) -> NegotiationEmailOutput:
+        self.calls.append(task)
+        raise AgentFailed("rfq_negotiation_writer failed (model_error)")
 
 
 class FlakyNegotiationWriter(FakeNegotiationWriter):
@@ -435,6 +445,87 @@ async def test_a_refused_draft_is_retried_from_the_same_decision(world: World) -
     assert len(flaky.calls) == 2 and flaky.calls[0] == flaky.calls[1]
     [row] = await world.messages("rhein")
     assert (row.status, row.attempts, row.round) == ("proposed", 2, 1)
+
+
+async def test_a_writer_outage_retries_the_same_decision_on_later_sweeps(world: World) -> None:
+    await world.configure()
+    await world.offer("rhein", ("0.050", "1.20"))
+    failing = FailingNegotiationWriter()
+    for attempts in (1, 2):
+        await world.sweep(failing)
+        [row] = await world.messages("rhein")
+        assert (row.status, row.attempts, row.sequence) == ("decided", attempts, 1)
+        view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+        rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+        assert rhein.state is not None
+        assert (rhein.state.phase, rhein.state.reason) == ("waiting", "preparing_email")
+    await world.sweep(failing)
+    [row] = await world.messages("rhein")
+    assert (row.status, row.attempts) == ("held", service.MAX_DRAFT_ATTEMPTS)
+    assert row.held_reason is not None and row.held_reason.startswith("writer_failed")
+    # One decision, written three times, never decided again.
+    assert len(failing.calls) == 3 and {task.round for task in failing.calls} == {1}
+
+
+async def test_the_copilot_reads_each_suppliers_state_and_cannot_double_a_counter(
+    world: World,
+) -> None:
+    from bido_back.copilot.tools import (
+        CopilotToolDeps,
+        NegotiationStatusOut,
+        ProposeCounteroffersOut,
+        copilot_tools,
+    )
+    from tests.rfqs.conftest import fake_agents
+
+    await world.configure()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.offer("lyon", ("0.038", "0.95"))
+    writer = FakeNegotiationWriter()
+    tools = {
+        tool.name: tool
+        for tool in copilot_tools(
+            CopilotToolDeps(
+                db=world.engine,
+                agents=fake_agents(),
+                mailboxes=world.mailboxes,
+                negotiation_writer=writer,
+            )
+        )
+    }
+    ctx = ToolContext(tenant_id=world.people.tenant, user_id=world.people.owner, run_id=uuid4())
+    ref = (await world.rfq()).ref
+
+    async def propose() -> ProposeCounteroffersOut:
+        tool = tools["propose_counteroffers"]
+        out = await tool.invoke(ctx, tool.parse_input({"rfq": ref}))
+        assert isinstance(out, ProposeCounteroffersOut)
+        return out
+
+    async def status() -> NegotiationStatusOut:
+        tool = tools["get_negotiation_status"]
+        out = await tool.invoke(ctx, tool.parse_input({"rfq": ref}))
+        assert isinstance(out, NegotiationStatusOut)
+        return out
+
+    assert ((await propose()).proposed, (await propose()).proposed) == (1, 0)
+    assert len(writer.calls) == 1
+    suppliers = {s.supplier_name: s for s in (await status()).suppliers}
+    assert (suppliers["Rhein"].state, suppliers["Rhein"].status) == ("held_for_approval", "open")
+    assert suppliers["Rhein"].state_text.startswith("Held for your approval")
+    assert [(e.kind, e.state) for e in suppliers["Rhein"].emails] == [("revised_offer", "proposed")]
+    assert (suppliers["Lyon"].state, suppliers["Lyon"].status) == (
+        "accepted_internally",
+        "accepted",
+    )
+    assert suppliers["Lyon"].state_text.startswith("Accepted internally – nothing to ask")
+    # Sent: still one email for this offer, and the buyer reads that Bido waits.
+    [counter] = await world.messages("rhein")
+    await world.approve(counter.approval_id or counter.id)
+    assert (await propose()).proposed == 0
+    rhein = next(s for s in (await status()).suppliers if s.supplier_name == "Rhein")
+    assert (rhein.state, rhein.status) == ("waiting_for_supplier", "countered")
+    assert rhein.state_text.startswith("Waiting for the supplier")
 
 
 async def test_a_rejected_counter_is_not_sent_and_that_offer_goes_to_the_buyer(

@@ -58,7 +58,7 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from datetime import time as clock
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_FLOOR, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Final, Protocol, cast
 from uuid import UUID, uuid4
@@ -1737,48 +1737,85 @@ def last_key(supplier_key: str) -> str:
 Asks = dict[str, Decimal]
 
 
-def golden_rounds(
-    targets: Mapping[str, Decimal], max_rounds: int, script: Sequence[SupplierEmail] = SCRIPT
-) -> dict[str, list[tuple[str, Asks]]]:
-    """Per supplier, the counter-offers the buyer's rules send, in order.
+def _places(price: Decimal) -> int:
+    """Decimals an ask may use: cents, or the supplier's own finer precision (at most 4)."""
+    exponent = price.normalize().as_tuple().exponent
+    written = -exponent if isinstance(exponent, int) and exponent < 0 else 0
+    return max(2, min(written, 4))
 
-    After each day's replies: ask the target on every line above it; nothing when
-    every line is within target; stop after a best-and-final request, after the
-    round cap, or after two replies in a row without a lower price or a shorter
-    lead time. The last allowed round is the best-and-final request.
+
+def _down(value: Decimal, places: int) -> Decimal:
+    return value.quantize(Decimal(1).scaleb(-places), rounding=ROUND_FLOOR)
+
+
+def golden_rounds(
+    targets: Mapping[str, Decimal],
+    max_rounds: int,
+    script: Sequence[SupplierEmail] = SCRIPT,
+    maxima: Mapping[str, Decimal] | None = None,
+) -> dict[str, list[tuple[str, Asks]]]:
+    """Per supplier, the negotiation requests the buyer's rules send, in order (price asks).
+
+    After each day's replies, from the supplier's offer at that moment:
+
+    - An offer without a price for a requested part leaves an open question: it is asked
+      first (a clarification, which the follow-up sweep writes; the journey runs only the
+      negotiation sweep), so no request goes out. (Extraction cannot yet say that a part
+      was declined.)
+    - The first request asks the target, rounded down to cents (or the supplier's finer
+      precision), on every part above it. A part late for its need-by date also gets one
+      delivery-date ask, graded by `late_line_lead_time_asked`.
+    - A later request needs the supplier to have moved on a price that was asked. It
+      concedes on the parts that moved: a quarter of the gap between our last ask and the
+      price, half in the last allowed round (the best-and-final request), never at or above
+      the price nor above the maximum; a part that did not move keeps its ask.
+    - It stops after an unchanged reply, after the best-and-final request, or at the round
+      cap; nothing is asked when every part is within target or at our last ask.
     """
     states = expected_states(script)
     result: dict[str, list[tuple[str, Asks]]] = {s.key: [] for s in SUPPLIERS}
-    history: dict[str, list[Mapping[str, Offer]]] = defaultdict(list)
+    last_ask: dict[str, dict[str, Decimal]] = defaultdict(dict)
+    asked_at: dict[str, dict[str, Decimal]] = defaultdict(dict)
     stopped: set[str] = set()
     for day in range(DAYS):
         for supplier in SUPPLIERS:
-            todays = [e for e in script if e.day == day and e.supplier.key == supplier.key]
-            if not todays or supplier.key in stopped:
+            key = supplier.key
+            todays = [e for e in script if e.day == day and e.supplier.key == key]
+            if not todays or key in stopped:
                 continue
             state = states[todays[-1].key]
-            asks = {
-                p: targets[p] for p, o in state.items() if p in targets and o.price > targets[p]
-            }
+            if any(part not in state for part in targets):
+                continue
+            rounds = result[key]
+            if rounds:
+                action, previous = rounds[-1]
+                moved = any(state[p].price < asked_at[key][p] for p in previous if p in state)
+                if not moved or action == "bafo" or len(rounds) >= max_rounds:
+                    stopped.add(key)
+                    continue
+            final = len(rounds) + 1 >= max_rounds
+            asks: Asks = {}
+            for part, target in targets.items():
+                price = state[part].price
+                before = last_ask[key].get(part)
+                if price <= target or (before is not None and price <= before):
+                    continue
+                if before is None:
+                    asks[part] = _down(target, _places(price))
+                    continue
+                asks[part] = before
+                ceiling = maxima.get(part) if maxima is not None else None
+                if price < asked_at[key][part] and (ceiling is None or price <= ceiling):
+                    share = Decimal("0.5") if final else Decimal("0.25")
+                    step = _down(before + (price - before) * share, _places(price))
+                    if before < step < price:
+                        asks[part] = step
             if not asks:
                 continue
-            stagnant, recent = 0, state
-            for prior in reversed(history[supplier.key]):
-                if set(prior) != set(recent):
-                    break
-                if any(
-                    recent[p].price < prior[p].price or recent[p].lead < prior[p].lead
-                    for p in recent
-                ):
-                    break
-                stagnant, recent = stagnant + 1, prior
-            rounds = result[supplier.key]
-            if stagnant >= 2 or len(rounds) >= max_rounds or any(a == "bafo" for a, _ in rounds):
-                stopped.add(supplier.key)
-                continue
-            action = "bafo" if len(rounds) + 1 >= max_rounds else "counter"
-            rounds.append((action, asks))
-            history[supplier.key].append(state)
+            rounds.append(("bafo" if final else "counter", asks))
+            for part, ask in asks.items():
+                last_ask[key][part] = ask
+                asked_at[key][part] = state[part].price
     return result
 
 
@@ -1792,10 +1829,16 @@ async def step_negotiation(j: Journey, step: Step) -> None:
         return
     targets = {p: t for p, (t, _) in j.limits.items()}
     maxima = {p: m for p, (_, m) in j.limits.items()}
-    want = golden_rounds(targets, j.max_rounds)
+    want = golden_rounds(targets, j.max_rounds, maxima=maxima)
     by_position = {position: part for part, position in j.positions.items()}
     got: dict[str, list[tuple[str, Asks]]] = {s.key: [] for s in SUPPLIERS}
-    tasks: list[NegotiationEmailInput] = [t for s in j.sweeps for t in s.tasks]
+    # A refused draft is written again from the same decision (same round): one request.
+    seen: set[tuple[str, int, str]] = set()
+    tasks: list[NegotiationEmailInput] = []
+    for task in (t for s in j.sweeps for t in s.tasks):
+        if (task.supplier_name, task.round, task.action) not in seen:
+            seen.add((task.supplier_name, task.round, task.action))
+            tasks.append(task)
     above: list[str] = []
     lead_asks: list[str] = []
     for task in tasks:
@@ -1883,10 +1926,12 @@ async def step_negotiation(j: Journey, step: Step) -> None:
                 )
             ).all()
         ]
+    expected_stalled = [a for a, _ in want[MULTIPECAS_KEY]]
     step.check(
         "stops_without_progress",
-        stalled == ["counter", "counter"] and status in ("closed", "rejected"),
-        f"MultiPecas got {stalled}, status {status}",
+        stalled == expected_stalled
+        and (status not in ("countered", "bafo_requested") or bool(stalled)),
+        f"MultiPecas got {stalled}, want {expected_stalled}, status {status}",
         owner="negotiation",
     )
     step.check("nothing_held", not held, f"held for a person: {held}", owner="negotiation")

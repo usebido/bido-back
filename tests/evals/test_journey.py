@@ -82,9 +82,18 @@ def test_supplier_script_follows_the_business_rules() -> None:
     assert "000104" not in states["multipecas.r0"]
 
     targets = {p.part: p.target for p in REAL_PARTS if p.buy}
-    rounds = golden_rounds(targets, 3)
-    assert [a for a, _ in rounds["multipecas"]] == ["counter", "counter"]
-    assert [a for a, _ in rounds["metalnova"]] == ["counter", "counter", "bafo"]
+    maxima = {p.part: p.maximum for p in REAL_PARTS if p.buy}
+    # MultiPecas left 000104 unquoted: that open question comes first, no request yet.
+    assert golden_rounds(targets, 2, maxima=maxima)["multipecas"] == []
+    # Two rounds: one request, then the best-and-final request once the supplier moved.
+    two = golden_rounds(targets, 2, maxima=maxima)
+    assert [a for a, _ in two["metalnova"]] == ["counter", "bafo"]
+    assert [a for a, _ in two["precisaosul"]] == ["counter", "bafo"]
+    # Three rounds: MetalNova's lead-time-only change moves nothing that was asked: stop.
+    three = golden_rounds(targets, 3, maxima=maxima)
+    assert [a for a, _ in three["metalnova"]] == ["counter", "counter"]
+    first, second = (asks for _, asks in three["metalnova"])
+    assert second["000102"] > first["000102"]  # it moved: a labeled concession
 
     best = expected_recommendations(REAL_PARTS, 10, maxima={p.part: p.maximum for p in REAL_PARTS})
     assert {p: e.supplier for p, e in best.items()} == {

@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from bido_back.agents.config import RunnerConfig
 from evals.flow import SCENARIOS, flow_markdown, golden_actions, guess_language, run_flow
 from evals.harness import Env, MemoryStorage
-from evals.personas import CHEAP_LATE, EAGER, NEGOTIATION_CAST, TOUGH
+from evals.personas import CHEAP_LATE, DECLINER, EAGER, NEGOTIATION_CAST, TOUGH
 from tests.db.conftest import app_engine
 
 __all__ = ["app_engine"]
@@ -26,15 +26,16 @@ def test_personas_write_to_test_domains_only() -> None:
 
 
 def test_golden_negotiation_follows_the_buyer_rules() -> None:
-    # Two unchanged replies stop the automatic loop and hold for the buyer.
+    # An unchanged reply stops the automatic requests and hands the supplier to the buyer.
     assert golden_actions(TOUGH) == [
         ("counter", {1: (Decimal("0.040"), None), 2: (Decimal("1.00"), None)}),
-        ("counter", {1: (Decimal("0.040"), None), 2: (Decimal("1.00"), None)}),
     ]
-    # Cheap but late: only the lead time is asked.
-    assert golden_actions(CHEAP_LATE)[0] == ("counter", {1: (None, 42), 2: (None, 42)})
-    # Line 1 accepted after the first counter: only line 2 is asked again.
-    assert golden_actions(EAGER)[1] == ("counter", {2: (Decimal("1.00"), None)})
+    # Cheap but late: only the delivery date is asked, once.
+    assert golden_actions(CHEAP_LATE) == [("counter", {1: (None, 42), 2: (None, 42)})]
+    # Line 1 accepted after the first counter; line 2 moved: a quarter-step concession.
+    assert golden_actions(EAGER)[1] == ("counter", {2: (Decimal("1.01"), None)})
+    # A line left unquoted is an open question first: no negotiation email yet.
+    assert golden_actions(DECLINER) == []
 
 
 def test_language_guess_reads_supplier_languages() -> None:

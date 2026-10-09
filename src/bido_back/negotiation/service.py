@@ -724,7 +724,15 @@ class _Planned:
     loaded: _Loaded
     plans: dict[UUID, SupplierPlan]
     cutoff: datetime | None
-    columns: set[UUID]
+    # Per invite, the offer (proposal) the comparison read; the quotes it gave.
+    columns: dict[UUID, UUID]
+    quotes: dict[UUID, dict[UUID, LineQuote]]
+
+    def current(self, item: "_Supplier") -> bool:
+        """Whether the plan read this supplier's latest offer (none arrived in between)."""
+        if item.proposal is None:
+            return item.invite.id not in self.columns
+        return self.columns.get(item.invite.id) == item.proposal.id
 
 
 def _plan(
@@ -785,7 +793,8 @@ def _plan(
         if firsts:
             cutoff = min(firsts)
             plans = plan_all(cutoff)
-    return _Planned(loaded, plans, cutoff, {c.invite_id for c in comparison.suppliers})
+    columns = {c.invite_id: c.proposal_id for c in comparison.suppliers}
+    return _Planned(loaded, plans, cutoff, columns, quotes)
 
 
 # --- The view (API) ----------------------------------------------------------------------
@@ -1008,7 +1017,7 @@ async def _view(
     loaded = planned.loaded
     rfq = loaded.rfq
     columns = {c.invite_id: c for c in comparison.suppliers}
-    quotes = _quotes(comparison, loaded, now.date(), expected_delivery)
+    quotes = planned.quotes
     invites: list[InviteNegotiation] = []
     for item in loaded.suppliers:
         plan = planned.plans[item.invite.id]
@@ -1596,8 +1605,8 @@ async def evaluate_rfq(
         revisions = {c.invite_id: c.correction_revision for c in comparison.suppliers}
         for item in loaded.suppliers:
             plan = planned.plans[item.invite.id]
-            if item.proposal is not None and item.invite.id not in planned.columns:
-                # The comparison did not see this offer (a newer version arrived meanwhile).
+            if not planned.current(item):
+                # A newer offer arrived after the comparison was read: the next sweep plans it.
                 continue
             await _record_decision(
                 session, rfq, item, plan, loaded.lines, revisions.get(item.invite.id, 0), at
@@ -1759,23 +1768,23 @@ async def _write_decided(
     sink = PostgresApprovalSink(db)
     for item in due:
         task = await _task(db, tenant_id, item)
-        if task is None:
-            continue
         attempts = item.attempts
-        problems: list[str] = []
+        problems: list[str] = [] if task is not None else ["task_unavailable"]
         body: str | None = None
-        while attempts < MAX_DRAFT_ATTEMPTS:
+        while task is not None and attempts < MAX_DRAFT_ATTEMPTS:
             attempts += 1
             context = ToolContext(tenant_id=tenant_id, user_id=item.sender_user_id, run_id=uuid4())
             try:
                 draft = await writer(task, context)
             except AgentFailed:
+                # Likely transient (the model or its provider): the next sweep tries again.
                 problems = ["writer_failed"]
-                continue
+                break
             problems = negotiation_email_problems(task, draft)
             if not problems:
                 body = draft.body.strip()
                 break
+            # Refused: another draft of the same decision may pass the check.
             logger.warning(
                 "negotiation draft refused tenant=%s invite=%s row=%s attempt=%d problems=%s",
                 tenant_id,
@@ -1784,7 +1793,7 @@ async def _write_decided(
                 attempts,
                 ",".join(problems),
             )
-        if body is None:
+        if body is None or task is None:
             result.refused += 1
             async with tenant_session(db, tenant_id) as session:
                 row = await session.scalar(
@@ -1795,8 +1804,12 @@ async def _write_decided(
                 if row is None or row.status != "decided":
                     continue
                 row.attempts = attempts
-                reason = "writer_failed" if problems == ["writer_failed"] else "draft_refused"
-                if attempts >= MAX_DRAFT_ATTEMPTS:
+                reason = (
+                    "draft_refused"
+                    if task is not None and problems != ["writer_failed"]
+                    else problems[0]
+                )
+                if task is None or attempts >= MAX_DRAFT_ATTEMPTS:
                     await _hold_row(session, row, f"{reason}:{','.join(problems)}"[:300])
                     result.held += 1
             continue

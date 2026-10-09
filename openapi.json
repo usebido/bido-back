@@ -5254,6 +5254,16 @@
             "title": "Invite Status",
             "type": "string"
           },
+          "last_decision": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NegotiationDecisionView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "latest_proposal_id": {
             "anyOf": [
               {
@@ -5277,6 +5287,13 @@
             ],
             "title": "Latest Proposal Version"
           },
+          "line_plans": {
+            "items": {
+              "$ref": "#/components/schemas/LinePlanView"
+            },
+            "title": "Line Plans",
+            "type": "array"
+          },
           "lines": {
             "items": {
               "$ref": "#/components/schemas/LineDecisionView"
@@ -5299,6 +5316,16 @@
             "default": 0,
             "title": "Stalled Rounds",
             "type": "integer"
+          },
+          "state": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/SupplierStateView"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "status": {
             "enum": [
@@ -6062,6 +6089,164 @@
         "title": "LineLimitsView",
         "type": "object"
       },
+      "LinePlanView": {
+        "description": "One line of the supplier's current offer: price, delivery, and what Bido asks.",
+        "properties": {
+          "acceptable": {
+            "default": false,
+            "title": "Acceptable",
+            "type": "boolean"
+          },
+          "ask_unit_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ask Unit Price"
+          },
+          "asks_best_price": {
+            "default": false,
+            "title": "Asks Best Price",
+            "type": "boolean"
+          },
+          "deliver_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deliver By"
+          },
+          "delivery": {
+            "anyOf": [
+              {
+                "enum": [
+                  "on_time",
+                  "no_need_by",
+                  "unknown",
+                  "late",
+                  "still_late",
+                  "need_by_unreachable"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Delivery"
+          },
+          "expected_delivery": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expected Delivery"
+          },
+          "latest_order_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Latest Order Date"
+          },
+          "offered_unit_price_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Offered Unit Price Base"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "price": {
+            "anyOf": [
+              {
+                "enum": [
+                  "in_target",
+                  "ask_met",
+                  "in_range",
+                  "above_max",
+                  "no_target"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price"
+          },
+          "reasons": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Reasons",
+            "type": "array"
+          },
+          "required_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Required By"
+          },
+          "rfq_line_id": {
+            "format": "uuid",
+            "title": "Rfq Line Id",
+            "type": "string"
+          },
+          "status": {
+            "enum": [
+              "not_quoted",
+              "declined",
+              "blocked",
+              "question_open",
+              "priced"
+            ],
+            "title": "Status",
+            "type": "string"
+          }
+        },
+        "required": [
+          "rfq_line_id",
+          "position",
+          "status"
+        ],
+        "title": "LinePlanView",
+        "type": "object"
+      },
       "LogoBackgroundRequest": {
         "additionalProperties": false,
         "properties": {
@@ -6433,6 +6618,13 @@
               }
             ],
             "title": "Waiting Reason"
+          },
+          "waits": {
+            "items": {
+              "$ref": "#/components/schemas/MandateWaitItem"
+            },
+            "title": "Waits",
+            "type": "array"
           }
         },
         "required": [
@@ -6778,6 +6970,72 @@
         "title": "MandateView",
         "type": "object"
       },
+      "MandateWaitItem": {
+        "description": "An in-bounds email the mandate will send on its own, once its wait clears.",
+        "properties": {
+          "approval_id": {
+            "format": "uuid",
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "invite_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Invite Id"
+          },
+          "reason": {
+            "enum": [
+              "daily_cap",
+              "mailbox_not_connected"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "supplier_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Name"
+          },
+          "tool": {
+            "title": "Tool",
+            "type": "string"
+          },
+          "until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Until"
+          }
+        },
+        "required": [
+          "approval_id",
+          "tool",
+          "invite_id",
+          "supplier_name",
+          "reason"
+        ],
+        "title": "MandateWaitItem",
+        "type": "object"
+      },
       "MeResponse": {
         "properties": {
           "allow_self_approval": {
@@ -6839,6 +7097,111 @@
           "allow_self_approval"
         ],
         "title": "MeResponse",
+        "type": "object"
+      },
+      "MessageAskView": {
+        "description": "What one negotiation email asks for one position (decided by code).",
+        "properties": {
+          "ask_unit_price": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ask Unit Price"
+          },
+          "best_price": {
+            "default": false,
+            "title": "Best Price",
+            "type": "boolean"
+          },
+          "deliver_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Deliver By"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "position",
+          "ask_unit_price"
+        ],
+        "title": "MessageAskView",
+        "type": "object"
+      },
+      "NegotiationDecisionView": {
+        "description": "The planner's last recorded decision for the supplier (by the sweep).",
+        "properties": {
+          "action": {
+            "enum": [
+              "wait",
+              "clarify",
+              "revised_offer",
+              "delivery_date",
+              "bafo",
+              "accept",
+              "hold",
+              "close"
+            ],
+            "title": "Action",
+            "type": "string"
+          },
+          "decided_at": {
+            "format": "date-time",
+            "title": "Decided At",
+            "type": "string"
+          },
+          "phase": {
+            "enum": [
+              "not_started",
+              "waiting_for_supplier",
+              "waiting",
+              "held_for_approval",
+              "accepted_internally",
+              "needs_decision",
+              "needs_answer",
+              "closed"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "proposal_version": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Proposal Version"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "action",
+          "phase",
+          "reason",
+          "decided_at"
+        ],
+        "title": "NegotiationDecisionView",
         "type": "object"
       },
       "NegotiationEmailDraft": {
@@ -6961,6 +7324,18 @@
             ],
             "title": "Approval Id"
           },
+          "asks": {
+            "items": {
+              "$ref": "#/components/schemas/MessageAskView"
+            },
+            "title": "Asks",
+            "type": "array"
+          },
+          "attempts": {
+            "default": 0,
+            "title": "Attempts",
+            "type": "integer"
+          },
           "canceled_reason": {
             "anyOf": [
               {
@@ -6977,15 +7352,66 @@
             "title": "Created At",
             "type": "string"
           },
+          "cutoff_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cutoff At"
+          },
+          "held_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Held Reason"
+          },
           "id": {
             "format": "uuid",
             "title": "Id",
             "type": "string"
           },
+          "kind": {
+            "anyOf": [
+              {
+                "enum": [
+                  "revised_offer",
+                  "delivery_date",
+                  "bafo"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Kind"
+          },
           "proposal_id": {
             "format": "uuid",
             "title": "Proposal Id",
             "type": "string"
+          },
+          "reply_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reply By"
           },
           "round": {
             "title": "Round",
@@ -7002,6 +7428,24 @@
               }
             ],
             "title": "Sent At"
+          },
+          "sequence": {
+            "default": 0,
+            "title": "Sequence",
+            "type": "integer"
+          },
+          "state": {
+            "default": "proposed",
+            "enum": [
+              "decided",
+              "proposed",
+              "sent",
+              "canceled",
+              "rejected",
+              "held"
+            ],
+            "title": "State",
+            "type": "string"
           },
           "status": {
             "enum": [
@@ -7115,7 +7559,7 @@
             "type": "array"
           },
           "max_rounds": {
-            "default": 3,
+            "default": 2,
             "maximum": 10.0,
             "minimum": 1.0,
             "title": "Max Rounds",
@@ -7123,6 +7567,59 @@
           }
         },
         "title": "NegotiationSettingsUpdate",
+        "type": "object"
+      },
+      "NegotiationWarningView": {
+        "description": "Something the buyer should know before deciding (e.g. a need-by date at risk).",
+        "properties": {
+          "code": {
+            "title": "Code",
+            "type": "string"
+          },
+          "on": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "On"
+          },
+          "position": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Position"
+          },
+          "supplier_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Name"
+          },
+          "text": {
+            "title": "Text",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "text"
+        ],
+        "title": "NegotiationWarningView",
         "type": "object"
       },
       "NettingStep": {
@@ -8322,7 +8819,7 @@
             "type": "integer"
           },
           "max_rounds": {
-            "default": 3,
+            "default": 2,
             "maximum": 10.0,
             "minimum": 1.0,
             "title": "Max Rounds",
@@ -10051,6 +10548,18 @@
             ],
             "title": "Closed At"
           },
+          "cutoff_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Cutoff At"
+          },
           "invites": {
             "items": {
               "$ref": "#/components/schemas/InviteNegotiation"
@@ -10101,6 +10610,13 @@
             ],
             "title": "Status",
             "type": "string"
+          },
+          "warnings": {
+            "items": {
+              "$ref": "#/components/schemas/NegotiationWarningView"
+            },
+            "title": "Warnings",
+            "type": "array"
           }
         },
         "required": [
@@ -12213,6 +12729,98 @@
           "suggested"
         ],
         "title": "SupplierStatView",
+        "type": "object"
+      },
+      "SupplierStateView": {
+        "description": "Where the supplier stands now, computed in code, and what Bido does next.",
+        "properties": {
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "next_action": {
+            "enum": [
+              "wait",
+              "clarify",
+              "revised_offer",
+              "delivery_date",
+              "bafo",
+              "accept",
+              "hold",
+              "close"
+            ],
+            "title": "Next Action",
+            "type": "string"
+          },
+          "order_by": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Order By"
+          },
+          "phase": {
+            "enum": [
+              "not_started",
+              "waiting_for_supplier",
+              "waiting",
+              "held_for_approval",
+              "accepted_internally",
+              "needs_decision",
+              "needs_answer",
+              "closed"
+            ],
+            "title": "Phase",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          },
+          "until": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Until"
+          },
+          "valid_until": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Valid Until"
+          },
+          "warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Warnings",
+            "type": "array"
+          }
+        },
+        "required": [
+          "phase",
+          "label",
+          "reason",
+          "next_action"
+        ],
+        "title": "SupplierStateView",
         "type": "object"
       },
       "SupplierView": {
