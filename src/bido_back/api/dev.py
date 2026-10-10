@@ -1,5 +1,8 @@
-"""Local-only dev endpoints: `POST /dev/inbound`, `POST /dev/followups/sweep`,
+"""Dev endpoints for local helpers and non-production debug data.
+
+Local-only endpoints: `POST /dev/inbound`, `POST /dev/followups/sweep`,
 `POST /dev/negotiation/sweep`, `POST /dev/uploads` and `GET /dev/files`.
+Local-or-dev endpoint: `POST /dev/payments/purchase-order`.
 
 `POST /dev/inbound` simulates an inbound email locally.
 
@@ -16,11 +19,14 @@ and answers 204 like S3, or 403 when the form does not match its signature.
 signed by `LocalDownloadLinks` points at, with the content type and
 disposition the link fixed, or 403 when the link does not verify.
 
-Local only, twice over: mount the router only when
-`settings.environment == "local"`, and every request is refused with 404
-unless the settings say "local" (in case it is mounted by mistake). It is left
-out of the OpenAPI schema, so `scripts/export_openapi.py` (which builds the app
-with environment "local") does not put it in the public contract.
+Two routers, each guarded twice over. `dev_router` holds the local-only
+endpoints: mount it only when `settings.environment == "local"`, and every
+request is refused with 404 unless the settings say "local". `debug_router`
+holds the local-or-dev endpoint: mount it only when `settings.environment in
+("local", "dev")`, and every request is refused with 404 elsewhere (in case
+either is mounted by mistake). Both are left out of the OpenAPI schema, so
+`scripts/export_openapi.py` (which builds the app with environment "local")
+does not put them in the public contract.
 
 Dependencies, overridable with `app.dependency_overrides`:
   * `get_dev_settings`: the settings (default: `get_settings()`);
@@ -29,19 +35,22 @@ Dependencies, overridable with `app.dependency_overrides`:
     `SQS_QUEUE_URL`, honouring `SQS_ENDPOINT_URL` for ElasticMQ).
 """
 
+from decimal import Decimal
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Protocol
 from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from pydantic import BaseModel
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bido_back.api.deps import get_db, get_job_queue, get_storage
+from bido_back.api.deps import get_db, get_job_queue, get_principal, get_storage
+from bido_back.auth import Principal
 from bido_back.intake.service import InboundService
 from bido_back.onboarding.service import MAX_DIRECT_UPLOAD_BYTES
+from bido_back.payments.demo import DebugPaymentPurchaseOrder, create_debug_payment_purchase_order
 from bido_back.settings import Settings, get_settings
 from bido_back.storage import BlobNotFound, BlobStorage
 from bido_back.storage.direct import InvalidUploadForm, LocalDirectUploads
@@ -64,6 +73,23 @@ class InboundResponse(BaseModel):
     extraction_enqueued: bool
 
 
+class DebugPaymentPurchaseOrderRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    amount_usd: Decimal = Field(default=Decimal("1.00"), gt=0, max_digits=18, decimal_places=2)
+
+
+class PaymentDemoCreator(Protocol):
+    async def __call__(
+        self,
+        db: async_sessionmaker[AsyncSession],
+        principal: Principal,
+        *,
+        amount_usd: Decimal,
+        email_domain: str,
+    ) -> DebugPaymentPurchaseOrder: ...
+
+
 def get_dev_settings() -> Settings:
     return get_settings()
 
@@ -72,6 +98,18 @@ def require_local(settings: Annotated[Settings, Depends(get_dev_settings)]) -> S
     if settings.environment != "local":
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Not Found")
     return settings
+
+
+def require_debug_environment(
+    settings: Annotated[Settings, Depends(get_dev_settings)],
+) -> Settings:
+    if settings.environment not in ("local", "dev"):
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Not Found")
+    return settings
+
+
+def get_payment_demo_creator() -> PaymentDemoCreator:
+    return create_debug_payment_purchase_order
 
 
 def get_inbound_service(
@@ -87,6 +125,7 @@ def get_inbound_service(
 
 
 dev_router = APIRouter(prefix="/dev", tags=["dev"], include_in_schema=False)
+debug_router = APIRouter(prefix="/dev", tags=["dev"], include_in_schema=False)
 
 
 @dev_router.post("/inbound", dependencies=[Depends(require_local)])
@@ -125,6 +164,29 @@ async def post_negotiation_sweep(
     key = f"negotiation.sweep:dev:{uuid4()}"
     await jobs.enqueue(Envelope(type=NEGOTIATION_SWEEP, tenant_id=UUID(int=0), idempotency_key=key))
     return {"enqueued": key}
+
+
+@debug_router.post(
+    "/payments/purchase-order",
+    dependencies=[Depends(require_debug_environment)],
+)
+async def post_payment_purchase_order(
+    principal: Annotated[Principal, Depends(get_principal)],
+    db: Annotated[async_sessionmaker[AsyncSession], Depends(get_db)],
+    settings: Annotated[Settings, Depends(require_debug_environment)],
+    creator: Annotated[PaymentDemoCreator, Depends(get_payment_demo_creator)],
+    body: Annotated[
+        DebugPaymentPurchaseOrderRequest,
+        Body(default_factory=DebugPaymentPurchaseOrderRequest),
+    ],
+) -> DebugPaymentPurchaseOrder:
+    """Create a sent USD purchase order for payment-flow demos."""
+    return await creator(
+        db,
+        principal,
+        amount_usd=body.amount_usd,
+        email_domain=settings.email_domain,
+    )
 
 
 @dev_router.post(
