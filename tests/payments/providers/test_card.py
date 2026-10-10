@@ -9,7 +9,7 @@ key, the simulated mode that never calls Stripe, and the builders.
 # ruff: noqa: S105, S106 - fake keys and tokens, never real credentials
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Final
 from uuid import UUID
@@ -24,6 +24,7 @@ from bido_back.payments.card import (
 )
 from bido_back.payments.errors import (
     CardCredentialLost,
+    CardNotVerified,
     PaymentRefused,
     PaymentsNotConfigured,
     ProviderError,
@@ -34,7 +35,11 @@ from bido_back.payments.ports import (
     CardConsumer,
     CardDisplayData,
     CardGateway,
+    CardRail,
+    CardVerification,
+    CardVerificationStatus,
     EnrolledCard,
+    IssuedCard,
 )
 from bido_back.payments.providers.basis_theory import BasisTheoryClient, Merchant
 from bido_back.payments.providers.stripe import StripeClient
@@ -137,7 +142,11 @@ def search_result(*intents: JsonValue) -> JsonValue:
 
 
 def gateway(
-    recorder: Recorder, *, simulated: bool = False, sleeps: list[float] | None = None
+    recorder: Recorder,
+    *,
+    simulated: bool = False,
+    sleeps: list[float] | None = None,
+    rail: CardRail = "spt",
 ) -> BasisTheoryCardGateway:
     http = recorder.client()
     slept = sleeps if sleeps is not None else []
@@ -150,6 +159,7 @@ def gateway(
         None if simulated else StripeClient(STRIPE_KEY, http=http),
         merchant=Merchant(name="Bido", url="https://usebido.com", country_code="US"),
         network_business_profile=NETWORK_PROFILE,
+        rail=rail,
         sleep=sleep,
     )
 
@@ -800,3 +810,202 @@ def test_a_simulated_gateway_is_refused_outside_the_test_tenant(update: dict[str
 
     with pytest.raises(PaymentsNotConfigured, match="test tenant"):
         build_card_gateway(settings)
+
+
+# --- Visa Intelligent Commerce (`vic`) ----------------------------------------------------------
+
+ALLOWANCE: Final = f"GET {BT}/agentic/allowances/alw_1"
+VIRTUAL_NUMBER: Final = "4000001000004242"
+VIRTUAL_CVC: Final = "987"
+
+
+def visa(status: str) -> JsonValue:
+    return rail("agentic-token", "vic", status)
+
+
+def live_allowance(*rails: JsonValue, status: str = "active", minutes: int = 10) -> JsonValue:
+    expires = datetime.now(UTC) + timedelta(minutes=minutes)
+    return {
+        "id": "alw_1",
+        "status": status,
+        "expires_at": expires.isoformat().replace("+00:00", "Z"),
+        "rails": list(rails),
+    }
+
+
+def minted_card(number: str = VIRTUAL_NUMBER) -> JsonValue:
+    return {
+        "id": "cred_card_1",
+        "credential": {
+            "format": "card",
+            "value": {
+                "number": number,
+                "expiration_month": 12,
+                "expiration_year": 2030,
+                "cvc": VIRTUAL_CVC,
+            },
+        },
+    }
+
+
+@pytest.mark.parametrize(
+    ("rails", "status"),
+    [
+        ([visa("enabled"), rail("spt", "stripe", "error")], "active"),
+        ([visa("pending"), rail("spt", "stripe", "enabled")], "pending"),
+        ([visa("error"), rail("spt", "stripe", "enabled")], "failed"),
+        ([rail("spt", "stripe", "enabled")], "failed"),
+    ],
+)
+async def test_a_visa_card_is_active_when_its_visa_rail_is(
+    rails: list[JsonValue], status: str
+) -> None:
+    recorder = Recorder(
+        scripted(
+            {
+                TOKEN: [Answer(200, TOKEN_BODY)],
+                PAYMENT_METHODS: [Answer(201, payment_method(*rails))],
+            }
+        )
+    )
+
+    card = await gateway(recorder, simulated=True, rail="vic").enroll(
+        token_id="tok-1", consumer=BUYER, idempotency_key="enroll:1"
+    )
+
+    assert card.status == status
+
+
+@pytest.mark.parametrize(
+    ("body", "usable"),
+    [
+        (live_allowance(visa("pending_verification"), rail("spt", "stripe", "active")), False),
+        (live_allowance(visa("active")), True),
+    ],
+)
+async def test_a_visa_allowance_is_usable_once_the_passkey_approved_it(
+    body: JsonValue, usable: bool
+) -> None:
+    recorder = Recorder(scripted({ALLOWANCES: [Answer(201, body)]}))
+
+    authorization = await gateway(recorder, simulated=True, rail="vic").authorize(
+        payment_method_ref="pm_1",
+        amount=Decimal("12.30"),
+        currency="USD",
+        description="Bido purchase order PO-12",
+        expires_at=EXPIRES,
+        idempotency_key="payment:1:authorize",
+    )
+
+    assert authorization.usable is usable
+
+
+@pytest.mark.parametrize(
+    ("answer", "status"),
+    [
+        (Answer(200, live_allowance(visa("pending_verification"))), "pending"),
+        (Answer(200, live_allowance(visa("active"))), "verified"),
+        (Answer(200, live_allowance(visa("error"))), "failed"),
+        (Answer(200, live_allowance(rail("spt", "stripe", "active"))), "failed"),
+        (Answer(200, live_allowance(visa("active"), status="cancelled")), "failed"),
+        (Answer(200, live_allowance(visa("active"), status="expired")), "expired"),
+        (Answer(200, live_allowance(visa("active"), minutes=-1)), "expired"),
+        (Answer(404, {"type": "ALLOWANCE_NOT_FOUND", "status": 404}), "failed"),
+    ],
+)
+async def test_the_verification_is_read_from_the_allowance(
+    answer: Answer, status: CardVerificationStatus
+) -> None:
+    recorder = Recorder(scripted({ALLOWANCE: [answer]}))
+
+    verification = await gateway(recorder, simulated=True, rail="vic").verification("alw_1")
+
+    assert verification == CardVerification(
+        status=status,
+        rail="agentic-token",
+        provider="vic",
+    )
+    assert recorder.calls() == [ALLOWANCE]
+
+
+async def test_a_visa_charge_mints_a_virtual_card_and_keeps_only_its_last_digits(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    recorder = Recorder(scripted({MINT: [Answer(201, minted_card())]}))
+
+    result = await charge(gateway(recorder, simulated=True, rail="vic"))
+
+    request = recorder.only()
+    assert request.headers["BT-IDEMPOTENCY-KEY"] == "payment:1:credential"
+    assert json_body(request) == {
+        "rail": "agentic-token",
+        "provider": "vic",
+        "amount": {"value": "12.30", "currency": "USD"},
+        "credential": {"format": "card"},
+    }
+    assert result == CardCharge(
+        "succeeded",
+        f"sim_{PAYMENT}",
+        None,
+        simulated=True,
+        issued_card=IssuedCard("cred_card_1", "4242", 12, 2030),
+    )
+    for secret in (VIRTUAL_NUMBER, VIRTUAL_CVC):
+        assert secret not in caplog.text
+        assert secret not in repr(result)
+
+
+async def test_a_visa_charge_before_the_passkey_is_not_verified() -> None:
+    recorder = Recorder(scripted({MINT: [Answer(409, {"type": "RAIL_NOT_ACTIVE", "status": 409})]}))
+
+    with pytest.raises(CardNotVerified):
+        await charge(gateway(recorder, simulated=True, rail="vic"))
+
+
+async def test_a_replayed_visa_mint_is_the_simulated_success_without_the_card() -> None:
+    recorder = Recorder(scripted({MINT: [replayed()]}))
+
+    result = await charge(gateway(recorder, simulated=True, rail="vic"))
+
+    assert result == CardCharge("succeeded", f"sim_{PAYMENT}", None, simulated=True)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        minted_card("4242"),
+        {"id": "cred_1", "credential": {"format": "network-token", "value": {}}},
+        {"id": "cred_1", "credential": {"format": "card"}},
+    ],
+)
+async def test_a_mint_without_a_whole_card_number_is_refused(body: JsonValue) -> None:
+    recorder = Recorder(scripted({MINT: [Answer(201, body)]}))
+
+    with pytest.raises(ProviderError):
+        await charge(gateway(recorder, simulated=True, rail="vic"))
+
+
+async def test_the_visa_gateway_is_built_simulated_on_the_test_tenant() -> None:
+    recorder = Recorder(scripted({MINT: [Answer(201, minted_card())]}))
+    settings = payment_settings(
+        payments_card_charge="simulated",
+        payments_card_rail="vic",
+        stripe_secret_key=None,
+        stripe_network_business_profile=None,
+    )
+
+    card = build_card_gateway(settings, http=recorder.client())
+    result = await charge(card)
+
+    assert (card.rail, card.simulated, result.issued_card is not None) == ("vic", True, True)
+
+
+def test_a_visa_card_is_never_charged_on_stripe() -> None:
+    with pytest.raises(ValueError, match="PAYMENTS_CARD_CHARGE=simulated"):
+        payment_settings(payments_card_rail="vic")
+    with pytest.raises(PaymentsNotConfigured, match="not charged on Stripe"):
+        gateway(Recorder(always(Answer(500))), rail="vic")
+    copied = payment_settings().model_copy(update={"payments_card_rail": "vic"})
+    with pytest.raises(PaymentsNotConfigured, match="PAYMENTS_CARD_RAIL=vic"):
+        build_card_gateway(copied)

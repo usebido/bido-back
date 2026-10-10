@@ -55,6 +55,8 @@ CREDENTIAL_UNAVAILABLE_CODES: Final = frozenset(
 IN_PROGRESS_SUFFIX: Final = "_IN_PROGRESS"
 MISSING_CREDENTIAL: Final = "missing_credential"
 UNEXPECTED_CREDENTIAL_FORMAT: Final = "unexpected_credential_format"
+CARD_FORMAT: Final = "card"
+_CARD_NUMBER: Final = re.compile(r"[0-9]{12,19}")
 
 _TIMEOUT: Final = httpx.Timeout(20.0, connect=5.0)
 # The mint's response carries the one-time token: a client timeout after Basis
@@ -178,6 +180,25 @@ class _MintResponse(_Model):
     credential: _CredentialBody | None = None
 
 
+class _CardValue(_Model):
+    """A minted virtual card. The number and security code are only ever `SecretStr`."""
+
+    number: SecretStr | None = None
+    expiration_month: int | None = None
+    expiration_year: int | None = None
+    cvc: SecretStr | None = None
+
+
+class _CardCredentialBody(_Model):
+    format: str | None = None
+    value: _CardValue | None = None
+
+
+class _CardMintResponse(_Model):
+    id: str | None = None
+    credential: _CardCredentialBody | None = None
+
+
 class _ProblemDebug(_Model):
     provider_correlation: str | None = None
 
@@ -205,6 +226,16 @@ class MintedCredential:
 
     id: str | None  # `cred_...`
     token: SecretStr
+
+
+@dataclass(frozen=True, slots=True)
+class MintedCard:
+    """A `card` credential, as much of it as Bido keeps: never the number or the code."""
+
+    id: str | None  # `cred_...`
+    last4: str
+    exp_month: int | None
+    exp_year: int | None
 
 
 def find_rail(rails: tuple[Rail, ...], *, rail: str, provider: str) -> Rail | None:
@@ -414,6 +445,61 @@ class BasisTheoryClient:
             loggable_id(response.headers.get("BT-TRACE-ID")),
         )
         return MintedCredential(id=minted.id, token=token)
+
+    async def mint_card(
+        self,
+        allowance_id: str,
+        *,
+        rail: str,
+        provider: str,
+        amount: Decimal,
+        currency: str,
+        idempotency_key: str,
+    ) -> MintedCard:
+        """`POST /agentic/allowances/{id}/credentials`, format `card`: a single-use virtual
+        card on a network rail (`agentic-token` / `vic`), once the cardholder approved
+        the allowance.
+
+        Spends `amount` of the allowance for good. The number and security code are read
+        as secrets and dropped here: only the last four digits and the expiry are returned.
+        Replaying `idempotency_key` raises `CredentialPayloadUnavailable`.
+        """
+        op = "mint_card"
+        segment = path_segment(allowance_id, provider=PROVIDER, operation=op)
+        body: dict[str, JsonValue] = {
+            "rail": rail,
+            "provider": provider,
+            "amount": _money(amount, currency),
+            "credential": {"format": CARD_FORMAT},
+        }
+        response = await self._request(
+            "POST",
+            f"/agentic/allowances/{segment}/credentials",
+            op,
+            body=body,
+            key=idempotency_key,
+            timeouts=_MINT_TIMEOUT,
+        )
+        minted = parse(_CardMintResponse, response, provider=PROVIDER, operation=op)
+        credential = minted.credential
+        if credential is not None and credential.format not in (None, CARD_FORMAT):
+            raise ProviderError(PROVIDER, op, UNEXPECTED_CREDENTIAL_FORMAT)
+        card = credential.value if credential is not None else None
+        number = card.number.get_secret_value() if card and card.number else ""
+        if card is None or not _CARD_NUMBER.fullmatch(number):
+            raise ProviderError(PROVIDER, op, MISSING_CREDENTIAL, status=response.status_code)
+        month, year = card.expiration_month, card.expiration_year
+        logger.info(
+            "basis_theory card minted credential=%s trace=%s",
+            loggable_id(minted.id),
+            loggable_id(response.headers.get("BT-TRACE-ID")),
+        )
+        return MintedCard(
+            id=minted.id,
+            last4=number[-4:],
+            exp_month=month if month is not None and 1 <= month <= 12 else None,
+            exp_year=year if year is not None and 2000 <= year <= 2999 else None,
+        )
 
     # --- Transport ------------------------------------------------------------------------------
 

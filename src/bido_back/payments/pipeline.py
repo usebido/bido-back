@@ -81,6 +81,8 @@ from bido_back.payments.errors import (
     ProviderError,
 )
 from bido_back.payments.ports import (
+    CardAuthorization,
+    CardGateway,
     EscrowMilestone,
     EscrowSpec,
     EscrowState,
@@ -159,6 +161,22 @@ def payment_advance_envelope(tenant_id: UUID, payment_id: UUID, state: str) -> E
     )
 
 
+async def authorize_payment_card(
+    card: CardGateway, payment_method_ref: str, args: PayPurchaseOrderArgs
+) -> CardAuthorization:
+    """The payment's allowance, built from the approved arguments only. The service (to
+    start the Visa passkey) and the act tool send this same request under the same key,
+    so Basis Theory answers both with the one allowance."""
+    return await card.authorize(
+        payment_method_ref=payment_method_ref,
+        amount=Decimal(args.charge_amount),
+        currency=args.charge_currency,
+        description=f"Bido {args.purchase_order_ref}",
+        expires_at=args.quote_expires_at,
+        idempotency_key=f"payment:{args.payment_id}:authorize",
+    )
+
+
 def approved_terms_match(payment: PoPayment, args: PayPurchaseOrderArgs) -> bool:
     """The row holds exactly what was approved: whose card, how much, which escrow."""
     milestones = [(m.get("name"), m.get("bps")) for m in payment.milestones]
@@ -175,6 +193,7 @@ def approved_terms_match(payment: PoPayment, args: PayPurchaseOrderArgs) -> bool
         and payment.chain_po_id == args.chain_po_id
         and payment.po_hash == args.content_hash
         and payment.charge_mode == args.charge_mode
+        and payment.card_rail == args.card_rail
         and milestones == [(m.name, m.bps) for m in args.milestones]
     )
 

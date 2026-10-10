@@ -45,6 +45,7 @@ from bido_back.payments.schemas import (
     PayPurchaseOrderRequest,
 )
 from bido_back.payments.views import (
+    PaymentCardVerificationView,
     PaymentMethodView,
     PaymentsConfigView,
     PaymentView,
@@ -244,6 +245,27 @@ def payments_router() -> APIRouter:
                 settings=settings,
                 today=datetime.now(UTC).date(),
             )
+        except (PaymentError, RfqError) as exc:
+            raise payments_http_error(exc) from None
+
+    @router.post(
+        "/purchase-orders/{po_id}/payment/card-verification",
+        responses=error_responses(
+            status.HTTP_403_FORBIDDEN,
+            status.HTTP_404_NOT_FOUND,
+            status.HTTP_409_CONFLICT,
+            status.HTTP_503_SERVICE_UNAVAILABLE,
+        ),
+    )
+    async def confirm_card_verification(  # pyright: ignore[reportUnusedFunction]
+        principal: CurrentPrincipal, po_id: UUID, db: Db, providers: Providers
+    ) -> PaymentCardVerificationView:
+        """The Visa passkey approval of the order's payment (`card_rail` `vic`), read from
+        Basis Theory. Call it for the allowance to verify, run `verifyAllowance` in the
+        browser, then call it again: `verified` lets the payment be approved and executed.
+        Only the person paying (whose card it is) may call it."""
+        try:
+            return await service.confirm_card_verification(db, principal, po_id, providers.card)
         except (PaymentError, RfqError) as exc:
             raise payments_http_error(exc) from None
 

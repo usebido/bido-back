@@ -69,8 +69,9 @@ async def test_payment_routes_require_authentication() -> None:
             await http.post(f"/v1/suppliers/{some}/payout-accounts/{some}/disable"),
             await http.post(f"/v1/purchase-orders/{some}/payment", json=pay_body(some, some)),
             await http.get(f"/v1/purchase-orders/{some}/payment"),
+            await http.post(f"/v1/purchase-orders/{some}/payment/card-verification"),
         ]
-    assert [r.status_code for r in responses] == [401] * 9
+    assert [r.status_code for r in responses] == [401] * 10
 
 
 async def test_without_payment_settings_the_provider_routes_answer_503() -> None:
@@ -83,10 +84,11 @@ async def test_without_payment_settings_the_provider_routes_answer_503() -> None
             await http.delete(f"/v1/payment-methods/{some}"),
             await http.post(f"/v1/suppliers/{some}/payout-accounts", json=ACCOUNT_JSON),
             await http.post(f"/v1/purchase-orders/{some}/payment", json=pay_body(some, some)),
+            await http.post(f"/v1/purchase-orders/{some}/payment/card-verification"),
         ]
     assert config.status_code == 200
     assert config.json() == {"enabled": False, "card": None, "chain": None}
-    assert [r.status_code for r in refused] == [503] * 4
+    assert [r.status_code for r in refused] == [503] * 5
     assert {r.json()["detail"] for r in refused} == {"payments are not set up on this server"}
 
 

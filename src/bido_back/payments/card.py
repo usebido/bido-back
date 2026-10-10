@@ -32,6 +32,17 @@ only): the allowance and the mint still go to Basis Theory, whose test tenant
 mints mock tokens Stripe cannot charge. There is no Stripe client at all; the
 charge is `sim_<payment_id>`, marked simulated.
 
+Visa rail (`PAYMENTS_CARD_RAIL=vic`, simulated only for now): the card is
+usable when its `agentic-token` rail (provider `vic`) is enabled. Each
+payment's allowance starts `pending_verification`: the cardholder approves it
+in the browser with the Visa passkey (Basis Theory's `web-agentic` SDK;
+Basis Theory's mock of the ceremony on its test tenant), and `verification`
+reads where that stands. `charge` then mints a single-use virtual card for the
+agent (format `card`, key `<key>:credential`); Basis Theory refuses the mint
+while the rail is not active (`CardNotVerified`). Nothing charges that card
+yet: the charge is `sim_<payment_id>`, and only the card's last four digits and
+expiry leave the gateway, never its number or security code.
+
 Basis Theory is used for cards only: a supplier's bank details are sealed in Bido's
 database for the payout provider (`payments.bank_details`).
 """
@@ -40,7 +51,7 @@ import asyncio
 import logging
 import re
 from collections.abc import Awaitable, Callable
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Final
 from urllib.parse import urlsplit
@@ -52,18 +63,25 @@ from pydantic import SecretStr
 from bido_back.payments.card_display import card_display
 from bido_back.payments.errors import (
     CardCredentialLost,
+    CardNotVerified,
     PaymentRefused,
     PaymentsNotConfigured,
     ProviderError,
 )
+from bido_back.payments.ports import SPT_RAIL as SPT_NAMES
+from bido_back.payments.ports import VIC_RAIL as VIC_NAMES
 from bido_back.payments.ports import (
     CardAuthorization,
     CardCharge,
     CardConsumer,
     CardDisplayData,
     CardGateway,
+    CardRail,
     CardStatus,
+    CardVerification,
+    CardVerificationStatus,
     EnrolledCard,
+    IssuedCard,
 )
 from bido_back.payments.providers.basis_theory import (
     PROVIDER as BASIS_THEORY,
@@ -74,6 +92,7 @@ from bido_back.payments.providers.basis_theory import (
     CardDetails,
     CredentialPayloadUnavailable,
     Merchant,
+    MintedCard,
     PaymentMethod,
     Rail,
     Token,
@@ -86,8 +105,15 @@ from bido_back.settings import BASIS_THEORY_TEST_HOST, Settings
 
 logger = logging.getLogger(__name__)
 
-SPT_RAIL: Final = "spt"
-SPT_PROVIDER: Final = "stripe"
+SPT_RAIL, SPT_PROVIDER = SPT_NAMES
+# Visa Intelligent Commerce: Basis Theory's network-token rail with provider `vic`.
+VIC_RAIL, VIC_PROVIDER = VIC_NAMES
+# What Basis Theory answers when a credential is minted from a rail that is not active.
+RAIL_NOT_ACTIVE: Final = "RAIL_NOT_ACTIVE"
+_RAILS: Final[dict[CardRail, tuple[str, str]]] = {
+    "spt": (SPT_RAIL, SPT_PROVIDER),
+    "vic": (VIC_RAIL, VIC_PROVIDER),
+}
 CHARGE_CURRENCY: Final = "USD"
 # Stripe's limits for a USD charge.
 MIN_CHARGE: Final = Decimal("0.50")
@@ -120,9 +146,14 @@ def charge_cents(amount: Decimal, currency: str) -> int:
     return int(amount / _CENT)
 
 
-def card_status(rails: tuple[Rail, ...]) -> CardStatus:
-    """The card's status on the rail Bido charges: `spt` with provider `stripe`."""
-    rail = find_rail(rails, rail=SPT_RAIL, provider=SPT_PROVIDER)
+def _find(rails: tuple[Rail, ...], card_rail: CardRail) -> Rail | None:
+    rail, provider = _RAILS[card_rail]
+    return find_rail(rails, rail=rail, provider=provider)
+
+
+def card_status(rails: tuple[Rail, ...], card_rail: CardRail = "spt") -> CardStatus:
+    """The card's status on the gateway's rail (`spt`/`stripe` or `agentic-token`/`vic`)."""
+    rail = _find(rails, card_rail)
     if rail is None or rail.status == "error":
         return "failed"
     if rail.status == "enabled":
@@ -130,12 +161,29 @@ def card_status(rails: tuple[Rail, ...]) -> CardStatus:
     return "pending"  # `pending`, or a status Basis Theory added since: not usable yet
 
 
-def allowance_usable(allowance: Allowance) -> bool:
-    """The allowance is live and its `spt` rail can mint (no ceremony on this rail)."""
+def allowance_usable(allowance: Allowance, card_rail: CardRail = "spt") -> bool:
+    """The allowance is live and its rail can mint (`vic`: once the passkey approved it)."""
     if allowance.status not in (None, "active"):
         return False
-    rail = find_rail(allowance.rails, rail=SPT_RAIL, provider=SPT_PROVIDER)
+    rail = _find(allowance.rails, card_rail)
     return rail is not None and rail.status == "active"
+
+
+def verification_status(
+    allowance: Allowance | None, card_rail: CardRail, *, now: datetime
+) -> CardVerificationStatus:
+    """Where the cardholder's approval of the allowance stands on the gateway's rail."""
+    if allowance is None or allowance.status == "cancelled":
+        return "failed"
+    expires_at = allowance.expires_at
+    if allowance.status == "expired" or (expires_at is not None and expires_at <= now):
+        return "expired"
+    rail = _find(allowance.rails, card_rail)
+    if rail is None or rail.status == "error":
+        return "failed"
+    if allowance.status in (None, "active") and rail.status == "active":
+        return "verified"
+    return "pending"  # `pending_verification`, or a status Basis Theory added since
 
 
 def method_display(method: PaymentMethod) -> CardDisplayData | None:
@@ -154,7 +202,9 @@ def method_display(method: PaymentMethod) -> CardDisplayData | None:
     )
 
 
-def _enrolled(method: PaymentMethod, token: Token, fingerprint: str) -> EnrolledCard:
+def _enrolled(
+    method: PaymentMethod, token: Token, fingerprint: str, card_rail: CardRail
+) -> EnrolledCard:
     card = method.card or CardDetails()
     vault = token.card or CardDetails()
     last4 = card.last4 or vault.last4
@@ -168,13 +218,24 @@ def _enrolled(method: PaymentMethod, token: Token, fingerprint: str) -> Enrolled
         exp_month=month if month is not None and 1 <= month <= 12 else None,
         exp_year=year if year is not None and 2000 <= year <= 2999 else None,
         funding=card.funding or vault.funding,
-        status=card_status(method.rails),
+        status=card_status(method.rails, card_rail),
         display=method_display(method),
     )
 
 
-def _simulated(payment_id: UUID) -> CardCharge:
-    return CardCharge("succeeded", f"sim_{payment_id}", None, simulated=True)
+def _simulated(payment_id: UUID, issued_card: IssuedCard | None = None) -> CardCharge:
+    return CardCharge(
+        "succeeded", f"sim_{payment_id}", None, simulated=True, issued_card=issued_card
+    )
+
+
+def _issued(card: MintedCard) -> IssuedCard:
+    return IssuedCard(
+        credential_ref=card.id,
+        last4=card.last4 if _LAST4.fullmatch(card.last4) else None,
+        exp_month=card.exp_month,
+        exp_year=card.exp_year,
+    )
 
 
 def _card_charge(charge: StripeCharge) -> CardCharge:
@@ -184,7 +245,8 @@ def _card_charge(charge: StripeCharge) -> CardCharge:
 
 
 class BasisTheoryCardGateway:
-    """`ports.CardGateway`. Without a Stripe client, charges are simulated."""
+    """`ports.CardGateway`. Without a Stripe client, charges are simulated; the `vic` rail
+    has no Stripe client (nothing charges its virtual card yet)."""
 
     def __init__(
         self,
@@ -193,17 +255,25 @@ class BasisTheoryCardGateway:
         *,
         merchant: Merchant,
         network_business_profile: str,
+        rail: CardRail = "spt",
         sleep: Sleep = asyncio.sleep,
     ) -> None:
+        if rail == "vic" and stripe is not None:
+            raise PaymentsNotConfigured("the vic rail's virtual card is not charged on Stripe")
         self._basis_theory = basis_theory
         self._stripe = stripe
         self._merchant = merchant
         self._network_business_profile = network_business_profile
+        self._rail: CardRail = rail
         self._sleep = sleep
 
     @property
     def simulated(self) -> bool:
         return self._stripe is None
+
+    @property
+    def rail(self) -> CardRail:
+        return self._rail
 
     async def enroll(
         self, *, token_id: str, consumer: CardConsumer, idempotency_key: str
@@ -222,7 +292,7 @@ class BasisTheoryCardGateway:
             country_code=consumer.country_code,
             idempotency_key=idempotency_key,
         )
-        card = _enrolled(method, token, token.fingerprint)
+        card = _enrolled(method, token, token.fingerprint, self._rail)
         logger.info(
             "card enrolled payment_method=%s status=%s display=%s art=%s",
             loggable_id(card.payment_method_ref),
@@ -259,11 +329,20 @@ class BasisTheoryCardGateway:
             expires_at=expires_at,
             idempotency_key=idempotency_key,
         )
-        usable = allowance_usable(allowance)
+        usable = allowance_usable(allowance, self._rail)
         logger.info("card authorized allowance=%s usable=%s", loggable_id(allowance.id), usable)
         return CardAuthorization(
             ref=allowance.id, usable=usable, expires_at=allowance.expires_at or expires_at
         )
+
+    async def verification(self, authorization_ref: str) -> CardVerification:
+        allowance = await self._basis_theory.get_allowance(authorization_ref)
+        rail, provider = _RAILS[self._rail]
+        status = verification_status(allowance, self._rail, now=datetime.now(UTC))
+        logger.info(
+            "card verification allowance=%s status=%s", loggable_id(authorization_ref), status
+        )
+        return CardVerification(status=status, rail=rail, provider=provider)
 
     async def charge(
         self,
@@ -276,6 +355,10 @@ class BasisTheoryCardGateway:
         idempotency_key: str,
     ) -> CardCharge:
         cents = charge_cents(amount, currency)
+        if self._rail == "vic":
+            return await self._issue_card(
+                authorization_ref, payment_id=payment_id, amount=amount, key=idempotency_key
+            )
         try:
             credential = await self._basis_theory.mint_identifier(
                 authorization_ref,
@@ -307,6 +390,32 @@ class BasisTheoryCardGateway:
             charge.decline_code,
         )
         return _card_charge(charge)
+
+    async def _issue_card(
+        self, authorization_ref: str, *, payment_id: UUID, amount: Decimal, key: str
+    ) -> CardCharge:
+        """Mint the agent's single-use Visa card. Nothing charges it yet: simulated."""
+        try:
+            card = await self._basis_theory.mint_card(
+                authorization_ref,
+                rail=VIC_RAIL,
+                provider=VIC_PROVIDER,
+                amount=amount,
+                currency=CHARGE_CURRENCY,
+                idempotency_key=f"{key}:credential",
+            )
+        except CredentialPayloadUnavailable:
+            # An earlier attempt minted it; its number is gone, and nothing charges it.
+            logger.info("card credential replayed payment=%s", payment_id)
+            return _simulated(payment_id)
+        except ProviderError as error:
+            if error.code == RAIL_NOT_ACTIVE:
+                raise CardNotVerified(
+                    f"payment {payment_id}: the cardholder has not approved the allowance"
+                ) from None
+            raise
+        logger.info("card issued for the agent payment=%s (not charged)", payment_id)
+        return _simulated(payment_id, _issued(card))
 
     async def _confirm(
         self,
@@ -373,6 +482,9 @@ def build_card_gateway(settings: Settings, *, http: httpx.AsyncClient | None = N
         url=settings.payments_merchant_url,
         country_code=settings.payments_merchant_country,
     )
+    rail = settings.payments_card_rail
+    if rail == "vic" and settings.payments_card_charge != "simulated":
+        raise PaymentsNotConfigured("PAYMENTS_CARD_RAIL=vic needs PAYMENTS_CARD_CHARGE=simulated")
     if settings.payments_card_charge == "simulated":
         # Settings refuse this already; a gateway that never charges must not reach prd.
         test_tenant = urlsplit(settings.basis_theory_api_url).hostname == BASIS_THEORY_TEST_HOST
@@ -382,7 +494,7 @@ def build_card_gateway(settings: Settings, *, http: httpx.AsyncClient | None = N
             )
         profile = settings.stripe_network_business_profile or SIMULATED_NETWORK_BUSINESS_PROFILE
         return BasisTheoryCardGateway(
-            basis_theory, None, merchant=merchant, network_business_profile=profile
+            basis_theory, None, merchant=merchant, network_business_profile=profile, rail=rail
         )
     stripe = StripeClient(
         _required(settings.stripe_secret_key, "STRIPE_SECRET_KEY"),

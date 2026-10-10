@@ -30,7 +30,7 @@ from typing import Final, cast
 from urllib.parse import urlsplit
 from uuid import UUID, uuid4
 
-from pydantic import JsonValue
+from pydantic import JsonValue, ValidationError
 from sqlalchemy import ColumnElement, and_, func, not_, or_, select, update
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -39,6 +39,7 @@ from bido_back.agents.approvals import ApprovalProposal
 from bido_back.agents.events import args_hash
 from bido_back.approvals.audit import approval_audit
 from bido_back.approvals.errors import ApprovalConflict
+from bido_back.approvals.integrity import payload_matches
 from bido_back.approvals.sink import PostgresApprovalSink
 from bido_back.auth import Principal
 from bido_back.awards.orders import po_document
@@ -66,17 +67,23 @@ from bido_back.payments.errors import (
     PaymentInvalidState,
     PaymentNotFound,
     PaymentRefused,
+    PaymentsNotConfigured,
 )
+from bido_back.payments.pipeline import approved_terms_match, authorize_payment_card
 from bido_back.payments.ports import (
+    VIC_RAIL,
     BankAccountDetails,
     BankDetailsCipher,
     CardConsumer,
     CardGateway,
+    CardVerificationStatus,
     EnrolledCard,
 )
 from bido_back.payments.proposals import (
+    CARD_NOT_VERIFIED,
     DEFAULT_MILESTONE_NAME,
     PAY_PURCHASE_ORDER,
+    PAYMENT_CARD_VERIFIED,
     PAYMENT_REQUESTED,
     payment_proposal_ids,
 )
@@ -95,7 +102,9 @@ from bido_back.payments.views import (
     ChainSetupView,
     ChainStep,
     ChainTransactionState,
+    IssuedCardView,
     PaymentApprovalView,
+    PaymentCardVerificationView,
     PaymentCardView,
     PaymentChainTransactionView,
     PaymentChainView,
@@ -155,6 +164,8 @@ def payments_config_view(settings: Settings) -> PaymentsConfigView:
             environment="test" if test else "production",
             public_key=settings.basis_theory_public_key,
             simulated=settings.payments_card_charge == "simulated",
+            rail=settings.payments_card_rail,
+            agentic_api_url=f"{settings.basis_theory_api_url.rstrip('/')}/agentic",
         ),
         chain=ChainSetupView(
             cluster=settings.solana_cluster,
@@ -814,6 +825,7 @@ async def request_po_payment(
             milestones=body.milestones
             or [MilestoneInput(name=DEFAULT_MILESTONE_NAME, bps=BPS_TOTAL)],
             charge_mode="simulated" if providers.card.simulated else "stripe",
+            card_rail=providers.card.rail,
         )
 
     approval_id = await _propose(
@@ -846,6 +858,7 @@ async def request_po_payment(
                 po_hash=args.content_hash,
                 milestones=[m.model_dump() for m in args.milestones],
                 charge_mode=args.charge_mode,
+                card_rail=args.card_rail,
             )
             session.add(payment)
             await session.flush()
@@ -890,7 +903,47 @@ async def request_po_payment(
         args.payment_id,
         approval_id,
     )
+    if args.card_rail == "vic":
+        # The cardholder approves this allowance with the Visa passkey before anyone decides.
+        if await _start_card_verification(
+            db, principal.tenant_id, providers.card, method.payment_method_ref, args
+        ):
+            async with tenant_session(db, principal.tenant_id) as session:
+                payment = await session.get(PoPayment, args.payment_id)
+                if payment is not None:
+                    view = await payment_view(session, payment, settings=settings)
     return PaymentRequested(approval_id=approval_id, payment=view)
+
+
+async def _start_card_verification(
+    db: Db,
+    tenant_id: UUID,
+    card: CardGateway,
+    payment_method_ref: str,
+    args: PayPurchaseOrderArgs,
+) -> str | None:
+    """Create the payment's allowance (best effort) and keep its reference: the browser
+    runs the Visa passkey on it. The act tool sends the same request under the same key,
+    so a failure here only delays it to the confirmation or to the execution."""
+    try:
+        authorization = await authorize_payment_card(card, payment_method_ref, args)
+    except PaymentError as exc:
+        logger.warning("payment %s: allowance not created yet: %s", args.payment_id, exc)
+        return None
+    async with tenant_session(db, tenant_id) as session:
+        await session.execute(
+            update(PoPayment)
+            .where(
+                PoPayment.id == args.payment_id,
+                PoPayment.card_authorization_ref.is_(None),
+                PoPayment.state.in_(("pending_approval", "charging")),
+            )
+            .values(card_authorization_ref=authorization.ref, updated_at=func.now())
+        )
+        ref = await session.scalar(
+            select(PoPayment.card_authorization_ref).where(PoPayment.id == args.payment_id)
+        )
+    return ref
 
 
 # --- Reading payments -------------------------------------------------------------------------
@@ -935,6 +988,9 @@ async def payment_view(
             last4=method.last4,
             display=_display_view(method),
         ),
+        card_rail="vic" if payment.card_rail == "vic" else "spt",
+        card_verification=_verification_view(payment),
+        agent_card=_agent_card_view(payment),
         payout=PaymentPayoutView(
             payout_account_id=account.id,
             currency=account.currency,
@@ -976,6 +1032,63 @@ async def payment_view(
     )
 
 
+async def _proposed_args(session: AsyncSession, payment: PoPayment) -> PayPurchaseOrderArgs | None:
+    """The arguments a person is deciding (or approved) for the payment, or None when its
+    approval no longer vouches for them (same checks as the act tool's)."""
+    approval = await session.get(Approval, payment.approval_id)
+    if (
+        approval is None
+        or approval.tool != PAY_PURCHASE_ORDER
+        or approval.status not in _OPEN_APPROVAL
+        or approval.requested_by != payment.requested_by
+        or not payload_matches(approval)
+    ):
+        return None
+    try:
+        args = PayPurchaseOrderArgs.model_validate(approval.args)
+    except ValidationError:
+        return None
+    return args if approved_terms_match(payment, args) else None
+
+
+def _verification_view(
+    payment: PoPayment, status: CardVerificationStatus | None = None
+) -> PaymentCardVerificationView | None:
+    """The Visa passkey approval as recorded; `status` when it was just read live."""
+    if payment.card_rail != "vic":
+        return None
+    if status is None:
+        if payment.card_verified_at is not None:
+            status = "verified"
+        elif payment.state == "expired":
+            status = "expired"
+        elif payment.failure_code == CARD_NOT_VERIFIED:
+            status = "failed"
+        else:
+            status = "pending"
+    rail, provider = VIC_RAIL
+    return PaymentCardVerificationView(
+        status=status,
+        allowance_id=payment.card_authorization_ref,
+        rail=rail,
+        provider=provider,
+        verified_at=payment.card_verified_at,
+    )
+
+
+def _agent_card_view(payment: PoPayment) -> IssuedCardView | None:
+    if payment.card_rail != "vic" or (
+        payment.issued_card_ref is None and payment.issued_card_last4 is None
+    ):
+        return None
+    return IssuedCardView(
+        brand="visa",
+        last4=payment.issued_card_last4,
+        exp_month=payment.issued_card_exp_month,
+        exp_year=payment.issued_card_exp_year,
+    )
+
+
 async def _current_payments(
     session: AsyncSession, po_ids: Collection[UUID]
 ) -> dict[UUID, PoPayment]:
@@ -1009,6 +1122,80 @@ async def get_po_payment(
         if payment is None:
             raise PaymentNotFound(f"purchase order {po_id} has no payment")
         return await payment_view(session, payment, settings=settings)
+
+
+async def confirm_card_verification(
+    db: Db,
+    principal: Principal,
+    po_id: UUID,
+    card: CardGateway,
+) -> PaymentCardVerificationView:
+    """Where the Visa passkey approval of the order's payment stands, read from Basis
+    Theory (never from the browser). Call it to get the allowance to verify (it is
+    created when missing) and again once the passkey is done. Only the person paying,
+    whose card it is, approves it."""
+    async with tenant_session(db, principal.tenant_id) as session:
+        payment = (await _current_payments(session, [po_id])).get(po_id)
+        if payment is None:
+            raise PaymentNotFound(f"purchase order {po_id} has no payment")
+        if payment.requested_by != principal.user_id:
+            raise PaymentForbidden("only the person paying approves their card with the passkey")
+        if payment.card_rail != "vic":
+            raise PaymentInvalidState(f"payment {payment.id} is not on the Visa rail")
+        if card.rail != "vic":
+            raise PaymentsNotConfigured("this server no longer issues Visa cards")
+        if payment.card_verified_at is not None:
+            return cast(PaymentCardVerificationView, _verification_view(payment))
+        if payment.state != "pending_approval":
+            return cast(PaymentCardVerificationView, _verification_view(payment))
+        payment_id, ref = payment.id, payment.card_authorization_ref
+        args = await _proposed_args(session, payment)
+        method_ref = await session.scalar(
+            select(PaymentMethod.payment_method_ref).where(
+                PaymentMethod.id == payment.payment_method_id
+            )
+        )
+    if ref is None:
+        if args is None or method_ref is None:
+            raise PaymentInvalidState(f"payment {payment_id} can no longer be approved")
+        ref = await _start_card_verification(db, principal.tenant_id, card, method_ref, args)
+        if ref is None:
+            raise PaymentInvalidState(f"payment {payment_id}: the card could not be authorized")
+    verification = await card.verification(ref)
+    async with tenant_session(db, principal.tenant_id) as session:
+        payment = await session.scalar(
+            select(PoPayment).where(PoPayment.id == payment_id).with_for_update()
+        )
+        if payment is None:
+            raise PaymentNotFound(f"payment {payment_id} not found")
+        if verification.status == "verified" and payment.card_verified_at is None:
+            payment.card_verified_at = datetime.now(UTC)
+            payment.updated_at = func.now()
+            if args is not None:
+                session.add(
+                    rfq_event(
+                        principal.tenant_id,
+                        principal.user_id,
+                        PAYMENT_CARD_VERIFIED,
+                        args.rfq_id,
+                        payment_id=payment_id,
+                        approval_id=payment.approval_id,
+                        purchase_order_id=po_id,
+                        purchase_order_ref=args.purchase_order_ref,
+                        invite_id=args.invite_id,
+                    )
+                )
+            await session.flush()
+        view = _verification_view(
+            payment, None if payment.card_verified_at else verification.status
+        )
+    logger.info(
+        "payment card verification tenant=%s payment=%s status=%s",
+        principal.tenant_id,
+        payment_id,
+        verification.status,
+    )
+    return cast(PaymentCardVerificationView, view)
 
 
 async def payment_summaries(
@@ -1051,6 +1238,12 @@ async def queue_details(
         )
     )
     names: dict[UUID, str] = {supplier_id: name for supplier_id, name in rows}
+    verified_rows = await session.execute(
+        select(PoPayment.id, PoPayment.card_verified_at).where(
+            PoPayment.id.in_({args.payment_id for args in parsed.values()})
+        )
+    )
+    verified: dict[UUID, bool] = {pid: at is not None for pid, at in verified_rows}
     return {
         approval_id: PaymentApprovalView(
             payment_id=args.payment_id,
@@ -1070,6 +1263,8 @@ async def queue_details(
             payout_account_last4=args.payout_account_last4,
             milestones=[PaymentMilestone(name=m.name, bps=m.bps) for m in args.milestones],
             simulated=args.charge_mode == "simulated",
+            card_rail=args.card_rail,
+            card_verified=verified.get(args.payment_id, False) if args.card_rail == "vic" else None,
         )
         for approval_id, args in parsed.items()
     }
