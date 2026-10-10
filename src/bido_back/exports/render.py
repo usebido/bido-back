@@ -61,25 +61,31 @@ def to_csv(table: Table) -> bytes:
 
 
 def to_xlsx(table: Table, sheet_name: str) -> bytes:
+    return to_xlsx_sheets([(sheet_name, table)])
+
+
+def to_xlsx_sheets(sheets: Sequence[tuple[str, Table]]) -> bytes:
+    """One workbook, one sheet per `(name, table)`, in order (names cut to Excel's 31)."""
     # openpyxl ships no type information; contain it here.
     from openpyxl import Workbook  # pyright: ignore[reportMissingTypeStubs]
     from openpyxl.styles import Font  # pyright: ignore[reportMissingTypeStubs]
 
     workbook = cast(Any, Workbook())
-    sheet = workbook.active
-    sheet.title = sheet_name[:_SHEET_NAME_MAX]
-    sheet.append([safe_text(h) for h in table.header])
-    for cell in sheet[1]:
-        cell.font = Font(bold=True)
-    sheet.freeze_panes = "A2"
-    for row in table.rows:
-        sheet.append([safe_text(v) if isinstance(v, str) else v for v in row])
-    for index, row in enumerate(sheet.iter_rows(min_row=2), start=0):
-        for cell, value in zip(row, table.rows[index], strict=True):
-            if isinstance(value, Decimal):
-                cell.number_format = "#,##0.00####"
-            elif isinstance(value, date):
-                cell.number_format = "yyyy-mm-dd"
+    workbook.remove(workbook.active)
+    for sheet_name, table in sheets:
+        sheet = workbook.create_sheet(title=sheet_name[:_SHEET_NAME_MAX])
+        sheet.append([safe_text(h) for h in table.header])
+        for cell in sheet[1]:
+            cell.font = Font(bold=True)
+        sheet.freeze_panes = "A2"
+        for row in table.rows:
+            sheet.append([safe_text(v) if isinstance(v, str) else v for v in row])
+        for index, row in enumerate(sheet.iter_rows(min_row=2), start=0):
+            for cell, value in zip(row, table.rows[index], strict=True):
+                if isinstance(value, Decimal):
+                    cell.number_format = "#,##0.00####"
+                elif isinstance(value, date):
+                    cell.number_format = "yyyy-mm-dd"
     buffer = io.BytesIO()
     workbook.save(buffer)
     return buffer.getvalue()

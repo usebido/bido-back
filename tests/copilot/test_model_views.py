@@ -305,3 +305,21 @@ def test_issue_codes_reach_the_model_as_plain_words() -> None:
         "status": "needs_review",
     }
     assert out.issues[0] == "line 3: lead_time_days:wrong_locator"
+
+
+def test_the_plan_is_counted_whole_even_when_its_lines_are_cut() -> None:
+    lines = [line(f"P{i:03}", "40", suppliers=6) for i in range(300)]
+    lines += [line(f"C{i:03}", "0") for i in range(50)]
+    for i, item in enumerate(lines):
+        item.location = "1000" if i % 2 else "2000"
+    view = cast(dict[str, Any], assessment_view(SourceAssessment(lines=lines)))
+
+    assert view["lines_left_out"] > 0
+    plan = view["plan"]
+    assert plan["rows"] == 350
+    assert plan["by_status"] == {"Buy": 300, "Covered, nothing to buy": 50}
+    assert plan["by_plant"] == {
+        "1000": {"rows": 175, "to_buy": 150},
+        "2000": {"rows": 175, "to_buy": 150},
+    }
+    assert "export_procurement_plan" in plan["full_plan"]
