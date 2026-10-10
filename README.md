@@ -338,6 +338,56 @@ Reports land in `evals/reports/<timestamp>-flow-<mode>/`: pass^k per case, the
 assertion pass rate per scenario, latencies and the top failure reasons.
 Tasks: `eval: flow (mock)` and `eval: flow (live)`.
 
+### Nightly evals (GitHub Actions)
+
+`.github/workflows/evals-nightly.yml` runs three suites live on main every night at
+06:00 UTC, one job each, in parallel:
+- `evals.run`, the spreadsheets;
+- `evals.flow`, the RFQ journey;
+- `evals.source_corpus`, source understanding on many layouts.
+
+Each job runs through `evals/nightly.py`, which:
+- keeps the suite's own report;
+- adds `usage.json` (model calls, tokens and estimated cost, summed from the runner's
+  `agent run` log lines);
+- writes the job summary (pass^k per case with failing cases first, the assertion rate
+  per scenario, the top failures and the spend).
+
+The reports are uploaded as the `evals-<suite>-<mode>-<run id>` artifact and kept 30
+days.
+
+- **Report-only.** Failing cases leave the run green. The run turns red only when a
+  harness crashes or produces no report. To make failing cases fail the run, set
+  `FAIL_ON_EVAL_FAILURES: "true"` in the workflow.
+- **Inputs.** It needs the `OPENAI_API_KEY` secret in the repository's `evals`
+  environment. Without it, the scheduled run plans and skips (a few seconds). Langfuse
+  and Sentry are not configured in the job. Emails are captured by the harness, and only
+  the generated synthetic files reach OpenAI.
+- **Cost, measured locally with k=1 on 2026-10-10:**
+
+  | Suite | Estimated model spend | Duration |
+  |---|---|---|
+  | `run` | $0.72 | 11.5 min |
+  | `flow` | $0.57 | 6.7 min |
+  | `sources` | $1.60 | 2.3 min |
+
+  Spend scales with k, so the default `NIGHTLY_K: "3"` comes to about $8.70 a night and
+  about 70 runner-minutes, setup included. `NIGHTLY_K: "1"` is about $2.90 and about 27
+  runner-minutes.
+
+Manual run, with the suites and k chosen per run:
+
+```bash
+gh workflow run evals-nightly.yml -R usebido/bido-back -f mode=mock -f k=1   # plumbing, free
+gh workflow run evals-nightly.yml -R usebido/bido-back -f mode=live -f k=1 -f suites=flow
+```
+
+Locally:
+
+```bash
+uv run python -m evals.nightly flow --out /tmp/nightly -k 1 && uv run python -m evals.nightly summary --out /tmp/nightly
+```
+
 ## Running the frontend against this backend
 
 `bido-front` is expected next to this repository (`../bido-front`). Tasks:
