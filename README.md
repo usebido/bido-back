@@ -170,6 +170,10 @@ jobs on the jobs queue with the all-zeros tenant id (= every tenant):
 | `followups.sweep` | 15 min | chases due (business days, supplier holidays, auto-reply pauses), clarifications for offers with missing fields, cleanup of stale proposals |
 | `negotiation.sweep` | 15 min | counter-offers and best-and-final requests, early close, closing at the deadline |
 
+A supplier reply does not wait for the sweep: once quote extraction stores it,
+an RFQ whose negotiation is open gets a `negotiation.replan` job (one per burst
+of replies) that plans that RFQ right away; the sweep stays the safety net.
+
 Every chase, clarification or counter-offer is proposed as a pending approval
 and sent in the RFQ's thread once approved. Under an approved negotiation
 mandate (`POST /v1/rfqs/{id}/negotiation/mandate`), the sweeps also approve the

@@ -38,8 +38,12 @@ from bido_back.followups.calendar import add_business_days
 from bido_back.followups.schemas import FollowupSettingsUpdate
 from bido_back.followups.send import register_followup_act_tools
 from bido_back.negotiation import service
-from bido_back.negotiation.hooks import cancel_on_new_offer
-from bido_back.negotiation.jobs import ALL_TENANTS, NegotiationSweepHandler
+from bido_back.negotiation.hooks import cancel_on_new_offer, replan_envelope, request_replan
+from bido_back.negotiation.jobs import (
+    ALL_TENANTS,
+    NegotiationReplanHandler,
+    NegotiationSweepHandler,
+)
 from bido_back.negotiation.schemas import LineLimitsUpdate, NegotiationSettingsUpdate
 from bido_back.negotiation.send import (
     NEGOTIATION_REJECT_HOOKS,
@@ -1367,3 +1371,84 @@ async def test_a_planner_that_cannot_run_only_delays_its_clarifications(
         world.engine, world.people.tenant, writer=FakeFollowupWriter()
     )
     assert swept.clarifications == 1
+
+
+# --- A supplier reply re-plans its RFQ right away ----------------------------------------
+
+
+async def _ask_replan(world: World) -> datetime:
+    """What quote extraction does after storing a reply (`request_replan`)."""
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        rfq = await session.scalar(select(Rfq).where(Rfq.id == world.rfq_id).with_for_update())
+        assert rfq is not None
+        at = datetime.now(UTC)
+        assert request_replan(rfq, at)
+        return at
+
+
+class BumpingWriter(FakeNegotiationWriter):
+    """Another reply lands while the re-plan writes its emails."""
+
+    def __init__(self, world: World) -> None:
+        super().__init__()
+        self.world = world
+
+    async def __call__(self, task: NegotiationEmailInput, context: ToolContext) -> EmailNoteOutput:
+        async with tenant_session(self.world.engine, self.world.people.tenant) as session:
+            rfq = await session.scalar(
+                select(Rfq).where(Rfq.id == self.world.rfq_id).with_for_update()
+            )
+            assert rfq is not None
+            # Pending already: the reply bumps the request but enqueues nothing.
+            assert not request_replan(rfq, datetime.now(UTC))
+        return await super().__call__(task, context)
+
+
+async def test_a_reply_is_planned_at_once_and_a_duplicate_job_does_nothing(world: World) -> None:
+    await world.configure()
+    await world.offer("rhein", ("0.050", "1.20"))
+    requested_at = await _ask_replan(world)
+    jobs = FakeJobQueue()
+    handler = NegotiationReplanHandler(db=world.engine, writer=FakeNegotiationWriter(), jobs=jobs)
+    envelope = replan_envelope(world.people.tenant, world.rfq_id, requested_at)
+
+    await handler(envelope)
+
+    [rhein] = await world.messages("rhein")
+    assert rhein.status == "proposed"  # the counter-offer awaits approval, no sweep needed
+    assert (await world.rfq()).negotiation_replan_requested_at is None
+    assert jobs.jobs == []
+    # Redelivered: nothing is pending, nothing is planned again.
+    writer = FakeNegotiationWriter()
+    result = await service.replan_rfq(
+        world.engine, world.people.tenant, world.rfq_id, writer=writer
+    )
+    assert not result.ran and writer.calls == []
+
+
+async def test_a_reply_during_the_replan_gets_one_more_job(world: World) -> None:
+    await world.configure()
+    await world.offer("rhein", ("0.050", "1.20"))
+    requested_at = await _ask_replan(world)
+    jobs = FakeJobQueue()
+    handler = NegotiationReplanHandler(db=world.engine, writer=BumpingWriter(world), jobs=jobs)
+
+    await handler(replan_envelope(world.people.tenant, world.rfq_id, requested_at))
+
+    pending = (await world.rfq()).negotiation_replan_requested_at
+    assert pending is not None and pending > requested_at
+    [again] = jobs.jobs
+    assert again.payload == {"rfq_id": str(world.rfq_id)}
+    assert again.idempotency_key.endswith(pending.isoformat())
+
+
+async def test_the_sweep_settles_a_replan_whose_job_was_lost(world: World) -> None:
+    await world.configure()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await _ask_replan(world)  # the enqueue after the commit failed: no job
+
+    assert (await world.sweep(FakeNegotiationWriter())).proposed == 1
+
+    assert (await world.rfq()).negotiation_replan_requested_at is None
+    # The next reply enqueues again.
+    await _ask_replan(world)

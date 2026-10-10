@@ -18,3 +18,6 @@ NEGOTIATION_SWEEP = (
 )
 # payload: {}. Reads one company's files not yet read, for content search.
 FILES_INDEX = "files.index"
+# payload: {"rfq_id": "<uuid>"}. One RFQ's negotiation planned again right after a
+# supplier reply (`bido_back.negotiation.jobs`); the sweep stays the safety net.
+NEGOTIATION_REPLAN = "negotiation.replan"
