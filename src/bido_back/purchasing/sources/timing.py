@@ -32,6 +32,7 @@ only words the result. The quantity to buy never changes here:
 
 import re
 from collections.abc import Sequence
+from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import ROUND_CEILING, Decimal
 from typing import Final
@@ -58,6 +59,7 @@ from bido_back.purchasing.sources.contracts import (
 )
 from bido_back.purchasing.sources.evidence import (
     categorical,
+    join_key,
     same_key,
     source_number,
     source_refs,
@@ -103,12 +105,26 @@ def demand_schedule(line: AssessmentLine) -> list[DatedQuantity]:
     return [DatedQuantity(need_by=day, quantity=totals[day]) for day in sorted(totals)]
 
 
-def usable(supplier: SupplierEvidence) -> bool:
-    """A source the buyer can order from: not blocked or disqualified, and with a current
-    agreement or a purchase history of the item."""
-    return not disqualified(supplier) and (
+def usable(supplier: SupplierEvidence, agreements: bool = False) -> bool:
+    """A source the buyer can order from: not blocked or disqualified (by its own code),
+    and with a current agreement or a purchase history of the item.
+
+    `agreements`: the item has purchasing agreements (e.g. SAP info records) at the
+    plant. Then only a current one makes a source valid: an expired agreement or a
+    history without one is price history, not a source of supply.
+    """
+    if disqualified(supplier):
+        return False
+    if agreements:
+        return supplier.contract_expired is False
+    return (
         supplier.orders > 0 or supplier.last_price is not None or supplier.contract_expired is False
     )
+
+
+def has_agreements(line: AssessmentLine) -> bool:
+    """The item's sources at the plant are governed by purchasing agreements."""
+    return any(s.contract_expired is not None for s in line.suppliers)
 
 
 def lead_time(
@@ -127,13 +143,15 @@ def lead_time(
 
 
 def project(
-    line: AssessmentLine, as_of: date, moved: dict[tuple[str, str], date] | None = None
+    line: AssessmentLine,
+    as_of: date,
+    moved: dict[tuple[str, str, str | None], date] | None = None,
 ) -> list[ProjectedBalance]:
     """The balance per need date without new orders; `moved` re-dates open orders."""
     moved = moved or {}
     arrivals: list[tuple[date, Decimal]] = []
     for order in line.inbound:
-        when = moved.get((order.po_number, order.po_line))
+        when = moved.get((order.po_number, order.po_line, order.schedule_line))
         if when is None:
             if not order.eligible or order.expected_at is None:
                 continue
@@ -154,12 +172,47 @@ def project(
     return projected
 
 
+@dataclass(frozen=True, slots=True)
+class RecordIndex:
+    """Lookups over all records that each line would otherwise scan: built once per
+    assessment (a large ERP export has tens of thousands of records)."""
+
+    # Item -> its first description (item master, purchase summary or requirement).
+    descriptions: dict[str, str]
+    # (production order, product) -> the requirements pegged to it: (item, label).
+    pegged: dict[tuple[str, str], list[tuple[str, str]]]
+
+    @classmethod
+    def build(cls, records: Sequence[Record]) -> "RecordIndex":
+        descriptions: dict[str, str] = {}
+        pegged: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        for record in records:
+            code = source_text(record, "part_number")
+            key = join_key(code)
+            if key is None or code is None:
+                continue
+            if record.kind in ("item", "purchase_summary", "material_requirement"):
+                text = source_text(record, "description")
+                if text is not None:
+                    descriptions.setdefault(key, text)
+            if record.kind == "material_requirement":
+                match = _PEGGED.match(source_text(record, "reference") or "")
+                order, product = (
+                    (join_key(match.group(1)), join_key(match.group(2))) if match else (None, None)
+                )
+                if order is not None and product is not None:
+                    label = f"{code} {source_text(record, 'description') or ''}".strip()
+                    pegged.setdefault((order, product), []).append((key, label))
+        return cls(descriptions=descriptions, pegged=pegged)
+
+
 def check_timing(
     line: AssessmentLine,
     *,
     as_of: date,
     master: Record | None,
     records: Sequence[Record],
+    index: RecordIndex | None = None,
 ) -> None:
     """Fill the line's schedule, arrival per source, timing, expedite and sourcing."""
     schedule = need_schedule(line)
@@ -202,12 +255,13 @@ def check_timing(
             (need.quantity for need in schedule if need.need_by >= arrival), ZERO
         )
     line.expedite = _expedite(line, projected, as_of, records)
-    timed = [s for s in line.suppliers if usable(s) and s.estimated_arrival is not None]
+    agreements = has_agreements(line)
+    timed = [s for s in line.suppliers if usable(s, agreements) and s.estimated_arrival is not None]
     if timed:
-        _recommend(line, timing, timed, schedule[-1].need_by)
-        _uncovered(line, timing, as_of, records)
-        _disclose(line, timing, schedule[-1].need_by)
-    if not any(usable(s) for s in line.suppliers):
+        _recommend(line, timing, timed, agreements, schedule[-1].need_by)
+        _uncovered(line, timing, as_of, index or RecordIndex.build(records))
+        _disclose(line, timing, schedule[-1].need_by, agreements)
+    if not any(usable(s, agreements) for s in line.suppliers):
         line.sourcing = _sourcing(line, master, records)
 
 
@@ -215,22 +269,79 @@ def _arrival(supplier: SupplierEvidence) -> date:
     return supplier.estimated_arrival or date.max
 
 
+def comparable_price(supplier: SupplierEvidence) -> Decimal | None:
+    """The source's price per base unit to compare sources: its current agreement, else
+    its measured average, else its last price."""
+    if supplier.contract_price is not None and supplier.contract_expired is False:
+        return supplier.contract_price
+    return supplier.avg_price if supplier.avg_price is not None else supplier.last_price
+
+
+def _cheapest(
+    sources: Sequence[SupplierEvidence], currency: str | None, ranked: Sequence[SupplierEvidence]
+) -> SupplierEvidence:
+    """Cheapest per base unit in the line's currency (a price in another currency, or none,
+    ranks after); at an equal price the earlier arrival; without a price, the measured
+    rank (`ranked`, `pricing.measure`)."""
+    order = {id(s): n for n, s in enumerate(ranked)}
+
+    def key(supplier: SupplierEvidence) -> tuple[bool, Decimal, date, int]:
+        price = comparable_price(supplier)
+        other = supplier.contract_currency or supplier.currency
+        known = price is not None and (currency is None or other is None or other == currency)
+        return (
+            not known,
+            price if known and price is not None else ZERO,
+            _arrival(supplier) if known else date.min,
+            order.get(id(supplier), len(order)),
+        )
+
+    return min(sources, key=key)
+
+
 def _recommend(
     line: AssessmentLine,
     timing: TimingCheck,
     timed: Sequence[SupplierEvidence],
+    agreements: bool,
     last_need: date,
 ) -> None:
-    preferred = next(s for s in line.suppliers if usable(s) and s.estimated_arrival is not None)
-    meeting = [s for s in timed if s.arrival_status != "does_not_meet"]
-    if preferred.arrival_status != "does_not_meet":
-        chosen = preferred
-    elif meeting:
-        chosen = min(meeting, key=_arrival)
-    elif _arrival(preferred) <= last_need:
-        chosen = preferred
+    """With purchasing agreements (the item's approved sources): the cheapest that arrives
+    before the balance falls below the safety stock; else the cheapest that arrives before
+    it runs out; else the fastest (an unavoidable stockout).
+
+    Without agreements, the sources are known from purchase history only: the best-ranked
+    by measured performance (`pricing.measure`) when it meets the line, else the fastest
+    that does; when none does, the best-ranked if it arrives within the horizon, else the
+    fastest.
+    """
+    currency = _line_currency(line)
+    meets = [s for s in timed if s.arrival_status == "meets"]
+    consuming = [s for s in timed if s.arrival_status == "meets_consuming_safety_stock"]
+    preferred = timed[0]
+    if not agreements:
+        meeting = [*meets, *consuming]
+        if preferred.arrival_status != "does_not_meet":
+            chosen = preferred
+        elif meeting:
+            chosen = min(meeting, key=_arrival)
+        elif _arrival(preferred) <= last_need:
+            chosen = preferred
+        else:
+            chosen = min(timed, key=_arrival)
+    elif meets:
+        chosen = _cheapest(meets, currency, timed)
+    elif consuming:
+        chosen = _cheapest(consuming, currency, timed)
     else:
-        chosen = min(timed, key=_arrival)
+        chosen = min(
+            timed,
+            key=lambda s: (
+                _arrival(s),
+                comparable_price(s) if comparable_price(s) is not None else Decimal("Infinity"),
+                s.supplier_code or "",
+            ),
+        )
     chosen.recommended = True
     timing.recommended_supplier = _name(chosen)
     timing.recommended_arrival = chosen.estimated_arrival
@@ -239,15 +350,45 @@ def _recommend(
         if chosen.arrival_status == "does_not_meet" or chosen.arrival_status is None
         else chosen.arrival_status
     )
-    if chosen is not preferred:
-        timing.switched_from = _name(preferred)
+    # The source the recommendation moved away from for timing: the best-ranked one, or
+    # with agreements the cheapest.
+    first_choice = _cheapest(timed, currency, timed) if agreements else preferred
+    if first_choice is not chosen:
+        timing.switched_from = _name(first_choice)
+    if agreements and chosen.arrival_status == "meets" and consuming:
+        cheaper = _cheapest(consuming, currency, timed)
+        price, other = comparable_price(cheaper), comparable_price(chosen)
+        if price is not None and other is not None and price < other:
+            unit = line.unit or ""
+            line.assumptions.append(
+                Assumption(
+                    code="cheaper_source_consumes_safety_stock",
+                    message=f"{_name(chosen)} is recommended: it arrives "
+                    f"{chosen.estimated_arrival} at {_plain(other)} per {unit}, before the "
+                    f"balance falls below the safety stock. {_name(cheaper)} is cheaper "
+                    f"({_plain(price)} per {unit}) but arrives {cheaper.estimated_arrival}, "
+                    "while the safety stock is being consumed.",
+                    alternative=f"Buying from {_name(cheaper)} saves on price and consumes "
+                    "safety stock until it arrives.",
+                    part_numbers=[line.part_number],
+                )
+            )
     # Recommended first, then the rest by measured rank. A source that does not meet the
     # line is suggested only when it arrives no later than the recommended one.
     line.suppliers.sort(key=lambda s: not s.recommended)
-    eligible = [s for s in line.suppliers if usable(s) and _competes(s, chosen)]
+    eligible = [s for s in line.suppliers if usable(s, agreements) and _competes(s, chosen)]
     picked = {id(s) for s in eligible[:MAX_SUGGESTED]}
     for supplier in line.suppliers:
         supplier.suggested = id(supplier) in picked
+
+
+def _line_currency(line: AssessmentLine) -> str | None:
+    if line.price is not None and line.price.currency:
+        return line.price.currency
+    if line.currency:
+        return line.currency
+    found = {c for s in line.suppliers if (c := s.contract_currency or s.currency) is not None}
+    return next(iter(found)) if len(found) == 1 else None
 
 
 def _competes(supplier: SupplierEvidence, chosen: SupplierEvidence) -> bool:
@@ -267,9 +408,7 @@ def late(supplier: SupplierEvidence) -> bool:
     )
 
 
-def _uncovered(
-    line: AssessmentLine, timing: TimingCheck, as_of: date, records: Sequence[Record]
-) -> None:
+def _uncovered(line: AssessmentLine, timing: TimingCheck, as_of: date, index: RecordIndex) -> None:
     arrival = timing.recommended_arrival
     if arrival is None or timing.outcome != "unavoidable_stockout":
         return
@@ -281,7 +420,7 @@ def _uncovered(
 
     timing.uncovered_quantity = deficit(timing.projected)
     moved = {
-        (a.po_number, a.po_line): a.requested_date
+        (a.po_number, a.po_line, a.schedule_line): a.requested_date
         for a in line.expedite
         if a.requested_date < a.current_date
     }
@@ -289,7 +428,7 @@ def _uncovered(
         timing.uncovered_after_expedite = deficit(project(line, as_of, moved))
     short = {p.on for p in timing.projected if p.on < arrival and p.balance < 0}
     timing.affected_demand = [
-        _affected(c.reference, c.product_code, c.need_by, c.quantity, records, line.part_number)
+        _affected(c.reference, c.product_code, c.need_by, c.quantity, index, line.part_number)
         for c in line.demand_contributions
         if c.need_by in short
     ]
@@ -329,8 +468,10 @@ def _plain(number: Decimal) -> str:
     return "0" if text in ("-0", "") else text
 
 
-def _disclose(line: AssessmentLine, timing: TimingCheck, last_need: date) -> None:
-    timed = [s for s in line.suppliers if s.estimated_arrival is not None and usable(s)]
+def _disclose(
+    line: AssessmentLine, timing: TimingCheck, last_need: date, agreements: bool = False
+) -> None:
+    timed = [s for s in line.suppliers if s.estimated_arrival is not None and usable(s, agreements)]
     parts = [
         f"{_name(s)} {s.planned_lead_time_days} days ({_SOURCE_LABEL[s.lead_time_source]}) "
         f"→ {s.estimated_arrival.isoformat()}"
@@ -373,7 +514,7 @@ def _affected(
     product: str | None,
     need_by: date,
     quantity: Decimal,
-    records: Sequence[Record],
+    index: RecordIndex,
     part: str,
 ) -> AffectedDemand:
     order = reference
@@ -382,44 +523,25 @@ def _affected(
         product = product or pegged.group(2)
     description = None
     if product is not None:
-        description = next(
-            (
-                text
-                for r in records
-                if r.kind in ("item", "purchase_summary", "material_requirement")
-                and same_key(source_text(r, "part_number"), product)
-                and (text := source_text(r, "description")) is not None
-            ),
-            None,
-        )
+        description = index.descriptions.get(join_key(product) or "")
     return AffectedDemand(
         reference=order,
         product_code=product,
         product_description=description,
-        product_components=_components(records, order, product, part) if product else [],
+        product_components=_components(index, order, product, part) if product else [],
         need_by=need_by,
         quantity=quantity,
     )
 
 
-def _components(records: Sequence[Record], order: str, product: str, part: str) -> list[str]:
+def _components(index: RecordIndex, order: str, product: str, part: str) -> list[str]:
     """Other materials the same production order needs, as the MRP list names them: they
     identify an undescribed product (e.g. a carcass "... BOMBA BC-125")."""
     found: list[str] = []
-    for record in records:
-        if record.kind != "material_requirement":
+    own = join_key(part)
+    for code, label in index.pegged.get((join_key(order) or "", join_key(product) or ""), []):
+        if code == own:
             continue
-        pegged = _PEGGED.match(source_text(record, "reference") or "")
-        code = source_text(record, "part_number")
-        if (
-            pegged is None
-            or not same_key(pegged.group(1), order)
-            or not same_key(pegged.group(2), product)
-            or code is None
-            or same_key(code, part)
-        ):
-            continue
-        label = f"{code} {source_text(record, 'description') or ''}".strip()
         if label not in found:
             found.append(label)
         if len(found) >= MAX_COMPONENTS:
@@ -465,6 +587,7 @@ def _expedite(
             ExpediteAction(
                 po_number=order.po_number,
                 po_line=order.po_line,
+                schedule_line=order.schedule_line,
                 supplier_code=order.supplier_code,
                 supplier_name=_supplier_name(line, order, records),
                 quantity=order.quantity,
@@ -747,14 +870,17 @@ def _actions(line: AssessmentLine, timing: TimingCheck) -> list[str]:
     actions: list[str] = []
     for action in line.expedite:
         who = action.supplier_name or action.supplier_code or "the supplier"
+        number = f"{action.po_number}/{action.po_line}"
+        if action.schedule_line is not None:
+            number += f" (schedule line {action.schedule_line})"
         if action.reason == "overdue":
             actions.append(
-                f"Chase overdue PO {action.po_number}/{action.po_line} ({who}, "
+                f"Chase overdue PO {number} ({who}, "
                 f"{_plain(action.quantity)} {unit}, due {action.current_date})."
             )
             continue
         actions.append(
-            f"Ask {who} to move PO {action.po_number}/{action.po_line} "
+            f"Ask {who} to move PO {number} "
             f"({_plain(action.quantity)} {unit}) from {action.current_date} to "
             f"{action.requested_date}"
             + (" (the MRP asks for it)" if action.reason.startswith("mrp_") else "")
