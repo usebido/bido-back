@@ -15,7 +15,7 @@ Every tool declares a `kind`:
 
 import json
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -27,6 +27,8 @@ ToolKind = Literal["read", "draft", "act"]
 
 # What model providers accept as a tool name.
 _TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Valid values a validation error lists for the model, at most.
+MAX_VALID_VALUES = 30
 
 
 class ToolError(Exception):
@@ -37,6 +39,46 @@ class ToolError(Exception):
     to the model as a generic internal error, so internals never leak into
     the conversation.
     """
+
+
+class ToolValidationError(ToolError):
+    """An argument that does not match the data the tool works on, with what would.
+
+    Raise it when the model's parameter names something the data does not hold (a
+    plant, a product, a column value) and the data says what it holds instead. The
+    runner feeds `payload()` back to the model as JSON and lets it correct the
+    parameters and call again, a bounded number of times, before it must ask the
+    buyer. An empty result is never how an invalid parameter surfaces.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str,
+        field: str,
+        value: str | None,
+        valid_values: Sequence[str],
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.field = field
+        self.value = value
+        self.valid_values = list(valid_values)[:MAX_VALID_VALUES]
+        self.valid_values_left_out = max(0, len(valid_values) - MAX_VALID_VALUES)
+
+    def payload(self) -> dict[str, JsonValue]:
+        found: dict[str, JsonValue] = {
+            "error": "validation_error",
+            "code": self.code,
+            "field": self.field,
+            "value": self.value,
+            "valid_values": list(self.valid_values),
+            "message": str(self),
+        }
+        if self.valid_values_left_out:
+            found["valid_values_left_out"] = self.valid_values_left_out
+        return found
 
 
 @dataclass(frozen=True, slots=True)
