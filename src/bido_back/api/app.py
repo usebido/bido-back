@@ -104,8 +104,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(uploads_router())
     app.include_router(files_router())
     app.include_router(branding_router())
-    if resolved.environment == "local":
-        # Never mounted elsewhere (and every route refuses outside local too).
+    if resolved.environment in ("local", "dev"):
+        # Dev-only router: each route still checks which non-production environment it allows.
         from bido_back.api.dev import dev_router
 
         app.include_router(dev_router)
