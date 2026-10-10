@@ -68,9 +68,11 @@ from bido_back.purchasing.sources.snapshots import (
     AssessmentSnapshotSummary,
     draft_from_snapshot,
     get_snapshot,
+    late_arrival,
     list_snapshots,
     plan_from_snapshot,
     rfq_lines,
+    rfq_need_by,
 )
 from bido_back.purchasing.workbook import WorkbookFileError, WorkbookImportReport, import_workbook
 from bido_back.rfqs import suppliers as supplier_service
@@ -480,7 +482,8 @@ def _assessment_preview(
                 part_number=line.part_number,
                 quantities=[line.calculated_to_buy],
                 unit=line.unit or "",
-                need_by=line.need_by,
+                need_by=rfq_need_by(line),
+                arrives_after_need_by=late_arrival(line),
                 delivery_location=line.location,
                 target_unit_price=found.target_unit_price if found else None,
                 max_unit_price=found.max_unit_price if found else None,
