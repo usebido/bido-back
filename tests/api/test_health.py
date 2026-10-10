@@ -47,3 +47,6 @@ async def test_dev_routes_are_mounted_only_locally() -> None:
     assert await _status(local, "GET", "/dev/inbound") == 405
     assert await _status(dev, "GET", "/dev/inbound") == 404
     assert await _status(dev, "GET", "/v1/mailbox/complete") == 405
+    # The payment debug route is the one dev endpoint mounted outside local.
+    assert await _status(local, "GET", "/dev/payments/purchase-order") == 405
+    assert await _status(dev, "GET", "/dev/payments/purchase-order") == 405

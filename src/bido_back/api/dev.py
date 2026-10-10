@@ -19,11 +19,14 @@ and answers 204 like S3, or 403 when the form does not match its signature.
 signed by `LocalDownloadLinks` points at, with the content type and
 disposition the link fixed, or 403 when the link does not verify.
 
-Dev only, twice over: mount the router only when
-`settings.environment in ("local", "dev")`, and every request is refused with
-404 unless its route allows that environment (in case it is mounted by mistake).
-It is left out of the OpenAPI schema, so `scripts/export_openapi.py` (which
-builds the app with environment "local") does not put it in the public contract.
+Two routers, each guarded twice over. `dev_router` holds the local-only
+endpoints: mount it only when `settings.environment == "local"`, and every
+request is refused with 404 unless the settings say "local". `debug_router`
+holds the local-or-dev endpoint: mount it only when `settings.environment in
+("local", "dev")`, and every request is refused with 404 elsewhere (in case
+either is mounted by mistake). Both are left out of the OpenAPI schema, so
+`scripts/export_openapi.py` (which builds the app with environment "local")
+does not put them in the public contract.
 
 Dependencies, overridable with `app.dependency_overrides`:
   * `get_dev_settings`: the settings (default: `get_settings()`);
@@ -122,6 +125,7 @@ def get_inbound_service(
 
 
 dev_router = APIRouter(prefix="/dev", tags=["dev"], include_in_schema=False)
+debug_router = APIRouter(prefix="/dev", tags=["dev"], include_in_schema=False)
 
 
 @dev_router.post("/inbound", dependencies=[Depends(require_local)])
@@ -162,7 +166,7 @@ async def post_negotiation_sweep(
     return {"enqueued": key}
 
 
-@dev_router.post(
+@debug_router.post(
     "/payments/purchase-order",
     dependencies=[Depends(require_debug_environment)],
 )

@@ -104,11 +104,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(uploads_router())
     app.include_router(files_router())
     app.include_router(branding_router())
-    if resolved.environment in ("local", "dev"):
-        # Dev-only router: each route still checks which non-production environment it allows.
+    if resolved.environment == "local":
+        # Never mounted elsewhere (and every route refuses outside local too).
         from bido_back.api.dev import dev_router
 
         app.include_router(dev_router)
+    if resolved.environment in ("local", "dev"):
+        # Debug data for demos; never mounted in production (and refuses there too).
+        from bido_back.api.dev import debug_router
+
+        app.include_router(debug_router)
     # Request ids, the access log and error bodies; inside tracing (so log
     # lines carry the trace id) and inside CORS (so a 500 still has its headers).
     add_request_context(app)

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bido_back.api.deps import get_db, get_principal
 from bido_back.api.dev import (
+    debug_router,
     dev_router,
     get_dev_settings,
     get_inbound_service,
@@ -89,7 +90,7 @@ def _payment_client(environment: str, creator: FakePaymentDemoCreator) -> TestCl
         }
     )
     app = FastAPI()
-    app.include_router(dev_router)
+    app.include_router(debug_router)
     app.dependency_overrides[get_dev_settings] = lambda: settings
     app.dependency_overrides[get_principal] = lambda: Principal(
         tenant_id=uuid4(), user_id=uuid4(), role="owner"
@@ -170,5 +171,6 @@ def test_empty_body_is_rejected() -> None:
 def test_not_in_openapi() -> None:
     app = FastAPI()
     app.include_router(dev_router)
+    app.include_router(debug_router)
     assert "/dev/inbound" not in app.openapi()["paths"]
     assert "/dev/payments/purchase-order" not in app.openapi()["paths"]
