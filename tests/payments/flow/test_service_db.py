@@ -271,7 +271,7 @@ def test_payments_are_off_until_every_setting_is_there() -> None:
 
 def test_the_config_view_shows_public_values_only() -> None:
     hidden = {
-        "basis_theory_api_key": "bt-private-value",
+        "bt_api_key": "bt-private-value",
         "privy_app_secret": "privy-app-value",
         "privy_authorization_key": "privy-authorization-value",
         "solana_rpc_url": "https://rpc.example.test/private-path",
@@ -284,7 +284,7 @@ def test_the_config_view_shows_public_values_only() -> None:
         {
             "environment": "test",
             "database_url": "postgresql+asyncpg://app@localhost:5432/unused",
-            "basis_theory_public_key": "public-elements-key",
+            "bt_public_key": "public-elements-key",
             "payments_card_charge": "simulated",
             "privy_app_id": "privy-app",
             "privy_wallet_owner_id": "quorum-id",

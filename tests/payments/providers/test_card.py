@@ -660,7 +660,7 @@ async def test_the_simulated_gateway_needs_no_stripe_settings() -> None:
 @pytest.mark.parametrize(
     ("overrides", "missing"),
     [
-        ({"basis_theory_api_key": None}, "BASIS_THEORY_API_KEY"),
+        ({"bt_api_key": None}, "BT_API_KEY"),
         ({"stripe_secret_key": None}, "STRIPE_SECRET_KEY"),
         ({"stripe_network_business_profile": None}, "STRIPE_NETWORK_BUSINESS_PROFILE"),
     ],
@@ -673,7 +673,7 @@ def test_the_gateway_needs_its_settings(overrides: dict[str, object], missing: s
 @pytest.mark.parametrize(
     "update",
     [
-        {"basis_theory_api_url": "https://api.basistheory.com"},
+        {"bt_api_base": "https://api.basistheory.com"},
         {"environment": "prd"},
     ],
 )

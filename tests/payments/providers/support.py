@@ -130,8 +130,8 @@ def payment_settings(**overrides: object) -> Settings:
     base: dict[str, object] = {
         "environment": "test",
         "database_url": "postgresql://app@localhost:5432/unused",
-        "basis_theory_api_url": BT_URL,
-        "basis_theory_api_key": BT_KEY,
+        "bt_api_base": BT_URL,
+        "bt_api_key": BT_KEY,
         "payments_card_charge": "stripe",
         "stripe_secret_key": STRIPE_KEY,
         "stripe_network_business_profile": NETWORK_PROFILE,

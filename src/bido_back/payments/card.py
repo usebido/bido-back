@@ -348,7 +348,7 @@ def build_card_gateway(settings: Settings, *, http: httpx.AsyncClient | None = N
     )
     if settings.payments_card_charge == "simulated":
         # Settings refuse this already; a gateway that never charges must not reach prd.
-        test_tenant = urlsplit(settings.basis_theory_api_url).hostname == BASIS_THEORY_TEST_HOST
+        test_tenant = urlsplit(settings.bt_api_base).hostname == BASIS_THEORY_TEST_HOST
         if not test_tenant or settings.environment == "prd":
             raise PaymentsNotConfigured(
                 "PAYMENTS_CARD_CHARGE=simulated needs the Basis Theory test tenant, outside prd"
@@ -374,8 +374,8 @@ def build_card_gateway(settings: Settings, *, http: httpx.AsyncClient | None = N
 
 def _basis_theory(settings: Settings, http: httpx.AsyncClient | None) -> BasisTheoryClient:
     return BasisTheoryClient(
-        settings.basis_theory_api_url,
-        _required(settings.basis_theory_api_key, "BASIS_THEORY_API_KEY"),
+        settings.bt_api_base,
+        _required(settings.bt_api_key, "BT_API_KEY"),
         http=http,
     )
 

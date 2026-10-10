@@ -125,10 +125,13 @@ class Settings(BaseSettings):
     #
     # Card: Basis Theory Agentic Payments (vault + `spt` rail), charged on Bido's
     # Stripe account. The private key stays in the backend; the public key only
-    # tokenizes cards in the browser (Basis Theory Elements).
-    basis_theory_api_url: str = "https://api.test.basistheory.com"
-    basis_theory_api_key: str | None = Field(default=None, repr=False)
-    basis_theory_public_key: str | None = None
+    # tokenizes cards in the browser (Basis Theory Elements). Same names as core-api;
+    # no BT_AGENT_ID: Agentic Payments (payment methods, allowances, credentials) has
+    # no agents, only the deprecated Agentic Commerce API did. The default is the
+    # test tenant: production is https://api.basistheory.com.
+    bt_api_base: str = "https://api.test.basistheory.com"
+    bt_api_key: str | None = Field(default=None, repr=False)
+    bt_public_key: str | None = None
     # "simulated": the Basis Theory test tenant mints mock Stripe tokens that
     # Stripe cannot charge, so the charge is recorded as simulated (marked as
     # such everywhere). Only with the test tenant, never in prd.
@@ -203,7 +206,7 @@ class Settings(BaseSettings):
     def _simulated_charges_only_on_the_test_tenant(self) -> Self:
         if self.payments_card_charge == "simulated" and (
             self.environment == "prd"
-            or urlsplit(self.basis_theory_api_url).hostname != BASIS_THEORY_TEST_HOST
+            or urlsplit(self.bt_api_base).hostname != BASIS_THEORY_TEST_HOST
         ):
             raise ValueError(
                 "PAYMENTS_CARD_CHARGE=simulated needs the Basis Theory test tenant "

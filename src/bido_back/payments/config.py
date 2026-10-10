@@ -25,7 +25,7 @@ class PaymentProviders:
 def missing_payment_settings(settings: Settings) -> list[str]:
     """The environment variables payments still need (names only, never values)."""
     required: dict[str, str | None] = {
-        "BASIS_THEORY_API_KEY": settings.basis_theory_api_key,
+        "BT_API_KEY": settings.bt_api_key,
         "PRIVY_APP_ID": settings.privy_app_id,
         "PRIVY_APP_SECRET": settings.privy_app_secret,
         "PRIVY_AUTHORIZATION_KEY": settings.privy_authorization_key,

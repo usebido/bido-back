@@ -144,13 +144,13 @@ def payments_config_view(settings: Settings) -> PaymentsConfigView:
     """What the browser needs to show payments (public values only); nothing when off."""
     if not payments_enabled(settings):
         return PaymentsConfigView(enabled=False, card=None, chain=None)
-    test = urlsplit(settings.basis_theory_api_url).hostname == BASIS_THEORY_TEST_HOST
+    test = urlsplit(settings.bt_api_base).hostname == BASIS_THEORY_TEST_HOST
     return PaymentsConfigView(
         enabled=True,
         card=CardSetupView(
             provider="basis_theory",
             environment="test" if test else "production",
-            public_key=settings.basis_theory_public_key,
+            public_key=settings.bt_public_key,
             simulated=settings.payments_card_charge == "simulated",
         ),
         chain=ChainSetupView(
