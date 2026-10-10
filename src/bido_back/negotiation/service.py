@@ -253,7 +253,6 @@ class SweepResult:
     skipped: int = 0
     held: int = 0
     rfqs: list[UUID] = field(default_factory=list[UUID])
-    held: int = 0
 
 
 # --- Loading what the planner needs ------------------------------------------------------
