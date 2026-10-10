@@ -1433,3 +1433,34 @@ class ProcurementAssessment(Base):
     assessment: Mapped[dict[str, JsonValue]] = mapped_column(JSONB)
     rfq_id: Mapped[UUID | None] = mapped_column(ForeignKey("rfqs.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class CopilotAnalysis(Base):
+    """A source analysis a copilot conversation ran, kept whole (migration 0040).
+
+    Keyed by its inputs (`input_key`: the files and the buyer's normalized scope):
+    the same inputs in the same conversation return this result instead of
+    recomputing, and `explain_analysis_item` reads an item of the latest one
+    (`last_used_at`). `bido_back.copilot.analyses`.
+    """
+
+    __tablename__ = "copilot_analyses"
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "user_id", "conversation_id", "input_key", name="copilot_analyses_input"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id", ondelete="CASCADE"))
+    user_id: Mapped[UUID] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"))
+    conversation_id: Mapped[UUID]
+    run_id: Mapped[UUID]
+    input_key: Mapped[str] = mapped_column(Text)
+    upload_ids: Mapped[list[UUID]] = mapped_column(ARRAY(Uuid()))
+    request: Mapped[dict[str, JsonValue] | None] = mapped_column(JSONB)
+    assessment: Mapped[dict[str, JsonValue]] = mapped_column(JSONB)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    last_used_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )

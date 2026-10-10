@@ -245,6 +245,22 @@ draft RFQ link can change. The cache key includes upload identities, source-byte
 hashes, objective and assessment contract version. A changed source or objective
 creates a new snapshot. This does not import canonical master data.
 
+Within a conversation, every `analyze_procurement_sources` result is also kept
+whole in `copilot_analyses` (forced tenant RLS, owner and conversation scoped),
+keyed by the upload ids and the buyer's normalized scope request
+(`bido_back.copilot.analyses`). Follow-up questions read it instead of re-running:
+`explain_analysis_item(material | line)` returns one line of the latest analysis as
+code computed it (dated demand, stock, open orders and their arrival, netting,
+timing status and dates, the chosen supplier, expedites, the alert with its
+`reason` or the exclusion with its reason), with no model call. The same files and
+an equivalent scope (values the stored analysis was asked or resolved to) return
+the stored result unless the buyer explicitly asks to recompute (`recompute`). A
+narrower call on the same files (an item, plant or MRP element the stored analysis
+did not narrow to) is never stored, and when it names an item the stored analysis
+has, it is not run at all: the tool points to `explain_analysis_item`. This is the
+conversation's working memory, not a saved assessment: it is not listed by
+`list_procurement_assessments`.
+
 `get_procurement_assessment` retrieves the snapshot in later conversations.
 `create_rfq_from_assessment` copies validated positive requirements, exact units,
 dates, locations and evidence into a draft without asking the LLM to repeat

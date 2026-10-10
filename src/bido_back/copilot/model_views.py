@@ -26,6 +26,7 @@ from typing import Final
 
 from pydantic import BaseModel, JsonValue
 
+from bido_back.copilot.analyses import AnalysisItemOut
 from bido_back.purchasing.sources.contracts import SourceAssessment
 
 # The keys every `SourceRef` has.
@@ -167,6 +168,23 @@ def assessment_view(assessment: SourceAssessment) -> JsonValue:
             ]
         view[key] = item
     return view
+
+
+def analysis_item_view(output: AnalysisItemOut) -> JsonValue:
+    """An item of a stored analysis as the model reads it: without cell references and
+    empty values, each line's lists cut like an assessment's lines (what was cut counted)."""
+    data = _pruned(without_cell_refs(output.model_dump(mode="json")))
+    if not isinstance(data, dict):
+        return data
+    items = data.get("items")
+    if isinstance(items, list):
+        data["items"] = [
+            {**item, "line": _line(line, set())}
+            if isinstance(item, dict) and isinstance(line := item.get("line"), dict)
+            else item
+            for item in items
+        ]
+    return data
 
 
 def _pruned(value: JsonValue) -> JsonValue:

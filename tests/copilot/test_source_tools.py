@@ -142,7 +142,7 @@ def test_source_tool_is_read_only_and_has_provider_compatible_inputs() -> None:
     schema = tool.input_schema()
     properties = schema["properties"]
     assert isinstance(properties, dict)
-    assert set(properties) == {"upload_ids", "objective", "scope"}
+    assert set(properties) == {"upload_ids", "objective", "scope", "recompute"}
     definitions = schema["$defs"]
     assert isinstance(definitions, dict)
     scope_schema = definitions["ScopeRequestInput"]
