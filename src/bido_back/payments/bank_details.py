@@ -71,6 +71,11 @@ class _Details(BaseModel):
     bank_code: str | None
     bank_address: str | None
     beneficiary_address: str | None
+    # Defaults: details sealed before Bido asked for these (all for companies).
+    beneficiary_type: str = "business"
+    beneficiary_name_local: str | None = None
+    bank_name_local: str | None = None
+    national_id: str | None = None
 
 
 def _to_bytes(details: BankAccountDetails) -> bytes:

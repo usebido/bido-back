@@ -152,9 +152,12 @@ async def test_pay_a_purchase_order_over_http(
     account = added.json()
     assert (account["beneficiary_display"], account["account_last4"]) == ("Shen…", "7890")
     assert ACCOUNT_NUMBER not in added.text and ACCOUNT.beneficiary_name not in added.text
+    assert "精密" not in added.text
     assert [a["id"] for a in (await http.get(accounts)).json()] == [account["id"]]
     invalid = await http.post(accounts, json={**ACCOUNT_JSON, "bank_code": "1045"})
     assert invalid.status_code == 422  # a CNAPS code has 12 digits
+    swift_only = {k: v for k, v in ACCOUNT_JSON.items() if k != "bank_code"}
+    assert (await http.post(accounts, json=swift_only)).status_code == 422  # paid by CNAPS
 
     others_card = await add_payment_method(world.engine, people.tenant, people.member)
     not_mine = await http.post(

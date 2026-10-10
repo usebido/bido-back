@@ -115,6 +115,8 @@ ACCOUNT = CreatePayoutAccountRequest(
     currency="CNY",
     swift_bic="BKCHCNBJ45A",
     bank_code="104584000003",
+    beneficiary_name_local="深圳精密零件有限公司",
+    bank_name_local="中国银行深圳分行",
 )
 ACCOUNT_NUMBER = "6222021234567890"
 ART_VIEW = PaymentMethodDisplayView(
@@ -596,6 +598,10 @@ async def test_only_an_approver_or_the_owner_adds_a_payout_account_and_bido_keep
         bank_code="104584000003",
         bank_address=None,
         beneficiary_address=None,
+        beneficiary_type="business",
+        beneficiary_name_local="深圳精密零件有限公司",
+        bank_name_local="中国银行深圳分行",
+        national_id=None,
     )
     assert sealer.sealed == [details]
     fingerprint = hashes.bank_fingerprint("CN", "104584000003", ACCOUNT_NUMBER)
@@ -611,7 +617,13 @@ async def test_only_an_approver_or_the_owner_adds_a_payout_account_and_bido_keep
     with pytest.raises(ValueError, match="another supplier"):
         await sealer.open(row.details_ciphertext, tenant_id=people.tenant, supplier_id=uuid4())
     stored = [str(getattr(row, attr.key)) for attr in inspect(SupplierPayoutAccount).column_attrs]
-    for secret in (ACCOUNT_NUMBER, ACCOUNT.account_number, ACCOUNT.beneficiary_name, "Precision"):
+    for secret in (
+        ACCOUNT_NUMBER,
+        ACCOUNT.account_number,
+        ACCOUNT.beneficiary_name,
+        "Precision",
+        "精密",
+    ):
         assert not [value for value in stored if secret in value]
     [event] = await actions(world, "supplier.payout_account_added")
     assert event.payload == {"supplier_id": str(rhein), "payout_account_id": str(added.id)}

@@ -462,6 +462,10 @@ def _normalized(code: str) -> str:
     return _ACCOUNT_NOISE.sub("", code).upper()
 
 
+def _stripped(text: str | None) -> str | None:
+    return text.strip() if text is not None else None
+
+
 def _masked_name(name: str) -> str:
     return name if len(name) <= _NAME_SHOWN else f"{name[:_NAME_SHOWN]}…"
 
@@ -523,6 +527,10 @@ async def create_payout_account(
         bank_code=bank_code,
         bank_address=body.bank_address,
         beneficiary_address=body.beneficiary_address,
+        beneficiary_type=body.beneficiary_type,
+        beneficiary_name_local=_stripped(body.beneficiary_name_local),
+        bank_name_local=_stripped(body.bank_name_local),
+        national_id=body.national_id.upper() if body.national_id else None,
     )
     sealed = await bank_details.seal(
         details, tenant_id=principal.tenant_id, supplier_id=supplier_id

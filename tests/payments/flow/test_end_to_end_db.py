@@ -60,6 +60,8 @@ ACCOUNT = CreatePayoutAccountRequest(
     currency="CNY",
     swift_bic="BKCHCNBJ92A",
     bank_code="104332000017",
+    beneficiary_name_local="宁波精密工具有限公司",
+    bank_name_local="中国银行宁波分行",
 )
 
 

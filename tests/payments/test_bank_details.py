@@ -2,9 +2,11 @@
 
 # ruff: noqa: S105, S106 - fake keys, never real credentials
 
+import base64
+import json
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import cast
 from uuid import uuid4
 
@@ -14,6 +16,7 @@ from cryptography.fernet import Fernet
 from bido_back.payments.bank_details import (
     FERNET_SCHEME,
     KMS_SCHEME,
+    PURPOSE,
     BankDetailsUnreadable,
     FernetBankDetailsCipher,
     KmsBankDetailsCipher,
@@ -35,8 +38,18 @@ DETAILS = BankAccountDetails(
     bank_code="104332000017",
     bank_address=None,
     beneficiary_address="Ningbo, Zhejiang",
+    beneficiary_type="business",
+    beneficiary_name_local="宁波精密工具有限公司",
+    bank_name_local="中国银行宁波分行",
+    national_id=None,
 )
-CLEAR = (b"6217850000001234567", b"Ningbo Precision", b"104332000017")
+CLEAR = (
+    b"6217850000001234567",
+    b"Ningbo Precision",
+    b"104332000017",
+    "宁波精密".encode(),
+    b"\\u5b81",  # the same, as JSON escapes it
+)
 
 
 def settings(**values: object) -> Settings:
@@ -99,7 +112,9 @@ async def test_kms_seals_under_a_fresh_data_key_bound_to_the_row() -> None:
 async def test_tampered_or_foreign_ciphertext_does_not_open() -> None:
     fernet = FernetBankDetailsCipher(Fernet.generate_key().decode())
     sealed = await fernet.seal(DETAILS, tenant_id=TENANT, supplier_id=SUPPLIER)
-    tampered = sealed[:-2] + bytes([sealed[-2] ^ 1]) + sealed[-1:]
+    # A byte mid-token: the last base64 characters may carry only padding bits.
+    middle = len(sealed) // 2
+    tampered = sealed[:middle] + bytes([sealed[middle] ^ 1]) + sealed[middle + 1 :]
     with pytest.raises(BankDetailsUnreadable):
         await fernet.open(tampered, tenant_id=TENANT, supplier_id=SUPPLIER)
     other_key = FernetBankDetailsCipher(Fernet.generate_key().decode())
@@ -108,6 +123,25 @@ async def test_tampered_or_foreign_ciphertext_does_not_open() -> None:
     kms = KmsBankDetailsCipher("alias/payout-details", FakeKms())
     with pytest.raises(BankDetailsUnreadable):
         await kms.open(sealed, tenant_id=TENANT, supplier_id=SUPPLIER)
+
+
+async def test_details_sealed_before_the_local_names_open_as_a_company() -> None:
+    key = Fernet.generate_key().decode()
+    earlier = {
+        name: value
+        for name, value in asdict(DETAILS).items()
+        if name
+        not in {"beneficiary_type", "beneficiary_name_local", "bank_name_local", "national_id"}
+    }
+    inner = {
+        "c": {"tenant_id": str(TENANT), "supplier_id": str(SUPPLIER), "purpose": PURPOSE},
+        "d": base64.b64encode(json.dumps(earlier).encode()).decode(),
+    }
+    sealed = FERNET_SCHEME + Fernet(key.encode()).encrypt(json.dumps(inner).encode())
+    opened = await FernetBankDetailsCipher(key).open(sealed, tenant_id=TENANT, supplier_id=SUPPLIER)
+    assert opened == replace(
+        DETAILS, beneficiary_type="business", beneficiary_name_local=None, bank_name_local=None
+    )
 
 
 async def test_the_builder_prefers_kms_and_still_opens_fernet_rows() -> None:

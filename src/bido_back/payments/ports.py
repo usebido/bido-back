@@ -148,6 +148,10 @@ class BankAccountDetails:
     bank_code: str | None  # the local clearing code: CNAPS for China
     bank_address: str | None
     beneficiary_address: str | None
+    beneficiary_type: str  # "business" or "individual"
+    beneficiary_name_local: str | None  # in the local script: Chinese characters for China
+    bank_name_local: str | None
+    national_id: str | None  # an individual's national identification number
 
 
 class BankDetailsCipher(Protocol):
