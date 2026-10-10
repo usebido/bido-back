@@ -4152,6 +4152,20 @@
             "title": "Bank Name",
             "type": "string"
           },
+          "bank_name_local": {
+            "anyOf": [
+              {
+                "maxLength": 140,
+                "minLength": 2,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The bank's name in the local script: in Chinese characters, required for a CNY account in China",
+            "title": "Bank Name Local"
+          },
           "beneficiary_address": {
             "anyOf": [
               {
@@ -4170,6 +4184,30 @@
             "title": "Beneficiary Name",
             "type": "string"
           },
+          "beneficiary_name_local": {
+            "anyOf": [
+              {
+                "maxLength": 140,
+                "minLength": 2,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The beneficiary's name in the local script: in Chinese characters, required for a CNY account in China",
+            "title": "Beneficiary Name Local"
+          },
+          "beneficiary_type": {
+            "default": "business",
+            "description": "A company, or a person (who needs `national_id`)",
+            "enum": [
+              "business",
+              "individual"
+            ],
+            "title": "Beneficiary Type",
+            "type": "string"
+          },
           "country": {
             "pattern": "^[A-Z]{2}$",
             "title": "Country",
@@ -4179,6 +4217,21 @@
             "pattern": "^[A-Z]{3}$",
             "title": "Currency",
             "type": "string"
+          },
+          "national_id": {
+            "anyOf": [
+              {
+                "maxLength": 40,
+                "minLength": 4,
+                "pattern": "^[0-9A-Za-z-]+$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The person's national identification number; required for an individual",
+            "title": "National Id"
           },
           "swift_bic": {
             "anyOf": [

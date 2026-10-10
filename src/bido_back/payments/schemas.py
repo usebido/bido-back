@@ -23,6 +23,9 @@ CountryCode = Annotated[str, StringConstraints(pattern=r"^[A-Z]{2}$")]
 CurrencyCode = Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")]
 
 _CNAPS = re.compile(r"[0-9]{12}", re.ASCII)
+_HAN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+BeneficiaryType = Literal["business", "individual"]
 
 MAX_MILESTONES = 4
 MAX_MILESTONE_NAME_BYTES = 24
@@ -94,6 +97,30 @@ class CreatePayoutAccountRequest(BaseModel):
     )
     bank_address: str | None = Field(default=None, max_length=200)
     beneficiary_address: str | None = Field(default=None, max_length=200)
+    beneficiary_type: BeneficiaryType = Field(
+        default="business", description="A company, or a person (who needs `national_id`)"
+    )
+    beneficiary_name_local: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=140,
+        description="The beneficiary's name in the local script: in Chinese characters, "
+        "required for a CNY account in China",
+    )
+    bank_name_local: str | None = Field(
+        default=None,
+        min_length=2,
+        max_length=140,
+        description="The bank's name in the local script: in Chinese characters, required "
+        "for a CNY account in China",
+    )
+    national_id: str | None = Field(
+        default=None,
+        min_length=4,
+        max_length=40,
+        pattern=r"^[0-9A-Za-z-]+$",
+        description="The person's national identification number; required for an individual",
+    )
 
     @model_validator(mode="after")
     def _routable(self) -> Self:
@@ -102,6 +129,19 @@ class CreatePayoutAccountRequest(BaseModel):
         code = self.bank_code
         if self.country == "CN" and code is not None and not _CNAPS.fullmatch(code):
             raise ValueError("a CNAPS code has 12 digits")
+        if self.beneficiary_type == "individual" and self.national_id is None:
+            raise ValueError("an individual beneficiary needs their national identification number")
+        if self.country == "CN" and self.currency == "CNY":
+            # Paid locally through CNAPS, not SWIFT; the payout provider takes the names as
+            # registered in China.
+            if code is None:
+                raise ValueError("a CNY account in China is paid through CNAPS: give its code")
+            for field, value in (
+                ("beneficiary_name_local", self.beneficiary_name_local),
+                ("bank_name_local", self.bank_name_local),
+            ):
+                if value is None or not _HAN.search(value):
+                    raise ValueError(f"a CNY account in China needs {field} in Chinese characters")
         return self
 
 
