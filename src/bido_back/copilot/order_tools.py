@@ -1,5 +1,7 @@
 """Copilot tools for the purchase order after the send (`awards.lifecycle`).
 
+- `send_purchase_order` (draft, gated): asks for the approval that emails a draft
+  order to its supplier (the same approval the PO page's Send asks for).
 - `list_purchase_orders` (read): the order book, newest first, with a count per
   fulfilment state over all the company's orders, so "which POs are open?" and
   "what did we receive?" have an answer.
@@ -45,6 +47,7 @@ from bido_back.awards.schemas import (
     ReceiptLineRequest,
     ReceiptRequest,
 )
+from bido_back.awards.thread import thread_of
 from bido_back.copilot import proposals, queries
 from bido_back.copilot.proposals import (
     PROPOSAL_ARG,
@@ -172,6 +175,10 @@ class CloseIn(OrderRef):
     reason: str | None = Field(default=None, max_length=2000)
 
 
+class SendOrderIn(OrderRef):
+    pass
+
+
 class CancelIn(OrderRef):
     reason: str | None = Field(default=None, max_length=2000, description="Why; required")
 
@@ -183,6 +190,11 @@ class OrderActionOut(AwaitingConfirmation):
     rfq_completed: bool = Field(
         default=False, description="This action completed the RFQ (all its orders are done)"
     )
+    send_approval_id: UUID | None = Field(
+        default=None,
+        description="Sending a draft order: the email to the supplier, waiting for approval in "
+        "the approvals queue (nothing is sent before)",
+    )
     cancellation_approval_id: UUID | None = Field(
         default=None,
         description="Cancelling a sent order: the cancellation email to the supplier, waiting "
@@ -191,6 +203,7 @@ class OrderActionOut(AwaitingConfirmation):
 
 
 Action = Literal[
+    "send_purchase_order",
     "acknowledge_purchase_order",
     "receive_purchase_order",
     "close_purchase_order",
@@ -586,6 +599,61 @@ def order_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:
             raise _service_error(exc) from None
         return await _done(ctx, po_id, args.proposal_id)
 
+    async def send_purchase_order(ctx: ToolContext, args: SendOrderIn) -> OrderActionOut:
+        action: Action = "send_purchase_order"
+        if args.proposal_id is None:
+            async with tenant_session(db, ctx.tenant_id) as session:
+                po = await _find_po(session, args.po, args.rfq)
+                rfq_ref, supplier = await _names(session, po)
+                lines = await po_lines(session, po.id)
+                thread = await thread_of(session, po.invite_id)
+            if po.fulfilment_state == "cancelled":
+                raise ToolError(f"{po.ref} is cancelled")
+            if po.status == "pending_approval":
+                raise ToolError(f"{po.ref} already waits for approval in the approvals queue")
+            if po.status != "draft":
+                raise ToolError(f"{po.ref} was already sent")
+            if thread.sender_user_id is None or not thread.contact_email:
+                raise ToolError(f"{po.ref}: the RFQ email to {supplier} was never sent from Bido")
+            shown = [
+                ProposedOrderLine(
+                    position=line.position,
+                    description=line.description,
+                    unit=line.unit,
+                    ordered=line.quantity,
+                    received_so_far=_ZERO,
+                    remaining_after=line.quantity,
+                )
+                for line in lines
+            ]
+            preview = _preview(
+                action,
+                po,
+                rfq_ref,
+                supplier,
+                state_after="sent, once the email is approved",
+                lines=shown,
+                email_to=thread.contact_email,
+                total=po.total,
+                currency=po.currency,
+            )
+            proposal_id = await _propose(
+                ctx, action, args.model_copy(update={"po": str(po.id)}), preview, SendOrderIn()
+            )
+            return OrderActionOut(
+                awaiting_confirmation=True, proposal_id=proposal_id, preview=preview, ref=po.ref
+            )
+        claimed = await _claim(ctx, action, args.proposal_id)
+        po_id = UUID(str(claimed.args["po"]))
+        try:
+            requested = await award_service.request_po_send(
+                db, _principal(ctx), po_id, deps.mailboxes
+            )
+        except RfqError as exc:
+            await proposals.release(db, _principal(ctx), args.proposal_id)
+            raise _service_error(exc) from None
+        return await _done(ctx, po_id, args.proposal_id, send_approval_id=requested.approval_id)
+
     async def cancel_purchase_order(ctx: ToolContext, args: CancelIn) -> OrderActionOut:
         action: Action = "cancel_purchase_order"
         if args.proposal_id is None:
@@ -665,6 +733,17 @@ def order_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:
             ListPurchaseOrdersOut,
             "read",
             list_purchase_orders,
+        ),
+        Tool(
+            "send_purchase_order",
+            "Ask for the approval that emails a draft purchase order (after an approved award) "
+            "to its supplier, in the RFQ thread, with the PO as PDF and .xlsx. The email waits "
+            "in the approvals queue (send_approval_id); nothing is sent before it is approved."
+            + _CONFIRM_FIRST.replace(" Nothing is sent to the supplier either way.", ""),
+            SendOrderIn,
+            OrderActionOut,
+            "draft",
+            send_purchase_order,
         ),
         Tool(
             "acknowledge_purchase_order",

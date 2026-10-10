@@ -20,7 +20,8 @@ from pydantic import JsonValue
 
 from bido_back.agents.events import args_hash
 from bido_back.exports.render import safe_text
-from bido_back.rfqs.document import DocumentBranding
+from bido_back.rfqs.document import DocumentBranding, labels
+from bido_back.supplier_email.locale import Locale, day, money, quantity
 from bido_back.templates.signature import signature
 
 XLSX_MEDIA_TYPE: Final = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -299,24 +300,43 @@ _TEXT: Final[dict[str, tuple[str, str, str, str]]] = {
 }
 
 
+# The email's own labels; Incoterm and payment terms come from the documents' catalog.
+_EMAIL_WORDS: Final[dict[str, tuple[str, str]]] = {
+    # order total, delivery
+    "en": ("Order total", "Delivery"),
+    "de": ("Bestellsumme", "Liefertermin"),
+    "fr": ("Total de la commande", "Livraison"),
+    "it": ("Totale ordine", "Consegna"),
+    "es": ("Total del pedido", "Entrega"),
+    "pt": ("Total do pedido", "Entrega"),
+}
+
+
 def po_email_body(doc: PoDocument, language: str, buyer_name: str) -> str:
-    """The plain-text email that carries the PO, in the supplier's language (else English)."""
-    greeting, intro, ask, sign_off = _TEXT.get(language.lower()[:2], _TEXT["en"])
+    """The plain-text email that carries the PO, in the supplier's language (else English):
+    numbers, money, units and dates as that language writes them, its own labels."""
+    lang = language.lower()[:2]
+    lang = lang if lang in _TEXT else "en"
+    greeting, intro, ask, sign_off = _TEXT[lang]
+    total_label, delivery_label = _EMAIL_WORDS[lang]
+    shared = labels(lang)
+    locale = Locale.of(lang)
     values = {"supplier": doc.supplier_name, "rfq_ref": doc.rfq_ref, "po_ref": doc.ref}
     lines = "\n".join(
         f"{line.position}. {line.description}"
         + (f" ({line.mpn})" if line.mpn else "")
-        + f": {_num(line.quantity)} {line.unit} x {_num(line.unit_price)} {doc.currency}"
-        + f" = {line.line_total:.2f} {doc.currency}"
-        + (f", {line.need_by.isoformat()}" if line.need_by else "")
+        + f": {quantity(line.quantity, line.unit, locale)}"
+        + f" × {money(line.unit_price, doc.currency, locale)}"
+        + f" = {money(line.line_total, doc.currency, locale)}"
+        + (f" · {delivery_label}: {day(line.need_by, locale)}" if line.need_by else "")
         for line in doc.lines
     )
     terms = " · ".join(
         part
         for part in (
-            f"Total: {doc.total:.2f} {doc.currency}",
-            f"Incoterm: {doc.incoterm}" if doc.incoterm else "",
-            f"Payment: {doc.payment_terms}" if doc.payment_terms else "",
+            f"{total_label}: {money(doc.total, doc.currency, locale)}",
+            f"{shared['incoterm']}: {doc.incoterm}" if doc.incoterm else "",
+            f"{shared['payment_terms']}: {doc.payment_terms}" if doc.payment_terms else "",
         )
         if part
     )

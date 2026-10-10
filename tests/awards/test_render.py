@@ -90,7 +90,8 @@ def test_xlsx_keeps_numbers_and_neutralizes_formulas() -> None:
 def test_the_email_is_in_the_supplier_language_with_an_english_fallback() -> None:
     german = po_email_body(doc(), "de", "Anna Becker")
     assert "Bestellung PO-7" in german and "RFQ-3" in german
-    assert "4000 pcs x 0.1 EUR = 400.00 EUR" in german
+    assert "4.000\xa0Stk. × 0,10\xa0€ = 400,00\xa0€ · Liefertermin: 15.01.2027" in german
+    assert "Bestellsumme: 400,00\xa0€" in german and "Zahlungsbedingungen: 30 days net" in german
     assert german.endswith("Anna Becker\nVoltwerk GmbH")
     assert "purchase order PO-7" in po_email_body(doc(), "zh", "Anna")
 
@@ -100,3 +101,16 @@ def test_the_po_email_signs_the_company_once_without_a_buyer_name() -> None:
     body = po_email_body(doc(), "pt", "Voltwerk GmbH")
     assert body.endswith("Atenciosamente,\nVoltwerk GmbH")
     assert body.count("Voltwerk GmbH") == 1
+
+
+def test_the_po_email_writes_numbers_dates_and_labels_as_the_supplier_reads_them() -> None:
+    """2026-10-10: a Portuguese PO email read "210 UN x 18.1 BRL = 3801.00 BRL, 2026-11-23"
+    and "Payment: 28 ddl"."""
+    from dataclasses import replace
+
+    body = po_email_body(
+        replace(doc(), currency="BRL", incoterm="CIF", payment_terms="28 ddl"), "pt", "Ana"
+    )
+    assert "4.000\xa0pç × R$\xa00,10 = R$\xa0400,00 · Entrega: 15/01/2027" in body
+    assert "Total do pedido: R$\xa0400,00 · Incoterm: CIF · Condição de pagamento: 28 ddl" in body
+    assert "Payment" not in body and "2027-01-15" not in body
