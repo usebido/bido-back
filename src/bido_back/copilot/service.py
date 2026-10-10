@@ -63,6 +63,7 @@ from bido_back.copilot.contracts import (
     StreamItem,
     TitleEvent,
 )
+from bido_back.copilot.language import reply_language
 from bido_back.copilot.titles import (
     MAX_TITLED_TURNS,
     Milestone,
@@ -141,20 +142,26 @@ async def prepare_message(
     """Everything that can fail before streaming starts (so it fails as a plain HTTP error)."""
     documents = await _attachments(deps, principal, request.attachment_ids)
     text = _attachments_text(documents)
-    earlier: tuple[UUID, ...] = ()
+    earlier_inputs: list[CopilotInput] = []
     if request.conversation_id is not None:
-        earlier = await earlier_attachment_ids(deps, principal, request.conversation_id)
+        earlier_inputs = await _earlier_inputs(deps, principal, request.conversation_id)
+    earlier = _attachment_ids(earlier_inputs)
+    # The request requires text or files; files alone get a standing instruction.
+    message = request.message if request.message.strip() else ATTACHMENTS_ONLY_MESSAGE
     return PreparedMessage(
         principal=principal,
         conversation_id=request.conversation_id or uuid4(),
         input=CopilotInput(
-            # The request requires text or files; files alone get a standing instruction.
-            message=request.message if request.message.strip() else ATTACHMENTS_ONLY_MESSAGE,
+            message=message,
             today=datetime.now(UTC).date(),
             attachments=[d.filename for d in documents],
             attachment_ids=list(dict.fromkeys(request.attachment_ids)),
             attachments_text=text,
             earlier_attachment_ids=[i for i in earlier if i not in request.attachment_ids],
+            # Code decides the reply's language, every turn, from the buyer's own words.
+            reply_language=reply_language(
+                _own_words([*(s.message for s in earlier_inputs), message])
+            ),
         ),
     )
 
@@ -166,14 +173,14 @@ def _attachments_text(documents: Sequence[DocumentText]) -> str:
     return text
 
 
-async def earlier_attachment_ids(
-    deps: CopilotDeps, principal: Principal, conversation_id: UUID
-) -> tuple[UUID, ...]:
-    """Upload ids attached in the caller's earlier turns of a conversation, oldest first."""
-    ids: list[UUID] = []
-    for stored in await _earlier_inputs(deps, principal, conversation_id):
-        ids.extend(stored.attachment_ids)
-    return tuple(dict.fromkeys(ids))
+def _attachment_ids(inputs: Sequence[CopilotInput]) -> tuple[UUID, ...]:
+    """Upload ids attached in a conversation's earlier turns, oldest first."""
+    return tuple(dict.fromkeys(i for stored in inputs for i in stored.attachment_ids))
+
+
+def _own_words(messages: Sequence[str]) -> list[str]:
+    """The buyer's own messages: without blanks and the standing instruction for files alone."""
+    return [m for m in messages if m.strip() and m not in ATTACHMENTS_ONLY_MESSAGES]
 
 
 async def buyer_messages(
@@ -187,9 +194,7 @@ async def buyer_messages(
     Bounded to the latest messages that fit `MAX_BUYER_MESSAGES_CHARS`.
     """
     earlier = [s.message for s in await _earlier_inputs(deps, principal, conversation_id)]
-    messages = [m for m in [*earlier, current] if m.strip() and m not in ATTACHMENTS_ONLY_MESSAGES][
-        -MAX_BUYER_MESSAGES:
-    ]
+    messages = _own_words([*earlier, current])[-MAX_BUYER_MESSAGES:]
     kept: list[str] = []
     total = 0
     for message in reversed(messages):
@@ -302,6 +307,7 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
             prepared.input.today,
             prepared.input.attachments,
             own_words,
+            prepared.input.reply_language,
             deps.analysis_writer,
         ),
     )

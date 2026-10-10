@@ -649,3 +649,34 @@ async def test_a_turn_is_traced_with_content_only_when_capture_is_on(
     assert attrs["langfuse.trace.metadata.tenant_id"] == str(copilot_rows.tenant)
     assert [s.name for s in spans if s.name.startswith("tool ")] == ["tool invite_suppliers"]
     assert len([s for s in spans if s.name.startswith("model ")]) == 2
+
+
+def _model_input(call: dict[str, Any]) -> dict[str, Any]:
+    """The run input (our CopilotInput) of a request to the model: its last user message."""
+    for message in reversed(call["input"]):
+        if message.get("role") == "user":
+            content = message["content"]
+            return json.loads(content if isinstance(content, str) else content[0]["text"])
+    raise AssertionError("no user message")
+
+
+@pytest.mark.db
+async def test_the_model_is_told_the_language_the_buyer_writes_in(
+    api: Api, agno_engine: AsyncEngine, copilot_rows: People, script: Script
+) -> None:
+    # Live, 2026-10-10: English messages, every reply in Portuguese.
+    api.runner_config = RunnerConfig(
+        openai_api_key="test-not-a-real-key",
+        agno_database_url=agno_engine.url.render_as_string(hide_password=False),
+    )
+    stub = script(reply(text("Done.")), reply(text("Done.")))
+    conversation = str(uuid4())
+
+    for message in ("Add Elettronica Test Srl as a supplier, please", "sim"):
+        response = await api.http.post(
+            "/v1/copilot/messages", json={"message": message, "conversation_id": conversation}
+        )
+        assert parse_sse(response.text)[-1]["ok"] is True
+
+    # The second message reads as Portuguese; the conversation started in English.
+    assert [_model_input(c)["reply_language"] for c in stub.calls] == ["en", "en"]

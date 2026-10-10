@@ -44,6 +44,14 @@ class CopilotInput(BaseModel):
         default_factory=list[UUID],
         description="Files attached in earlier messages of this conversation (still usable)",
     )
+    reply_language: str | None = Field(
+        default=None,
+        description=(
+            "The language to answer in, as an ISO 639-1 code: the one the buyer started "
+            "this conversation in, read by code from their own messages; null while none "
+            "shows a language"
+        ),
+    )
 
 
 class CopilotReply(BaseModel):

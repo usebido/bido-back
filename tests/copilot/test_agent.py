@@ -109,7 +109,7 @@ def test_definition_and_tools() -> None:
     agent = copilot_agent(tools)
 
     assert agent.model == DEFAULT_MODEL
-    assert (agent.prompt_file, agent.prompt_version) == ("copilot.v33.md", 33)
+    assert (agent.prompt_file, agent.prompt_version) == ("copilot.v34.md", 34)
     # The copilot runs its newest prompt: a new version is never left unused.
     newest = max(int(p.stem.removeprefix("copilot.v")) for p in PROMPTS.glob("copilot.v*.md"))
     assert agent.prompt_version == newest
@@ -148,7 +148,9 @@ async def test_analysis_turns_hand_their_reply_to_the_writer_on_the_stronger_mod
     async def earlier() -> list[str]:
         return ["analisa o motor"]
 
-    handoff = analysis_handoff("analisa o motor", date(2026, 10, 9), ["mb52.xlsx"], earlier)
+    handoff = analysis_handoff(
+        "analisa o motor", date(2026, 10, 9), ["mb52.xlsx"], earlier, reply_language="pt"
+    )
     agent = copilot_agent(tools, handoff=handoff)
 
     # Luna stays the Copilot; only the analysis tools hand the reply off.
@@ -163,6 +165,8 @@ async def test_analysis_turns_hand_their_reply_to_the_writer_on_the_stronger_mod
     assert writer.tools == () and writer.history_runs == 0 and writer.stream_text
     assert isinstance(writer_input, AnalysisReplyInput)
     assert writer_input.buyer_messages == ["analisa o motor"]
+    # The writer answers in the language code gave the Copilot.
+    assert writer_input.reply_language == "pt"
     assert writer_input.tool_calls[0].output == {"a": 1}
     # The writer's own rules first, then the Copilot's presentation rules, whole.
     prompt = writer.load_prompt()
