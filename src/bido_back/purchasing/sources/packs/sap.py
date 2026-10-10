@@ -84,6 +84,7 @@ _BASE_UNIT = Column(
     (
         "UM básica",
         "UMB",
+        "UM",
         "Base unit of measure",
         "Base Unit of Measure",
         "Base unit",

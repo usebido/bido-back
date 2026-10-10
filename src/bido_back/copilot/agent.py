@@ -29,8 +29,8 @@ MAX_TURNS: Final = 12
 
 # The tools whose result the analysis writer presents (when the Copilot has them).
 ANALYSIS_TOOLS: Final = frozenset({"analyze_procurement_sources", "run_purchase_analysis"})
-ANALYSIS_REPLY_PROMPT_FILE: Final = "analysis_reply_writer.v1.md"
-ANALYSIS_REPLY_PROMPT_VERSION: Final = 1
+ANALYSIS_REPLY_PROMPT_FILE: Final = "analysis_reply_writer.v2.md"
+ANALYSIS_REPLY_PROMPT_VERSION: Final = 2
 ANALYSIS_REPLY_MODEL: Final = "gpt-6.1-sol"
 # Live, 2026-10-09, Pedro's 8 SAP files and workbook 01 (k=2): low and medium gave the
 # same answers on the review's points; low was ~10 s faster at the same cost.

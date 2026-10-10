@@ -30,11 +30,13 @@ from bido_back.purchasing.sources.evidence import (
     categorical,
     join_key,
     normalize_unit,
+    row_of,
     same_key,
     source_date,
     source_number,
     source_refs,
     source_text,
+    table_of,
     unit_key,
     unit_price,
 )
@@ -404,12 +406,7 @@ def _direct_demand(
                     )
                 continue
         candidates.append(row)
-    for row in coalesce(
-        candidates,
-        ("reference", "part_number", "location"),
-        issues,
-        "conflicting_material_requirement",
-    ):
+    for row in _requirements(candidates, issues):
         need = source_date(row, "need_by", issues)
         if need is None:
             add_issue(issues, "missing_need_date", "A material requirement has no date.", [row])
@@ -466,6 +463,42 @@ def _direct_demand(
         )
     if assumptions is not None:
         assumptions.extend(_demand_notes(notes, scope))
+
+
+def _requirements(candidates: Sequence[Record], issues: list[Issue]) -> list[Record]:
+    """The requirements of the scope, each once.
+
+    A requirement list states each element once, so inside ONE table every row is its
+    own requirement: an MRP list's element data is a label ("Ordem planej.") or blank
+    as often as an order number, never a key unique per row. Only a material and plant
+    whose requirements come from more than one table can hold the same requirement
+    twice; those are merged by business key (reference, part, plant), and a row
+    without its reference, or with a conflicting one, stays blocked there.
+    """
+    groups: dict[tuple[str | None, str | None], list[Record]] = defaultdict(list)
+    for row in candidates:
+        key = (join_key(source_text(row, "part_number")), join_key(source_text(row, "location")))
+        groups[key].append(row)
+    result: list[Record] = []
+    for rows in groups.values():
+        if len({table_of(row) for row in rows}) > 1:
+            result.extend(
+                coalesce(
+                    rows,
+                    ("reference", "part_number", "location"),
+                    issues,
+                    "conflicting_material_requirement",
+                )
+            )
+            continue
+        # One table: a row the mapper read twice (a section and a record) counts once.
+        seen: set[tuple[str, str, int] | int] = set()
+        for row in rows:
+            cell = row_of(row)
+            if cell not in seen:
+                seen.add(cell)
+                result.append(row)
+    return result
 
 
 def _in_horizon(need: date, scope: PlanningScope, *, lenient: bool) -> bool:

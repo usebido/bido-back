@@ -28,7 +28,7 @@ from bido_back.purchasing.sources.contracts import (
     ScopeResolution,
     SourceAssessment,
 )
-from bido_back.purchasing.sources.evidence import same_key
+from bido_back.purchasing.sources.evidence import describe_locations, same_key
 from bido_back.purchasing.sources.mapping import Mapper, map_sources
 from bido_back.purchasing.sources.packs import PackResult, read_known
 from bido_back.purchasing.sources.packs.base import PackContext
@@ -119,7 +119,7 @@ async def analyze_documents(
     # The rest is computation: off the event loop, so a large source does not hold up the
     # other requests this process serves.
     return await asyncio.to_thread(
-        _settle, known, mapped, problems, coverage, issues, unread, names, scope, today
+        _settle, known, mapped, problems, coverage, issues, unread, names, scope, today, tables
     )
 
 
@@ -133,9 +133,11 @@ def _settle(
     names: Mapping[str, str],
     scope: ScopeRequest | PlanningScope | None,
     today: date,
+    tables: Sequence[EvidenceTable] = (),
 ) -> SourceAssessment:
     """Units, the buyer's boundaries and the assessment of the read records."""
     records = [*known.records, *mapped]
+    read = list(records)
     unit_issues, conversions = convert_units(records)
     problems = [*known.issues, *problems, *unit_issues]
     coverage = [*known.coverage, *coverage]
@@ -283,6 +285,13 @@ def _settle(
             )
         )
     _disclose(result, all_coverage)
+    # Where a failed join is: the file, sheet, column headers and rows the buyer can fix.
+    describe_locations(
+        [*result.issues, *(issue for line in result.lines for issue in line.issues)],
+        read,
+        tables,
+        names,
+    )
     excluded, excluded_left_out = alert_exclusions(result.lines)
     resolution = resolved.resolution if resolved is not None else None
     if resolution is not None and selection.filters:
@@ -381,7 +390,7 @@ async def analyze_uploads(
     source_key = hashlib.sha256(
         json.dumps(
             {
-                "version": 5,
+                "version": 6,
                 "objective": objective,
                 "scope": request.model_dump(mode="json") if request is not None else None,
                 "sources": sorted(

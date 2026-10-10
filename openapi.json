@@ -6327,6 +6327,13 @@
             "title": "Evidence",
             "type": "array"
           },
+          "locations": {
+            "items": {
+              "$ref": "#/components/schemas/IssueLocation"
+            },
+            "title": "Locations",
+            "type": "array"
+          },
           "message": {
             "title": "Message",
             "type": "string"
@@ -6346,6 +6353,107 @@
           "message"
         ],
         "title": "Issue",
+        "type": "object"
+      },
+      "IssueColumn": {
+        "description": "A column an issue concerns, as the buyer finds it in the sheet.",
+        "properties": {
+          "column": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Column"
+          },
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "header": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Header"
+          },
+          "letter": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Letter"
+          },
+          "missing": {
+            "default": false,
+            "title": "Missing",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "field"
+        ],
+        "title": "IssueColumn",
+        "type": "object"
+      },
+      "IssueLocation": {
+        "description": "Where an issue is in one table: which columns, and example rows to look at.",
+        "properties": {
+          "columns": {
+            "items": {
+              "$ref": "#/components/schemas/IssueColumn"
+            },
+            "title": "Columns",
+            "type": "array"
+          },
+          "filename": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Filename"
+          },
+          "rows": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Rows",
+            "type": "array"
+          },
+          "rows_total": {
+            "default": 0,
+            "title": "Rows Total",
+            "type": "integer"
+          },
+          "source_id": {
+            "title": "Source Id",
+            "type": "string"
+          },
+          "table": {
+            "title": "Table",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source_id",
+          "table"
+        ],
+        "title": "IssueLocation",
         "type": "object"
       },
       "IssuedPurchaseOrderLineView": {
