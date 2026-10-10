@@ -99,6 +99,9 @@ class World:
         self.rfq_id: UUID
         self.invite_id: UUID
         self.sent_at: datetime
+        # The first business-day moment at or after the RFQ email (the supplier's calendar):
+        # a sweep "now" that a weekend or a holiday does not push behind the schedule.
+        self.now: datetime
 
     async def setup(self) -> "World":
         principal = buyer(self.people)
@@ -134,6 +137,7 @@ class World:
             stored = await session.get(Invite, invite.id)
             assert stored is not None and stored.sent_at is not None
             self.sent_at = stored.sent_at
+        self.now = service.on_business_day(self.sent_at, "DE")
         return self
 
     async def approve(self, approval_id: UUID) -> None:
@@ -227,7 +231,7 @@ async def test_max_chases_and_rejections(world: World, writer: FakeFollowupWrite
         world.rfq_id,
         FollowupSettingsUpdate(first_after_business_days=0, every_business_days=1, max_chases=2),
     )
-    now = world.sent_at
+    now = world.now
     await world.sweep(writer, now)
     [first] = await world.followups()
     await decide_approval(
@@ -536,7 +540,7 @@ async def test_a_refused_chase_is_held_once_and_the_schedule_moves_on(
     )
     gate_refuses(monkeypatch)
     writer = FakeFollowupWriter()
-    now = datetime.now(UTC)
+    now = world.now
     result = await world.sweep(writer, now)
     assert (result.chases, result.held, result.skipped) == (0, 1, 0)
     [held] = await world.followups()
