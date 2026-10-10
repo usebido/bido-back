@@ -329,8 +329,9 @@ class ProposeMandateIn(BaseModel):
     limits: list[LineLimitIn] = Field(
         default_factory=list[LineLimitIn],
         max_length=200,
-        description="Only limits the buyer stated, for lines without them "
-        "(lines_without_limits); other lines keep the analysis limits",
+        description="Only limits the buyer stated: for lines without them "
+        "(lines_without_limits), or the new limits they gave for a negotiation already "
+        "running; other lines keep their current limits",
     )
 
 
@@ -349,6 +350,9 @@ class ProposeMandateOut(BaseModel):
     # False: approving is fine now, but nothing goes out until the buyer
     # connects their mailbox (Gmail or Outlook); the emails then send on their own.
     mailbox_connected: bool = True
+    # True: the negotiation already runs under a mandate; this one replaces it once
+    # approved (until then the current limits keep applying).
+    replaces_current_mandate: bool = False
 
 
 class MandateStateOut(BaseModel):
@@ -838,12 +842,20 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
                     "now, but sending starts only once they connect Gmail or Outlook "
                     "(onboarding); tell them so."
                 )
+                + (
+                    " This replaces the negotiation's current mandate once approved: until "
+                    "then the current limits keep applying; on approval, emails prepared "
+                    "under the old limits are withdrawn and decided again with the new ones."
+                    if proposed.replaces_mandate_id is not None
+                    else ""
+                )
             ),
             recipients=proposed.recipients,
             domains_to_confirm=sorted(
                 {r.domain for r in proposed.recipients if not r.will_send and r.domain}
             ),
             mailbox_connected=proposed.mailbox_connected,
+            replaces_current_mandate=proposed.replaces_mandate_id is not None,
         )
 
     async def _set_paused(ctx: ToolContext, args: RfqArg, *, paused: bool) -> MandateStateOut:
@@ -1119,7 +1131,9 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             "from the analysis) until the deadline. Nothing is sent until it is approved. "
             "Needs the RFQ's reply-by date (response_due, today or later) when initial "
             "emails are still to be written: if it is missing or past, ask the buyer for it "
-            "and set it with set_rfq_terms first." + ref_hint,
+            "and set it with set_rfq_terms first. To change the limits, deadline or rounds "
+            "of a negotiation already running under a mandate, call it again with the new "
+            "values: it proposes a replacement that takes over once approved." + ref_hint,
             ProposeMandateIn,
             ProposeMandateOut,
             "draft",

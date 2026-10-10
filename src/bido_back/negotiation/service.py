@@ -1434,7 +1434,8 @@ async def update_negotiation(
     """Save the settings and open the negotiation. Current offers are re-evaluated.
 
     Refused while a negotiation mandate is live: its bounds are what a person
-    approved; pause and replace the mandate to change them.
+    approved. To change them, propose a new mandate (`POST .../negotiation/mandate`):
+    it replaces the live one once approved (`bido_back.mandates`).
     """
     at = now or datetime.now(UTC)
     async with tenant_session(db, principal.tenant_id) as session:
@@ -1445,7 +1446,8 @@ async def update_negotiation(
         )
         if live is not None:
             raise InvalidState(
-                f"rfq {rfq_id}: a negotiation mandate is live; its limits cannot change"
+                f"rfq {rfq_id}: a negotiation mandate is live; propose a new mandate "
+                "to replace it with these limits"
             )
         await apply_settings(
             session,
@@ -1583,6 +1585,34 @@ async def _cancel(session: AsyncSession, rows: Sequence[NegotiationMessage], rea
             session.add(approval_audit(approval, "approval.expired", None))
     await session.flush()
     return len(rows)
+
+
+async def withdraw_live_emails(session: AsyncSession, rfq_id: UUID, reason: str) -> int:
+    """Withdraw the RFQ's negotiation emails decided, awaiting approval or approved and not
+    sent yet, in the caller's transaction: each row ends `canceled` (`reason`; a canceled
+    email uses no round), its pending approval expires, and an approved one is skipped by
+    the send handler. The planner decides those offers again. An email whose Message-ID
+    was already claimed may be with the supplier: it is left to finish."""
+    rows = list(
+        await session.scalars(
+            select(NegotiationMessage)
+            .join(Invite, Invite.id == NegotiationMessage.invite_id)
+            .where(
+                Invite.rfq_id == rfq_id,
+                NegotiationMessage.status.in_(_LIVE),
+                NegotiationMessage.message_id_header.is_(None),
+            )
+            .with_for_update(of=NegotiationMessage)
+        )
+    )
+    if not rows:
+        return 0
+    await session.execute(
+        update(Invite)
+        .where(Invite.rfq_id == rfq_id, Invite.negotiation_status.not_in(_FINAL_INVITE))
+        .values(negotiation_evaluated_proposal_id=None)
+    )
+    return await _cancel(session, rows, reason)
 
 
 async def close_negotiation(

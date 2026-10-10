@@ -7726,6 +7726,18 @@
             ],
             "title": "Paused At"
           },
+          "replaces_mandate_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replaces Mandate Id"
+          },
           "rfq_id": {
             "format": "uuid",
             "title": "Rfq Id",
@@ -9918,6 +9930,18 @@
             },
             "title": "Recipients",
             "type": "array"
+          },
+          "replaces_mandate_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Replaces Mandate Id"
           },
           "rfq_id": {
             "format": "uuid",
