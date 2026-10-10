@@ -367,4 +367,9 @@ def po_pdf(doc: PoDocument) -> bytes:
 
 
 def po_pdf_filename(doc: PoDocument) -> str:
-    return f"{re.sub(r'[^A-Za-z0-9-]+', '-', doc.ref).strip('-') or 'PO'}.pdf"
+    return po_pdf_filename_for(doc.ref)
+
+
+def po_pdf_filename_for(ref: str) -> str:
+    """The attached PDF's name from the order's reference alone (the approvals queue)."""
+    return f"{re.sub(r'[^A-Za-z0-9-]+', '-', ref).strip('-') or 'PO'}.pdf"

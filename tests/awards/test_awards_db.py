@@ -364,6 +364,13 @@ async def test_a_purchase_order_is_sent_in_the_thread_after_approval(world: Worl
         "PO-1",
     )
     assert "Bestellung PO-1" in item.thread_email.body  # Rhein writes German
+    # The review shows the attached PDF and the order's own figures, not the RFQ's.
+    assert item.thread_email.attachment_name == "PO-1.pdf"
+    assert (item.thread_email.purchase_order_line_count or 0) >= 1
+    assert (item.thread_email.purchase_order_total, item.thread_email.purchase_order_currency) == (
+        po.total,
+        po.currency,
+    )
     company = await tenant_name(world)
     assert item.thread_email.body.endswith(f"Mit freundlichen Grüßen\n{company}")
     assert item.thread_email.body.count(company) == 1

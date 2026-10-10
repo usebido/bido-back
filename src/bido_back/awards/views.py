@@ -1,6 +1,7 @@
 """Award models the approval queue shows. No imports from the RFQ modules (no cycles)."""
 
 from datetime import date
+from decimal import Decimal
 from typing import Annotated, Literal
 from uuid import UUID
 
@@ -67,3 +68,11 @@ class ThreadEmailApprovalView(BaseModel):
     body: str
     # The same email as HTML, when the proposal has one (the "not selected" notice).
     html_body: str | None = None
+    # A purchase order's send: the PDF attached to the email, as the RFQ send shows its
+    # document (`GET /v1/purchase-orders/{purchase_order_id}.pdf` renders it; an .xlsx with
+    # the same content goes with it).
+    attachment_name: str | None = None
+    # The purchase order's own figures, for the review's header (not the RFQ's).
+    purchase_order_line_count: int | None = None
+    purchase_order_total: Decimal | None = None
+    purchase_order_currency: str | None = None

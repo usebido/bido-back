@@ -142,6 +142,22 @@ class ProposedOrderAction(BaseModel):
     short: bool = False
     reason: str | None = None
     note: str | None = None
+    # Sending a draft order (send_purchase_order): the address it would go to, the total.
+    email_to: str | None = None
+    total: Decimal | None = None
+    currency: str | None = None
+
+
+class ProposedAwardLine(BaseModel):
+    """A line an award would give to a supplier (prepare_award), at its offer's price."""
+
+    position: int
+    description: str
+    supplier_name: str
+    quantity: Decimal
+    unit: str
+    unit_price: Decimal
+    currency: str
 
 
 class ProposedHoldRelease(BaseModel):
@@ -186,6 +202,11 @@ class ProposalPreview(BaseModel):
     purchase_order: ProposedOrderAction | None = None
     # A negotiation hold release (`release_negotiation_hold`): the offer and why it waits.
     negotiation_hold: ProposedHoldRelease | None = None
+    # An award (`prepare_award`): who would get each line, whether that differs from the
+    # recommendation, and the buyer's reason. Confirming only asks for the approval.
+    award: list[ProposedAwardLine] = Field(default_factory=list[ProposedAwardLine])
+    differs_from_recommendation: bool | None = None
+    reason: str | None = None
     questions: list[str] = Field(default_factory=list[str])
     issues: list[str] = Field(
         default_factory=list[str], description="What would stop it, if anything"

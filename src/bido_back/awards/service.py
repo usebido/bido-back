@@ -43,7 +43,12 @@ from bido_back.awards.cancellation import (
     cancellation_proposal_ids,
     cancellation_sent,
 )
-from bido_back.awards.document import PDF_MEDIA_TYPE, po_pdf, po_pdf_filename
+from bido_back.awards.document import (
+    PDF_MEDIA_TYPE,
+    po_pdf,
+    po_pdf_filename,
+    po_pdf_filename_for,
+)
 from bido_back.awards.lifecycle import (
     awaiting_review,
     fulfilment_view,
@@ -99,6 +104,7 @@ from bido_back.db.models import (
     AwardNotice,
     Invite,
     IssuedPurchaseOrder,
+    IssuedPurchaseOrderLine,
     Message,
     Proposal,
     Rfq,
@@ -160,10 +166,20 @@ async def _open_approval(session: AsyncSession, tool: str, call_id: str) -> Appr
     )
 
 
-async def request_award(
+@dataclass(frozen=True, slots=True)
+class CheckedAward:
+    """An award request that passed every check, before anything is proposed."""
+
+    rfq_ref: str
+    attempt: int
+    args: AwardRfqArgs
+
+
+async def check_award(
     db: Db, principal: Principal, rfq_id: UUID, body: AwardRequest, today: date
-) -> AwardRequested:
-    """Propose the award of an open RFQ; a person decides (the buyer by default)."""
+) -> CheckedAward:
+    """What `request_award` would propose, writing nothing (the Copilot's preview): the
+    same state, selection, limit and reason checks, raising the same errors."""
     call_id = award_proposal_ids(rfq_id)[1]
     async with tenant_session(db, principal.tenant_id) as session:
         rfq = await session.get(Rfq, rfq_id)
@@ -202,11 +218,20 @@ async def request_award(
         differs_from_recommendation=selected.differs_from_recommendation,
         reason=reason,
     )
+    return CheckedAward(rfq_ref=rfq_ref, attempt=attempt, args=args)
+
+
+async def request_award(
+    db: Db, principal: Principal, rfq_id: UUID, body: AwardRequest, today: date
+) -> AwardRequested:
+    """Propose the award of an open RFQ; a person decides (the buyer by default)."""
+    checked = await check_award(db, principal, rfq_id, body, today)
+    args = checked.args
     approval_id = await _propose(
         db,
         principal,
         tool=AWARD_RFQ,
-        ids=award_proposal_ids(rfq_id, attempt),
+        ids=award_proposal_ids(rfq_id, checked.attempt),
         session_id=f"rfq:{rfq_id}",
         payload=cast(dict[str, JsonValue], args.model_dump(mode="json")),
     )
@@ -216,8 +241,8 @@ async def request_award(
     return AwardRequested(
         rfq_id=rfq_id,
         approval_id=approval_id,
-        differs_from_recommendation=selected.differs_from_recommendation,
-        lines=selected.lines,
+        differs_from_recommendation=args.differs_from_recommendation,
+        lines=args.lines,
     )
 
 
@@ -719,6 +744,16 @@ async def queue_details(session: AsyncSession, approvals: list[Approval]) -> Que
                 ).one_or_none()
                 rfq_id, rfq_ref, supplier_name = row if row is not None else (None, None, None)
                 po = email if not isinstance(email, SendAwardNoticeArgs) else None
+                order = await session.get(IssuedPurchaseOrder, po.purchase_order_id) if po else None
+                line_count = (
+                    await session.scalar(
+                        select(func.count()).where(
+                            IssuedPurchaseOrderLine.purchase_order_id == order.id
+                        )
+                    )
+                    if order is not None
+                    else None
+                )
                 emails[approval.id] = ThreadEmailApprovalView(
                     kind="purchase_order" if po else "award_notice",
                     invite_id=email.invite_id,
@@ -733,6 +768,14 @@ async def queue_details(session: AsyncSession, approvals: list[Approval]) -> Que
                     subject=email.subject,
                     body=email.body,
                     html_body=email.html_body,
+                    attachment_name=(
+                        po_pdf_filename_for(email.purchase_order_ref)
+                        if isinstance(email, SendPurchaseOrderArgs)
+                        else None
+                    ),
+                    purchase_order_line_count=line_count,
+                    purchase_order_total=order.total if order is not None else None,
+                    purchase_order_currency=order.currency if order is not None else None,
                 )
         except ValueError:
             logger.error("approval %s has args that do not validate", approval.id)

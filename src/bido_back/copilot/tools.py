@@ -32,7 +32,7 @@ model.
 """
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -49,7 +49,7 @@ from bido_back.agents.tools import AnyTool, Tool, ToolError
 from bido_back.auth import Principal
 from bido_back.awards import service as award_service
 from bido_back.awards.schemas import AwardLine, AwardRequest, AwardSelection, PurchaseOrderSummary
-from bido_back.comparison.compute import Recommendation
+from bido_back.comparison.compute import Recommendation, SupplierColumn
 from bido_back.comparison.loader import load_comparison
 from bido_back.comparison.policy import ComparisonPolicy
 from bido_back.copilot import proposals, queries
@@ -65,6 +65,7 @@ from bido_back.copilot.proposals import (
     PROPOSAL_ARG,
     AwaitingConfirmation,
     ProposalPreview,
+    ProposedAwardLine,
     ProposedLine,
     ProposedSupplier,
     QuotedLinePreview,
@@ -905,7 +906,15 @@ class PrepareAwardIn(BaseModel):
         description="Only when the buyer picks suppliers; empty = the recommendation",
     )
     reason: str | None = Field(
-        default=None, description="Why, when the choice differs from the recommendation"
+        default=None,
+        description=(
+            "Why, when the choice differs from the recommendation or breaks the approved "
+            "limits: the buyer's words"
+        ),
+    )
+    proposal_id: UUID | None = Field(
+        default=None,
+        description="From the preview: only after the buyer confirmed it in a later message",
     )
 
 
@@ -937,9 +946,10 @@ class AwardStatusOut(BaseModel):
     purchase_orders: list[PoItem]
 
 
-class PrepareAwardOut(BaseModel):
+class PrepareAwardOut(AwaitingConfirmation):
     ref: str
-    approval_id: UUID
+    # Set once confirmed: the award waiting in the approvals queue.
+    approval_id: UUID | None = None
     differs_from_recommendation: bool
     lines: list[AwardedLineItem]
     note: str
@@ -1134,6 +1144,19 @@ def _template_out(row: RfqTemplate | None) -> TemplateOut:
         footer=row.footer,
         fields=[str(f) for f in row.fields],
     )
+
+
+def _award_supplier(columns: Sequence[SupplierColumn], name: str) -> SupplierColumn | None:
+    """The comparison's supplier the buyer named: an exact name, else the only one whose
+    name contains it ("Roltec" for "ROLTEC DISTRIBUIDORA DE ROLAMENTOS LTDA")."""
+    wanted = " ".join(name.split()).casefold()
+    if not wanted:
+        return None
+    exact = [c for c in columns if c.supplier_name.casefold() == wanted]
+    if len(exact) == 1:
+        return exact[0]
+    partial = [c for c in columns if wanted in c.supplier_name.casefold()]
+    return partial[0] if len(partial) == 1 else None
 
 
 def _awarded_items(lines: list[AwardLine]) -> list[AwardedLineItem]:
@@ -2343,10 +2366,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             ][:MAX_LIST]
         )
 
-    async def prepare_award(ctx: ToolContext, args: PrepareAwardIn) -> PrepareAwardOut:
-        principal = _principal(ctx)
-        async with tenant_session(db, ctx.tenant_id) as session:
-            rfq = await _rfq(session, args.rfq)
+    async def _award_request(principal: Principal, rfq: Rfq, args: PrepareAwardIn) -> AwardRequest:
         selections: list[AwardSelection] = []
         if args.choices:
             comparison = await load_comparison(db, principal, rfq.id, deps.today())
@@ -2355,33 +2375,72 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 line = lines.get(choice.line_position)
                 if line is None:
                     raise ToolError(f"{rfq.ref} has no line {choice.line_position}")
-                wanted = choice.supplier.strip().casefold()
-                matches = [
-                    column
-                    for column in comparison.suppliers
-                    if column.supplier_name.casefold() == wanted
-                ]
-                if len(matches) != 1:
+                column = _award_supplier(comparison.suppliers, choice.supplier)
+                if column is None:
                     raise ToolError(
                         f"no single supplier named {choice.supplier!r} has a proposal on {rfq.ref}"
                     )
                 selections.append(
                     AwardSelection(
-                        rfq_line_id=line.id, tier=choice.tier, invite_id=matches[0].invite_id
+                        rfq_line_id=line.id, tier=choice.tier, invite_id=column.invite_id
                     )
                 )
+        return AwardRequest(lines=selections, reason=args.reason)
+
+    async def prepare_award(ctx: ToolContext, args: PrepareAwardIn) -> PrepareAwardOut:
+        principal = _principal(ctx)
+        action = "prepare_award"
+        if args.proposal_id is None:
+            async with tenant_session(db, ctx.tenant_id) as session:
+                rfq = await _rfq(session, args.rfq)
+            request = await _award_request(principal, rfq, args)
+            try:
+                checked = await award_service.check_award(
+                    db, principal, rfq.id, request, deps.today()
+                )
+            except RfqError as exc:
+                raise _service_error(exc) from None
+            items = _awarded_items(checked.args.lines)
+            preview = ProposalPreview(
+                action=action,
+                rfq=rfq.ref,
+                award=[ProposedAwardLine.model_validate(i.model_dump()) for i in items],
+                differs_from_recommendation=checked.args.differs_from_recommendation,
+                reason=checked.args.reason,
+            )
+            proposal_id = await _propose(
+                ctx,
+                action,
+                args,
+                preview,
+                rfq_id=str(rfq.id),
+                request=request.model_dump(mode="json"),
+            )
+            return PrepareAwardOut(
+                awaiting_confirmation=True,
+                proposal_id=proposal_id,
+                preview=preview,
+                ref=rfq.ref,
+                differs_from_recommendation=checked.args.differs_from_recommendation,
+                lines=items,
+                note=(
+                    "Nothing was asked yet. Confirming sends the award to the approvals "
+                    "queue; nothing is awarded until it is approved."
+                ),
+            )
+        claimed = await _claim(ctx, action, args.proposal_id)
+        stored = AwardRequest.model_validate(claimed.preview["request"])
+        rfq_id = UUID(str(claimed.preview["rfq_id"]))
         try:
             requested = await award_service.request_award(
-                db,
-                principal,
-                rfq.id,
-                AwardRequest(lines=selections, reason=args.reason),
-                deps.today(),
+                db, principal, rfq_id, stored, deps.today()
             )
         except RfqError as exc:
+            await proposals.release(db, principal, args.proposal_id)
             raise _service_error(exc) from None
         return PrepareAwardOut(
-            ref=rfq.ref,
+            proposal_id=args.proposal_id,
+            ref=str(claimed.preview["shown"]["rfq"]),
             approval_id=requested.approval_id,
             differs_from_recommendation=requested.differs_from_recommendation,
             lines=_awarded_items(requested.lines),
