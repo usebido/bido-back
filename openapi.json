@@ -5086,6 +5086,17 @@
             "title": "Requested Date",
             "type": "string"
           },
+          "schedule_line": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Line"
+          },
           "supplier_code": {
             "anyOf": [
               {
@@ -6121,6 +6132,17 @@
               }
             ],
             "title": "Reschedule To"
+          },
+          "schedule_line": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Schedule Line"
           },
           "supplier_code": {
             "anyOf": [
@@ -15974,6 +15996,29 @@
               }
             ],
             "title": "On Time Rate"
+          },
+          "order_unit": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Order Unit"
+          },
+          "order_unit_factor": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Order Unit Factor"
           },
           "ordered_at": {
             "anyOf": [
