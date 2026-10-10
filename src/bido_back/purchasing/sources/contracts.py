@@ -32,11 +32,42 @@ class SourceRef(BaseModel):
     end: int | None = Field(default=None, ge=0)
 
 
+class IssueColumn(BaseModel):
+    """A column an issue concerns, as the buyer finds it in the sheet."""
+
+    # Bido's field read from the column (e.g. "reference" for an order/element reference).
+    field: str
+    # 1-based column and its spreadsheet letter; None when no column of the sheet was
+    # read as that field (the value is missing from every row).
+    column: int | None = None
+    letter: str | None = None
+    # The column's header cell, as written in the sheet, when it is known.
+    header: str | None = None
+    # The located rows have no value in this column.
+    missing: bool = False
+
+
+class IssueLocation(BaseModel):
+    """Where an issue is in one table: which columns, and example rows to look at."""
+
+    source_id: str
+    filename: str | None = None
+    # The sheet (or table) name.
+    table: str
+    columns: list[IssueColumn] = Field(default_factory=list[IssueColumn])
+    # 1-based sheet rows, the first few of `rows_total`.
+    rows: list[int] = Field(default_factory=list[int])
+    rows_total: int = 0
+
+
 class Issue(BaseModel):
     code: str
     severity: Literal["warning", "blocker"]
     message: str
     evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
+    # For a join that failed: the sheets, key columns and example rows to fix, so the
+    # reply can name them (`evidence` is per cell and is not read by the model).
+    locations: list[IssueLocation] = Field(default_factory=list[IssueLocation])
 
 
 CanonicalBasis = Literal[

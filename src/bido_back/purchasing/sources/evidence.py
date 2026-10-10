@@ -3,13 +3,20 @@
 import re
 import unicodedata
 from collections import defaultdict
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Final
 
 from bido_back.purchasing.importers import norm
-from bido_back.purchasing.sources.contracts import Issue, Record, SourceRef
+from bido_back.purchasing.sources.contracts import (
+    EvidenceTable,
+    Issue,
+    IssueColumn,
+    IssueLocation,
+    Record,
+    SourceRef,
+)
 from bido_back.purchasing.sources.formats import read_date, read_number
 from bido_back.purchasing.sources.vocabulary import UNIT_VOCABULARY, built_in, vocabulary_key
 
@@ -73,6 +80,7 @@ def add_issue(
     records: Sequence[Record],
     *fields: str,
     warning: bool = False,
+    locations: Sequence[IssueLocation] = (),
 ) -> None:
     issues.append(
         Issue(
@@ -80,8 +88,129 @@ def add_issue(
             severity="warning" if warning else "blocker",
             message=message,
             evidence=source_refs(records, *fields),
+            locations=list(locations),
         )
     )
+
+
+# Example rows an issue's location names per table; the total is always given.
+LOCATION_ROWS: Final = 5
+
+
+def _first_ref(record: Record) -> SourceRef | None:
+    return record.evidence.get("part_number") or next(iter(record.evidence.values()), None)
+
+
+def table_of(record: Record) -> tuple[str, str] | None:
+    """The source and table a record was read from, when it cites one."""
+    ref = _first_ref(record)
+    return (ref.source_id, ref.table) if ref is not None else None
+
+
+def row_of(record: Record) -> tuple[str, str, int] | int:
+    """The source row a record was read from; a record citing none is only itself."""
+    ref = _first_ref(record)
+    return (ref.source_id, ref.table, ref.row) if ref is not None else id(record)
+
+
+def column_letter(column: int) -> str:
+    """A spreadsheet column's letters: 1 -> A, 27 -> AA."""
+    letters = ""
+    while column > 0:
+        column, rest = divmod(column - 1, 26)
+        letters = chr(ord("A") + rest) + letters
+    return letters
+
+
+def locate(
+    records: Sequence[Record], fields: Sequence[str], missing: Sequence[str] = ()
+) -> list[IssueLocation]:
+    """Per table, the columns read as `fields` and the rows of `records`, capped.
+
+    `missing` are the fields these rows have no value for: their column is the one the
+    table's other records give (see `describe_locations`), else unknown.
+    """
+    tables: dict[tuple[str, str], list[Record]] = defaultdict(list)
+    for record in records:
+        if (where := table_of(record)) is not None:
+            tables[where].append(record)
+    result: list[IssueLocation] = []
+    for (source_id, table), rows in tables.items():
+        columns: list[IssueColumn] = []
+        for field in fields:
+            column = next(
+                (
+                    ref.column
+                    for r in rows
+                    if (ref := r.evidence.get(field)) is not None and ref.table == table
+                ),
+                None,
+            )
+            columns.append(
+                IssueColumn(
+                    field=field,
+                    column=column,
+                    letter=column_letter(column) if column is not None else None,
+                    missing=field in missing,
+                )
+            )
+        lines = sorted({ref.row for r in rows if (ref := _first_ref(r)) is not None})
+        result.append(
+            IssueLocation(
+                source_id=source_id,
+                table=table,
+                columns=columns,
+                rows=lines[:LOCATION_ROWS],
+                rows_total=len(lines),
+            )
+        )
+    return result
+
+
+def _header(table: EvidenceTable, column: int, first_row: int) -> str | None:
+    """The column's header: the nearest text above the table's first record row."""
+    for number in range(first_row - 1, 0, -1):
+        cells = table.rows[number - 1] if number <= len(table.rows) else []
+        cell = cells[column - 1] if column <= len(cells) else None
+        if cell is not None and cell.strip():
+            return cell.strip()
+    return None
+
+
+def describe_locations(
+    issues: Sequence[Issue],
+    records: Sequence[Record],
+    tables: Sequence[EvidenceTable],
+    filenames: Mapping[str, str],
+) -> None:
+    """Name each located issue's file, column letters and headers, in place.
+
+    A column the located rows leave empty is the one the same table's other records
+    read as that field, when the table has one.
+    """
+    by_name = {(t.source_id, t.name): t for t in tables}
+    first: dict[tuple[str, str], int] = {}
+    columns: dict[tuple[str, str, str], int] = {}
+    for record in records:
+        for field, ref in record.evidence.items():
+            columns.setdefault((ref.source_id, ref.table, field), ref.column)
+        # Data rows, not a title cell a section's constant was copied from.
+        if (ref := _first_ref(record)) is not None:
+            where = (ref.source_id, ref.table)
+            first[where] = min(first.get(where, ref.row), ref.row)
+    for issue in issues:
+        for location in issue.locations:
+            where = (location.source_id, location.table)
+            location.filename = filenames.get(location.source_id, location.filename)
+            table = by_name.get(where)
+            for column in location.columns:
+                if column.column is None:
+                    column.column = columns.get((*where, column.field))
+                if column.column is None:
+                    continue
+                column.letter = column_letter(column.column)
+                if table is not None and where in first:
+                    column.header = _header(table, column.column, first[where])
 
 
 def _derived(record: Record, field: str, raw: str, bases: frozenset[str]) -> str | None:

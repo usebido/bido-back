@@ -31,6 +31,7 @@ from bido_back.purchasing.sources.evidence import (
     categorical,
     fact_key,
     join_key,
+    locate,
     normalize_unit,
     same_key,
     source_date,
@@ -81,17 +82,23 @@ def coalesce(
     "2026-10-08"/"08/10/2026" agree. The first record's spelling is kept for display.
     """
     grouped: dict[tuple[str, ...], list[Record]] = defaultdict(list)
+    unkeyed: list[Record] = []
     for record in records:
         if not all(source_text(record, field) for field in keys):
-            add_issue(
-                issues,
-                "missing_join_key",
-                "A record lacks an explicit business key.",
-                [record],
-                *keys,
-            )
+            unkeyed.append(record)
             continue
         grouped[tuple(fact_key(record, field) for field in keys)].append(record)
+    if unkeyed:
+        missing = [f for f in keys if any(source_text(r, f) is None for r in unkeyed)]
+        add_issue(
+            issues,
+            "missing_join_key",
+            f"{len(unkeyed)} record(s) have no {', '.join(missing)}, part of the business "
+            f"key ({', '.join(keys)}) that matches them across reports; they were not used.",
+            unkeyed,
+            *keys,
+            locations=locate(unkeyed, keys, missing),
+        )
     result: list[Record] = []
     for group in grouped.values():
         values: dict[str, str] = {}
@@ -112,7 +119,14 @@ def coalesce(
             for field, ref in record.evidence.items():
                 evidence[field if field not in evidence else f"{field}#{index}"] = ref
         if conflict:
-            add_issue(issues, code, "Records with the same business key disagree.", group)
+            add_issue(
+                issues,
+                code,
+                f"{len(group)} records with the same business key ({', '.join(keys)}) "
+                "disagree; none of them was used.",
+                group,
+                locations=locate(group, keys),
+            )
         else:
             result.append(
                 Record(kind=group[0].kind, values=values, evidence=evidence, canonical=canonical)

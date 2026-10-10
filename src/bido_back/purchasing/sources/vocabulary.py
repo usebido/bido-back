@@ -134,15 +134,16 @@ _SYNONYMS: Final[dict[str, dict[str, tuple[str, ...]]]] = {
             "demand", "consumo", "forecast req", "prev",
         ),
         "receipt": (
-            "pedcpa", "pedido de compra", "item de pedido", "poitem", "po item",
+            "pedcpa", "pedcompra", "pedido de compra", "item de pedido", "poitem", "po item",
             "purchase order", "bs-pos", "bestpo", "bestellung", "ped. compra", "avrem",
             "aviso de remessa", "shpgnt", "shipping notification", "ordprd", "ordpro",
             "ordem de produção", "prdord", "production order", "fertauf",
         ),
         "proposal": (
             "reqcpa", "reqc", "solcom", "requisição de compra", "requisicao de compra",
-            "purrqs", "purchase requisition", "banf", "ordpl", "ordpla", "ordem planejada",
-            "plord", "plord.", "planned order", "plauf", "solped", "orden planificada",
+            "purrqs", "purchase requisition", "banf", "ordpl", "ordpla", "ordplan",
+            "ordem planejada", "ordem planej", "plord", "plord.", "planned order", "plauf",
+            "solped", "orden planificada",
         ),
         "stock": (
             "est.cen", "estcen", "estoque centro", "estoque do centro", "plnt stock",
