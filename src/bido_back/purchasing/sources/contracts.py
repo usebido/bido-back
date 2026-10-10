@@ -2,7 +2,7 @@
 
 from datetime import date
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -162,11 +162,45 @@ class ScopeRequest(BaseModel):
         le=365,
         description="Days before the production date that components are needed, when given",
     )
+    plants: list[str] | int | Literal["all"] | None = Field(
+        default=None,
+        description="The plants as the buyer selected them: a list as they named them "
+        "(['1000', '2000']), 'all' for every plant in the sources, or the number they said "
+        "('três centros' = 3). Code maps it to the plants found in the data; a count that "
+        "is not the number found is asked back with the plants found. Use `location` for "
+        "one plant.",
+    )
+    mrp_element: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=60,
+        description="A value of the MRP element column the buyer named (NecDep, NecInd, "
+        "Reserv...): only requirement rows with that element count as demand. It is a "
+        "value of that column, never a field or a product.",
+    )
 
-    @field_validator("product_code", "product", "area", "location", mode="before")
+    @field_validator("product_code", "product", "area", "location", "mrp_element", mode="before")
     @classmethod
     def blank_is_unknown(cls, value: object) -> object:
         return None if isinstance(value, str) and not value.strip() else value
+
+    @field_validator("plants", mode="before")
+    @classmethod
+    def plants_as_said(cls, value: object) -> object:
+        """'3' is a count, 'all' the selector, any other lone text one named plant."""
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            if text.isdigit():
+                return int(text)
+            if text.casefold() in ("all", "todos", "todas", "todos os centros", "todas as plantas"):
+                return "all"
+            return [text]
+        if isinstance(value, list):
+            items = [str(item).strip() for item in cast(list[object], value)]
+            return [item for item in items if item] or None
+        return value
 
     @model_validator(mode="after")
     def valid_request(self) -> "ScopeRequest":
@@ -176,6 +210,12 @@ class ScopeRequest(BaseModel):
             and self.horizon_end < self.as_of
         ):
             raise ValueError("The planning horizon must end on or after the snapshot date")
+        if isinstance(self.plants, int) and not 1 <= self.plants <= 500:
+            raise ValueError("A plant count is between 1 and 500")
+        if isinstance(self.plants, list) and (
+            len(self.plants) > 50 or any(len(plant) > 200 for plant in self.plants)
+        ):
+            raise ValueError("At most 50 plants, each at most 200 characters")
         return self
 
 
@@ -229,12 +269,26 @@ class ScopeProvenance(BaseModel):
     evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
 
 
+class ScopeFilter(BaseModel):
+    """A selector the buyer gave, as they said it, and the values of the sources it
+    settled on before planning. Plain strings: new selectors stay additive."""
+
+    # The request field: "plants" or "mrp_element".
+    field: str
+    # As the buyer said it: "3", "all", "1000, 2000", "NecDep".
+    selector: str
+    # The values of the sources it selected, in their spelling; empty while it is asked.
+    values: list[str] = Field(default_factory=list[str])
+
+
 class ScopeResolution(BaseModel):
     request: ScopeRequest
     assumptions: list[ScopeAssumption] = Field(default_factory=list[ScopeAssumption])
     questions: list[ScopeQuestion] = Field(default_factory=list[ScopeQuestion])
     # One entry per value of the resolved scope; empty while questions are open.
     provenance: list[ScopeProvenance] = Field(default_factory=list[ScopeProvenance])
+    # The buyer's plant and MRP element selectors and what they settled on.
+    filters: list[ScopeFilter] = Field(default_factory=list[ScopeFilter])
 
 
 class DemandContribution(BaseModel):
@@ -596,6 +650,30 @@ class TimingAlert(BaseModel):
     outcome: Literal["unavoidable_stockout", "meets_consuming_safety_stock", "unknown"]
     summary: str
     actions: list[str] = Field(default_factory=list[str])
+    # One line on why this line is an alert: the balance, the date and the arrival.
+    reason: str | None = None
+
+
+class AlertExclusion(BaseModel):
+    """A line the analysis evaluated and did not alert on, with the one-line reason."""
+
+    part_number: str
+    description: str | None = None
+    reason: str
+
+
+class FoundValues(BaseModel):
+    """The distinct values the sources hold for each boundary, so "todos os centros" or
+    "três centros" map to the plants found without guessing. Lists are capped."""
+
+    plants: list[str] = Field(default_factory=list[str])
+    # Distinct spellings of the MRP element column on requirement rows (NecDep, NecInd...).
+    mrp_elements: list[str] = Field(default_factory=list[str])
+    # Products with production orders; without any, the materials the requirements name.
+    products: list[str] = Field(default_factory=list[str])
+    products_left_out: int = 0
+    first_need_date: date | None = None
+    last_need_date: date | None = None
 
 
 class EvidenceTable(BaseModel):
@@ -647,6 +725,11 @@ class SourceAssessment(Assessment):
     # Every line that runs short before a new order arrives: stockouts first, then lines
     # that consume their safety stock until the purchase arrives.
     timing_alerts: list[TimingAlert] = Field(default_factory=list[TimingAlert])
+    # Every other evaluated line, with why it is not an alert (capped; the rest counted).
+    alerts_excluded: list[AlertExclusion] = Field(default_factory=list[AlertExclusion])
+    alerts_excluded_left_out: int = 0
+    # What the sources hold for each boundary: plants, MRP elements, products, need dates.
+    found: FoundValues | None = None
 
 
 class CellRef(BaseModel):

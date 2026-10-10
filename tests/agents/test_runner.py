@@ -39,7 +39,7 @@ from bido_back.agents.events import (
     ToolResult,
 )
 from bido_back.agents.runner import Completed, Failed, NeedsApproval, run, run_to_completion
-from bido_back.agents.tools import Tool, ToolError
+from bido_back.agents.tools import Tool, ToolError, ToolValidationError
 from bido_back.agents.usage import UsageMeter
 from tests.db.conftest import agno_engine
 
@@ -297,6 +297,14 @@ async def lookup_price(ctx: ToolContext, args: LookupIn) -> LookupOut:
     lookup_calls.append((ctx.tenant_id, args))
     if args.sku == "missing":
         raise ToolError("no such sku")
+    if args.sku.startswith("PLANT-"):
+        raise ToolValidationError(
+            f"no plant {args.sku!r}; plants in the data: 1000, 2000, 3000",
+            code="unknown_plant",
+            field="sku",
+            value=args.sku,
+            valid_values=["1000", "2000", "3000"],
+        )
     if args.sku == "boom":
         raise RuntimeError("database password is hunter2")
     return LookupOut(sku=args.sku, price_cents=1250)
@@ -621,6 +629,69 @@ async def test_tool_errors_become_error_results(script: Script) -> None:
     sent = tool_results(stub.calls[1])
     assert sorted(b["call_id"] for b in sent) == ["call_1", "call_2", "call_3"]
     assert "hunter2" not in json.dumps(sent)
+
+
+def _feedback(call: dict[str, Any], call_id: str) -> dict[str, Any]:
+    [block] = [b for b in tool_results(call) if b["call_id"] == call_id]
+    return cast(dict[str, Any], json.loads(result_text(block)))
+
+
+async def test_a_validation_error_is_fed_back_with_its_valid_values_and_a_retry(
+    script: Script,
+) -> None:
+    """The model names a plant the data lacks, reads the valid values, corrects itself."""
+    stub = script(
+        reply(tool_use("fc_1", "lookup_price", sku="PLANT-4000")),
+        reply(tool_use("fc_2", "lookup_price", sku="1000")),
+        final(answer="12.50", confidence=0.9),
+    )
+
+    result = await run_to_completion(agent(), TASK, ctx(), config=CONFIG)
+
+    assert isinstance(result, Completed)
+    assert [args.sku for _, args in lookup_calls] == ["PLANT-4000", "1000"]
+    feedback = _feedback(stub.calls[1], "call_1")
+    assert feedback["error"] == "validation_error"
+    assert (feedback["code"], feedback["field"], feedback["value"]) == (
+        "unknown_plant",
+        "sku",
+        "PLANT-4000",
+    )
+    assert feedback["valid_values"] == ["1000", "2000", "3000"]
+    assert feedback["retry"]["allowed"] is True and feedback["retry"]["left"] == 2
+    assert "call lookup_price again now" in feedback["retry"]["instruction"]
+    results = [e for e in result.events if isinstance(e, ToolResult)]
+    assert [(r.call_id, r.ok) for r in results] == [("fc_1", False), ("fc_2", True)]
+    assert results[0].error is not None and "1000, 2000, 3000" in results[0].error
+
+
+async def test_after_two_retries_the_model_is_told_to_ask_the_buyer(script: Script) -> None:
+    stub = script(
+        reply(tool_use("fc_1", "lookup_price", sku="PLANT-4000")),
+        reply(tool_use("fc_2", "lookup_price", sku="PLANT-5000")),
+        reply(tool_use("fc_3", "lookup_price", sku="PLANT-6000")),
+        final(answer="which plant do you mean: 1000, 2000 or 3000?", confidence=0.5),
+    )
+
+    result = await run_to_completion(agent(max_turns=6), TASK, ctx(), config=CONFIG)
+
+    assert isinstance(result, Completed)
+    assert len(lookup_calls) == 3
+    first, second, third = (
+        _feedback(stub.calls[1], "call_1"),
+        _feedback(stub.calls[2], "call_2"),
+        _feedback(stub.calls[3], "call_3"),
+    )
+    assert (first["retry"]["left"], second["retry"]["left"]) == (2, 1)
+    assert first["retry"]["allowed"] is second["retry"]["allowed"] is True
+    # The budget is spent: the error still lists the valid values, and says to ask.
+    assert third["retry"] == {
+        "allowed": False,
+        "left": 0,
+        "instruction": "Do not call lookup_price again in this turn: tell the buyer what was "
+        "tried and ask which of the valid values they mean.",
+    }
+    assert third["valid_values"] == ["1000", "2000", "3000"]
 
 
 async def test_provider_error_fails_the_run(script: Script) -> None:

@@ -12,7 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from bido_back.agents.context import ToolContext
-from bido_back.agents.tools import Tool, ToolError
+from bido_back.agents.tools import Tool, ToolError, ToolValidationError
 from bido_back.auth import Principal
 from bido_back.copilot.journey_tools import (
     AnalyzeSourcesIn,
@@ -160,6 +160,8 @@ def test_source_tool_is_read_only_and_has_provider_compatible_inputs() -> None:
         "horizon_days",
         "safety_stock",
         "production_lead_days",
+        "plants",
+        "mrp_element",
     }
     assert "required" not in scope_schema
     assert tool.parse_input({"upload_ids": [str(uuid4())], "objective": "What should I buy?"})
@@ -501,3 +503,63 @@ async def test_saved_evidence_can_be_found_and_drafted_in_a_later_conversation(
     )
     assert result.lines == 1 and result.assessment_id == saved.assessment_id
     assert not mailboxes.calls and not mailboxes.sender.sent
+
+
+@pytest.mark.db
+async def test_a_plant_the_sources_lack_is_a_validation_error_listing_the_plants(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    storage = TrackingStorage()
+    data, mapper = motor_workbook()
+    upload = await onboarding.store_upload(
+        app_engine, storage, principal, filename="erp.xlsx", content_type=XLSX, data=data
+    )
+    tools = {
+        tool.name: tool
+        for tool in copilot_tools(
+            CopilotToolDeps(
+                db=app_engine,
+                agents=fake_agents(),
+                mailboxes=FakeMailboxes(),
+                storage=storage,
+                source_mapper=mapper,
+                attachment_ids=(upload.id,),
+            )
+        )
+    }
+    analyze = tools["analyze_procurement_sources"]
+    args = analyze.parse_input(
+        {
+            "upload_ids": [str(upload.id)],
+            "objective": "O que comprar no centro 4000?",
+            "scope": {"product": "Motor MTR-100", "plants": ["4000"]},
+        }
+    )
+
+    with pytest.raises(ToolValidationError) as caught:
+        await analyze.invoke(context_of(principal), args)
+
+    error = caught.value
+    assert (error.code, error.field, error.value) == ("unknown_plant", "scope.plants", "4000")
+    assert error.valid_values == ["Plant A", "Plant B"]
+    assert error.payload()["error"] == "validation_error"
+    # A column value put where a field should be is an argument error, not silently dropped.
+    with pytest.raises(ValidationError):
+        analyze.parse_input(
+            {
+                "upload_ids": [str(upload.id)],
+                "objective": "x",
+                "scope": {"NecDep": True},
+            }
+        )
+    # The MRP element and the plant selector are read as the buyer says them.
+    parsed = analyze.parse_input(
+        {
+            "upload_ids": [str(upload.id)],
+            "objective": "x",
+            "scope": {"plants": "3", "mrp_element": "NecDep"},
+        }
+    )
+    assert parsed.scope is not None
+    assert (parsed.scope.plants, parsed.scope.mrp_element) == (3, "NecDep")

@@ -235,6 +235,36 @@
         "title": "AffectedDemand",
         "type": "object"
       },
+      "AlertExclusion": {
+        "description": "A line the analysis evaluated and did not alert on, with the one-line reason.",
+        "properties": {
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Description"
+          },
+          "part_number": {
+            "title": "Part Number",
+            "type": "string"
+          },
+          "reason": {
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "part_number",
+          "reason"
+        ],
+        "title": "AlertExclusion",
+        "type": "object"
+      },
       "AnalysisLineView": {
         "properties": {
           "avg_price": {
@@ -5495,6 +5525,63 @@
           }
         },
         "title": "FollowupSettingsUpdate",
+        "type": "object"
+      },
+      "FoundValues": {
+        "description": "The distinct values the sources hold for each boundary, so \"todos os centros\" or\n\"três centros\" map to the plants found without guessing. Lists are capped.",
+        "properties": {
+          "first_need_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "First Need Date"
+          },
+          "last_need_date": {
+            "anyOf": [
+              {
+                "format": "date",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Need Date"
+          },
+          "mrp_elements": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Mrp Elements",
+            "type": "array"
+          },
+          "plants": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Plants",
+            "type": "array"
+          },
+          "products": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Products",
+            "type": "array"
+          },
+          "products_left_out": {
+            "default": 0,
+            "title": "Products Left Out",
+            "type": "integer"
+          }
+        },
+        "title": "FoundValues",
         "type": "object"
       },
       "HTTPValidationError": {
@@ -12796,6 +12883,32 @@
         "title": "ScopeAssumption",
         "type": "object"
       },
+      "ScopeFilter": {
+        "description": "A selector the buyer gave, as they said it, and the values of the sources it\nsettled on before planning. Plain strings: new selectors stay additive.",
+        "properties": {
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "selector": {
+            "title": "Selector",
+            "type": "string"
+          },
+          "values": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Values",
+            "type": "array"
+          }
+        },
+        "required": [
+          "field",
+          "selector"
+        ],
+        "title": "ScopeFilter",
+        "type": "object"
+      },
       "ScopeOption": {
         "properties": {
           "evidence": {
@@ -12972,6 +13085,42 @@
             "description": "The plant or site as the buyer wrote it (e.g. 'Planta A')",
             "title": "Location"
           },
+          "mrp_element": {
+            "anyOf": [
+              {
+                "maxLength": 60,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A value of the MRP element column the buyer named (NecDep, NecInd, Reserv...): only requirement rows with that element count as demand. It is a value of that column, never a field or a product.",
+            "title": "Mrp Element"
+          },
+          "plants": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "const": "all",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The plants as the buyer selected them: a list as they named them (['1000', '2000']), 'all' for every plant in the sources, or the number they said ('três centros' = 3). Code maps it to the plants found in the data; a count that is not the number found is asked back with the plants found. Use `location` for one plant.",
+            "title": "Plants"
+          },
           "product": {
             "anyOf": [
               {
@@ -13101,6 +13250,42 @@
             "description": "The plant or site as the buyer wrote it (e.g. 'Planta A')",
             "title": "Location"
           },
+          "mrp_element": {
+            "anyOf": [
+              {
+                "maxLength": 60,
+                "minLength": 1,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A value of the MRP element column the buyer named (NecDep, NecInd, Reserv...): only requirement rows with that element count as demand. It is a value of that column, never a field or a product.",
+            "title": "Mrp Element"
+          },
+          "plants": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "integer"
+              },
+              {
+                "const": "all",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The plants as the buyer selected them: a list as they named them (['1000', '2000']), 'all' for every plant in the sources, or the number they said ('três centros' = 3). Code maps it to the plants found in the data; a count that is not the number found is asked back with the plants found. Use `location` for one plant.",
+            "title": "Plants"
+          },
           "product": {
             "anyOf": [
               {
@@ -13161,6 +13346,13 @@
               "$ref": "#/components/schemas/ScopeAssumption"
             },
             "title": "Assumptions",
+            "type": "array"
+          },
+          "filters": {
+            "items": {
+              "$ref": "#/components/schemas/ScopeFilter"
+            },
+            "title": "Filters",
             "type": "array"
           },
           "provenance": {
@@ -13542,6 +13734,18 @@
       },
       "SourceAssessment": {
         "properties": {
+          "alerts_excluded": {
+            "items": {
+              "$ref": "#/components/schemas/AlertExclusion"
+            },
+            "title": "Alerts Excluded",
+            "type": "array"
+          },
+          "alerts_excluded_left_out": {
+            "default": 0,
+            "title": "Alerts Excluded Left Out",
+            "type": "integer"
+          },
           "assessment_id": {
             "anyOf": [
               {
@@ -13567,6 +13771,16 @@
             },
             "title": "Coverage",
             "type": "array"
+          },
+          "found": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FoundValues"
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "issues": {
             "items": {
@@ -15746,6 +15960,17 @@
           "part_number": {
             "title": "Part Number",
             "type": "string"
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reason"
           },
           "summary": {
             "title": "Summary",
@@ -22140,7 +22365,7 @@
         ]
       },
       "post": {
-        "description": "Assess the uploads and save the evidence snapshot.\n\n`scope` carries the buyer's planning boundaries as stated, all optional (a product\nname or code, plant, reference date, horizon end or days, safety stock). They are\nresolved against the mapped evidence: `scope` in the response is the resolved scope\nand `scope_resolution` the assumptions made and the questions still open.",
+        "description": "Assess the uploads and save the evidence snapshot.\n\n`scope` carries the buyer's planning boundaries as stated, all optional (a product\nname or code, plant, reference date, horizon end or days, safety stock). They are\nresolved against the mapped evidence: `scope` in the response is the resolved scope\nand `scope_resolution` the assumptions made and the questions still open. A plant,\nMRP element or product the sources do not hold is a 400 naming the valid values.",
         "operationId": "create_assessment_v1_procurement_assessments_post",
         "parameters": [
           {

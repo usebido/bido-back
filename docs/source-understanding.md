@@ -200,6 +200,15 @@ The deterministic planner:
 
 `copilot.v22.md` passes the buyer's boundaries in one call, discloses the assumptions and
 asks only the open questions, rather than asking buyers to prejoin the workbook. This path performs no import or outbound action.
+`copilot.v28.md` adds the self-correction loop. The scope's selectors (`plants` as a
+list, `"all"` or a count; `mrp_element` as a value of the MRP element column, never a
+field; the product) are checked in code (`sources/selectors.py`) against the values the
+sources hold (`found` in the result) before anything is planned: a value the data lacks
+is a validation error naming the valid values, never an empty result. The agent runner
+feeds that error back with a retry budget (`MAX_VALIDATION_RETRIES`, 2 per tool per
+turn): the model corrects the parameters and calls again, then must ask the buyer. Every
+evaluated line carries a one-line reason: `timing_alerts[].reason` for an alert,
+`alerts_excluded[]` for a line that is not one.
 Manufacturing lead time defaults to zero and is disclosed: component deadlines then
 equal the production need date. Coverage is conditional on pending deliveries arriving.
 
