@@ -547,3 +547,67 @@ The standalone devnet escrow program, LiteSVM tests, IDL and setup tooling live
 in [`solana/`](solana/README.md). Run `pnpm --dir solana install --frozen-lockfile`
 and `bash solana/scripts/check.sh` from this repository root. CI includes the
 Solana checks in the required `ci-ok` result.
+
+## Paying a purchase order (card → stablecoin → escrow on Solana)
+
+`bido_back.payments`, devnet only. A buyer pays an issued (sent) PO by card; Bido
+mints its own stablecoin into the company's invisible wallet and locks it in the
+PO's escrow (`solana/`, program `bido_escrow`). Releasing milestones against
+attestations, the supplier's documents, refunds and the payout in the supplier's
+currency are the next steps, not here.
+
+```
+POST /v1/suppliers/{id}/payout-accounts     the supplier's bank account (approver/owner),
+                                             sealed (KMS) for the payout provider that will
+                                             pay it (Tazapay, next step); in clear only a
+                                             masked view and the account's fingerprint
+POST /v1/payment-methods {token_id}         a card tokenized in the browser with Basis
+                                             Theory Elements (Bido never sees the number),
+                                             enrolled for agentic payments
+POST /v1/purchase-orders/{id}/payment       quote (USD, ECB rate for other currencies) and a
+                                             pending `pay_purchase_order` approval
+POST /v1/approvals/{id}/decision            a person decides (the buyer by default; an
+                                             approver or owner in four-eyes companies)
+worker: approval.execute                     Basis Theory allowance on the `spt` rail →
+                                             single-use Stripe token → charge on Bido's
+                                             Stripe account (or a simulated charge on the
+                                             test tenant)
+worker: payment.advance (one step per job)   mint into the company's Privy wallet →
+                                             `create_po` (operator) → `fund` (the wallet
+                                             signs through Privy); the relayer pays all fees
+GET  /v1/purchase-orders/{id}/payment        state, card, quote, wallet, escrow and every
+                                             Solana transaction with its explorer link
+```
+
+States: `pending_approval → charging → charged → minted → escrow_created → funded`,
+or `rejected`, `expired` (quote past its time), `declined` (card) and `failed`. A
+payment that failed after the charge shows `needs_attention: true`: the card was
+charged and a person must finish or refund it.
+
+Exactly once: the card charge is keyed by the payment id at Basis Theory and at
+Stripe; every Solana transaction is recorded (signature, last valid block height)
+before it is sent, and a retry asks the chain first. It builds a new transaction
+only after the old one can no longer land, and `create_po` / `fund` are idempotent
+on chain. `followups.sweep` re-enqueues payments that stopped between steps.
+
+Setup (devnet, done once by a person; never from tests):
+
+1. Keys (base58 secret keys, outside the repository): relayer (funded with devnet
+   SOL), operator (must be `Config.operator`), mint authority; a Privy app with a key
+   quorum holding the P-256 authorization key; Basis Theory test-tenant keys with
+   the agentic permissions (Basis Theory is used for cards only); Stripe test keys
+   if `PAYMENTS_CARD_CHARGE=stripe`; a key that seals suppliers' bank details
+   (`PAYOUT_DETAILS_KMS_KEY_ID` in AWS, a Fernet `PAYOUT_DETAILS_ENCRYPTION_KEY`
+   locally).
+2. `uv run python scripts/payments_chain.py create-mint`, then put the address in
+   `SOLANA_STABLECOIN_MINT`.
+3. `uv run python scripts/payments_chain.py allow-mint --admin-keypair <upgrade
+   authority keypair>`: `update_config` puts the mint in `allowed_mints` in place of
+   the old tUSD (slot 0), keeping Circle's USDC: the payout provider takes USDC.
+4. Add `SOLANA_GATE_ATTESTER` to the SAS credential's signers
+   (`pnpm --dir solana setup:devnet sas:signers`): `create_po` pins it per gate.
+5. `uv run python scripts/payments_chain.py status` checks it all.
+
+The token is a devnet test asset: no value, no redemption. The card pays the
+purchase order; nothing is sold as "buying tokens". Mainnet needs a regulated
+stablecoin through a licensed partner (see the PR for the details).

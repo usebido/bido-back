@@ -1581,10 +1581,12 @@ async def list_approvals(
             for line in await session.scalars(select(RfqLine).where(RfqLine.rfq_id.in_(rfq_ids))):
                 by_rfq.setdefault(line.rfq_id, []).append(line)
             reviewed = {rfq_id: _line_reviews(found) for rfq_id, found in by_rfq.items()}
-        # Imported here: the award service builds on this module.
+        # Imported here: the award service builds on this module, the payment service on it.
         from bido_back.awards.service import queue_details
+        from bido_back.payments.service import queue_details as payment_queue_details
 
         details = await queue_details(session, approvals)
+        payments = await payment_queue_details(session, approvals)
 
         mandate_views = await _mandate_views(session, approvals)
 
@@ -1670,6 +1672,7 @@ async def list_approvals(
                 thread_email=details.emails.get(approval.id),
                 recipient_checks=checks.get(approval.id),
                 mandate=mandate_views.get(approval.id),
+                payment=payments.get(approval.id),
             )
         )
     return items

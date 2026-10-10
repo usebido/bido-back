@@ -8,10 +8,11 @@ company linked to the token's active organization, created on first login
 when allowed; `X-Tenant-Id` is ignored. In dev mode `X-Tenant-Id` only selects
 among the caller's own memberships.
 
-The database, the job queue and the JWT verifier are built lazily, on the
-first request that needs them, so building the app (OpenAPI export, health
-checks) never touches Postgres, AWS or Clerk. Unsafe auth configuration (dev
-mode outside `ENVIRONMENT=local`) is refused when the app is built.
+The database, the job queue, the JWT verifier and the payment providers are
+built lazily, on the first request that needs them, so building the app
+(OpenAPI export, health checks) never touches Postgres, AWS, Clerk or a
+payment provider. Unsafe auth configuration (dev mode outside
+`ENVIRONMENT=local`) is refused when the app is built.
 """
 
 from typing import Annotated
@@ -38,6 +39,8 @@ from bido_back.awards.agents import NoticeWriter, default_notice_writer
 from bido_back.db import create_engine, create_sessionmaker
 from bido_back.logs import annotate
 from bido_back.orgs import ClerkDirectory, OrgPolicy, clerk_directory_for, principal_for_org
+from bido_back.payments.config import PaymentProviders, build_payment_providers
+from bido_back.payments.errors import PaymentsNotConfigured
 from bido_back.rfqs.agents import RfqAgents, default_rfq_agents
 from bido_back.rfqs.mailbox import MailboxSenderFactory, mailbox_senders_for
 from bido_back.settings import Settings
@@ -65,6 +68,7 @@ class ApiResources:
         self._jobs: JobQueue | None = None
         self._verifier: ClerkJwtVerifier | None = None
         self._storage: BlobStorage | None = None
+        self._payments: PaymentProviders | None = None
         self.org_policy = OrgPolicy.from_settings(settings)
         self.clerk_directory: ClerkDirectory = clerk_directory_for(settings)
 
@@ -100,6 +104,12 @@ class ApiResources:
         if self._verifier is None and self._settings.clerk_issuer and self._settings.clerk_jwks_url:
             self._verifier = ClerkJwtVerifier.from_settings(self._settings)
         return self._verifier
+
+    def payment_providers(self) -> PaymentProviders:
+        """Card, vault, wallets and chain, built once; `PaymentsNotConfigured` while unset."""
+        if self._payments is None:
+            self._payments = build_payment_providers(self._settings)
+        return self._payments
 
     async def aclose(self) -> None:
         if self._engine is not None:
@@ -177,6 +187,20 @@ def get_notice_writer() -> NoticeWriter:
 def get_mailbox_senders(request: Request) -> MailboxSenderFactory:
     """How to get a buyer's sender (`EMAIL_TRANSPORT`, see rfqs.mailbox); tests override it."""
     return mailbox_senders_for(_resources(request).settings)
+
+
+def get_payment_providers(request: Request) -> PaymentProviders:
+    """The payment providers (`bido_back.payments`); tests override it.
+
+    503 while this server has no payments set up: refused before anything is
+    recorded, so no payment waits for providers that do not exist.
+    """
+    try:
+        return _resources(request).payment_providers()
+    except PaymentsNotConfigured:
+        raise HTTPException(
+            status.HTTP_503_SERVICE_UNAVAILABLE, "payments are not set up on this server"
+        ) from None
 
 
 def _unauthorized(detail: str) -> HTTPException:

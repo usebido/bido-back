@@ -1,5 +1,9 @@
 """Job type names shared by producers and the worker registry."""
 
+# One chain step of a charged payment (mint, create the escrow, fund it), from
+# `bido_back.payments.proposals`. payload: {"payment_id": "<uuid>"}
+from bido_back.payments.proposals import PAYMENT_ADVANCE as PAYMENT_ADVANCE
+
 APPROVAL_EXECUTE = "approval.execute"
 QUOTE_EXTRACT = "quote.extract"  # payload: {"message_id": "<uuid>"}
 # A supplier's reply to a sent purchase order. payload: {"message_id": "<uuid>"}

@@ -30,6 +30,7 @@ from bido_back.api.me import me_router
 from bido_back.api.negotiation import negotiation_router
 from bido_back.api.onboarding import onboarding_router
 from bido_back.api.outbound import outbound_router
+from bido_back.api.payments import payments_router
 from bido_back.api.procurement_assessments import procurement_assessments_router
 from bido_back.api.proposals import proposals_router
 from bido_back.api.purchasing import purchasing_router
@@ -98,6 +99,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(purchasing_router())
     app.include_router(procurement_assessments_router())
     app.include_router(awards_router())
+    app.include_router(payments_router())
     app.include_router(outbound_router())
     app.include_router(uploads_router())
     app.include_router(files_router())

@@ -49,6 +49,7 @@ from bido_back.worker.job_types import (
     MAILBOX_SYNC,
     NEGOTIATION_REPLAN,
     NEGOTIATION_SWEEP,
+    PAYMENT_ADVANCE,
     PO_RESPONSE,
     QUOTE_EXTRACT,
     TEMPLATE_BUILD,
@@ -129,6 +130,9 @@ def build_worker_registry(
         TemplateBuildHandler,
         TemplateScanHandler,
     )
+    from bido_back.payments.config import build_payment_providers, payments_enabled
+    from bido_back.payments.execute import PaymentActDeps, register_payment_act_tools
+    from bido_back.payments.pipeline import PaymentAdvanceHandler
     from bido_back.quotes.extract_job import quote_extract_handler
     from bido_back.rfqs.mailbox import mailbox_senders_for
     from bido_back.rfqs.send import RfqActDeps, register_act_tools
@@ -155,13 +159,32 @@ def build_worker_registry(
         else None
     )
     register_mandate_act_tools(act_tools, MandateActDeps(db=engine, jobs=jobs))
+    # Payments only when every provider is set up (`payments.config`): otherwise
+    # nothing that could move money is registered.
+    payments = payments_enabled(settings)
+    advance_payment: PaymentAdvanceHandler | None = None
+    if payments:
+        providers = build_payment_providers(settings)
+        register_payment_act_tools(
+            act_tools, PaymentActDeps(db=engine, providers=providers, jobs=jobs)
+        )
+        advance_payment = PaymentAdvanceHandler(
+            engine, providers, jobs, refund_after_days=settings.payments_escrow_refund_days
+        )
     registry = build_registry(engine, act_tools)
     storage = build_storage(settings)
     runner_config = RunnerConfig.from_settings(settings)
     registry.register(
         FOLLOWUPS_SWEEP,
-        FollowupSweepHandler(db=engine, writer=default_followup_writer(runner_config), jobs=jobs),
+        FollowupSweepHandler(
+            db=engine,
+            writer=default_followup_writer(runner_config),
+            jobs=jobs,
+            payments=payments,
+        ),
     )
+    if advance_payment is not None:
+        registry.register(PAYMENT_ADVANCE, advance_payment)
     registry.register(
         NEGOTIATION_SWEEP,
         NegotiationSweepHandler(

@@ -15,7 +15,9 @@ is the order's life after it:
   never exceeds the ordered quantity (`OverReceipt`); the state follows the sum.
 - `close`: everything arrived, or the rest is given up (`short`, with a reason;
   the shortfall per line goes into the event).
-- `cancel`: with a reason, while nothing or only part of it arrived.
+- `cancel`: with a reason, while nothing or only part of it arrived. A payment of
+  the order still waiting for approval expires with it (and its approval); one the
+  worker already started charging is left alone (a refund is a separate step).
 - `review_response`: the buyer's decision on a supplier reply that changed or
   questioned the order (flagged by `awards.responses`); acknowledging by hand,
   closing or cancelling settles it too (`awaiting_review`).
@@ -36,9 +38,10 @@ from decimal import Decimal
 from typing import Final, Literal, cast
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from bido_back.approvals.audit import approval_audit
 from bido_back.auth import Principal
 from bido_back.awards.orders import po_lines
 from bido_back.awards.schemas import (
@@ -57,9 +60,11 @@ from bido_back.awards.schemas import (
 )
 from bido_back.db import tenant_session
 from bido_back.db.models import (
+    Approval,
     AuditEvent,
     IssuedPurchaseOrder,
     IssuedPurchaseOrderLine,
+    PoPayment,
     PurchaseOrderReceipt,
     PurchaseOrderReceiptLine,
     Rfq,
@@ -483,8 +488,50 @@ async def cancel(
             reason=request.reason,
         )
     )
+    await _expire_waiting_payment(session, po, actor_user_id)
     await session.flush()
     await _complete_rfq_if_done(session, po.rfq_id, actor_user_id, now)
+
+
+async def _expire_waiting_payment(
+    session: AsyncSession, po: IssuedPurchaseOrder, actor_user_id: UUID
+) -> None:
+    """A cancelled order is not paid: its payment waiting for approval expires with it.
+
+    A payment the worker already claimed (`charging` or later) is left alone: money may
+    have moved, and refunding it is a separate step. The approval is updated before the
+    payment, the order the guard's reject hook locks them in.
+    """
+    waiting = (
+        await session.execute(
+            select(PoPayment.id, PoPayment.approval_id).where(
+                PoPayment.purchase_order_id == po.id, PoPayment.state == "pending_approval"
+            )
+        )
+    ).all()
+    if not waiting:
+        return
+    expired = list(
+        await session.scalars(
+            update(Approval)
+            .where(
+                Approval.id.in_([approval_id for _, approval_id in waiting]),
+                Approval.status == "pending",
+            )
+            .values(status="expired")
+            .returning(Approval)
+        )
+    )
+    for approval in expired:
+        session.add(approval_audit(approval, "approval.expired", actor_user_id))
+    await session.execute(
+        update(PoPayment)
+        .where(
+            PoPayment.id.in_([payment_id for payment_id, _ in waiting]),
+            PoPayment.state == "pending_approval",
+        )
+        .values(state="expired", failure_code="purchase_order_cancelled", updated_at=func.now())
+    )
 
 
 def rfq_is_complete(states: Iterable[str]) -> bool:

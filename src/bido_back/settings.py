@@ -8,10 +8,13 @@ the first request.
 
 import re
 from functools import lru_cache
-from typing import Literal, Self
+from typing import Final, Literal, Self
+from urllib.parse import urlsplit
 
 from pydantic import Field, PostgresDsn, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+BASIS_THEORY_TEST_HOST: Final = "api.test.basistheory.com"
 
 
 class Settings(BaseSettings):
@@ -116,6 +119,65 @@ class Settings(BaseSettings):
     langfuse_host: str | None = None
     langfuse_capture_content: bool = False
 
+    # Payments (bido_back.payments): a buyer pays an issued PO by card, Bido mints
+    # its stablecoin into the company's invisible wallet and funds the PO's escrow
+    # on Solana. Off until every required value below is set; devnet only.
+    #
+    # Card: Basis Theory Agentic Payments (vault + `spt` rail), charged on Bido's
+    # Stripe account. The private key stays in the backend; the public key only
+    # tokenizes cards in the browser (Basis Theory Elements).
+    basis_theory_api_url: str = "https://api.test.basistheory.com"
+    basis_theory_api_key: str | None = Field(default=None, repr=False)
+    basis_theory_public_key: str | None = None
+    # "simulated": the Basis Theory test tenant mints mock Stripe tokens that
+    # Stripe cannot charge, so the charge is recorded as simulated (marked as
+    # such everywhere). Only with the test tenant, never in prd.
+    payments_card_charge: Literal["stripe", "simulated"] = "stripe"
+    stripe_secret_key: str | None = Field(default=None, repr=False)
+    # Bido's Stripe Business Network profile (`profile_...`): the Shared Payment
+    # Token Basis Theory mints is granted to it.
+    stripe_network_business_profile: str | None = None
+    stripe_api_version: str | None = None
+    # The merchant the card allowance is scoped to (Bido collects the payment).
+    payments_merchant_name: str = "Bido"
+    payments_merchant_url: str = "https://usebido.com"
+    payments_merchant_country: str = "US"
+    # Basis Theory's consumer country for enrolled cards.
+    payments_consumer_country: str = "US"
+    # How long a payment's quote (amount, FX rate) may wait for its approval.
+    payments_quote_ttl_minutes: int = Field(default=24 * 60, ge=5, le=7 * 24 * 60)
+    # The escrow returns the unreleased balance to the buyer only after this.
+    payments_escrow_refund_days: int = Field(default=90, ge=1, le=3650)
+    # Suppliers' bank details are sealed in Bido's database until the payout provider
+    # (Tazapay, next step) holds them. Local: a Fernet key. AWS: KMS envelope
+    # encryption under `payout_details_kms_key_id` (required in prd).
+    payout_details_encryption_key: str | None = Field(default=None, repr=False)
+    payout_details_kms_key_id: str | None = None
+    # Wallets: one Privy server wallet per company, owned by a Privy key quorum
+    # whose P-256 authorization key Bido holds (PKCS#8 DER, base64).
+    privy_api_url: str = "https://api.privy.io"
+    privy_app_id: str | None = None
+    privy_app_secret: str | None = Field(default=None, repr=False)
+    privy_authorization_key: str | None = Field(default=None, repr=False)
+    privy_wallet_owner_id: str | None = None
+    privy_wallet_policy_id: str | None = None
+    # Solana: our stablecoin mint (Bido holds its mint authority) and the
+    # `bido_escrow` program (solana/). Keys are base58 64-byte secret keys:
+    # the relayer pays every fee and rent, the operator signs `create_po`.
+    solana_cluster: Literal["devnet"] = "devnet"
+    solana_rpc_url: str | None = Field(default=None, repr=False)
+    solana_escrow_program_id: str = "7992GKVq51ChvsVJQ9GFto2aBozUGuMcuY93SUSxexJw"
+    solana_stablecoin_mint: str | None = None
+    solana_stablecoin_decimals: int = Field(default=6, ge=0, le=9)
+    solana_mint_authority_key: str | None = Field(default=None, repr=False)
+    solana_operator_key: str | None = Field(default=None, repr=False)
+    solana_relayer_key: str | None = Field(default=None, repr=False)
+    # Where released milestones are paid: the payout provider's deposit wallet.
+    solana_payout_owner: str | None = None
+    # Who attests each milestone's gate (Solana Attestation Service signer).
+    solana_gate_attester: str | None = None
+    solana_priority_fee_micro_lamports: int = Field(default=1_000, ge=0, le=1_000_000)
+
     @field_validator("log_level", mode="before")
     @classmethod
     def _upper_log_level(cls, value: object) -> object:
@@ -135,6 +197,18 @@ class Settings(BaseSettings):
     def _no_wildcard_cors_outside_local(self) -> Self:
         if self.environment != "local" and "*" in self.cors_allowed_origins:
             raise ValueError('CORS_ALLOWED_ORIGINS may contain "*" only when ENVIRONMENT=local')
+        return self
+
+    @model_validator(mode="after")
+    def _simulated_charges_only_on_the_test_tenant(self) -> Self:
+        if self.payments_card_charge == "simulated" and (
+            self.environment == "prd"
+            or urlsplit(self.basis_theory_api_url).hostname != BASIS_THEORY_TEST_HOST
+        ):
+            raise ValueError(
+                "PAYMENTS_CARD_CHARGE=simulated needs the Basis Theory test tenant "
+                f"({BASIS_THEORY_TEST_HOST}) and ENVIRONMENT other than prd"
+            )
         return self
 
 

@@ -30,6 +30,8 @@ dependencies = [
     "dnspython>=2.6,<3",
     "pillow>=11",
     "weasyprint>=66",
+    "solders==0.29.0",
+    "cryptography>=44",
 ]
 
 [dependency-groups]

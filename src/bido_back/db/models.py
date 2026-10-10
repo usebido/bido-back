@@ -16,6 +16,7 @@ from uuid import UUID
 
 from pydantic import JsonValue
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     Computed,
@@ -1433,3 +1434,144 @@ class ProcurementAssessment(Base):
     assessment: Mapped[dict[str, JsonValue]] = mapped_column(JSONB)
     rfq_id: Mapped[UUID | None] = mapped_column(ForeignKey("rfqs.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+# --- Payments (migration 0040): card -> stablecoin -> the PO's escrow on Solana -------------
+
+PAYMENT_STATES = (
+    "pending_approval",
+    "charging",
+    "charged",
+    "minted",
+    "escrow_created",
+    "funded",
+    "rejected",
+    "expired",
+    "declined",
+    "failed",
+)
+CHAIN_STEPS = ("mint", "create_escrow", "fund")
+CHAIN_TRANSACTION_STATES = ("sent", "confirmed", "failed", "expired")
+
+
+class SupplierPayoutAccount(Base):
+    """Where a supplier is paid. The details are sealed here until the payout provider has them."""
+
+    __tablename__ = "supplier_payout_accounts"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    supplier_id: Mapped[UUID] = mapped_column(ForeignKey("suppliers.id"))
+    method: Mapped[str] = mapped_column(Text, server_default=text("'bank_transfer'"))
+    country: Mapped[str] = mapped_column(Text)
+    currency: Mapped[str] = mapped_column(Text)
+    # The bank details, sealed (`payments.bank_details`): opened only to pay the supplier.
+    details_ciphertext: Mapped[bytes] = mapped_column(LargeBinary)
+    # The payout provider's beneficiary id (Tazapay `bnf_...`), once registered there.
+    beneficiary_ref: Mapped[str | None] = mapped_column(Text)
+    # sha256("bido-bank-v1" | country | 0 | bank_code | 0 | account_number): binds a payment.
+    bank_fingerprint: Mapped[str] = mapped_column(Text)
+    beneficiary_display: Mapped[str] = mapped_column(Text)
+    bank_name: Mapped[str] = mapped_column(Text)
+    swift_bic: Mapped[str | None] = mapped_column(Text)
+    account_last4: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text, server_default=text("'active'"))
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    disabled_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PaymentMethod(Base):
+    """A buyer's card: a Basis Theory agentic payment method (`pm_...`). No card data."""
+
+    __tablename__ = "payment_methods"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    provider: Mapped[str] = mapped_column(Text, server_default=text("'basis_theory'"))
+    payment_method_ref: Mapped[str] = mapped_column(Text)
+    fingerprint: Mapped[str] = mapped_column(Text)
+    brand: Mapped[str | None] = mapped_column(Text)
+    last4: Mapped[str | None] = mapped_column(Text)
+    exp_month: Mapped[int | None] = mapped_column(SmallInteger)
+    exp_year: Mapped[int | None] = mapped_column(SmallInteger)
+    funding: Mapped[str | None] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class TenantWallet(Base):
+    """The company's invisible Solana wallet: a Privy server wallet, one per tenant."""
+
+    __tablename__ = "tenant_wallets"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    provider: Mapped[str] = mapped_column(Text, server_default=text("'privy'"))
+    chain: Mapped[str] = mapped_column(Text, server_default=text("'solana'"))
+    wallet_ref: Mapped[str] = mapped_column(Text)
+    address: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PoPayment(Base):
+    """One payment of an issued PO: the card charge, the mint and the funded escrow."""
+
+    __tablename__ = "po_payments"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    purchase_order_id: Mapped[UUID] = mapped_column(ForeignKey("issued_purchase_orders.id"))
+    # The `pay_purchase_order` approval. No FK on purpose (see migration 0040).
+    approval_id: Mapped[UUID] = mapped_column()
+    requested_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    payment_method_id: Mapped[UUID] = mapped_column(ForeignKey("payment_methods.id"))
+    payout_account_id: Mapped[UUID] = mapped_column(ForeignKey("supplier_payout_accounts.id"))
+    state: Mapped[str] = mapped_column(Text, server_default=text("'pending_approval'"))
+    po_currency: Mapped[str] = mapped_column(Text)
+    po_total: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    charge_currency: Mapped[str] = mapped_column(Text)
+    charge_amount: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    fx_rate: Mapped[Decimal | None] = mapped_column(Numeric(18, 8))
+    fx_rate_date: Mapped[date | None] = mapped_column(Date)
+    quote_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # Base units of the stablecoin mint (a u64; NUMERIC because BIGINT is signed).
+    token_amount: Mapped[Decimal] = mapped_column(Numeric(20, 0))
+    chain_po_id: Mapped[str] = mapped_column(Text)
+    po_hash: Mapped[str] = mapped_column(Text)
+    milestones: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
+    charge_mode: Mapped[str] = mapped_column(Text)
+    card_authorization_ref: Mapped[str | None] = mapped_column(Text)
+    charge_reference: Mapped[str | None] = mapped_column(Text)
+    charged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    wallet_id: Mapped[UUID | None] = mapped_column(ForeignKey("tenant_wallets.id"))
+    wallet_address: Mapped[str | None] = mapped_column(Text)
+    escrow_address: Mapped[str | None] = mapped_column(Text)
+    vault_address: Mapped[str | None] = mapped_column(Text)
+    refund_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    funded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_code: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PaymentChainTransaction(Base):
+    """A Solana transaction of a payment, recorded before it is sent."""
+
+    __tablename__ = "payment_chain_transactions"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    payment_id: Mapped[UUID] = mapped_column(ForeignKey("po_payments.id"))
+    step: Mapped[str] = mapped_column(Text)
+    attempt: Mapped[int] = mapped_column(Integer)
+    signature: Mapped[str] = mapped_column(Text)
+    last_valid_block_height: Mapped[int] = mapped_column(BigInteger)
+    state: Mapped[str] = mapped_column(Text, server_default=text("'sent'"))
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

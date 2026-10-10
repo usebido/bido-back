@@ -45,6 +45,7 @@ _TOOLS: Final[Mapping[str, str]] = {
     "send_award_notice": "not-selected notice",
     "send_po_cancellation": "purchase order cancellation",
     "approve_negotiation_mandate": "negotiation mandate",
+    "pay_purchase_order": "purchase order payment",
 }
 _FOLLOWUP_KINDS: Final[Mapping[str, str]] = {
     "chase": "Reminder",
@@ -298,6 +299,11 @@ def _event_item(
             summary = f"Supplier reply on purchase order {_po_ref(data)} reviewed: {verdict}"
         case "purchase_order.cancellation_sent":
             kind, summary = "email", f"Cancellation of purchase order {_po_ref(data)} sent{to}"
+        case action if action.startswith(("purchase_order.payment_", "purchase_order.escrow_")):
+            kind, summary = _payment_event(action, data)
+            if kind == "system":
+                # The worker moves the money once a person approved it.
+                actor = actor or BIDO
         case "rfq.completed":
             kind = "system"
             closed, cancelled = data.get("closed"), data.get("cancelled")
@@ -490,6 +496,41 @@ def _supplier_response(data: Mapping[str, Any], supplier: str | None) -> str:
 def _po_ref(data: Mapping[str, Any]) -> str:
     ref = data.get("purchase_order_ref")
     return ref if isinstance(ref, str) and ref else "?"
+
+
+def _payment_event(action: str, data: Mapping[str, Any]) -> tuple[ActivityKind, str]:
+    """One step of a PO's card payment into its escrow (`bido_back.payments`).
+
+    Reads `purchase_order_ref`, `charge_currency` and `charge_amount`, `simulated`,
+    `failure_code` and `step` from the event; all optional. A failure at a chain `step`
+    came after the card was charged.
+    """
+    ref = data.get("purchase_order_ref")
+    order = f"purchase order {ref}" if isinstance(ref, str) and ref else "the purchase order"
+    currency, amount = data.get("charge_currency"), data.get("charge_amount")
+    charge = f" ({currency} {amount})" if isinstance(currency, str) and amount else ""
+    why = _words(data.get("failure_code"))
+    reason = f" ({why})" if why else ""
+    match action:
+        case "purchase_order.payment_requested":
+            return "user", f"Payment of {order} requested{charge}: waits for approval"
+        case "purchase_order.payment_charged":
+            simulated = " (simulated: no money moved)" if data.get("simulated") is True else ""
+            return "system", f"Card charged{charge} for {order}{simulated}"
+        case "purchase_order.payment_declined":
+            return "system", f"Card payment for {order} declined{reason}"
+        case "purchase_order.payment_failed":
+            step = data.get("step")
+            charged = ": the card was charged, a person must act" if step else ""
+            return "system", f"Payment of {order} failed{reason}{charged}"
+        case "purchase_order.payment_minted":
+            return "system", f"Stablecoin for {order} minted into the company's wallet"
+        case "purchase_order.escrow_created":
+            return "system", f"Escrow for {order} created on Solana"
+        case "purchase_order.escrow_funded":
+            return "system", f"Escrow for {order} funded: the payment waits for its milestones"
+        case _:
+            return "system", action
 
 
 def _received_lines(data: Mapping[str, Any]) -> str:

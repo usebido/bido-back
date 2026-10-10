@@ -8,7 +8,9 @@ answered invite", found through the SECURITY DEFINER `followup_tenants()`
 at once is safe: proposals are keyed by (invite, kind, sequence).
 
 The every-tenant run also re-enqueues approved actions whose execution job was
-lost between the approval's commit and its enqueue (`approvals.reconcile`).
+lost between the approval's commit and its enqueue (`approvals.reconcile`) and,
+on servers with payments, wakes charged payments whose next step's job was lost
+(`payments.reconcile`).
 """
 
 import logging
@@ -26,6 +28,7 @@ from bido_back.db import create_sessionmaker
 from bido_back.followups.agents import FollowupWriter
 from bido_back.followups.service import sweep_tenant
 from bido_back.mandates.service import auto_approve_pending
+from bido_back.payments.reconcile import requeue_stalled_payments
 from bido_back.worker.envelope import Envelope
 from bido_back.worker.jobs import JobQueue
 
@@ -60,6 +63,9 @@ class FollowupSweepHandler:
     # Mandates: after each tenant's sweep, approve its in-bounds emails and
     # enqueue their execution (`bido_back.mandates`). None: mandates idle.
     jobs: JobQueue | None = None
+    # Payments: the every-tenant run also wakes charged payments whose next step's
+    # job was lost (`payments.reconcile`). False on servers without payments.
+    payments: bool = False
 
     async def __call__(self, envelope: Envelope) -> None:
         single = envelope.tenant_id != ALL_TENANTS
@@ -81,3 +87,8 @@ class FollowupSweepHandler:
                 await requeue_stalled_approvals(self.db, self.jobs)
             except Exception:
                 logger.exception("followups.sweep: re-enqueueing stalled approvals failed")
+            if self.payments:
+                try:
+                    await requeue_stalled_payments(self.db, self.jobs)
+                except Exception:
+                    logger.exception("followups.sweep: waking stalled payments failed")
