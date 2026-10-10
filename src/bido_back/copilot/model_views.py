@@ -71,6 +71,7 @@ ASSESSMENT_LIST_ITEMS: Final[Mapping[str, int]] = {
     "snapshot_dates": 12,
     "reports": 40,
     "timing_alerts": 40,
+    "alerts_excluded": 40,
 }
 CANDIDATE_NEED_DATES: Final = 6
 

@@ -11,7 +11,11 @@ from bido_back.api.rfqs import error_responses
 from bido_back.purchasing.service import PurchasingError
 from bido_back.purchasing.sources.contracts import SourceAssessment
 from bido_back.purchasing.sources.mapping import Mapper, default_mapper
-from bido_back.purchasing.sources.service import SourceAccessError, analyze_uploads
+from bido_back.purchasing.sources.service import (
+    ScopeValidationError,
+    SourceAccessError,
+    analyze_uploads,
+)
 from bido_back.purchasing.sources.snapshots import (
     AssessmentRequest,
     AssessmentRfqRequest,
@@ -39,7 +43,10 @@ def procurement_assessments_router() -> APIRouter:
     ) -> list[AssessmentSnapshotSummary]:
         return await list_snapshots(db, principal, limit=limit, search=search)
 
-    @router.post("", responses=error_responses(status.HTTP_404_NOT_FOUND))
+    @router.post(
+        "",
+        responses=error_responses(status.HTTP_400_BAD_REQUEST, status.HTTP_404_NOT_FOUND),
+    )
     async def create_assessment(  # pyright: ignore[reportUnusedFunction]
         request: AssessmentRequest,
         principal: CurrentPrincipal,
@@ -52,7 +59,8 @@ def procurement_assessments_router() -> APIRouter:
         `scope` carries the buyer's planning boundaries as stated, all optional (a product
         name or code, plant, reference date, horizon end or days, safety stock). They are
         resolved against the mapped evidence: `scope` in the response is the resolved scope
-        and `scope_resolution` the assumptions made and the questions still open.
+        and `scope_resolution` the assumptions made and the questions still open. A plant,
+        MRP element or product the sources do not hold is a 400 naming the valid values.
         """
         try:
             return await analyze_uploads(
@@ -70,6 +78,13 @@ def procurement_assessments_router() -> APIRouter:
             )
         except SourceAccessError as exc:
             raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc)) from None
+        except ScopeValidationError as exc:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"{exc.code}: {exc} (scope.{exc.field}={exc.value!r}; valid: "
+                + ", ".join(exc.valid_values)
+                + ")",
+            ) from None
 
     @router.get("/{assessment_id}", responses=error_responses(status.HTTP_404_NOT_FOUND))
     async def read_assessment(  # pyright: ignore[reportUnusedFunction]

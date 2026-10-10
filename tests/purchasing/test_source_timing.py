@@ -332,3 +332,26 @@ async def test_timing_alerts_list_every_line_that_runs_short_most_urgent_first()
     assert "MOTORES EXEMPLO SUL LTDA is not recommended: it arrives too late" in motor.actions[2]
     carcass = next(a for a in result.timing_alerts if a.part_number == "100000101")
     assert "15 UN below it" in carcass.summary
+
+
+async def test_every_line_of_the_review_says_why_it_is_or_is_not_an_alert() -> None:
+    result = await _review()
+    alerted = {a.part_number for a in result.timing_alerts}
+    excluded = {e.part_number: e.reason for e in result.alerts_excluded}
+    assert alerted.isdisjoint(excluded)
+    assert alerted | set(excluded) == {line.part_number for line in result.lines}
+    assert result.alerts_excluded_left_out == 0
+    for alert in result.timing_alerts:
+        assert alert.reason, alert.part_number
+    motor = next(a for a in result.timing_alerts if a.part_number == "100000152")
+    assert motor.reason is not None
+    assert motor.reason.startswith("projected balance falls below zero on 2026-10-12")
+    assert "ELETROMOTORES EXEMPLO SA arrives" in motor.reason
+    carcass = next(a for a in result.timing_alerts if a.part_number == "100000101")
+    assert carcass.reason is not None
+    assert carcass.reason.startswith("projected balance falls below the safety stock")
+    # The one line that is not an alert says why in one line a buyer can read.
+    assert set(excluded) == {"100000103"}
+    assert (
+        "nothing to buy" in excluded["100000103"] or "never falls below" in (excluded["100000103"])
+    )

@@ -21,6 +21,11 @@ How our rules map onto Agno:
   `ApprovalRequested` and stop. If the proposed arguments do not validate,
   the error is fed back as the call's result and the run continues, so a
   person is never asked to approve an invalid payload.
+- A tool that raises `ToolValidationError` (a parameter the data does not hold,
+  with the values it does) is fed back as JSON with a retry budget: the model
+  may correct the parameters and call that tool again up to
+  `MAX_VALIDATION_RETRIES` times in one run; past that, the feedback tells it
+  to stop and ask the buyer. The count is per tool per run, in code.
 - A `Handoff` tool ends the model's turn once it succeeds (Agno's
   `stop_after_tool_call`, set on that call only, so an invalid call still goes
   back to the model). Another agent then writes the reply from the run's tool
@@ -49,6 +54,7 @@ import json
 import logging
 import os
 import time
+from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import aclosing
 from dataclasses import dataclass, field, replace
@@ -101,7 +107,7 @@ from bido_back.agents.events import (
     ToolResult,
     args_hash,
 )
-from bido_back.agents.tools import AnyTool, ToolError
+from bido_back.agents.tools import AnyTool, ToolError, ToolValidationError
 from bido_back.agents.usage import ModelUsage, UsageMeter
 from bido_back.logs import safe_reason
 
@@ -113,6 +119,9 @@ AGNO_SCHEMA: Final = "agno"
 _FC_PARAM: Final = "fc"
 
 _INTERNAL_ERROR: Final = "internal error while running the tool"
+# Calls of the same tool the model may make again in one run after it answered with a
+# validation error listing valid values, before it is told to ask the buyer instead.
+MAX_VALIDATION_RETRIES: Final = 2
 _ACT_REFUSAL: Final = "error: this action needs a person's approval and was not executed"
 
 
@@ -290,6 +299,8 @@ class _RunState:
     # The definition's handoff tools, and whether one succeeded in this run.
     handoff_tools: frozenset[str] = frozenset()
     handed_off: bool = False
+    # Validation errors each tool answered in this run: the retry budget is spent per tool.
+    validation_failures: Counter[str] = field(default_factory=Counter[str])
 
 
 def _to_function(tool: AnyTool, context: ToolContext, state: _RunState) -> Function:
@@ -333,6 +344,20 @@ def _entrypoint(
             ) as traced:
                 try:
                     output = await tool.invoke(context, parsed)
+                except ToolValidationError as exc:
+                    message = str(exc) or "invalid parameter"
+                    _log_tool_call(
+                        tool,
+                        context,
+                        call_id,
+                        "error",
+                        started,
+                        reason=message,
+                        error_class="ToolValidationError",
+                    )
+                    traced.finished("error", error=message, error_class="ToolValidationError")
+                    state.outcomes[call_id] = _Outcome(status="error", error=message)
+                    return _validation_feedback(tool, exc, state)
                 except ToolError as exc:
                     message = str(exc) or "tool error"
                     cause = exc.__cause__ or exc.__context__
@@ -388,6 +413,29 @@ def _entrypoint(
         return f"error: {message}"
 
     return entrypoint
+
+
+def _validation_feedback(tool: AnyTool, exc: ToolValidationError, state: _RunState) -> str:
+    """What the model reads of a validation error: the valid values and whether it may
+    correct the parameters and call again, or must ask the buyer now."""
+    state.validation_failures[tool.name] += 1
+    left = max(0, MAX_VALIDATION_RETRIES - (state.validation_failures[tool.name] - 1))
+    payload = exc.payload()
+    if left > 0:
+        payload["retry"] = {
+            "allowed": True,
+            "left": left,
+            "instruction": f"Correct `{exc.field}` using valid_values and call {tool.name} "
+            "again now, in this same turn; do not ask the buyer to rephrase.",
+        }
+    else:
+        payload["retry"] = {
+            "allowed": False,
+            "left": 0,
+            "instruction": f"Do not call {tool.name} again in this turn: tell the buyer what "
+            "was tried and ask which of the valid values they mean.",
+        }
+    return json.dumps(payload, ensure_ascii=False)
 
 
 def _log_tool_call(
