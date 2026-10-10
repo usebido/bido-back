@@ -16,6 +16,8 @@ from bido_back.payments.errors import ProviderError
 from bido_back.payments.providers.basis_theory import (
     BasisTheoryClient,
     CardDetails,
+    CardDisplay,
+    CardIssuer,
     CredentialPayloadUnavailable,
     Merchant,
     MintedCredential,
@@ -55,7 +57,20 @@ TOKEN_BODY: Final[JsonValue] = {
 PAYMENT_METHOD_BODY: Final[JsonValue] = {
     "id": "pm_h2Kd91mAqLwX",
     "status": "active",
-    "card": {"brand": "visa", "last4": "4242", "expiration_month": 12, "expiration_year": 2030},
+    "card": {
+        "brand": "visa",
+        "last4": "4242",
+        "expiration_month": 12,
+        "expiration_year": 2030,
+        "display": {
+            "art_url": "https://cdn.basistheory.example/art/visa-signature.png",
+            "background_color": "#1A1F71",
+            "foreground_color": "#FFFFFF",
+            "description": "Visa Signature",
+            "issuer_name": None,
+        },
+        "issuer": {"name": "Example Bank", "country": "US"},
+    },
     "rails": [
         {"rail": "agentic-token", "provider": "vic", "status": "enabled"},
         {"rail": "spt", "provider": "stripe", "status": "enabled"},
@@ -183,7 +198,34 @@ async def test_get_payment_method_reads_it_or_none() -> None:
 
     assert str(found.only().url) == f"{BT_URL}/agentic/payment-methods/pm_h2Kd91mAqLwX"
     assert method is not None and method.status == "active"
+    assert method.card is not None
+    assert method.card.display == CardDisplay(
+        art_url="https://cdn.basistheory.example/art/visa-signature.png",
+        background_color="#1A1F71",
+        foreground_color="#FFFFFF",
+        description="Visa Signature",
+    )
+    assert method.card.issuer == CardIssuer(name="Example Bank", country="US")
     assert await client(gone).get_payment_method("pm_h2Kd91mAqLwX") is None
+
+
+@pytest.mark.parametrize(
+    "card",
+    [
+        {"brand": "visa", "display": None, "issuer": None},
+        {"brand": "visa", "display": "visa-signature", "issuer": ["Example Bank"]},
+        {"brand": "visa", "display": {"art_url": 42, "background_color": {"hex": "#000000"}}},
+    ],
+)
+async def test_branding_of_another_shape_reads_as_absent(card: JsonValue) -> None:
+    recorder = Recorder(always(Answer(200, {"id": "pm_1", "card": card})))
+
+    method = await client(recorder).get_payment_method("pm_1")
+
+    assert method is not None and method.card is not None
+    assert method.card.brand == "visa"
+    assert method.card.issuer is None
+    assert method.card.display in (None, CardDisplay())
 
 
 @pytest.mark.parametrize("status", [204, 404])

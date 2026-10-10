@@ -1499,6 +1499,8 @@ class PaymentMethod(Base):
     exp_year: Mapped[int | None] = mapped_column(SmallInteger)
     funding: Mapped[str | None] = mapped_column(Text)
     status: Mapped[str] = mapped_column(Text)
+    # The issuer's branding (`payments.card_display`), or SQL NULL (not JSON null). Public.
+    display: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

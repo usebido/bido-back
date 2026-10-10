@@ -33,6 +33,21 @@ CardStatus = Literal["active", "pending", "failed"]
 
 
 @dataclass(frozen=True, slots=True)
+class CardDisplayData:
+    """How the issuer brands the card (Basis Theory `card.display`): public, never card data.
+
+    Built only by `payments.card_display`, which keeps well-formed values: every field
+    is optional, and a card without any is `None` rather than an all-empty display.
+    """
+
+    art_url: str | None  # the card face, an https URL
+    background_color: str | None  # `#rrggbb`
+    foreground_color: str | None  # `#rrggbb`
+    description: str | None  # the issuer's name for the product ("Sapphire Preferred")
+    issuer_name: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class EnrolledCard:
     """A card vaulted at Basis Theory and enrolled as an agentic payment method."""
 
@@ -45,6 +60,7 @@ class EnrolledCard:
     funding: str | None  # credit | debit | prepaid | None
     # The rail Bido charges on (`spt` / `stripe`): active, still provisioning, or refused.
     status: CardStatus
+    display: CardDisplayData | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,6 +103,11 @@ class CardGateway(Protocol):
     ) -> EnrolledCard: ...
 
     async def remove(self, payment_method_ref: str) -> None: ...
+
+    async def display(self, payment_method_ref: str) -> CardDisplayData | None:
+        """The card's branding as the provider tells it now; None when it has none or the
+        payment method is gone."""
+        ...
 
     async def authorize(
         self,

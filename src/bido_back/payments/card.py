@@ -4,7 +4,9 @@ The buyer's card is tokenized in the browser by Basis Theory Elements; Bido
 only ever sees the token id. `enroll` reads the token (fingerprint, brand,
 last four, expiry, funding: never the number) and creates an agentic payment
 method from it. The card is usable when its `spt` rail (provider `stripe`) is
-enabled: Stripe Shared Payment Tokens need no passkey ceremony.
+enabled: Stripe Shared Payment Tokens need no passkey ceremony. The payment
+method also carries the issuer's branding (`card.display`, `card.issuer`), which
+is kept when well formed (`payments.card_display`) so the buyer sees their card.
 
 Paying one purchase order:
 
@@ -47,6 +49,7 @@ from uuid import UUID
 import httpx
 from pydantic import SecretStr
 
+from bido_back.payments.card_display import card_display
 from bido_back.payments.errors import (
     CardCredentialLost,
     PaymentRefused,
@@ -57,6 +60,7 @@ from bido_back.payments.ports import (
     CardAuthorization,
     CardCharge,
     CardConsumer,
+    CardDisplayData,
     CardGateway,
     CardStatus,
     EnrolledCard,
@@ -134,6 +138,22 @@ def allowance_usable(allowance: Allowance) -> bool:
     return rail is not None and rail.status == "active"
 
 
+def method_display(method: PaymentMethod) -> CardDisplayData | None:
+    """The payment method's branding, well-formed values only (`issuer.name` names the
+    issuer when the display does not)."""
+    card = method.card or CardDetails()
+    display = card.display
+    issuer = card.issuer
+    return card_display(
+        art_url=display.art_url if display else None,
+        background_color=display.background_color if display else None,
+        foreground_color=display.foreground_color if display else None,
+        description=display.description if display else None,
+        issuer_name=display.issuer_name if display else None,
+        issuer_fallback=issuer.name if issuer else None,
+    )
+
+
 def _enrolled(method: PaymentMethod, token: Token, fingerprint: str) -> EnrolledCard:
     card = method.card or CardDetails()
     vault = token.card or CardDetails()
@@ -149,6 +169,7 @@ def _enrolled(method: PaymentMethod, token: Token, fingerprint: str) -> Enrolled
         exp_year=year if year is not None and 2000 <= year <= 2999 else None,
         funding=card.funding or vault.funding,
         status=card_status(method.rails),
+        display=method_display(method),
     )
 
 
@@ -203,14 +224,20 @@ class BasisTheoryCardGateway:
         )
         card = _enrolled(method, token, token.fingerprint)
         logger.info(
-            "card enrolled payment_method=%s status=%s",
+            "card enrolled payment_method=%s status=%s display=%s art=%s",
             loggable_id(card.payment_method_ref),
             card.status,
+            card.display is not None,
+            card.display is not None and card.display.art_url is not None,
         )
         return card
 
     async def remove(self, payment_method_ref: str) -> None:
         await self._basis_theory.delete_payment_method(payment_method_ref)
+
+    async def display(self, payment_method_ref: str) -> CardDisplayData | None:
+        method = await self._basis_theory.get_payment_method(payment_method_ref)
+        return method_display(method) if method is not None else None
 
     async def authorize(
         self,

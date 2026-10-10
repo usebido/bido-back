@@ -7,8 +7,8 @@ the card only after a person approved it (`payments.execute`).
 
 - Cards (`payment_methods`): any member saves a card the browser tokenized with
   Basis Theory Elements. Bido enrolls it as an agentic payment method and keeps
-  its brand, last 4 digits and expiry, never card data. A buyer pays only with a
-  card they saved themselves.
+  its brand, last 4 digits, expiry and the issuer's branding (card art, colours),
+  never card data. A buyer pays only with a card they saved themselves.
 - Payout accounts (`supplier_payout_accounts`): where a supplier is paid. Only an
   approver or the owner adds or disables one: changed bank details are the classic
   payment fraud. The details are sealed (encrypted) for the payout provider that will
@@ -23,6 +23,7 @@ the card only after a person approved it (`payments.execute`).
 import logging
 import re
 from collections.abc import Collection, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Final, cast
@@ -56,6 +57,7 @@ from bido_back.db.models import (
     User,
 )
 from bido_back.decimals import format_decimal
+from bido_back.payments.card_display import display_from_json, display_json
 from bido_back.payments.chain import hashes
 from bido_back.payments.config import PaymentProviders, explorer_tx_url, payments_enabled
 from bido_back.payments.errors import (
@@ -97,6 +99,7 @@ from bido_back.payments.views import (
     PaymentCardView,
     PaymentChainTransactionView,
     PaymentChainView,
+    PaymentMethodDisplayView,
     PaymentMethodStatus,
     PaymentMethodView,
     PaymentMilestone,
@@ -210,6 +213,19 @@ def _needs_attention(payment: PoPayment) -> bool:
 # --- Cards --------------------------------------------------------------------------------
 
 
+def _display_view(row: PaymentMethod) -> PaymentMethodDisplayView | None:
+    display = display_from_json(row.display)
+    if display is None:
+        return None
+    return PaymentMethodDisplayView(
+        art_url=display.art_url,
+        background_color=display.background_color,
+        foreground_color=display.foreground_color,
+        description=display.description,
+        issuer_name=display.issuer_name,
+    )
+
+
 def _method_view(row: PaymentMethod) -> PaymentMethodView:
     return PaymentMethodView(
         id=row.id,
@@ -218,6 +234,7 @@ def _method_view(row: PaymentMethod) -> PaymentMethodView:
         exp_month=row.exp_month,
         exp_year=row.exp_year,
         funding=row.funding,
+        display=_display_view(row),
         status=cast(PaymentMethodStatus, row.status),
         created_by=row.created_by,
         created_at=row.created_at,
@@ -288,6 +305,7 @@ async def _save_card(db: Db, principal: Principal, enrolled: EnrolledCard) -> Pa
             exp_month=month,
             exp_year=enrolled.exp_year,
             funding=enrolled.funding,
+            display=display_json(enrolled.display),
             status=enrolled.status,
         )
         session.add(row)
@@ -383,6 +401,57 @@ async def remove_payment_method(
         reference = row.payment_method_ref
     # After the commit: the card is unusable here whatever the provider answers.
     await _forget_card(card, reference)
+
+
+@dataclass(frozen=True, slots=True)
+class DisplayBackfill:
+    missing: int  # saved cards without a display
+    filled: int  # given one (or that would be, without `apply`)
+    empty: int  # the provider has none for them, or no longer knows the card
+    failed: int  # the provider call failed: left as they were
+
+
+async def backfill_card_display(
+    db: Db, tenant_id: UUID, card: CardGateway, *, apply: bool
+) -> DisplayBackfill:
+    """Ask the provider for the branding of the tenant's saved cards that have none (saved
+    before Bido kept it) and store it. Writes `display` only, and only where it is still
+    NULL; best effort: a provider failure leaves the card as it was. Safe to re-run."""
+    async with tenant_session(db, tenant_id) as session:
+        rows = (
+            await session.execute(
+                select(PaymentMethod.id, PaymentMethod.payment_method_ref)
+                .where(PaymentMethod.status != "removed", PaymentMethod.display.is_(None))
+                .order_by(PaymentMethod.created_at, PaymentMethod.id)
+            )
+        ).all()
+    filled = empty = failed = 0
+    # No transaction is held across the provider calls.
+    for method_id, reference in rows:
+        try:
+            display = await card.display(reference)
+        except PaymentError as exc:
+            failed += 1
+            logger.warning(
+                "payment method display not read tenant=%s payment_method=%s error=%s",
+                tenant_id,
+                method_id,
+                type(exc).__name__,
+            )
+            continue
+        if display is None:
+            empty += 1
+            continue
+        filled += 1
+        if not apply:
+            continue
+        async with tenant_session(db, tenant_id) as session:
+            await session.execute(
+                update(PaymentMethod)
+                .where(PaymentMethod.id == method_id, PaymentMethod.display.is_(None))
+                .values(display=display_json(display))
+            )
+    return DisplayBackfill(missing=len(rows), filled=filled, empty=empty, failed=failed)
 
 
 # --- Payout accounts ----------------------------------------------------------------------
@@ -852,7 +921,12 @@ async def payment_view(
         fx_rate_date=payment.fx_rate_date,
         quote_expires_at=payment.quote_expires_at,
         simulated=payment.charge_mode == "simulated",
-        card=PaymentCardView(payment_method_id=method.id, brand=method.brand, last4=method.last4),
+        card=PaymentCardView(
+            payment_method_id=method.id,
+            brand=method.brand,
+            last4=method.last4,
+            display=_display_view(method),
+        ),
         payout=PaymentPayoutView(
             payout_account_id=account.id,
             currency=account.currency,

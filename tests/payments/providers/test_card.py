@@ -32,6 +32,7 @@ from bido_back.payments.ports import (
     CardAuthorization,
     CardCharge,
     CardConsumer,
+    CardDisplayData,
     CardGateway,
     EnrolledCard,
 )
@@ -71,6 +72,14 @@ STRIPE: Final = "api.stripe.com"
 CREATE: Final = f"POST {STRIPE}/v1/payment_intents"
 SEARCH: Final = f"GET {STRIPE}/v1/payment_intents/search"
 
+ART: Final[dict[str, JsonValue]] = {
+    "art_url": "  https://cdn.basistheory.example/art/visa-signature.png ",
+    "background_color": "#1A1F71",
+    "foreground_color": "#ffffff",
+    "description": " Visa Signature ",
+    "issuer_name": None,
+}
+ISSUER: Final[JsonValue] = {"name": "Example Bank", "country": "US"}
 TOKEN_BODY: Final[JsonValue] = {
     "id": "tok-1",
     "type": "card",
@@ -167,7 +176,10 @@ async def test_enroll_reads_the_token_then_creates_the_payment_method() -> None:
                 PAYMENT_METHODS: [
                     Answer(
                         201,
-                        payment_method(rail("spt", "stripe", "enabled"), card={"brand": "visa"}),
+                        payment_method(
+                            rail("spt", "stripe", "enabled"),
+                            card={"brand": "visa", "display": ART, "issuer": ISSUER},
+                        ),
                     )
                 ],
             }
@@ -199,6 +211,13 @@ async def test_enroll_reads_the_token_then_creates_the_payment_method() -> None:
         exp_year=2030,
         funding="credit",
         status="active",
+        display=CardDisplayData(
+            art_url="https://cdn.basistheory.example/art/visa-signature.png",
+            background_color="#1A1F71",
+            foreground_color="#ffffff",
+            description="Visa Signature",
+            issuer_name="Example Bank",
+        ),
     )
 
 
@@ -249,6 +268,104 @@ async def test_enroll_keeps_only_well_formed_card_details() -> None:
     card = await gateway(recorder).enroll(token_id="tok-1", consumer=BUYER, idempotency_key="k")
 
     assert (card.last4, card.exp_month, card.exp_year, card.brand) == (None, None, None, None)
+    assert card.display is None
+
+
+async def enrolled_display(card: JsonValue) -> CardDisplayData | None:
+    recorder = Recorder(
+        scripted(
+            {
+                TOKEN: [Answer(200, TOKEN_BODY)],
+                PAYMENT_METHODS: [
+                    Answer(201, payment_method(rail("spt", "stripe", "enabled"), card=card))
+                ],
+            }
+        )
+    )
+    enrolled = await gateway(recorder).enroll(token_id="tok-1", consumer=BUYER, idempotency_key="k")
+    return enrolled.display
+
+
+@pytest.mark.parametrize(
+    ("display", "issuer", "name"),
+    [
+        (
+            {"issuer_name": None, "background_color": "#000000"},
+            {"name": "Example Bank"},
+            "Example Bank",
+        ),
+        (
+            {"issuer_name": "  ", "background_color": "#000000"},
+            {"name": "Example Bank"},
+            "Example Bank",
+        ),
+        ({"issuer_name": "Chase", "background_color": "#000000"}, {"name": "JPMorgan"}, "Chase"),
+        (None, {"name": "Example Bank", "country": "US"}, "Example Bank"),
+    ],
+)
+async def test_the_issuer_names_the_card_when_its_display_does_not(
+    display: JsonValue, issuer: JsonValue, name: str
+) -> None:
+    found = await enrolled_display({"brand": "visa", "display": display, "issuer": issuer})
+
+    assert found is not None and found.issuer_name == name
+
+
+async def test_enroll_keeps_only_well_formed_display_values() -> None:
+    display: dict[str, JsonValue] = {
+        "art_url": "http://cdn.example.test/art.png",
+        "background_color": "red",
+        "foreground_color": "#FFF",
+        "description": "  " + "Platinum " * 40,
+        "issuer_name": "Bank\u0000Name",
+    }
+
+    found = await enrolled_display({"brand": "visa", "display": display})
+
+    assert found is not None
+    assert (found.art_url, found.background_color, found.foreground_color) == (None, None, None)
+    assert found.issuer_name is None
+    assert found.description is not None and found.description.startswith("Platinum")
+    assert len(found.description) <= 120
+
+
+@pytest.mark.parametrize(
+    "card",
+    [
+        {"brand": "visa"},
+        {"brand": "visa", "display": None, "issuer": None},
+        {"brand": "visa", "display": {}, "issuer": {"country": "US"}},
+        {"display": {"art_url": "javascript:alert(1)", "background_color": "#12345"}},
+        {"display": {"art_url": 7, "issuer_name": ["Example Bank"]}},
+        {"display": "not an object", "issuer": "nor this"},
+    ],
+)
+async def test_a_card_without_usable_branding_has_no_display(card: JsonValue) -> None:
+    assert await enrolled_display(card) is None
+
+
+async def test_display_reads_the_payment_method_now() -> None:
+    found = Recorder(always(Answer(200, payment_method(card={"display": ART, "issuer": ISSUER}))))
+    gone = Recorder(always(Answer(404)))
+
+    display = await gateway(found).display("pm_1")
+
+    assert found.calls() == [f"GET {BT}/agentic/payment-methods/pm_1"]
+    assert display is not None
+    assert display.art_url == "https://cdn.basistheory.example/art/visa-signature.png"
+    assert await gateway(gone).display("pm_1") is None
+
+
+async def test_enrollment_logs_whether_there_is_art_never_the_branding(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO)
+
+    await enrolled_display({"display": ART, "issuer": ISSUER})
+
+    assert "display=True art=True" in caplog.text
+    assert "cdn.basistheory.example" not in caplog.text
+    assert "Example Bank" not in caplog.text
 
 
 @pytest.mark.parametrize(

@@ -29,7 +29,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Annotated, Final
+from typing import Annotated, Final, cast
 from uuid import UUID
 
 import httpx
@@ -94,6 +94,35 @@ class Rail(_Model):
 Rails = Annotated[tuple[Rail, ...], BeforeValidator(_empty_if_none)]
 
 
+def _string_or_none(value: object) -> object:
+    return value if isinstance(value, str) else None
+
+
+def _object_or_none(value: object) -> object:
+    if isinstance(value, dict | BaseModel):
+        return cast(object, value)
+    return None
+
+
+# Branding is optional: a value of another type reads as absent, never as a bad response.
+_OptionalText = Annotated[str | None, BeforeValidator(_string_or_none)]
+
+
+class CardDisplay(_Model):
+    """The issuer's branding of a card (`card.display`). Cleaned by `payments.card_display`."""
+
+    art_url: _OptionalText = None
+    background_color: _OptionalText = None
+    foreground_color: _OptionalText = None
+    description: _OptionalText = None
+    issuer_name: _OptionalText = None
+
+
+class CardIssuer(_Model):
+    name: _OptionalText = None
+    country: _OptionalText = None
+
+
 class CardDetails(_Model):
     """What Basis Theory tells about a card: never its number."""
 
@@ -102,6 +131,8 @@ class CardDetails(_Model):
     expiration_month: int | None = None
     expiration_year: int | None = None
     funding: str | None = None
+    display: Annotated[CardDisplay | None, BeforeValidator(_object_or_none)] = None
+    issuer: Annotated[CardIssuer | None, BeforeValidator(_object_or_none)] = None
 
 
 class Token(_Model):
