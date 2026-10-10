@@ -75,6 +75,7 @@ from bido_back.purchasing.sources.snapshots import (
     rfq_need_by,
 )
 from bido_back.purchasing.workbook import WorkbookFileError, WorkbookImportReport, import_workbook
+from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs import suppliers as supplier_service
 from bido_back.rfqs.errors import (
     MailboxNotConfigured,
@@ -83,7 +84,12 @@ from bido_back.rfqs.errors import (
     RfqError,
 )
 from bido_back.rfqs.language import DEFAULT_LANGUAGE, email_language
-from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest, EmailAddress
+from bido_back.rfqs.schemas import (
+    ContactIn,
+    CreateSupplierRequest,
+    EmailAddress,
+    UpdateLineRequest,
+)
 from bido_back.rfqs.service import preliminary_hold, preliminary_title
 
 if TYPE_CHECKING:
@@ -226,6 +232,26 @@ class ListAssessmentsOut(BaseModel):
 class CreateAssessmentRfqIn(AssessmentRfqRequest):
     assessment_id: UUID
     proposal_id: UUID | None = Field(default=None, description=PROPOSAL_ARG)
+    move_to_arrival: list[int] = Field(
+        default_factory=list[int],
+        max_length=200,
+        description=(
+            "Confirming call only (with proposal_id): the preview's line positions flagged "
+            "`arrives_after_need_by` whose need-by the buyer chose to move to that estimated "
+            "arrival. Code applies every one of them to the created draft at once; never "
+            "move dates one by one with update_rfq_line after this"
+        ),
+    )
+
+
+class MovedLine(BaseModel):
+    position: int
+    need_by: date
+
+
+class NotMovedLine(BaseModel):
+    position: int
+    reason: str
 
 
 class AssessmentRfqOut(AwaitingConfirmation):
@@ -248,6 +274,10 @@ class AssessmentRfqOut(AwaitingConfirmation):
         default_factory=list[AssessmentSkippedSupplier]
     )
     lines_without_limits: list[int] = Field(default_factory=list[int])
+    # Confirming with `move_to_arrival`: the lines whose need-by now is the estimated
+    # arrival shown in the preview, and the positions that could not be moved, with why.
+    moved_to_arrival: list[MovedLine] = Field(default_factory=list[MovedLine])
+    not_moved: list[NotMovedLine] = Field(default_factory=list[NotMovedLine])
 
 
 def _rfq_request(args: CreateAssessmentRfqIn) -> AssessmentRfqRequest:
@@ -256,7 +286,7 @@ def _rfq_request(args: CreateAssessmentRfqIn) -> AssessmentRfqRequest:
     (pending_validation, once), and the request forbids unknown fields, so a field the
     handoff does not take fails instead of disappearing."""
     return AssessmentRfqRequest.model_validate(
-        args.model_dump(exclude={"assessment_id", "proposal_id"})
+        args.model_dump(exclude={"assessment_id", "proposal_id", "move_to_arrival"})
     )
 
 
@@ -356,7 +386,9 @@ class ProposeMandateOut(BaseModel):
     lines: int
     initial_emails: int
     deadline: datetime
-    note: str
+    # For the model only, never shown to the buyer: what to say and do next. Not
+    # `note`: the screen's approval card shows a `note`, and this text leaked there.
+    guidance: str
     # Each address and its domain check (test, real_domain, no_mail, unknown).
     recipients: list[RecipientCheck]
     # Domains the buyer must confirm in the approval before anything is sent.
@@ -660,7 +692,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
                 conversation_id=deps.conversation_id,
                 run_id=ctx.run_id,
                 action="create_rfq_from_assessment",
-                args=args.model_dump(mode="json", exclude={"proposal_id"}),
+                args=args.model_dump(mode="json", exclude={"proposal_id", "move_to_arrival"}),
                 preview={"shown": preview.model_dump(mode="json")},
             )
             return AssessmentRfqOut(
@@ -685,9 +717,55 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         except purchasing_service.PurchasingError as exc:
             await proposals.release(db, principal, args.proposal_id)
             raise ToolError(str(exc)) from None
-        return AssessmentRfqOut.model_validate(
+        out = AssessmentRfqOut.model_validate(
             {**result.model_dump(), "proposal_id": args.proposal_id}
         )
+        if args.move_to_arrival and out.rfq_id is not None:
+            out.moved_to_arrival, out.not_moved = await _move_to_arrival(
+                principal, out.rfq_id, claimed.preview, args.move_to_arrival
+            )
+        return out
+
+    async def _move_to_arrival(
+        principal: Principal, rfq_id: UUID, stored_preview: dict[str, object], positions: list[int]
+    ) -> tuple[list[MovedLine], list[NotMovedLine]]:
+        """Moves each chosen line's need-by to the estimated arrival the buyer saw in the
+        preview, in one go: a model moving them one by one lost count (2026-10-10, RFQ-7,
+        the fifth of five skipped). Only dates the preview flagged can move, and only on
+        the line with the same position and part number."""
+        shown = ProposalPreview.model_validate(stored_preview.get("shown") or {})
+        arrivals = {
+            line.position: (line.part_number, line.arrives_after_need_by) for line in shown.lines
+        }
+        detail = await rfq_service.get_rfq(db, principal, rfq_id)
+        lines = {line.position: line for line in detail.lines}
+        moved: list[MovedLine] = []
+        not_moved: list[NotMovedLine] = []
+        for position in dict.fromkeys(positions):
+            part_number, arrival = arrivals.get(position, (None, None))
+            line = lines.get(position)
+            if arrival is None:
+                not_moved.append(
+                    NotMovedLine(
+                        position=position,
+                        reason="the preview showed no later estimated arrival for this line",
+                    )
+                )
+                continue
+            if line is None or line.part_number != part_number:
+                not_moved.append(
+                    NotMovedLine(position=position, reason="the draft has no matching line")
+                )
+                continue
+            try:
+                await rfq_service.update_line(
+                    db, principal, rfq_id, line.id, UpdateLineRequest(need_by=arrival)
+                )
+            except RfqError as exc:
+                not_moved.append(NotMovedLine(position=position, reason=str(exc)))
+                continue
+            moved.append(MovedLine(position=position, need_by=arrival))
+        return moved, not_moved
 
     async def add_supplier_contact(ctx: ToolContext, args: AddContactIn) -> AddContactOut:
         principal = _principal(ctx)
@@ -858,7 +936,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             lines=proposed.lines,
             initial_emails=proposed.initial_emails,
             deadline=proposed.deadline,
-            note=(
+            guidance=(
                 "Nothing was sent. One approval covers the initial emails and the "
                 "negotiation's limits; once approved, follow-ups and counter-offers within "
                 "those limits go out automatically until the deadline or until closed. "

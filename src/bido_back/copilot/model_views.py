@@ -26,6 +26,7 @@ from typing import Final
 
 from pydantic import BaseModel, JsonValue
 
+from bido_back.copilot.plain_codes import plain
 from bido_back.purchasing.sources.contracts import SourceAssessment
 
 # The keys every `SourceRef` has.
@@ -109,9 +110,31 @@ def without_cell_refs(value: JsonValue) -> JsonValue:
     return view
 
 
+# Lists of issue codes (quote validation, comparison exclusions) the model reads as
+# plain words (`plain_codes`), so it never echoes a code to the buyer.
+_CODE_LISTS: Final = frozenset({"issues", "reasons"})
+
+
+def plain_codes(value: JsonValue) -> JsonValue:
+    """`value` with the issue codes of its `issues` and `reasons` lists in plain words."""
+    if isinstance(value, list):
+        return [plain_codes(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: (
+            [plain(item) if isinstance(item, str) else plain_codes(item) for item in item_list]
+            if key in _CODE_LISTS and isinstance(item_list := value[key], list)
+            else plain_codes(value[key])
+        )
+        for key in value
+    }
+
+
 def cell_free_view(output: BaseModel) -> JsonValue:
-    """The default view: the whole output, without cell references."""
-    return without_cell_refs(output.model_dump(mode="json"))
+    """The default view: the whole output, without cell references, its issue codes in
+    plain words."""
+    return plain_codes(without_cell_refs(output.model_dump(mode="json")))
 
 
 def assessment_view(assessment: SourceAssessment) -> JsonValue:

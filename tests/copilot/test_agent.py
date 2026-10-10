@@ -107,7 +107,7 @@ def test_definition_and_tools() -> None:
     agent = copilot_agent(tools)
 
     assert agent.model == DEFAULT_MODEL
-    assert (agent.prompt_file, agent.prompt_version) == ("copilot.v31.md", 31)
+    assert (agent.prompt_file, agent.prompt_version) == ("copilot.v32.md", 32)
     # The copilot runs its newest prompt: a new version is never left unused.
     newest = max(int(p.stem.removeprefix("copilot.v")) for p in PROMPTS.glob("copilot.v*.md"))
     assert agent.prompt_version == newest
