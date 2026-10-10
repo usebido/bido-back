@@ -1003,3 +1003,27 @@ async def test_a_replacement_of_a_mandate_no_longer_live_starts_nothing(
         await world.start(proposed.approval_id)
 
     assert [m.status for m in await _mandates(world)] == ["ended"]
+
+
+async def test_the_queue_lists_the_mandate_not_the_emails_it_covers(world: MandateWorld) -> None:
+    # 2026-10-10: the queue listed every supplier's "Send RFQ" next to the mandate, and
+    # still for ~20 s after the mandate was approved (until its act ran).
+    approval_id = await world.propose()
+
+    pending = await rfq_service.list_approvals(world.engine, buyer(world.people), "pending")
+    assert [a.id for a in pending] == [approval_id]
+
+    world.jobs.jobs.clear()
+    await decide_approval(
+        world.engine, buyer(world.people), approval_id, "approve", jobs=world.jobs
+    )
+    # Approved, the act not run yet: the initial emails are still pending rows, but no
+    # decision is left for the buyer.
+    assert await rfq_service.list_approvals(world.engine, buyer(world.people), "pending") == []
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        rows = list(await session.scalars(select(Approval).where(Approval.tool == SEND_RFQ_EMAIL)))
+    assert {a.status for a in rows} == {"pending"}
+
+    await world.run_jobs()
+    assert await rfq_service.list_approvals(world.engine, buyer(world.people), "pending") == []
+    assert len(world.mailboxes.sender.sent) == 2

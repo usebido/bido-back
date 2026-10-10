@@ -1546,6 +1546,9 @@ async def list_approvals(
                 .limit(_QUEUE_LIMIT)
             )
         )
+        if status == "pending":
+            covered = await _mandate_covered_sends(session)
+            approvals = [a for a in approvals if a.id not in covered]
         drafts: dict[UUID, tuple[SendRfqEmailArgs | SendFollowupEmailArgs, EmailKind]] = {}
         negotiations: dict[UUID, SendNegotiationEmailArgs] = {}
         for approval in approvals:
@@ -1676,6 +1679,35 @@ async def list_approvals(
             )
         )
     return items
+
+
+async def _mandate_covered_sends(session: AsyncSession) -> set[UUID]:
+    """The pending RFQ-email approvals a negotiation mandate decides: its initial emails.
+
+    They are not the buyer's decisions. The mandate's one approval covers them, and on
+    approval its act approves (or holds) each one. Listed as pending, the queue showed
+    every supplier's "Send RFQ" next to the mandate, and still for ~20 s after the
+    mandate was approved, until the act ran (2026-10-10). A rejected mandate expires
+    them (`release_rejected_mandate`), so none is left pending without a mandate."""
+    # Imported here: the mandate service builds on this module.
+    from bido_back.mandates.schemas import ApproveMandateArgs
+    from bido_back.mandates.service import APPROVE_NEGOTIATION_MANDATE
+
+    covered: set[UUID] = set()
+    mandates = await session.scalars(
+        select(Approval).where(
+            Approval.tool == APPROVE_NEGOTIATION_MANDATE,
+            Approval.status.in_(("pending", "approved")),
+        )
+    )
+    for mandate in mandates:
+        try:
+            args = ApproveMandateArgs.model_validate(mandate.args)
+        except ValueError:
+            logger.error("approval %s has args that do not validate", mandate.id)
+            continue
+        covered.update(email.approval_id for email in args.initial_emails)
+    return covered
 
 
 async def _mandate_views(
