@@ -17,6 +17,7 @@ from bido_back.awards.views import (
     DecimalText,
     ThreadEmailApprovalView,
 )
+from bido_back.payments.views import PaymentState, PurchaseOrderPaymentSummary
 from bido_back.rfqs.schemas import EmailAddress
 
 __all__ = ["AwardApprovalView", "AwardLine", "DecimalText", "ThreadEmailApprovalView"]
@@ -321,6 +322,11 @@ class PurchaseOrderView(BaseModel):
         description="What the PO document leaves blank (e.g. payment_terms, incoterm, "
         "line 2 delivery_date): fill it on the RFQ before sending, or send it as is",
     )
+    payment: PurchaseOrderPaymentSummary | None = Field(
+        default=None,
+        description="The order's card payment into its escrow (the live one, else the "
+        "latest); details at GET /v1/purchase-orders/{id}/payment",
+    )
 
 
 class PurchaseOrderSummary(BaseModel):
@@ -339,6 +345,10 @@ class PurchaseOrderSummary(BaseModel):
     )
     needs_review: bool = Field(
         default=False, description="A supplier reply to the order waits for the buyer"
+    )
+    payment_state: PaymentState | None = Field(
+        default=None,
+        description="The state of the order's payment (the live one, else the latest), if any",
     )
 
 

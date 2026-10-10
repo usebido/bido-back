@@ -1,0 +1,1556 @@
+{
+  "address": "7992GKVq51ChvsVJQ9GFto2aBozUGuMcuY93SUSxexJw",
+  "metadata": {
+    "name": "bido_escrow",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Bido escrow: pays a purchase order's fixed payout by milestones, only against SAS gate attestations (Solana devnet)"
+  },
+  "instructions": [
+    {
+      "name": "create_po",
+      "docs": [
+        "Creates an unfunded escrow for a PO, signed by the operator; the relayer pays."
+      ],
+      "discriminator": [
+        70,
+        241,
+        65,
+        62,
+        199,
+        136,
+        179,
+        245
+      ],
+      "accounts": [
+        {
+          "name": "config",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "operator",
+          "signer": true
+        },
+        {
+          "name": "payer",
+          "docs": [
+            "The relayer: pays the fee and the rent of the escrow and both ATAs."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "buyer"
+        },
+        {
+          "name": "payout"
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "escrow",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  111
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "buyer"
+              },
+              {
+                "kind": "arg",
+                "path": "args.chain_po_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "escrow"
+              },
+              {
+                "kind": "account",
+                "path": "token_program"
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "payout_token",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "payout"
+              },
+              {
+                "kind": "account",
+                "path": "token_program"
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "sas_credential"
+        },
+        {
+          "name": "token_program"
+        },
+        {
+          "name": "associated_token_program",
+          "address": "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "CreatePoArgs"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "fund",
+      "docs": [
+        "Moves exactly the PO total from the buyer into the vault, signed by the buyer."
+      ],
+      "discriminator": [
+        218,
+        188,
+        111,
+        221,
+        152,
+        113,
+        174,
+        7
+      ],
+      "accounts": [
+        {
+          "name": "buyer",
+          "signer": true
+        },
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "buyer_token",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "token_program"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "init_config",
+      "docs": [
+        "One-shot setup of `Config`, signed by the program upgrade authority."
+      ],
+      "discriminator": [
+        23,
+        235,
+        115,
+        232,
+        168,
+        96,
+        1,
+        231
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program",
+          "address": "7992GKVq51ChvsVJQ9GFto2aBozUGuMcuY93SUSxexJw"
+        },
+        {
+          "name": "program_data"
+        },
+        {
+          "name": "sas_credential"
+        },
+        {
+          "name": "sas_schema"
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "InitConfigArgs"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "refund",
+      "docs": [
+        "Returns the unreleased balance to the buyer's ATA after `refund_after`, signed by the buyer."
+      ],
+      "discriminator": [
+        2,
+        96,
+        183,
+        251,
+        63,
+        208,
+        46,
+        46
+      ],
+      "accounts": [
+        {
+          "name": "buyer",
+          "signer": true
+        },
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "buyer_token",
+          "docs": [
+            "ATA(buyer, mint); must already exist."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "account",
+                "path": "buyer"
+              },
+              {
+                "kind": "account",
+                "path": "token_program"
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                140,
+                151,
+                37,
+                143,
+                78,
+                36,
+                137,
+                241,
+                187,
+                61,
+                16,
+                41,
+                20,
+                142,
+                13,
+                131,
+                11,
+                90,
+                19,
+                153,
+                218,
+                255,
+                16,
+                132,
+                4,
+                142,
+                123,
+                216,
+                219,
+                233,
+                248,
+                89
+              ]
+            }
+          }
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "token_program"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "release",
+      "docs": [
+        "Pays one milestone to the fixed payout against its gate's SAS attestation. Permissionless."
+      ],
+      "discriminator": [
+        253,
+        249,
+        15,
+        206,
+        28,
+        127,
+        193,
+        241
+      ],
+      "accounts": [
+        {
+          "name": "escrow",
+          "writable": true
+        },
+        {
+          "name": "vault",
+          "writable": true
+        },
+        {
+          "name": "payout_token",
+          "writable": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "attestation"
+        },
+        {
+          "name": "token_program"
+        },
+        {
+          "name": "event_authority"
+        },
+        {
+          "name": "program"
+        }
+      ],
+      "args": [
+        {
+          "name": "milestone",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "update_config",
+      "docs": [
+        "Updates `Config`, signed by the current upgrade authority; never touches a `PoEscrow`."
+      ],
+      "discriminator": [
+        29,
+        158,
+        252,
+        191,
+        10,
+        83,
+        219,
+        99
+      ],
+      "accounts": [
+        {
+          "name": "admin",
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  111,
+                  110,
+                  102,
+                  105,
+                  103
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program",
+          "address": "7992GKVq51ChvsVJQ9GFto2aBozUGuMcuY93SUSxexJw"
+        },
+        {
+          "name": "program_data"
+        },
+        {
+          "name": "sas_credential"
+        },
+        {
+          "name": "sas_schema"
+        }
+      ],
+      "args": [
+        {
+          "name": "args",
+          "type": {
+            "defined": {
+              "name": "UpdateConfigArgs"
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "Config",
+      "discriminator": [
+        155,
+        12,
+        170,
+        224,
+        30,
+        250,
+        204,
+        130
+      ]
+    },
+    {
+      "name": "PoEscrow",
+      "discriminator": [
+        117,
+        6,
+        174,
+        16,
+        212,
+        15,
+        177,
+        143
+      ]
+    }
+  ],
+  "events": [
+    {
+      "name": "MilestoneReleased",
+      "discriminator": [
+        49,
+        225,
+        91,
+        223,
+        34,
+        165,
+        109,
+        181
+      ]
+    },
+    {
+      "name": "PoCompleted",
+      "discriminator": [
+        132,
+        114,
+        50,
+        200,
+        168,
+        217,
+        132,
+        67
+      ]
+    },
+    {
+      "name": "PoCreated",
+      "discriminator": [
+        120,
+        196,
+        83,
+        130,
+        196,
+        134,
+        127,
+        248
+      ]
+    },
+    {
+      "name": "PoFunded",
+      "discriminator": [
+        17,
+        204,
+        119,
+        236,
+        246,
+        211,
+        137,
+        89
+      ]
+    },
+    {
+      "name": "PoRefunded",
+      "discriminator": [
+        106,
+        55,
+        152,
+        245,
+        251,
+        16,
+        22,
+        117
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "UnauthorizedAdmin",
+      "msg": "Signer is not the program upgrade authority"
+    },
+    {
+      "code": 6001,
+      "name": "UnauthorizedOperator",
+      "msg": "Signer is not the configured operator"
+    },
+    {
+      "code": 6002,
+      "name": "UnauthorizedBuyer",
+      "msg": "Signer is not this escrow's buyer"
+    },
+    {
+      "code": 6003,
+      "name": "InvalidSasConfig",
+      "msg": "SAS credential or schema is not valid for Bido gate approvals"
+    },
+    {
+      "code": 6004,
+      "name": "MintNotAllowed",
+      "msg": "Mint is not allowed or does not match the escrow"
+    },
+    {
+      "code": 6005,
+      "name": "InvalidPoId",
+      "msg": "Invalid on-chain PO id"
+    },
+    {
+      "code": 6006,
+      "name": "InvalidMilestoneCount",
+      "msg": "A PO needs 1 to 4 milestones"
+    },
+    {
+      "code": 6007,
+      "name": "NameTooLong",
+      "msg": "Milestone name must be 1 to 24 bytes"
+    },
+    {
+      "code": 6008,
+      "name": "ZeroBps",
+      "msg": "Milestone share must be greater than zero"
+    },
+    {
+      "code": 6009,
+      "name": "BpsSumNot10000",
+      "msg": "Milestone shares must add up to 100%"
+    },
+    {
+      "code": 6010,
+      "name": "ZeroAmount",
+      "msg": "Total and every milestone amount must be greater than zero"
+    },
+    {
+      "code": 6011,
+      "name": "MathOverflow",
+      "msg": "Arithmetic overflow"
+    },
+    {
+      "code": 6012,
+      "name": "InvalidGate",
+      "msg": "Invalid or unused approval gate"
+    },
+    {
+      "code": 6013,
+      "name": "InvalidAttester",
+      "msg": "Gate attester is empty or equals the payout"
+    },
+    {
+      "code": 6014,
+      "name": "GateAttesterMismatch",
+      "msg": "Gate attester is not an authorized signer of the credential"
+    },
+    {
+      "code": 6015,
+      "name": "PayoutIsEscrow",
+      "msg": "Payout cannot be the escrow or its vault"
+    },
+    {
+      "code": 6016,
+      "name": "PayoutIsBuyer",
+      "msg": "Payout cannot be the buyer"
+    },
+    {
+      "code": 6017,
+      "name": "VaultAccountInvalid",
+      "msg": "Vault token account is not the escrow's clean vault"
+    },
+    {
+      "code": 6018,
+      "name": "InvalidRefundDeadline",
+      "msg": "Refund deadline must be in the future"
+    },
+    {
+      "code": 6019,
+      "name": "AlreadyFunded",
+      "msg": "Escrow is already funded"
+    },
+    {
+      "code": 6020,
+      "name": "NotFunded",
+      "msg": "Escrow is not funded"
+    },
+    {
+      "code": 6021,
+      "name": "EscrowClosed",
+      "msg": "Escrow is completed or refunded"
+    },
+    {
+      "code": 6022,
+      "name": "FundDeltaMismatch",
+      "msg": "Vault did not receive exactly the PO total"
+    },
+    {
+      "code": 6023,
+      "name": "InvalidMilestone",
+      "msg": "Milestone index out of range"
+    },
+    {
+      "code": 6024,
+      "name": "MilestoneAlreadyReleased",
+      "msg": "Milestone already released"
+    },
+    {
+      "code": 6025,
+      "name": "AttestationAddressMismatch",
+      "msg": "Attestation does not belong to this escrow and gate"
+    },
+    {
+      "code": 6026,
+      "name": "AttestationMissing",
+      "msg": "No approval attestation exists for this gate"
+    },
+    {
+      "code": 6027,
+      "name": "AttestationMalformed",
+      "msg": "Attestation account is malformed"
+    },
+    {
+      "code": 6028,
+      "name": "AttestationCredentialMismatch",
+      "msg": "Attestation credential mismatch"
+    },
+    {
+      "code": 6029,
+      "name": "AttestationSchemaMismatch",
+      "msg": "Attestation schema mismatch"
+    },
+    {
+      "code": 6030,
+      "name": "AttestationNonceMismatch",
+      "msg": "Attestation nonce mismatch"
+    },
+    {
+      "code": 6031,
+      "name": "AttestationPoHashMismatch",
+      "msg": "Attestation is for a different PO document"
+    },
+    {
+      "code": 6032,
+      "name": "AttestationGateMismatch",
+      "msg": "Attestation is for a different gate"
+    },
+    {
+      "code": 6033,
+      "name": "AttesterMismatch",
+      "msg": "Attestation was not signed by this gate's approver"
+    },
+    {
+      "code": 6034,
+      "name": "AttestationExpired",
+      "msg": "Attestation has expired"
+    },
+    {
+      "code": 6035,
+      "name": "PayoutMismatch",
+      "msg": "Destination is not the escrow's fixed payout account"
+    },
+    {
+      "code": 6036,
+      "name": "RefundTooEarly",
+      "msg": "Refund deadline has not passed"
+    },
+    {
+      "code": 6037,
+      "name": "NothingToRefund",
+      "msg": "Nothing left to refund"
+    }
+  ],
+  "types": [
+    {
+      "name": "Config",
+      "docs": [
+        "Program-wide settings. PDA `[\"config\"]`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "docs": [
+              "Program upgrade authority at the last `init_config` or `update_config`."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "operator",
+            "docs": [
+              "The only key allowed to call `create_po`."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "allowed_mints",
+            "docs": [
+              "`[tUSD, Circle devnet USDC]`; `Pubkey::default()` marks an empty slot."
+            ],
+            "type": {
+              "array": [
+                "pubkey",
+                2
+              ]
+            }
+          },
+          {
+            "name": "sas_credential",
+            "docs": [
+              "SAS credential \"bido-approvals\"."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "sas_schema",
+            "docs": [
+              "SAS schema \"bido-gate-approval\" v1."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "CreatePoArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "chain_po_id",
+            "type": "string"
+          },
+          {
+            "name": "po_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "cad_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "total",
+            "type": "u64"
+          },
+          {
+            "name": "gate_attesters",
+            "type": {
+              "vec": "pubkey"
+            }
+          },
+          {
+            "name": "milestones",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "MilestoneInput"
+                }
+              }
+            }
+          },
+          {
+            "name": "refund_after",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "EscrowStatus",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Created"
+          },
+          {
+            "name": "Funded"
+          },
+          {
+            "name": "Completed"
+          },
+          {
+            "name": "Refunded"
+          }
+        ]
+      }
+    },
+    {
+      "name": "Gate",
+      "docs": [
+        "An approval point with one pinned attester."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "attester",
+            "type": "pubkey"
+          },
+          {
+            "name": "attestation",
+            "docs": [
+              "Expected SAS attestation PDA `[\"attestation\", credential, schema, gate nonce]`."
+            ],
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "InitConfigArgs",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "operator",
+            "type": "pubkey"
+          },
+          {
+            "name": "allowed_mints",
+            "type": {
+              "array": [
+                "pubkey",
+                2
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "Milestone",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "name": "bps",
+            "type": "u16"
+          },
+          {
+            "name": "amount",
+            "docs": [
+              "Fixed at `create_po`."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "gate",
+            "type": "u8"
+          },
+          {
+            "name": "status",
+            "type": {
+              "defined": {
+                "name": "MilestoneStatus"
+              }
+            }
+          },
+          {
+            "name": "released_slot",
+            "docs": [
+              "0 until released."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "approved_by",
+            "docs": [
+              "Attestation signer; default until released."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "evidence_hash",
+            "docs": [
+              "From the attestation; zero until released."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "MilestoneInput",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "name",
+            "type": "string"
+          },
+          {
+            "name": "bps",
+            "type": "u16"
+          },
+          {
+            "name": "gate",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MilestoneReleased",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "chain_po_id",
+            "type": "string"
+          },
+          {
+            "name": "milestone",
+            "type": "u8"
+          },
+          {
+            "name": "gate",
+            "type": "u8"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "released_total",
+            "type": "u64"
+          },
+          {
+            "name": "payout",
+            "type": "pubkey"
+          },
+          {
+            "name": "payout_token",
+            "type": "pubkey"
+          },
+          {
+            "name": "attestation",
+            "type": "pubkey"
+          },
+          {
+            "name": "approved_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "evidence_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "MilestoneStatus",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Pending"
+          },
+          {
+            "name": "Released"
+          },
+          {
+            "name": "Cancelled"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PoCompleted",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "chain_po_id",
+            "type": "string"
+          },
+          {
+            "name": "total",
+            "type": "u64"
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PoCreated",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "chain_po_id",
+            "type": "string"
+          },
+          {
+            "name": "buyer",
+            "type": "pubkey"
+          },
+          {
+            "name": "payout",
+            "type": "pubkey"
+          },
+          {
+            "name": "payout_token",
+            "type": "pubkey"
+          },
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "po_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "cad_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "total",
+            "type": "u64"
+          },
+          {
+            "name": "credential",
+            "type": "pubkey"
+          },
+          {
+            "name": "schema",
+            "type": "pubkey"
+          },
+          {
+            "name": "gate_attesters",
+            "type": {
+              "vec": "pubkey"
+            }
+          },
+          {
+            "name": "gate_attestations",
+            "type": {
+              "vec": "pubkey"
+            }
+          },
+          {
+            "name": "milestone_names",
+            "type": {
+              "vec": "string"
+            }
+          },
+          {
+            "name": "milestone_bps",
+            "type": {
+              "vec": "u16"
+            }
+          },
+          {
+            "name": "milestone_gates",
+            "type": "bytes"
+          },
+          {
+            "name": "milestone_amounts",
+            "type": {
+              "vec": "u64"
+            }
+          },
+          {
+            "name": "refund_after",
+            "type": "i64"
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PoEscrow",
+      "docs": [
+        "One purchase order's escrow and audit record. PDA `[\"po\", buyer, chain_po_id]`; never closed."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "chain_po_id",
+            "type": "string"
+          },
+          {
+            "name": "buyer",
+            "docs": [
+              "Signs `fund` and `refund` (the buyer approver's passkey wallet)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "payout",
+            "docs": [
+              "Payout owner wallet from the verified registry; immutable."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "payout_token",
+            "docs": [
+              "ATA(payout, mint), created at `create_po`."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "vault",
+            "docs": [
+              "ATA(escrow, mint); its authority is this PDA."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "po_hash",
+            "docs": [
+              "sha256 of the PO PDF bytes."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "cad_hash",
+            "docs": [
+              "sha256 of the drawing 2D PDF (rev C)."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "total",
+            "docs": [
+              "Base units (6 decimals)."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "released",
+            "type": "u64"
+          },
+          {
+            "name": "status",
+            "type": {
+              "defined": {
+                "name": "EscrowStatus"
+              }
+            }
+          },
+          {
+            "name": "credential",
+            "docs": [
+              "SAS credential copied from `Config` at creation."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "schema",
+            "docs": [
+              "SAS schema copied from `Config` at creation."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "gates",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "Gate"
+                }
+              }
+            }
+          },
+          {
+            "name": "milestones",
+            "type": {
+              "vec": {
+                "defined": {
+                  "name": "Milestone"
+                }
+              }
+            }
+          },
+          {
+            "name": "refund_after",
+            "docs": [
+              "Unix seconds after which the buyer may refund."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PoFunded",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "chain_po_id",
+            "type": "string"
+          },
+          {
+            "name": "buyer",
+            "type": "pubkey"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PoRefunded",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "escrow",
+            "type": "pubkey"
+          },
+          {
+            "name": "chain_po_id",
+            "type": "string"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
+          },
+          {
+            "name": "to",
+            "type": "pubkey"
+          },
+          {
+            "name": "slot",
+            "type": "u64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "UpdateConfigArgs",
+      "docs": [
+        "`Some` fields replace the stored values; `None` keeps them."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "operator",
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "allowed_mints",
+            "type": {
+              "option": {
+                "array": [
+                  "pubkey",
+                  2
+                ]
+              }
+            }
+          },
+          {
+            "name": "sas_credential",
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "sas_schema",
+            "type": {
+              "option": "pubkey"
+            }
+          }
+        ]
+      }
+    }
+  ]
+}

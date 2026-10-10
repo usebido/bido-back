@@ -106,6 +106,7 @@ from bido_back.db.models import (
     Tenant,
     User,
 )
+from bido_back.payments.service import payment_summaries
 from bido_back.rfqs.errors import AgentFailed, InvalidState, NotFound, RfqError
 from bido_back.rfqs.language import country_code
 from bido_back.rfqs.mailbox import MailboxSenderFactory
@@ -270,6 +271,7 @@ async def _summaries(
     )
     totals = await quantities(session, [po.id for po, _, _ in rows])
     review = await awaiting_review(session, [po.id for po, _, _ in rows])
+    payments = await payment_summaries(session, [po.id for po, _, _ in rows])
     return [
         PurchaseOrderSummary(
             id=po.id,
@@ -284,6 +286,7 @@ async def _summaries(
             sent_at=po.sent_at,
             fulfilment=fulfilment_view(po, totals[po.id]),
             needs_review=po.id in review,
+            payment_state=payments[po.id].state if po.id in payments else None,
         )
         for po, rfq_ref, supplier_name in rows
     ]
@@ -596,6 +599,7 @@ async def get_purchase_order(db: Db, principal: Principal, po_id: UUID) -> Purch
             cancellation_approval_id=cancellation.id if cancellation else None,
             cancellation_sent=await cancellation_sent(session, po.id),
             document_gaps=document_gaps(doc),
+            payment=(await payment_summaries(session, [po.id])).get(po.id),
         )
 
 

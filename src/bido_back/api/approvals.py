@@ -35,6 +35,7 @@ from bido_back.awards.send import AWARD_REJECT_HOOKS
 from bido_back.followups.send import FOLLOWUP_REJECT_HOOKS
 from bido_back.mandates.service import MANDATE_REJECT_HOOKS
 from bido_back.negotiation.send import NEGOTIATION_REJECT_HOOKS
+from bido_back.payments.execute import PAYMENT_REJECT_HOOKS
 from bido_back.rfqs.schemas import ApprovalQueueItem, ApprovalStatus
 from bido_back.rfqs.send import REJECT_HOOKS
 from bido_back.rfqs.service import list_approvals
@@ -120,6 +121,7 @@ def approvals_router() -> APIRouter:
                     **NEGOTIATION_REJECT_HOOKS,
                     **AWARD_REJECT_HOOKS,
                     **MANDATE_REJECT_HOOKS,
+                    **PAYMENT_REJECT_HOOKS,
                 },
                 confirmed_domains=body.confirmed_domains,
             )

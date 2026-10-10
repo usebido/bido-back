@@ -17,6 +17,7 @@ from bido_back.awards.views import AwardApprovalView, ThreadEmailApprovalView
 from bido_back.branding.schemas import LogoPlacement
 from bido_back.fx import REFERENCE_CURRENCIES
 from bido_back.outbound.domains import RecipientCheck
+from bido_back.payments.views import PaymentApprovalView
 
 # Deliberately strict and single-line: these end up in email headers.
 EmailAddress = Annotated[
@@ -490,6 +491,9 @@ class ApprovalQueueItem(BaseModel):
     recipient_checks: list[RecipientCheck] | None = None
     # Set for `approve_negotiation_mandate`: suppliers, addresses, per-line limits.
     mandate: MandateApprovalView | None = None
+    # Set for `pay_purchase_order`: the order, the amount charged to which card, the
+    # supplier's payout account and the escrow's milestones.
+    payment: PaymentApprovalView | None = None
 
 
 ActivityKind = Literal["agent", "email", "user", "system"]
