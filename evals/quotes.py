@@ -152,6 +152,49 @@ def cases(today: date) -> list[QuoteCase]:
             ),
         ),
         QuoteCase(
+            name="pt_xlsx_two_lines_dias",
+            description="Portuguese reply: the whole quote in one xlsx with title rows, then a "
+            "header and two lines, lead time in a 'Prazo de entrega (dias)' column (live "
+            "2026-10-10: every lead time came back wrong_locator)",
+            language="pt",
+            subject="RE: [RFQ-1] Termistores e pads térmicos",
+            body="Prezados,\nsegue nossa proposta para a RFQ-1 em anexo.\nAtenciosamente\n"
+            "Ana Lima - Componentes Demo Ltda",
+            documents=(
+                (
+                    "proposta-rfq1.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    _xlsx(
+                        "Proposta",
+                        [
+                            ["COMPONENTES DEMO LTDA - Proposta comercial"],
+                            ["Ref.: [RFQ-1] Termistores e pads térmicos"],
+                            [f"Validade: {it_valid}", "Pagamento: 28 ddl", "Frete: DAP Leipzig"],
+                            [],
+                            [
+                                "Item",
+                                "Código",
+                                "Descrição",
+                                "Qtd",
+                                "Un",
+                                "Preço unitário (R$)",
+                                "Prazo de entrega (dias)",
+                            ],
+                            [1, "NTC-10K-3950", "Termistor NTC 10k", 10000, "pcs", 0.04, 21],
+                            [2, "TP-2-300", "Pad térmico 2 mm", 400, "pcs", 7.8, 22],
+                        ],
+                    ),
+                ),
+            ),  # fmt: skip
+            is_quote=True,
+            declined=False,
+            currency="BRL",
+            lines=(
+                LineTruth(1, Decimal(10000), Decimal("0.04"), 21),
+                LineTruth(2, Decimal(400), Decimal("7.8"), 22),
+            ),
+        ),
+        QuoteCase(
             name="it_body_prices",
             description="Italian reply with prices, lead time in weeks and validity in the body",
             language="it",

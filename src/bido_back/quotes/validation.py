@@ -620,7 +620,7 @@ def _check_lead_time(
         return None
     issues = _evidence_issues(value, ctx)
     source = value.source
-    quote = source.quote if source is not None else ""
+    quote = (_spanned_cell(source, ctx.sources) or source.quote) if source is not None else ""
     header = _column_header(source, ctx.sources) if source is not None else None
     unit_text = f"{quote}\n{header}" if header else quote
     risk = _verbatim(value.risk_note, ctx.sources)
@@ -815,7 +815,7 @@ def _written_lead_time(value: ExtractedValue, ctx: _Context) -> _LeadCheck | Non
     issues = _evidence_issues(value, ctx)
     parsed, value_issues = _parse("days", text, ctx.decimal)
     source = value.source
-    quote = source.quote if source is not None else ""
+    quote = (_spanned_cell(source, ctx.sources) or source.quote) if source is not None else ""
     if not isinstance(parsed, int):
         raw = LeadTimeValue(value=value.value, source=source, confidence=value.confidence)
         return _LeadCheck(raw, None, tuple(dict.fromkeys((*issues, *value_issues))), written=True)
@@ -1360,7 +1360,10 @@ def check_field(
         return FieldCheck(name=name, extracted=extracted, parsed=parsed)
     issues.extend(value_issues)
     if parsed is not None and source is not None and source.quote.strip():
-        issues.extend(_grounding(kind, parsed, source.quote, decimal))
+        # A sheet value is grounded in the cell it cites when the quote spans more cells
+        # than that one: the value must be that cell's, not any number of the span.
+        cell = _spanned_cell(source, sources)
+        issues.extend(_grounding(kind, parsed, cell or source.quote, decimal))
     return FieldCheck(name=name, extracted=extracted, parsed=parsed, issues=tuple(issues))
 
 
@@ -1393,6 +1396,10 @@ def _locate(source: SourceRef, sources: QuoteSources) -> str | None:
         scope = cell_text(document, source.sheet, source.cell)
     if scope is not None and quote in normalize_text(scope):
         return None
+    if _spanned_cell(source, sources) is not None:
+        # The quote runs over several cells (a header, the row) and the cited cell is
+        # one of them, in the file: located. The value is then grounded in that cell.
+        return None
     if quote in normalize_text(document.text):
         # Found, but not at the cited page / cell (or no locator was given).
         has_locator = (source.kind == "pdf" and source.page is not None) or (
@@ -1400,6 +1407,29 @@ def _locate(source: SourceRef, sources: QuoteSources) -> str | None:
         )
         return "wrong_locator" if has_locator else None
     return "quote_not_found"
+
+
+def _spanned_cell(source: SourceRef, sources: QuoteSources) -> str | None:
+    """The cited sheet cell's text when the quote spans several cells, this one among
+    them, and that span is in the workbook; else None.
+
+    Seen live (2026-10-10, a 2-line xlsx quote): the model cited `Proposta!G6` (21 days)
+    with a quote running from the column header through the row, so the quote was in the
+    file but not inside G6, and every lead time came back `wrong_locator`."""
+    if source.kind != "sheet" or not source.cell or source.attachment is None:
+        return None
+    document = sources.documents.get(source.attachment)
+    if document is None or not document.readable:
+        return None
+    cell = cell_text(document, source.sheet, source.cell)
+    if cell is None or not normalize_text(cell):
+        return None
+    quote = normalize_text(source.quote)
+    if quote == normalize_text(cell) or normalize_text(cell) not in quote:
+        return None
+    if quote not in normalize_text(document.text):
+        return None
+    return cell
 
 
 _CELL = re.compile(r"([A-Za-z]+)(\d+)")
