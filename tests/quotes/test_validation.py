@@ -793,3 +793,40 @@ def test_mismatches_are_compared_with_the_lines_the_quote_answers() -> None:
 
 def replace_line(line: RequestedLine, **changes: object) -> RequestedLine:
     return replace(line, **changes)
+
+
+def test_a_quote_spanning_the_row_is_grounded_in_its_cited_cell() -> None:
+    # Live, 2026-10-10: a 2-line xlsx quote. The model cited G6 (21 days) with a quote
+    # running from the column header through the row, so every lead time came back
+    # `wrong_locator`. The cited cell is in the span: it is located, and the value must
+    # be that cell's, not another number of the span.
+    sheet = extract_text(
+        "proposta.xlsx",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        build_xlsx(
+            {
+                "Proposta": [
+                    ["Item", "Código", "Qtd", "Preço unitário (R$)", "Prazo de entrega (dias)"],
+                    [3, "100000110", 350, 236, 21],
+                    [4, "100000120", 390, 134.5, 22],
+                ]
+            }
+        ),
+    )
+    start = sheet.text.index("Prazo de entrega (dias)")
+    end = sheet.text.index("] 21", start) + len("] 21")
+    span = sheet.text[start:end]
+    in_cell = ev("21", span, kind="sheet", attachment="proposta.xlsx", sheet="Proposta", cell="E2")
+    other_cell = ev(
+        "21", span, kind="sheet", attachment="proposta.xlsx", sheet="Proposta", cell="D2"
+    )
+
+    right, wrong = (
+        validate(output(line(lead_time_days=value)), documents=[sheet], decimal=",")
+        for value in (in_cell, other_cell)
+    )
+
+    assert issues_of(right, "lead_time_days") == ()
+    assert right.lines[0].parsed("lead_time_days") == 21
+    # D2 holds 236: the span is located, but 21 is not that cell's value.
+    assert issues_of(wrong, "lead_time_days") != ()
