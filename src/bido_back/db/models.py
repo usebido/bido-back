@@ -1547,7 +1547,16 @@ class PoPayment(Base):
     po_hash: Mapped[str] = mapped_column(Text)
     milestones: Mapped[list[dict[str, Any]]] = mapped_column(JSONB)
     charge_mode: Mapped[str] = mapped_column(Text)
+    # `spt` (Stripe Shared Payment Token) or `vic` (Visa, approved with a passkey).
+    card_rail: Mapped[str] = mapped_column(Text, server_default=text("'spt'"))
     card_authorization_ref: Mapped[str | None] = mapped_column(Text)
+    # `vic`: when the cardholder's passkey approval of the allowance was read.
+    card_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # `vic`: the single-use virtual card minted for the agent; never its number or code.
+    issued_card_ref: Mapped[str | None] = mapped_column(Text)
+    issued_card_last4: Mapped[str | None] = mapped_column(Text)
+    issued_card_exp_month: Mapped[int | None] = mapped_column(SmallInteger)
+    issued_card_exp_year: Mapped[int | None] = mapped_column(SmallInteger)
     charge_reference: Mapped[str | None] = mapped_column(Text)
     charged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     wallet_id: Mapped[UUID | None] = mapped_column(ForeignKey("tenant_wallets.id"))

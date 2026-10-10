@@ -92,6 +92,7 @@ class Paying:
         charge_mode: Literal["stripe", "simulated"] = "stripe",
         method_id: UUID | None = None,
         attempt: int = 0,
+        card_rail: Literal["spt", "vic"] = "spt",
     ) -> ProposedPayment:
         """The buyer (the tenant's owner) asks to pay the PO: a pending approval."""
         return await propose_payment(
@@ -103,6 +104,7 @@ class Paying:
             charge_mode=charge_mode,
             quote_ttl=quote_ttl,
             attempt=attempt,
+            card_rail=card_rail,
         )
 
     async def charged(self) -> ProposedPayment:
@@ -295,6 +297,66 @@ async def test_the_charge_is_made_the_way_the_approver_saw_it(paying: Paying) ->
     assert payment.charge_reference == f"sim_{simulated.payment_id}"
     [event] = await paying.events(simulated.payment_id)
     assert event.payload["simulated"] is True
+
+
+# --- Visa Intelligent Commerce: the passkey, then the agent's virtual card ---------------------
+
+
+def visa(paying: Paying) -> None:
+    card = paying.providers.card
+    card.rail_mode, card.simulated_mode = "vic", True
+
+
+async def test_a_visa_payment_approved_before_the_passkey_mints_nothing(paying: Paying) -> None:
+    visa(paying)
+    proposed = await paying.propose(charge_mode="simulated", card_rail="vic")
+    await paying.world.approve(proposed.approval_id)
+
+    assert await refused(paying, proposed.payment_id) == ("failed", "card_not_verified")
+    payment = await paying.payment(proposed.payment_id)
+    assert (payment.card_verified_at, payment.issued_card_ref) == (None, None)
+    assert await paying.actions(proposed.payment_id) == [PAYMENT_FAILED]
+
+
+async def test_a_visa_payment_approved_after_the_passkey_issues_the_agent_a_card(
+    paying: Paying,
+) -> None:
+    visa(paying)
+    paying.providers.card.verification_status = "verified"
+    proposed = await paying.propose(charge_mode="simulated", card_rail="vic")
+    await paying.world.approve(proposed.approval_id)
+
+    payment = await paying.payment(proposed.payment_id)
+    assert payment.state == "charged"
+    assert payment.charge_reference == f"sim_{proposed.payment_id}"
+    assert payment.card_verified_at is not None
+    assert (
+        payment.issued_card_ref,
+        payment.issued_card_last4,
+        payment.issued_card_exp_month,
+        payment.issued_card_exp_year,
+    ) == (f"cred_{proposed.payment_id.hex[:8]}", "4242", 12, 2030)
+    [event] = await paying.events(proposed.payment_id)
+    assert (event.action, event.payload["card_rail"], event.payload["simulated"]) == (
+        PAYMENT_CHARGED,
+        "vic",
+        True,
+    )
+
+
+async def test_a_payment_is_minted_only_on_the_rail_it_was_approved_on(paying: Paying) -> None:
+    # Approved for the Visa passkey, executed by a server on the Stripe rail: not charged.
+    paying.providers.card.simulated_mode = True
+    on_visa = await paying.propose(charge_mode="simulated", card_rail="vic")
+    await paying.world.approve(on_visa.approval_id)
+    assert await refused(paying, on_visa.payment_id) == ("failed", "charge_mode_changed")
+
+    # And the reverse: approved without a passkey, never minted on the Visa rail.
+    visa(paying)
+    paying.providers.card.verification_status = "verified"
+    on_stripe = await paying.propose(charge_mode="simulated", attempt=1)
+    await paying.world.approve(on_stripe.approval_id)
+    assert await refused(paying, on_stripe.payment_id) == ("failed", "charge_mode_changed")
 
 
 # --- Not charged: what the approval assumed changed ------------------------------------------

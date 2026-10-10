@@ -199,6 +199,9 @@ class PayPurchaseOrderArgs(BaseModel):
     chain_po_id: ChainPoId
     milestones: list[MilestoneInput]
     charge_mode: Literal["stripe", "simulated"]
+    # `vic`: the cardholder approves the allowance with the Visa passkey before the agent's
+    # virtual card is minted. Absent in proposals made before the Visa rail: `spt`.
+    card_rail: Literal["spt", "vic"] = "spt"
 
 
 PayOutcome = Literal["charged", "already_charged", "declined", "expired", "skipped", "failed"]

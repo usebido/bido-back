@@ -20,18 +20,23 @@ from solders.pubkey import Pubkey
 from solders.signature import Signature
 
 from bido_back.payments.config import PaymentProviders
-from bido_back.payments.errors import CardCredentialLost, ProviderError
+from bido_back.payments.errors import CardCredentialLost, CardNotVerified, ProviderError
 from bido_back.payments.ports import (
+    VIC_RAIL,
     BankAccountDetails,
     CardAuthorization,
     CardCharge,
     CardConsumer,
     CardDisplayData,
+    CardRail,
+    CardVerification,
+    CardVerificationStatus,
     ChargeOutcome,
     CustodyWallet,
     EnrolledCard,
     EscrowSpec,
     EscrowState,
+    IssuedCard,
     SignedTransaction,
     TransactionStatus,
     UnsignedTransaction,
@@ -57,6 +62,10 @@ CARD_ART = CardDisplayData(
 @dataclass
 class FakeCardGateway:
     simulated_mode: bool = False
+    # `vic`: each allowance waits for the passkey (`verification_status`) before a mint.
+    rail_mode: CardRail = "spt"
+    verification_status: CardVerificationStatus = "pending"
+    verification_calls: list[str] = field(default_factory=list[str])
     enroll_status: Literal["active", "pending", "failed"] = "active"
     enroll_display: CardDisplayData | None = CARD_ART
     # What `display` answers per payment method ref (absent: no display); an exception is raised.
@@ -80,6 +89,15 @@ class FakeCardGateway:
     @property
     def simulated(self) -> bool:
         return self.simulated_mode
+
+    @property
+    def rail(self) -> CardRail:
+        return self.rail_mode
+
+    async def verification(self, authorization_ref: str) -> CardVerification:
+        self.verification_calls.append(authorization_ref)
+        rail, provider = VIC_RAIL
+        return CardVerification(status=self.verification_status, rail=rail, provider=provider)
 
     async def enroll(
         self, *, token_id: str, consumer: CardConsumer, idempotency_key: str
@@ -120,10 +138,13 @@ class FakeCardGateway:
         existing = self.authorizations.get(idempotency_key)
         if existing is not None:
             return existing
+        usable = (
+            self.verification_status == "verified"
+            if self.rail_mode == "vic"
+            else self.authorize_usable
+        )
         authorization = CardAuthorization(
-            ref=f"alw_{len(self.authorizations) + 1}",
-            usable=self.authorize_usable,
-            expires_at=expires_at,
+            ref=f"alw_{len(self.authorizations) + 1}", usable=usable, expires_at=expires_at
         )
         self.authorizations[idempotency_key] = authorization
         return authorization
@@ -145,6 +166,13 @@ class FakeCardGateway:
         existing = self.charges.get(payment_id)
         if existing is not None:
             return existing
+        if self.rail_mode == "vic":
+            if self.verification_status != "verified":
+                raise CardNotVerified(f"payment {payment_id}: the allowance is not approved")
+            card = IssuedCard("cred_" + payment_id.hex[:8], "4242", 12, 2030)
+            charge = CardCharge("succeeded", f"sim_{payment_id}", None, True, issued_card=card)
+            self.charges[payment_id] = charge
+            return charge
         if self.charge_outcome == "succeeded":
             reference = f"sim_{payment_id}" if self.simulated_mode else f"pi_{payment_id.hex[:12]}"
             charge = CardCharge("succeeded", reference, None, self.simulated_mode)

@@ -14,7 +14,7 @@ decimals). Addresses and signatures are base58 strings.
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
-from typing import Literal, Protocol
+from typing import Final, Literal, Protocol
 from uuid import UUID
 
 # --- Card: Basis Theory Agentic Payments, charged on Bido's Stripe account -----------
@@ -30,6 +30,14 @@ class CardConsumer:
 
 
 CardStatus = Literal["active", "pending", "failed"]
+# Where a payment's card credential comes from: a Stripe Shared Payment Token (`spt`) or a
+# Visa Intelligent Commerce virtual card the cardholder approves with a passkey (`vic`).
+CardRail = Literal["spt", "vic"]
+# Basis Theory's (rail, provider) for each: what the browser SDK is told to verify.
+SPT_RAIL: Final = ("spt", "stripe")
+VIC_RAIL: Final = ("agentic-token", "vic")
+# The cardholder's approval of one allowance with the network's passkey.
+CardVerificationStatus = Literal["pending", "verified", "failed", "expired"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +66,7 @@ class EnrolledCard:
     exp_month: int | None
     exp_year: int | None
     funding: str | None  # credit | debit | prepaid | None
-    # The rail Bido charges on (`spt` / `stripe`): active, still provisioning, or refused.
+    # The card on the gateway's rail: active, still provisioning, or refused.
     status: CardStatus
     display: CardDisplayData | None
 
@@ -68,8 +76,31 @@ class CardAuthorization:
     """A Basis Theory allowance: the ceiling, merchant and expiry one payment may use."""
 
     ref: str  # `alw_...`
-    usable: bool  # the `spt` rail is active on it
+    usable: bool  # the gateway's rail is active on it (`vic`: once the passkey approved it)
     expires_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class CardVerification:
+    """Where the cardholder's passkey approval of an allowance stands, and what the
+    browser's Basis Theory SDK needs to run it (`verifyAllowance(ref, {rail, provider})`)."""
+
+    status: CardVerificationStatus
+    rail: str  # Basis Theory's rail name, e.g. `agentic-token`
+    provider: str  # e.g. `vic`
+
+
+@dataclass(frozen=True, slots=True)
+class IssuedCard:
+    """The single-use virtual card minted for the agent: what may be shown of it.
+
+    Its number and security code are never kept: only the last four digits and the
+    expiry, which identify it on the buyer's screen."""
+
+    credential_ref: str | None  # Basis Theory `cred_...`
+    last4: str | None
+    exp_month: int | None
+    exp_year: int | None
 
 
 ChargeOutcome = Literal["succeeded", "declined", "pending"]
@@ -81,21 +112,34 @@ class CardCharge:
     reference: str | None  # Stripe `pi_...`, or `sim_...` for a simulated charge
     decline_code: str | None  # a code we wrote (`card_declined`, ...), never provider prose
     simulated: bool
+    # `vic`: the virtual card minted for the agent (None when a replay could not read it).
+    issued_card: IssuedCard | None = None
 
 
 class CardGateway(Protocol):
     """Enrolls cards and charges one payment, exactly once per payment id.
 
-    `charge` mints the single-use Stripe Shared Payment Token from the allowance
-    and charges it on Bido's Stripe account in the same call: the token never
-    leaves the gateway and is never stored. Replaying a payment's charge returns
-    the charge already made (looked up by payment id); when the token was minted
-    but no charge exists, it raises `CardCredentialLost` (nothing was charged).
+    `spt`: `charge` mints the single-use Stripe Shared Payment Token from the
+    allowance and charges it on Bido's Stripe account in the same call: the token
+    never leaves the gateway and is never stored. Replaying a payment's charge
+    returns the charge already made (looked up by payment id); when the token was
+    minted but no charge exists, it raises `CardCredentialLost` (nothing was charged).
+
+    `vic`: the cardholder approves the allowance with the Visa passkey in the
+    browser first; `charge` then mints the single-use virtual card for the agent
+    (`CardNotVerified` while the passkey has not approved it). Nothing charges that
+    card yet: the charge is simulated, and only its last four digits and expiry
+    leave the gateway.
     """
 
     @property
     def simulated(self) -> bool:
         """True when charges are simulated (Basis Theory test tenant, devnet only)."""
+        ...
+
+    @property
+    def rail(self) -> CardRail:
+        """The rail the card credential is minted on."""
         ...
 
     async def enroll(
@@ -119,6 +163,10 @@ class CardGateway(Protocol):
         expires_at: datetime,
         idempotency_key: str,
     ) -> CardAuthorization: ...
+
+    async def verification(self, authorization_ref: str) -> CardVerification:
+        """Where the cardholder's passkey approval of the allowance stands (read live)."""
+        ...
 
     async def charge(
         self,

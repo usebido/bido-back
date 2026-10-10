@@ -71,6 +71,7 @@ from bido_back.db.models import (
 from bido_back.payments.config import PaymentProviders
 from bido_back.payments.errors import (
     CardCredentialLost,
+    CardNotVerified,
     PaymentError,
     PaymentInvalidState,
     PaymentRefused,
@@ -82,10 +83,13 @@ from bido_back.payments.pipeline import (
     Clock,
     Db,
     approved_terms_match,
+    authorize_payment_card,
     locked_payment,
     payment_advance_envelope,
 )
+from bido_back.payments.ports import IssuedCard
 from bido_back.payments.proposals import (
+    CARD_NOT_VERIFIED,
     PAY_PURCHASE_ORDER,
     PAYMENT_CHARGED,
     PAYMENT_DECLINED,
@@ -174,8 +178,10 @@ class _PayPurchaseOrder:
         self._deps = deps
 
     def _mode_matches(self, args: PayPurchaseOrderArgs) -> bool:
-        """The gateway charges the way the approver was shown (a real or a simulated charge)."""
-        return self._deps.providers.card.simulated == (args.charge_mode == "simulated")
+        """The gateway charges the way the approver was shown (a real or a simulated charge,
+        and on the approved rail: a Visa payment is never minted without its passkey)."""
+        card = self._deps.providers.card
+        return card.simulated == (args.charge_mode == "simulated") and card.rail == args.card_rail
 
     async def __call__(
         self, ctx: ToolContext, args: PayPurchaseOrderArgs
@@ -322,14 +328,7 @@ class _PayPurchaseOrder:
         authorization_ref = claim.authorization_ref
         if authorization_ref is None:
             try:
-                authorization = await card.authorize(
-                    payment_method_ref=claim.payment_method_ref,
-                    amount=amount,
-                    currency=args.charge_currency,
-                    description=description,
-                    expires_at=args.quote_expires_at,
-                    idempotency_key=f"payment:{args.payment_id}:authorize",
-                )
+                authorization = await authorize_payment_card(card, claim.payment_method_ref, args)
             except PaymentRefused:
                 return await self._record(ctx, args, "failed", code="card_authorization_failed")
             except ProviderError as exc:
@@ -337,6 +336,11 @@ class _PayPurchaseOrder:
                     raise
                 return await self._record(ctx, args, "failed", code="card_authorization_failed")
             if not authorization.usable:
+                if args.card_rail == "vic":
+                    # Created just now: nobody approved it with the passkey.
+                    return await self._record(
+                        ctx, args, "failed", code=CARD_NOT_VERIFIED, allowance=authorization.ref
+                    )
                 return await self._record(
                     ctx, args, "declined", code="card_rail_unavailable", allowance=authorization.ref
                 )
@@ -351,6 +355,9 @@ class _PayPurchaseOrder:
                 description=description,
                 idempotency_key=f"payment:{args.payment_id}",
             )
+        except CardNotVerified:
+            # The cardholder never approved the allowance with the Visa passkey: nothing minted.
+            return await self._record(ctx, args, "failed", code=CARD_NOT_VERIFIED)
         except CardCredentialLost:
             if self._now() - claim.decided_at < CREDENTIAL_GRACE:
                 # Stripe's search may not show the charge yet: asked again on the retry.
@@ -374,7 +381,9 @@ class _PayPurchaseOrder:
             return await self._record(
                 ctx, args, "declined", code=_code(charge.decline_code, "card_declined")
             )
-        return await self._record(ctx, args, "charged", reference=charge.reference)
+        return await self._record(
+            ctx, args, "charged", reference=charge.reference, issued_card=charge.issued_card
+        )
 
     async def _store_allowance(self, ctx: ToolContext, payment_id: UUID, ref: str) -> None:
         """Kept before the charge, so a retry charges against the same allowance."""
@@ -397,6 +406,7 @@ class _PayPurchaseOrder:
         reference: str | None = None,
         allowance: str | None = None,
         charged: bool = False,
+        issued_card: IssuedCard | None = None,
     ) -> PayPurchaseOrderResult:
         """`charged`: a `failed` payment whose card WAS charged (it needs a person, and keeps
         the order from being charged again: it stays the order's live payment)."""
@@ -416,6 +426,15 @@ class _PayPurchaseOrder:
             if state == "charged":
                 payment.charge_reference = reference
                 payment.charged_at = self._now()
+                if args.card_rail == "vic":
+                    # Minted: Basis Theory found the allowance approved by the passkey.
+                    if payment.card_verified_at is None:
+                        payment.card_verified_at = self._now()
+                    if issued_card is not None:
+                        payment.issued_card_ref = issued_card.credential_ref
+                        payment.issued_card_last4 = issued_card.last4
+                        payment.issued_card_exp_month = issued_card.exp_month
+                        payment.issued_card_exp_year = issued_card.exp_year
                 session.add(
                     _event(
                         ctx,
@@ -426,6 +445,7 @@ class _PayPurchaseOrder:
                         charge_amount=args.charge_amount,
                         charge_reference=reference,
                         simulated=args.charge_mode == "simulated",
+                        card_rail=args.card_rail,
                     )
                 )
             else:

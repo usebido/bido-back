@@ -15,6 +15,9 @@ _NAMESPACE: Final = UUID("52a6ef1b-cf15-43f9-b7ac-4d2737b5cecf")
 
 # Audit actions (keyed by `rfq_id` through `rfqs.audit.rfq_event`, so the RFQ feed shows them).
 PAYMENT_REQUESTED: Final = "purchase_order.payment_requested"
+PAYMENT_CARD_VERIFIED: Final = "purchase_order.payment_card_verified"
+# A Visa payment's failure code when its allowance was never approved with the passkey.
+CARD_NOT_VERIFIED: Final = "card_not_verified"
 PAYMENT_CHARGED: Final = "purchase_order.payment_charged"
 PAYMENT_DECLINED: Final = "purchase_order.payment_declined"
 PAYMENT_FAILED: Final = "purchase_order.payment_failed"

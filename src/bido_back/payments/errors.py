@@ -59,3 +59,8 @@ class CardCredentialLost(PaymentError):
 
     The allowance's capacity is spent; a new payment request starts over.
     """
+
+
+class CardNotVerified(PaymentError):
+    """The card network's rail is not active on the allowance: the cardholder has not
+    approved it with the passkey (or it expired). Nothing was minted or charged."""

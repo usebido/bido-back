@@ -133,6 +133,12 @@ class Settings(BaseSettings):
     # Stripe cannot charge, so the charge is recorded as simulated (marked as
     # such everywhere). Only with the test tenant, never in prd.
     payments_card_charge: Literal["stripe", "simulated"] = "stripe"
+    # The rail a payment's card credential comes from:
+    # "spt": a Stripe Shared Payment Token, no ceremony, charged on Bido's Stripe account.
+    # "vic": Visa Intelligent Commerce. The buyer approves each payment's allowance with
+    # the network's passkey in the browser, then Bido mints a single-use virtual card for
+    # the agent. Nothing charges that card yet, so it needs PAYMENTS_CARD_CHARGE=simulated.
+    payments_card_rail: Literal["spt", "vic"] = "spt"
     stripe_secret_key: str | None = Field(default=None, repr=False)
     # Bido's Stripe Business Network profile (`profile_...`): the Shared Payment
     # Token Basis Theory mints is granted to it.
@@ -208,6 +214,15 @@ class Settings(BaseSettings):
             raise ValueError(
                 "PAYMENTS_CARD_CHARGE=simulated needs the Basis Theory test tenant "
                 f"({BASIS_THEORY_TEST_HOST}) and ENVIRONMENT other than prd"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _visa_cards_are_not_charged_yet(self) -> Self:
+        if self.payments_card_rail == "vic" and self.payments_card_charge != "simulated":
+            raise ValueError(
+                "PAYMENTS_CARD_RAIL=vic mints a virtual card nothing charges yet: it needs "
+                "PAYMENTS_CARD_CHARGE=simulated"
             )
         return self
 

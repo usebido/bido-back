@@ -2676,6 +2676,11 @@
       },
       "CardSetupView": {
         "properties": {
+          "agentic_api_url": {
+            "description": "`apiBaseUrl` for `AgenticVerification` (Basis Theory's agentic API)",
+            "title": "Agentic Api Url",
+            "type": "string"
+          },
           "environment": {
             "enum": [
               "test",
@@ -2701,6 +2706,15 @@
             "description": "Basis Theory public key for Elements",
             "title": "Public Key"
           },
+          "rail": {
+            "description": "`vic`: each payment is approved with the Visa passkey (`@basis-theory/web-agentic`)",
+            "enum": [
+              "spt",
+              "vic"
+            ],
+            "title": "Rail",
+            "type": "string"
+          },
           "simulated": {
             "title": "Simulated",
             "type": "boolean"
@@ -2710,7 +2724,9 @@
           "provider",
           "environment",
           "public_key",
-          "simulated"
+          "simulated",
+          "rail",
+          "agentic_api_url"
         ],
         "title": "CardSetupView",
         "type": "object"
@@ -6732,6 +6748,57 @@
         "title": "IssueLocation",
         "type": "object"
       },
+      "IssuedCardView": {
+        "description": "The single-use virtual card Visa issued for the agent: never its number or code.",
+        "properties": {
+          "brand": {
+            "const": "visa",
+            "title": "Brand",
+            "type": "string"
+          },
+          "exp_month": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exp Month"
+          },
+          "exp_year": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Exp Year"
+          },
+          "last4": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last4"
+          }
+        },
+        "required": [
+          "brand",
+          "last4",
+          "exp_month",
+          "exp_year"
+        ],
+        "title": "IssuedCardView",
+        "type": "object"
+      },
       "IssuedPurchaseOrderLineView": {
         "properties": {
           "description": {
@@ -9507,6 +9574,27 @@
             ],
             "title": "Card Last4"
           },
+          "card_rail": {
+            "description": "`vic`: the buyer approves the card with the Visa passkey first",
+            "enum": [
+              "spt",
+              "vic"
+            ],
+            "title": "Card Rail",
+            "type": "string"
+          },
+          "card_verified": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`vic`: whether the buyer's Visa passkey approved the card; approving before it fails the payment (`card_not_verified`). Null on the `spt` rail",
+            "title": "Card Verified"
+          },
           "charge_amount": {
             "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
             "title": "Charge Amount",
@@ -9617,9 +9705,70 @@
           "payout_currency",
           "payout_account_last4",
           "milestones",
-          "simulated"
+          "simulated",
+          "card_rail",
+          "card_verified"
         ],
         "title": "PaymentApprovalView",
+        "type": "object"
+      },
+      "PaymentCardVerificationView": {
+        "description": "The cardholder's Visa passkey approval of this payment (`card_rail` `vic` only).\n\nThe browser runs it with Basis Theory's `@basis-theory/web-agentic` SDK:\n`AgenticVerification({apiKey: <public key>, ...}).verifyAllowance(allowance_id,\n{rail, provider})`, then confirms at POST\n/v1/purchase-orders/{po_id}/payment/card-verification.",
+        "properties": {
+          "allowance_id": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The Basis Theory allowance to verify; null until it is created",
+            "title": "Allowance Id"
+          },
+          "provider": {
+            "description": "Pass to `verifyAllowance` as is (`vic`)",
+            "title": "Provider",
+            "type": "string"
+          },
+          "rail": {
+            "description": "Pass to `verifyAllowance` as is (`agentic-token`)",
+            "title": "Rail",
+            "type": "string"
+          },
+          "status": {
+            "description": "`verified` once the passkey approved it; `failed`/`expired`: request the payment again",
+            "enum": [
+              "pending",
+              "verified",
+              "failed",
+              "expired"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "verified_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Verified At"
+          }
+        },
+        "required": [
+          "status",
+          "allowance_id",
+          "rail",
+          "provider",
+          "verified_at"
+        ],
+        "title": "PaymentCardVerificationView",
         "type": "object"
       },
       "PaymentCardView": {
@@ -10099,6 +10248,17 @@
       },
       "PaymentView": {
         "properties": {
+          "agent_card": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/IssuedCardView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The virtual card minted for the agent once the payment is executed"
+          },
           "approval_id": {
             "format": "uuid",
             "title": "Approval Id",
@@ -10106,6 +10266,26 @@
           },
           "card": {
             "$ref": "#/components/schemas/PaymentCardView"
+          },
+          "card_rail": {
+            "description": "`vic`: the buyer approves the payment with the Visa passkey (`card_verification`) and the agent gets a single-use virtual card (`agent_card`)",
+            "enum": [
+              "spt",
+              "vic"
+            ],
+            "title": "Card Rail",
+            "type": "string"
+          },
+          "card_verification": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PaymentCardVerificationView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The Visa passkey approval; null on the `spt` rail"
           },
           "chain": {
             "$ref": "#/components/schemas/PaymentChainView"
@@ -10273,6 +10453,9 @@
           "quote_expires_at",
           "simulated",
           "card",
+          "card_rail",
+          "card_verification",
+          "agent_card",
           "payout",
           "token",
           "milestones",
@@ -26470,6 +26653,133 @@
           }
         ],
         "summary": "Request Po Payment",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
+    "/v1/purchase-orders/{po_id}/payment/card-verification": {
+      "post": {
+        "description": "The Visa passkey approval of the order's payment (`card_rail` `vic`), read from\nBasis Theory. Call it for the allowance to verify, run `verifyAllowance` in the\nbrowser, then call it again: `verified` lets the payment be approved and executed.\nOnly the person paying (whose card it is) may call it.",
+        "operationId": "confirm_card_verification_v1_purchase_orders__po_id__payment_card_verification_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "po_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Po Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentCardVerificationView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Confirm Card Verification",
         "tags": [
           "payments"
         ]

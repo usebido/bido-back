@@ -49,6 +49,7 @@ from bido_back.payments.errors import (
 )
 from bido_back.payments.ports import (
     BankAccountDetails,
+    CardAuthorization,
     CardConsumer,
     CardDisplayData,
     EnrolledCard,
@@ -57,6 +58,7 @@ from bido_back.payments.proposals import (
     ESCROW_CREATED,
     ESCROW_FUNDED,
     PAY_PURCHASE_ORDER,
+    PAYMENT_CARD_VERIFIED,
     PAYMENT_CHARGED,
     PAYMENT_DECLINED,
     PAYMENT_FAILED,
@@ -75,6 +77,7 @@ from bido_back.payments.schemas import (
 from bido_back.payments.views import (
     CardSetupView,
     ChainSetupView,
+    PaymentCardVerificationView,
     PaymentMethodDisplayView,
     PaymentMethodView,
     PurchaseOrderPaymentSummary,
@@ -158,6 +161,34 @@ class RecordingCard(FakeCardGateway):
         self.keys.append(idempotency_key)
         return await super().enroll(
             token_id=token_id, consumer=consumer, idempotency_key=idempotency_key
+        )
+
+
+@dataclass
+class FailingAuthorizationCard(FakeCardGateway):
+    """Basis Theory is down when the payment is requested."""
+
+    fail: bool = True
+
+    async def authorize(
+        self,
+        *,
+        payment_method_ref: str,
+        amount: Decimal,
+        currency: str,
+        description: str,
+        expires_at: datetime,
+        idempotency_key: str,
+    ) -> CardAuthorization:
+        if self.fail:
+            raise ProviderError("basis_theory", "create_allowance", "unavailable", status=503)
+        return await super().authorize(
+            payment_method_ref=payment_method_ref,
+            amount=amount,
+            currency=currency,
+            description=description,
+            expires_at=expires_at,
+            idempotency_key=idempotency_key,
         )
 
 
@@ -300,6 +331,7 @@ def test_the_config_view_shows_public_values_only() -> None:
             "database_url": "postgresql+asyncpg://app@localhost:5432/unused",
             "basis_theory_public_key": "public-elements-key",
             "payments_card_charge": "simulated",
+            "payments_card_rail": "vic",
             "privy_app_id": "privy-app",
             "privy_wallet_owner_id": "quorum-id",
             "solana_stablecoin_mint": MINT,
@@ -315,6 +347,8 @@ def test_the_config_view_shows_public_values_only() -> None:
         environment="test",
         public_key="public-elements-key",
         simulated=True,
+        rail="vic",
+        agentic_api_url="https://api.test.basistheory.com/agentic",
     )
     assert view.chain == ChainSetupView(
         cluster="devnet",
@@ -1019,6 +1053,89 @@ async def test_a_payment_that_cannot_be_recorded_leaves_no_approval_waiting(
 
 
 # --- What people see ----------------------------------------------------------------------
+
+
+async def test_a_visa_payment_waits_for_the_buyers_passkey(
+    world: World, providers: FakeProviders, usd_rate: date
+) -> None:
+    people = world.people
+    card = providers.card
+    card.rail_mode, card.simulated_mode = "vic", True
+    target = await payable(world)
+    requested = await request(world, providers, target)
+    payment = requested.payment
+
+    # The allowance is created with the request, under the act tool's key, for the browser
+    # to run the Visa passkey on.
+    assert payment.card_rail == "vic"
+    pending = PaymentCardVerificationView(
+        status="pending",
+        allowance_id="alw_1",
+        rail="agentic-token",
+        provider="vic",
+        verified_at=None,
+    )
+    assert payment.card_verification == pending
+    assert payment.agent_card is None
+    assert list(card.authorizations) == [f"payment:{payment.id}:authorize"]
+    queue = await rfq_service.list_approvals(world.engine, approver(people), "pending")
+    [item] = [i for i in queue if i.tool == PAY_PURCHASE_ORDER]
+    assert item.payment is not None
+    assert (item.payment.card_rail, item.payment.card_verified) == ("vic", False)
+
+    # Only the person paying approves their card; Basis Theory says where it stands.
+    with pytest.raises(PaymentForbidden):
+        await service.confirm_card_verification(world.engine, approver(people), target.po.id, card)
+    still = await service.confirm_card_verification(world.engine, buyer(people), target.po.id, card)
+    assert still == pending
+    card.verification_status = "verified"
+    done = await service.confirm_card_verification(world.engine, buyer(people), target.po.id, card)
+    assert (done.status, done.allowance_id) == ("verified", "alw_1")
+    assert done.verified_at is not None
+    # Read once: confirmed again, the provider is not asked.
+    again = await service.confirm_card_verification(world.engine, buyer(people), target.po.id, card)
+    assert again == done
+    assert card.verification_calls == ["alw_1", "alw_1"]
+    [event] = await actions(world, PAYMENT_CARD_VERIFIED)
+    assert event.payload["payment_id"] == str(payment.id)
+    view = await service.get_po_payment(world.engine, buyer(people), target.po.id, SETTINGS)
+    assert view.card_verification == done
+    queue = await rfq_service.list_approvals(world.engine, approver(people), "pending")
+    [item] = [i for i in queue if i.tool == PAY_PURCHASE_ORDER]
+    assert item.payment is not None and item.payment.card_verified is True
+
+
+async def test_a_visa_allowance_not_created_with_the_request_is_created_on_confirmation(
+    world: World, providers: FakeProviders, usd_rate: date
+) -> None:
+    people = world.people
+    card = FailingAuthorizationCard(rail_mode="vic", simulated_mode=True)
+    providers.card = card
+    target = await payable(world)
+    requested = await request(world, providers, target)
+    assert requested.payment.card_verification is not None
+    assert requested.payment.card_verification.allowance_id is None
+
+    card.fail = False
+    started = await service.confirm_card_verification(
+        world.engine, buyer(people), target.po.id, card
+    )
+    assert (started.status, started.allowance_id) == ("pending", "alw_1")
+    assert list(card.authorizations) == [f"payment:{requested.payment.id}:authorize"]
+
+
+async def test_a_payment_without_the_visa_rail_has_no_passkey(
+    world: World, providers: FakeProviders, usd_rate: date
+) -> None:
+    people = world.people
+    target = await payable(world)
+    requested = await request(world, providers, target)
+    assert (requested.payment.card_rail, requested.payment.card_verification) == ("spt", None)
+    assert providers.card.authorizations == {}
+    with pytest.raises(PaymentInvalidState, match="not on the Visa rail"):
+        await service.confirm_card_verification(
+            world.engine, buyer(people), target.po.id, providers.card
+        )
 
 
 async def test_the_order_and_the_approval_queue_show_the_payment(

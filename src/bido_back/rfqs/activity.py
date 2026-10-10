@@ -502,7 +502,7 @@ def _payment_event(action: str, data: Mapping[str, Any]) -> tuple[ActivityKind, 
     """One step of a PO's card payment into its escrow (`bido_back.payments`).
 
     Reads `purchase_order_ref`, `charge_currency` and `charge_amount`, `simulated`,
-    `failure_code` and `step` from the event; all optional. A failure at a chain `step`
+    `card_rail`, `failure_code` and `step` from the event; all optional. A failure at a chain `step`
     came after the card was charged.
     """
     ref = data.get("purchase_order_ref")
@@ -514,8 +514,15 @@ def _payment_event(action: str, data: Mapping[str, Any]) -> tuple[ActivityKind, 
     match action:
         case "purchase_order.payment_requested":
             return "user", f"Payment of {order} requested{charge}: waits for approval"
+        case "purchase_order.payment_card_verified":
+            return "user", f"Card approved with the Visa passkey for {order}"
         case "purchase_order.payment_charged":
             simulated = " (simulated: no money moved)" if data.get("simulated") is True else ""
+            if data.get("card_rail") == "vic":
+                return (
+                    "system",
+                    f"Single-use Visa card issued to the agent{charge} for {order}{simulated}",
+                )
             return "system", f"Card charged{charge} for {order}{simulated}"
         case "purchase_order.payment_declined":
             return "system", f"Card payment for {order} declined{reason}"

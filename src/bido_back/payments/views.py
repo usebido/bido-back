@@ -60,6 +60,35 @@ class PaymentCardView(BaseModel):
     display: PaymentMethodDisplayView | None
 
 
+class PaymentCardVerificationView(BaseModel):
+    """The cardholder's Visa passkey approval of this payment (`card_rail` `vic` only).
+
+    The browser runs it with Basis Theory's `@basis-theory/web-agentic` SDK:
+    `AgenticVerification({apiKey: <public key>, ...}).verifyAllowance(allowance_id,
+    {rail, provider})`, then confirms at POST
+    /v1/purchase-orders/{po_id}/payment/card-verification."""
+
+    status: Literal["pending", "verified", "failed", "expired"] = Field(
+        description="`verified` once the passkey approved it; `failed`/`expired`: request "
+        "the payment again"
+    )
+    allowance_id: str | None = Field(
+        description="The Basis Theory allowance to verify; null until it is created"
+    )
+    rail: str = Field(description="Pass to `verifyAllowance` as is (`agentic-token`)")
+    provider: str = Field(description="Pass to `verifyAllowance` as is (`vic`)")
+    verified_at: datetime | None
+
+
+class IssuedCardView(BaseModel):
+    """The single-use virtual card Visa issued for the agent: never its number or code."""
+
+    brand: Literal["visa"]
+    last4: str | None
+    exp_month: int | None
+    exp_year: int | None
+
+
 class PaymentPayoutView(BaseModel):
     payout_account_id: UUID
     currency: str
@@ -105,6 +134,16 @@ class PaymentView(BaseModel):
         description="The card charge was simulated (Basis Theory test tenant): no money moved"
     )
     card: PaymentCardView
+    card_rail: Literal["spt", "vic"] = Field(
+        description="`vic`: the buyer approves the payment with the Visa passkey "
+        "(`card_verification`) and the agent gets a single-use virtual card (`agent_card`)"
+    )
+    card_verification: PaymentCardVerificationView | None = Field(
+        description="The Visa passkey approval; null on the `spt` rail"
+    )
+    agent_card: IssuedCardView | None = Field(
+        description="The virtual card minted for the agent once the payment is executed"
+    )
     payout: PaymentPayoutView
     token: PaymentTokenView
     milestones: list[PaymentMilestone]
@@ -154,6 +193,13 @@ class PaymentApprovalView(BaseModel):
     payout_account_last4: str
     milestones: list[PaymentMilestone]
     simulated: bool
+    card_rail: Literal["spt", "vic"] = Field(
+        description="`vic`: the buyer approves the card with the Visa passkey first"
+    )
+    card_verified: bool | None = Field(
+        description="`vic`: whether the buyer's Visa passkey approved the card; approving "
+        "before it fails the payment (`card_not_verified`). Null on the `spt` rail"
+    )
 
 
 class PaymentMethodView(BaseModel):
@@ -192,6 +238,13 @@ class CardSetupView(BaseModel):
     environment: Literal["test", "production"]
     public_key: str | None = Field(description="Basis Theory public key for Elements")
     simulated: bool
+    rail: Literal["spt", "vic"] = Field(
+        description="`vic`: each payment is approved with the Visa passkey "
+        "(`@basis-theory/web-agentic`)"
+    )
+    agentic_api_url: str = Field(
+        description="`apiBaseUrl` for `AgenticVerification` (Basis Theory's agentic API)"
+    )
 
 
 class ChainSetupView(BaseModel):

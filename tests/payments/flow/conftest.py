@@ -163,6 +163,7 @@ async def propose_payment(
     charge_mode: Literal["stripe", "simulated"] = "stripe",
     quote_ttl: timedelta = timedelta(hours=24),
     attempt: int = 0,
+    card_rail: Literal["spt", "vic"] = "spt",
 ) -> ProposedPayment:
     """A pending `pay_purchase_order` approval and its `po_payments` row (as the service does)."""
     tenant_id = po.tenant_id
@@ -218,6 +219,7 @@ async def propose_payment(
         chain_po_id=chain_po_id(ref),
         milestones=chosen,
         charge_mode=charge_mode,
+        card_rail=card_rail,
     )
     payload = cast(dict[str, JsonValue], args.model_dump(mode="json"))
     run_id, call_id = payment_proposal_ids(po.id, attempt)
@@ -262,6 +264,7 @@ async def propose_payment(
                 po_hash=doc_hash,
                 milestones=[m.model_dump() for m in chosen],
                 charge_mode=charge_mode,
+                card_rail=card_rail,
             )
         )
         await session.flush()
