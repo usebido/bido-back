@@ -23,12 +23,12 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Annotated, Final, cast
 from uuid import UUID
 
-from pydantic import BaseModel, Field, StringConstraints, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 from sqlalchemy import func, select
 
 from bido_back.agents.catalog.contracts import ExtraOfferDraft, ModelDecimal
 from bido_back.agents.context import ToolContext
-from bido_back.agents.tools import AnyTool, Tool, ToolError
+from bido_back.agents.tools import AnyTool, Tool, ToolError, ToolValidationError
 from bido_back.auth import Principal
 from bido_back.comparison.compute import DecisionOffer, ExcludedOffer, OfferAlternative
 from bido_back.comparison.loader import load_comparison
@@ -57,7 +57,11 @@ from bido_back.purchasing.sources.handoff import (
     AssessmentSkippedSupplier,
 )
 from bido_back.purchasing.sources.mapping import default_mapper
-from bido_back.purchasing.sources.service import SourceAccessError, analyze_uploads
+from bido_back.purchasing.sources.service import (
+    ScopeValidationError,
+    SourceAccessError,
+    analyze_uploads,
+)
 from bido_back.purchasing.sources.snapshots import (
     AssessmentRfqPlan,
     AssessmentRfqRequest,
@@ -137,6 +141,10 @@ class ImportSpreadsheetIn(BaseModel):
 
 
 class ScopeRequestInput(ScopeRequest):
+    # A column value put where a field should be ("NecDep": true) is an error the model
+    # reads, never silently dropped.
+    model_config = ConfigDict(extra="forbid")
+
     # A plain number: the decimal string pattern has a lookahead strict schemas reject.
     safety_stock: ModelDecimal | None = Field(
         default=None,
@@ -161,11 +169,15 @@ class AnalyzeSourcesIn(BaseModel):
     scope: ScopeRequestInput | None = Field(
         default=None,
         description="Always fill it with the planning boundaries the buyer stated, in their "
-        "words: product (or product_code), area only for a whole area, location, as_of or "
-        "horizon_end as dates, horizon_days for 'the next N days', safety_stock, "
-        "production_lead_days. Leave unknown fields empty: code resolves them against the "
-        "evidence (the reference date from the latest stock snapshot) and asks the rest. When "
-        "saving, pass the same scope as the analysis plus the buyer's answers.",
+        "words: product (or product_code), area only for a whole area, location for one "
+        "plant, plants for several ('todos os centros' = 'all', 'três centros' = 3, or the "
+        "list they named), mrp_element when they name a value of the MRP element column "
+        "(NecDep, NecInd...), as_of or horizon_end as dates, horizon_days for 'the next N "
+        "days', safety_stock, production_lead_days. Leave unknown fields empty: code resolves "
+        "them against the evidence (the reference date from the latest stock snapshot) and "
+        "asks the rest. A value the data does not hold is a validation error that lists the "
+        "valid values: correct it and call again. When saving, pass the same scope as the "
+        "analysis plus the buyer's answers.",
     )
 
 
@@ -570,6 +582,14 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             )
         except SourceAccessError as exc:
             raise ToolError(str(exc)) from None
+        except ScopeValidationError as exc:
+            raise ToolValidationError(
+                str(exc),
+                code=exc.code,
+                field=f"scope.{exc.field}",
+                value=exc.value,
+                valid_values=exc.valid_values,
+            ) from None
 
     async def save_procurement_assessment(
         ctx: ToolContext, args: AnalyzeSourcesIn
@@ -1073,7 +1093,10 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             '"motor"}. A large result is cut for you: `lines` are read in full (lines to '
             "buy first), `more_lines` are one-row summaries of the others and `lines_left_out` "
             "counts the lines not shown; cell references are only counted (`evidence_cells`). "
-            "Never present the lines shown as all of them.",
+            "Never present the lines shown as all of them. `found` lists the plants, MRP "
+            "elements, products and need dates the sources hold. Every evaluated line has a "
+            "one-line reason: `timing_alerts[].reason` for alerts, `alerts_excluded[]` for "
+            "the lines that are not.",
             AnalyzeSourcesIn,
             SourceAssessment,
             "read",

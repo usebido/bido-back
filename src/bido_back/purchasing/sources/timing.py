@@ -25,6 +25,9 @@ only words the result. The quantity to buy never changes here:
 * A line whose known suppliers are all blocked, disqualified or without a current
   agreement or purchase history gets a sourcing proposal limited to suppliers of the
   material's own group in the evidence.
+* Every evaluated line gets a one-line reason: why it is an alert (`TimingAlert.reason`)
+  or why it is not (`alert_exclusions`): stock covering the demand, no demand in the
+  horizon, an order arriving in time. Nothing is left out silently.
 """
 
 import re
@@ -37,6 +40,7 @@ from bido_back.purchasing.analysis import MAX_SUGGESTED
 from bido_back.purchasing.importers import norm
 from bido_back.purchasing.sources.contracts import (
     AffectedDemand,
+    AlertExclusion,
     AssessmentLine,
     Assumption,
     DatedQuantity,
@@ -586,6 +590,8 @@ def _sourcing(
 
 
 _ORDER: Final = {"unavoidable_stockout": 0, "meets_consuming_safety_stock": 1, "unknown": 2}
+# Excluded lines listed with their reason, at most; the rest are counted.
+MAX_EXCLUSIONS: Final = 60
 
 
 def timing_alerts(lines: Sequence[AssessmentLine]) -> list[TimingAlert]:
@@ -602,10 +608,89 @@ def timing_alerts(lines: Sequence[AssessmentLine]) -> list[TimingAlert]:
                 outcome=timing.outcome,
                 summary=_summary(line, timing),
                 actions=_actions(line, timing),
+                reason=_alert_reason(line, timing),
             )
         )
     alerts.sort(key=lambda a: _ORDER[a.outcome])
     return alerts
+
+
+def alert_exclusions(lines: Sequence[AssessmentLine]) -> tuple[list[AlertExclusion], int]:
+    """Every line that is not an alert, each with its one-line reason, in the lines'
+    order; the first `MAX_EXCLUSIONS` and how many more there are."""
+    excluded = [
+        AlertExclusion(part_number=line.part_number, description=line.description, reason=reason)
+        for line in lines
+        if (reason := _exclusion_reason(line)) is not None
+    ]
+    return excluded[:MAX_EXCLUSIONS], max(0, len(excluded) - MAX_EXCLUSIONS)
+
+
+def _alert_reason(line: AssessmentLine, timing: TimingCheck) -> str:
+    unit = line.unit or ""
+    arrival = (
+        f"{timing.recommended_supplier} arrives {timing.recommended_arrival}"
+        if timing.recommended_arrival is not None
+        else "no usable supplier has a known lead time"
+    )
+    if timing.outcome == "unavoidable_stockout":
+        return (
+            f"projected balance falls below zero on {timing.first_stockout_date} "
+            f"(up to {_plain(timing.uncovered_quantity)} {unit} short) and the earliest "
+            f"order arrives later: {arrival}."
+        )
+    if timing.outcome == "meets_consuming_safety_stock":
+        return (
+            f"projected balance falls below the safety stock {_plain(timing.safety_stock)} "
+            f"{unit} on {timing.first_shortage_date} and stays above zero until {arrival}."
+        )
+    return (
+        f"projected balance falls below the safety stock on {timing.first_shortage_date}; "
+        f"{arrival}, so the arrival could not be checked."
+    )
+
+
+def _exclusion_reason(line: AssessmentLine) -> str | None:
+    """Why the line is not an alert; None when it is one."""
+    unit = line.unit or ""
+    timing = line.timing
+    if timing is not None and timing.first_shortage_date is not None and timing.outcome != "meets":
+        return None
+    if timing is not None and timing.outcome == "meets":
+        return (
+            f"{timing.recommended_supplier} arrives {timing.recommended_arrival}, before the "
+            f"first shortage on {timing.first_shortage_date}."
+        )
+    if timing is not None:
+        lowest = min(timing.projected, key=lambda p: p.balance, default=None)
+        return (
+            "projected balance never falls below the safety stock "
+            f"{_plain(timing.safety_stock)} {unit}"
+            + (
+                f" (lowest {_plain(lowest.balance)} {unit} on {lowest.on})"
+                if lowest is not None
+                else ""
+            )
+            + " within the horizon."
+        )
+    if not line.demand_contributions and (line.demand is None or line.demand == 0):
+        return "no demand within the horizon."
+    if line.demand_contributions and not need_schedule(line):
+        available = _plain(line.available) if line.available is not None else "unknown"
+        incoming = f" + {_plain(line.on_order)} {unit} on order" if line.on_order else ""
+        last = line.demand_schedule[-1].need_by if line.demand_schedule else line.need_by
+        return (
+            f"stock {available} {unit}{incoming} covers the demand "
+            f"{_plain(sum((c.quantity for c in line.demand_contributions), ZERO))} {unit}"
+            + (f" through {last}" if last is not None else "")
+            + ": nothing to buy."
+        )
+    if line.calculated_to_buy is None:
+        return "the quantity could not be netted (see the line's issues): no timing check."
+    return (
+        "no dated demand to project (the need is assessed as the source reports it): "
+        "no timing check."
+    )
 
 
 def _summary(line: AssessmentLine, timing: TimingCheck) -> str:
@@ -695,6 +780,7 @@ def _actions(line: AssessmentLine, timing: TimingCheck) -> list[str]:
 
 
 __all__ = [
+    "alert_exclusions",
     "check_timing",
     "demand_schedule",
     "late",

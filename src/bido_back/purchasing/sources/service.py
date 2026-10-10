@@ -25,6 +25,7 @@ from bido_back.purchasing.sources.contracts import (
     PlanningScope,
     Record,
     ScopeRequest,
+    ScopeResolution,
     SourceAssessment,
 )
 from bido_back.purchasing.sources.evidence import same_key
@@ -44,8 +45,13 @@ from bido_back.purchasing.sources.scope import (
     resolve_scope,
     scope_issues,
 )
+from bido_back.purchasing.sources.selectors import (
+    ScopeValidationError,
+    apply_mrp_element,
+    select_scope,
+)
 from bido_back.purchasing.sources.snapshots import find_snapshot, save_snapshot
-from bido_back.purchasing.sources.timing import timing_alerts
+from bido_back.purchasing.sources.timing import alert_exclusions, timing_alerts
 from bido_back.purchasing.sources.units import convert_units
 from bido_back.storage import BlobStorage
 
@@ -54,6 +60,14 @@ Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
 class SourceAccessError(Exception):
     pass
+
+
+__all__ = [
+    "ScopeValidationError",
+    "SourceAccessError",
+    "analyze_documents",
+    "analyze_uploads",
+]
 
 
 async def analyze_documents(
@@ -69,10 +83,12 @@ async def analyze_documents(
 
     Tables of a known ERP report are read by its report pack (no model call); the rest
     go to the source mapper, in parallel. `scope` is the buyer's request; code resolves
-    it against the mapped evidence (no second model call). With production plans and
-    unsettled boundaries, the result holds the candidates and the questions to ask,
-    never per-material lines of every area. Without them, an MRP list is planned for
-    every required material of each plant.
+    it against the mapped evidence (no second model call). Its selectors (plants, MRP
+    element, product) are checked against the values the sources hold first: a value
+    they lack raises `ScopeValidationError` naming the valid ones, before anything is
+    planned. With production plans and unsettled boundaries, the result holds the
+    candidates and the questions to ask, never per-material lines of every area.
+    Without them, an MRP list is planned for every required material of each plant.
 
     Problems never hold the quantities: every line with demand gets a best estimate,
     its assumptions and a confidence (see `planning.assess_plan`); the buyer and the
@@ -123,8 +139,38 @@ def _settle(
     unit_issues, conversions = convert_units(records)
     problems = [*known.issues, *problems, *unit_issues]
     coverage = [*known.coverage, *coverage]
+    for row in coverage:
+        row.filename = names[row.source_id]
+    all_coverage = [*coverage, *unread]
+    # The buyer's selectors against what the sources hold, before anything is planned.
+    selection = select_scope(records, as_request(scope))
+    request = selection.request if scope is not None else None
+    records, element_note = apply_mrp_element(records, selection.request.mrp_element)
     candidates, snapshot_dates = planning_context(records)
-    request = as_request(scope)
+    if selection.question is not None:
+        # A plant count the sources do not have: ask which plants, plan nothing yet.
+        return SourceAssessment(
+            issues=[
+                Issue(
+                    code="plant_selection_open",
+                    severity="blocker",
+                    message=selection.question.message
+                    + " Ask the buyer scope_resolution.questions and repeat the analysis "
+                    "with their answer (scope.plants); nothing is planned until then.",
+                ),
+                *issues,
+                *problems,
+            ],
+            record_counts=dict(Counter(record.kind for record in records)),
+            scope_resolution=ScopeResolution(
+                request=selection.request, questions=[selection.question]
+            ),
+            planning_candidates=candidates,
+            snapshot_dates=snapshot_dates,
+            coverage=all_coverage,
+            reports=known.reports,
+            found=selection.found,
+        )
     planned = has_production_plans(records)
     resolved: ResolvedScope | None = None
     lists: list[ResolvedScope] = []
@@ -135,11 +181,13 @@ def _settle(
     left: list[str] = []
     if planned and resolved is not None and resolved.scope is None:
         # Open boundaries never hold the plan: each candidate is planned on its own.
-        lists, left = candidate_scopes(records, request or ScopeRequest(), today)
+        lists, left = candidate_scopes(
+            records, request or ScopeRequest(), today, plants=selection.plants
+        )
         if lists:
             resolved = lists[0]
     elif not planned and (resolved is None or resolved.scope is None):
-        lists = mrp_scopes(records, request, today)
+        lists = mrp_scopes(records, request, today, plants=selection.plants)
         if lists:
             resolved = lists[0]
     planning = resolved.scope if resolved is not None else None
@@ -207,7 +255,12 @@ def _settle(
                 alternative="If you meant only one, ignore the other candidates' lines.",
             )
         )
-    result.assumptions[:0] = [*settled, *known.assumptions, *conversions]
+    result.assumptions[:0] = [
+        *settled,
+        *known.assumptions,
+        *conversions,
+        *([element_note] if element_note is not None else []),
+    ]
     if left:
         result.assumptions.append(
             Assumption(
@@ -227,10 +280,8 @@ def _settle(
                 "Check uncovered content; a BOM is needed only for a product-build calculation.",
             )
         )
-    for row in coverage:
-        row.filename = names[row.source_id]
-    all_coverage = [*coverage, *unread]
     _disclose(result, all_coverage)
+    excluded, excluded_left_out = alert_exclusions(result.lines)
     # The assessment's own objects, not a dump and a re-validation: on a large source the
     # copy would nearly double the memory this call needs.
     return SourceAssessment(
@@ -246,6 +297,9 @@ def _settle(
         else "needs_review",
         totals=spend_totals(result.lines),
         timing_alerts=timing_alerts(result.lines),
+        alerts_excluded=excluded,
+        alerts_excluded_left_out=excluded_left_out,
+        found=selection.found,
     )
 
 

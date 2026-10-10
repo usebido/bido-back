@@ -71,6 +71,8 @@ _FILLER = frozenset(
         "items",
     }
 )  # fmt: skip
+# The same words, for the modules that read the buyer's product words (`selectors`).
+FILLER = _FILLER
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,7 +162,11 @@ def direct_scope(records: Sequence[Record], request: ScopeRequest) -> ResolvedSc
 
 
 def mrp_scopes(
-    records: Sequence[Record], request: ScopeRequest | None, today: date
+    records: Sequence[Record],
+    request: ScopeRequest | None,
+    today: date,
+    *,
+    plants: Sequence[str] = (),
 ) -> list[ResolvedScope]:
     """Without production plans, an MRP list (a material with several dated requirements
     at a plant) is planned for every required material of each plant, in date order.
@@ -168,6 +174,7 @@ def mrp_scopes(
     The buyer's product, plant, dates and safety stock apply when given; otherwise the
     reference date is the plant's latest stock snapshot (today when none is dated) and
     the horizon runs to the plant's last requirement, each a disclosed assumption.
+    `plants`, the plants the buyer's selector settled on (`selectors`), limits the list.
     """
     request = request or ScopeRequest()
     dated: dict[str, list[date]] = defaultdict(list)
@@ -186,7 +193,7 @@ def mrp_scopes(
     if not any(count > 1 for count in counts.values()):
         return []
     spellings = _plant_spellings(records)
-    wanted = _wanted_plants(request.location, list(dated))
+    wanted = {norm(plant) for plant in plants} or _wanted_plants(request.location, list(dated))
     result: list[ResolvedScope] = []
     for plant, needs in sorted(dated.items()):
         if wanted and plant not in wanted:
@@ -264,7 +271,11 @@ MAX_CANDIDATES = 5
 
 
 def candidate_scopes(
-    records: Sequence[Record], request: ScopeRequest, today: date
+    records: Sequence[Record],
+    request: ScopeRequest,
+    today: date,
+    *,
+    plants: Sequence[str] = (),
 ) -> tuple[list[ResolvedScope], list[str]]:
     """When the request leaves production boundaries open, plan each candidate separately.
 
@@ -272,7 +283,8 @@ def candidate_scopes(
     a candidate (those they point to first, at most `MAX_CANDIDATES`); an open horizon
     covers all of the candidate's orders and an undated stock position uses today. Each
     choice is an assumption. Returns the planned scopes and the candidates left out, by
-    name with their order counts.
+    name with their order counts. `plants`, the plants the buyer's selector settled on
+    (`selectors`), rules the other plants' candidates out.
     """
     candidates, _ = planning_context(records)
     words = " ".join(w for w in (request.product, request.product_code) if w)
@@ -288,6 +300,8 @@ def candidate_scopes(
         candidates = [c for c in candidates if pointed(c)]
     if request.location is not None:
         candidates = [c for c in candidates if same_place(c.location, request.location)]
+    if plants:
+        candidates = [c for c in candidates if any(same_place(c.location, p) for p in plants)]
     candidates.sort(key=lambda c: (not pointed(c), c.product_code, c.location or ""))
     planned: list[ResolvedScope] = []
     left: list[str] = []
@@ -808,6 +822,11 @@ def _provenance(
             )
         else:
             result.append(ScopeProvenance(field=field, source="default"))
+    # Selectors settled before planning (`selectors`): always the buyer's.
+    if request.plants is not None:
+        result.append(ScopeProvenance(field="plants", source="buyer"))
+    if request.mrp_element is not None:
+        result.append(ScopeProvenance(field="mrp_element", source="buyer"))
     return result
 
 
