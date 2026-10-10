@@ -339,7 +339,7 @@ async def test_a_message_needs_text_or_files(
 
 
 @pytest.mark.db
-async def test_files_alone_are_imported_and_analysed(
+async def test_files_alone_are_analysed_never_imported(
     api: Api,
     app_engine: AsyncEngine,
     agno_engine: AsyncEngine,
@@ -363,7 +363,12 @@ async def test_files_alone_are_imported_and_analysed(
         await session.flush()
         upload_id = str(upload.id)
     api.storage.blobs["uploads/pecas.csv"] = b"part,qty\n6205,400\n"
-    stub = script(reply(text("Importei pecas.csv.")))
+    # The model tries to store the file anyway: the tool refuses (2026-10-10: the
+    # standing instruction said "Importe", and 8 SAP exports were imported unasked).
+    stub = script(
+        reply(tool_use("fc_1", "import_spreadsheet", upload_id=upload_id)),
+        reply(text("Analisei pecas.csv.")),
+    )
     conversation = str(uuid4())
 
     response = await api.http.post(
@@ -372,9 +377,12 @@ async def test_files_alone_are_imported_and_analysed(
     )
 
     assert parse_sse(response.text)[-1]["ok"] is True
-    # The model is asked to import and analyse the files, in Portuguese.
+    # The model is asked to analyse the files, in Portuguese; never to import them.
     sent = json.dumps(stub.calls[0]["input"], ensure_ascii=False)
     assert ATTACHMENTS_ONLY_MESSAGE in sent and "[pecas.csv A2] 6205" in sent
+    assert "Importe" not in ATTACHMENTS_ONLY_MESSAGE
+    refused = json.dumps(stub.calls[1]["input"], ensure_ascii=False)
+    assert "without asking to store them" in refused
     # The buyer's turn shows the files, not the instruction; the title names them.
     turns = (await api.http.get(f"/v1/copilot/conversations/{conversation}")).json()["turns"]
     assert [(t["message"], t["attachments"]) for t in turns] == [("", ["pecas.csv"])]

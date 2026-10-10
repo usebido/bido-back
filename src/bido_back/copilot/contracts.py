@@ -12,9 +12,16 @@ MAX_MESSAGE_CHARS = 8_000
 # capped at MAX_ATTACHMENT_CHARS in total (service.py), and imports read them by id.
 MAX_ATTACHMENTS = 25
 # What the copilot is asked when the buyer sends files without writing anything:
-# import and analyse them. Portuguese, since the buyer's language is not stored
-# and the copilot answers in the language of the message it reads.
-ATTACHMENTS_ONLY_MESSAGE = "Importe e analise o(s) arquivo(s) anexado(s)."
+# analyse them, never import them. Storing the company's data is a step the buyer
+# asks for in their own words (import_spreadsheet refuses in such a turn).
+# Portuguese, since the buyer's language is not stored and the copilot answers in
+# the language of the message it reads.
+ATTACHMENTS_ONLY_MESSAGE = "Analise o(s) arquivo(s) anexado(s)."
+# Every text ever sent in that role, so the instruction stored in older runs is
+# still recognized as not the buyer's words (until 2026-10-10 it asked to import).
+ATTACHMENTS_ONLY_MESSAGES = frozenset(
+    {ATTACHMENTS_ONLY_MESSAGE, "Importe e analise o(s) arquivo(s) anexado(s)."}
+)
 
 
 # --- What the model sees and answers -------------------------------------------------

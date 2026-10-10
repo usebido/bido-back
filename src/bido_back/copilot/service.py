@@ -48,6 +48,7 @@ from bido_back.auth import Principal
 from bido_back.copilot.agent import analysis_handoff, copilot_agent
 from bido_back.copilot.contracts import (
     ATTACHMENTS_ONLY_MESSAGE,
+    ATTACHMENTS_ONLY_MESSAGES,
     AnswerEvent,
     ConversationEvent,
     ConversationList,
@@ -186,7 +187,7 @@ async def buyer_messages(
     Bounded to the latest messages that fit `MAX_BUYER_MESSAGES_CHARS`.
     """
     earlier = [s.message for s in await _earlier_inputs(deps, principal, conversation_id)]
-    messages = [m for m in [*earlier, current] if m.strip() and m != ATTACHMENTS_ONLY_MESSAGE][
+    messages = [m for m in [*earlier, current] if m.strip() and m not in ATTACHMENTS_ONLY_MESSAGES][
         -MAX_BUYER_MESSAGES:
     ]
     kept: list[str] = []
@@ -284,6 +285,7 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
             mailboxes=deps.mailboxes,
             attachments_text=prepared.input.attachments_text,
             attachment_ids=tuple(prepared.input.attachment_ids),
+            files_only=_files_only(prepared.input),
             earlier_attachment_ids=earlier_ids,
             earlier_attachments_text=earlier_text if earlier_ids else None,
             buyer_messages=own_words,

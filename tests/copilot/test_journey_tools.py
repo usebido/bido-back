@@ -159,6 +159,21 @@ async def test_only_this_conversations_attachments_can_be_imported(
         )
 
 
+async def test_files_sent_without_text_are_never_imported(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    """A turn of files alone reads them; storing them needs the buyer's own words."""
+    upload = uuid4()
+    tools = make_tools(app_engine, attachment_ids=(upload,), files_only=True)
+    with pytest.raises(ToolError, match="without asking to store them"):
+        await tools.call(
+            context_of(buyer_of(copilot_rows)),
+            "import_spreadsheet",
+            upload_id=str(upload),
+            confirmed=True,
+        )
+
+
 async def test_a_file_from_an_earlier_turn_can_be_imported(
     app_engine: AsyncEngine, copilot_rows: People
 ) -> None:

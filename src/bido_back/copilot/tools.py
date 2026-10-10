@@ -134,6 +134,9 @@ class CopilotToolDeps:
     # This message's attachments (upload ids) and where their bytes live, for
     # import_spreadsheet; the sheet mapper reads sheets the rules cannot.
     attachment_ids: tuple[UUID, ...] = ()
+    # The buyer sent files without writing anything: the turn reads them, and
+    # import_spreadsheet refuses (storing data is asked for in the buyer's words).
+    files_only: bool = False
     # Files attached in earlier turns of the same conversation, read from its
     # stored runs on the server (never from the request), so a confirmation
     # sent as text alone can still import the file it confirms.
