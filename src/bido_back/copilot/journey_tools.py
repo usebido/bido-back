@@ -4,6 +4,8 @@
   rules first, the sheet mapper for the rest, every value validated; asks
   before writing when unsure (`purchasing.workbook`).
 - `add_supplier_contact` (draft): a supplier's contact email, from the chat.
+- `explain_analysis_item` (read): one item of the analysis this conversation already
+  ran, as code computed it (`copilot.analyses`); no model call, no re-planning.
 - `refine_analysis` (draft): the buyer's edits to a recommendation (drop
   parts, set quantities, or re-run with another quantity, safety stock or date).
 - `propose_negotiation_mandate` (draft): the single approval that starts the
@@ -23,7 +25,14 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Annotated, Final, cast
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationError,
+    model_validator,
+)
 from sqlalchemy import func, select
 
 from bido_back.agents.catalog.contracts import ExtraOfferDraft, ModelDecimal
@@ -33,8 +42,9 @@ from bido_back.auth import Principal
 from bido_back.comparison.compute import DecisionOffer, ExcludedOffer, OfferAlternative
 from bido_back.comparison.loader import load_comparison
 from bido_back.comparison.policy import ComparisonPolicy, SupplierPerformance
-from bido_back.copilot import proposals, queries
-from bido_back.copilot.model_views import assessment_view
+from bido_back.copilot import analyses, proposals, queries
+from bido_back.copilot.analyses import AnalysisItemOut
+from bido_back.copilot.model_views import analysis_item_view, assessment_view
 from bido_back.copilot.proposals import (
     PROPOSAL_ARG,
     AwaitingConfirmation,
@@ -57,6 +67,7 @@ from bido_back.purchasing.sources.handoff import (
     AssessmentSkippedSupplier,
 )
 from bido_back.purchasing.sources.mapping import default_mapper
+from bido_back.purchasing.sources.scope import as_request
 from bido_back.purchasing.sources.service import (
     ScopeValidationError,
     SourceAccessError,
@@ -155,7 +166,7 @@ class ScopeRequestInput(ScopeRequest):
     )
 
 
-class AnalyzeSourcesIn(BaseModel):
+class SourcesIn(BaseModel):
     upload_ids: list[UUID] = Field(
         min_length=1,
         max_length=10,
@@ -181,6 +192,15 @@ class AnalyzeSourcesIn(BaseModel):
     )
 
 
+class AnalyzeSourcesIn(SourcesIn):
+    recompute: bool = Field(
+        default=False,
+        description="True only when the buyer explicitly asks to recompute or refresh an "
+        "analysis of this conversation with the same files and scope; otherwise its stored "
+        "result is returned",
+    )
+
+
 _COUNTRY_ARG = (
     "The supplier's country, ISO 3166-1 alpha-2 (BR, DE, IT...). It decides the language of "
     "the RFQ document they receive. Pass it when the buyer said it or when it is obvious from "
@@ -194,6 +214,27 @@ _LANGUAGE_ARG = (
     "ISO 639-1 (pt, de, it, es, fr, en), only when the buyer said which language to write to "
     "this supplier in. Left empty, Bido uses the country's language."
 )
+
+
+class ExplainItemIn(BaseModel):
+    material: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=200,
+        description="The item as the buyer named it: its code (e.g. 100000152) or its name",
+    )
+    line: int | None = Field(
+        default=None,
+        ge=1,
+        le=100_000,
+        description="The line's position in the analysis, when the buyer named a line number",
+    )
+
+    @model_validator(mode="after")
+    def names_an_item(self) -> "ExplainItemIn":
+        if self.material is None and self.line is None:
+            raise ValueError("give the item's code or name (material) or its line number")
+        return self
 
 
 class AddContactIn(BaseModel):
@@ -563,15 +604,66 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             asked.add(upload_id)
         return report
 
-    async def analyze_procurement_sources(
-        ctx: ToolContext, args: AnalyzeSourcesIn, *, persist: bool = False
-    ) -> SourceAssessment:
+    def _sources_principal(ctx: ToolContext, args: SourcesIn) -> Principal:
         principal = _principal(ctx)
         allowed = set(deps.attachment_ids) | set(deps.earlier_attachment_ids)
         if not set(args.upload_ids) <= allowed:
             raise ToolError("that id is not one of the files attached in this conversation")
         if deps.storage is None:
             raise ToolError("file storage is not available")
+        return principal
+
+    async def analyze_procurement_sources(
+        ctx: ToolContext, args: AnalyzeSourcesIn
+    ) -> SourceAssessment:
+        principal = _sources_principal(ctx, args)
+        conversation = deps.conversation_id
+        if conversation is None:
+            return await _analyze(ctx, principal, args, persist=False)
+        # The conversation's analyses: the same inputs are never recomputed, and a
+        # narrower call never replaces the analysis the buyer is asking about.
+        request = as_request(args.scope)
+        key = analyses.input_key(args.upload_ids, request)
+        stored = await analyses.recent(db, principal, conversation)
+        same = None
+        if not args.recompute:
+            same = await analyses.find(db, principal, conversation, key) or next(
+                (s for s in stored if analyses.same_inputs(args.upload_ids, request, s)), None
+            )
+        if same is not None:
+            await analyses.touch(db, principal, same.id)
+            return same.assessment
+        latest = stored[0] if stored else None
+        narrowed = latest is not None and analyses.narrower(args.upload_ids, request, latest)
+        item = analyses.requested_item(request)
+        if latest is not None and narrowed and item is not None:
+            found = analyses.matching_lines(latest.assessment, item)
+            if found:
+                raise ToolError(
+                    f"not recomputed: {item!r} is line {found[0] + 1} of the analysis this "
+                    "conversation already ran on these files; a narrower run would not "
+                    "see the rest of its plan. Call explain_analysis_item with material="
+                    f"{item!r} and answer from its record. Run this tool again only when the "
+                    "buyer changes the files, the horizon or the plants, or asks to recompute."
+                )
+        assessment = await _analyze(ctx, principal, args, persist=False)
+        if not narrowed:
+            await analyses.store(
+                db,
+                principal,
+                conversation_id=conversation,
+                run_id=ctx.run_id,
+                key=key,
+                upload_ids=args.upload_ids,
+                request=request,
+                assessment=assessment,
+            )
+        return assessment
+
+    async def _analyze(
+        ctx: ToolContext, principal: Principal, args: SourcesIn, *, persist: bool
+    ) -> SourceAssessment:
+        assert deps.storage is not None
         try:
             return await analyze_uploads(
                 db,
@@ -595,10 +687,17 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
                 valid_values=exc.valid_values,
             ) from None
 
-    async def save_procurement_assessment(
-        ctx: ToolContext, args: AnalyzeSourcesIn
-    ) -> SourceAssessment:
-        return await analyze_procurement_sources(ctx, args, persist=True)
+    async def save_procurement_assessment(ctx: ToolContext, args: SourcesIn) -> SourceAssessment:
+        return await _analyze(ctx, _sources_principal(ctx, args), args, persist=True)
+
+    async def explain_analysis_item(ctx: ToolContext, args: ExplainItemIn) -> AnalysisItemOut:
+        principal = _principal(ctx)
+        stored = (
+            await analyses.latest(db, principal, deps.conversation_id)
+            if deps.conversation_id is not None
+            else None
+        )
+        return analyses.explain_item(stored, material=args.material, position=args.line)
 
     async def list_procurement_assessments(
         ctx: ToolContext, args: ListAssessmentsIn
@@ -1038,7 +1137,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             "upload_ids, objective and scope as the analyze_procurement_sources call the buyer "
             "saw (their words plus any answers, not the resolved values), so the saved snapshot "
             "resolves the same scope. Nothing is sent.",
-            AnalyzeSourcesIn,
+            SourcesIn,
             SourceAssessment,
             "draft",
             save_procurement_assessment,
@@ -1108,12 +1207,35 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             "Never present the lines shown as all of them. `found` lists the plants, MRP "
             "elements, products and need dates the sources hold. Every evaluated line has a "
             "one-line reason: `timing_alerts[].reason` for alerts, `alerts_excluded[]` for "
-            "the lines that are not.",
+            "the lines that are not. A question about an item or a conclusion of an analysis "
+            "already run in this conversation is answered with explain_analysis_item, never by "
+            "calling this again: call it again only when the buyer changes the files, the "
+            "horizon or the plants, or asks to recompute. The same files and an equivalent "
+            "scope return the stored result unchanged; a narrower call (an item's code as "
+            "product_code) is not run when that item is in the stored analysis.",
             AnalyzeSourcesIn,
             SourceAssessment,
             "read",
             analyze_procurement_sources,
             model_view=assessment_view,
+        ),
+        Tool(
+            "explain_analysis_item",
+            "Explain one item (material code or name) or line of the analysis this "
+            "conversation already ran, from its stored result as code computed it: demand by "
+            "date, stock and safety stock, open orders and when they arrive, the netting and "
+            "quantity to buy, the timing status with its shortage and stockout dates, the "
+            "chosen supplier and why (lead time, arrival, the source it switched from), "
+            "expedites, assumptions, and its timing alert with `reason` or why it is not an "
+            "alert. Use it for every follow-up about an item or conclusion of that analysis "
+            "('e o item 100000152, por quê?', 'por que comprar X?', 'quando chega o pedido?'). "
+            "Nothing is recomputed. Says so when the conversation has no analysis yet or the "
+            "item is not in it.",
+            ExplainItemIn,
+            AnalysisItemOut,
+            "read",
+            explain_analysis_item,
+            model_view=analysis_item_view,
         ),
         Tool(
             "import_spreadsheet",

@@ -17,7 +17,7 @@ from bido_back.copilot.agent import (
     analysis_handoff,
     copilot_agent,
 )
-from bido_back.copilot.model_views import assessment_view, cell_free_view
+from bido_back.copilot.model_views import analysis_item_view, assessment_view, cell_free_view
 from bido_back.copilot.tools import CopilotToolDeps, copilot_tools
 from tests.rfqs.conftest import FakeMailboxes, fake_agents
 
@@ -58,6 +58,7 @@ EXPECTED_TOOLS = {
     "cancel_purchase_order": "draft",
     "import_spreadsheet": "draft",
     "analyze_procurement_sources": "read",
+    "explain_analysis_item": "read",
     "save_procurement_assessment": "draft",
     "get_procurement_assessment": "read",
     "list_procurement_assessments": "read",
@@ -106,7 +107,7 @@ def test_definition_and_tools() -> None:
     agent = copilot_agent(tools)
 
     assert agent.model == DEFAULT_MODEL
-    assert (agent.prompt_file, agent.prompt_version) == ("copilot.v29.md", 29)
+    assert (agent.prompt_file, agent.prompt_version) == ("copilot.v30.md", 30)
     # The copilot runs its newest prompt: a new version is never left unused.
     newest = max(int(p.stem.removeprefix("copilot.v")) for p in PROMPTS.glob("copilot.v*.md"))
     assert agent.prompt_version == newest
@@ -132,6 +133,7 @@ def test_the_model_reads_tool_outputs_without_cell_references() -> None:
         "get_procurement_assessment",
     ):
         assert views[name] is assessment_view, name
+    assert views["explain_analysis_item"] is analysis_item_view
     assert views["get_comparison"] is cell_free_view
     assert all(view is not None for view in views.values())
 
