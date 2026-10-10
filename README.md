@@ -563,7 +563,8 @@ POST /v1/suppliers/{id}/payout-accounts     the supplier's bank account (approve
                                              masked view and the account's fingerprint
 POST /v1/payment-methods {token_id}         a card tokenized in the browser with Basis
                                              Theory Elements (Bido never sees the number),
-                                             enrolled for agentic payments
+                                             enrolled for agentic payments; `display` is
+                                             the issuer's card art and colours, if any
 POST /v1/purchase-orders/{id}/payment       quote (USD, ECB rate for other currencies) and a
                                              pending `pay_purchase_order` approval
 POST /v1/approvals/{id}/decision            a person decides (the buyer by default; an
@@ -578,6 +579,10 @@ worker: payment.advance (one step per job)   mint into the company's Privy walle
 GET  /v1/purchase-orders/{id}/payment        state, card, quote, wallet, escrow and every
                                              Solana transaction with its explorer link
 ```
+
+Cards saved before 2026-10-10 have no `display` (card art). `uv run python
+scripts/backfill_payment_method_display.py --tenant <uuid>` reads each one at
+Basis Theory and prints what it would fill; `--apply` writes it.
 
 States: `pending_approval → charging → charged → minted → escrow_created → funded`,
 or `rejected`, `expired` (quote past its time), `declined` (card) and `failed`. A

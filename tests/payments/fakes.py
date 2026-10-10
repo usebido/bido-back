@@ -26,6 +26,7 @@ from bido_back.payments.ports import (
     CardAuthorization,
     CardCharge,
     CardConsumer,
+    CardDisplayData,
     ChargeOutcome,
     CustodyWallet,
     EnrolledCard,
@@ -44,11 +45,25 @@ def address(label: str) -> str:
 
 # --- Card ------------------------------------------------------------------------------------
 
+CARD_ART = CardDisplayData(
+    art_url="https://cdn.example.test/art/visa-signature.png",
+    background_color="#1A1F71",
+    foreground_color="#FFFFFF",
+    description="Visa Signature",
+    issuer_name="Example Bank",
+)
+
 
 @dataclass
 class FakeCardGateway:
     simulated_mode: bool = False
     enroll_status: Literal["active", "pending", "failed"] = "active"
+    enroll_display: CardDisplayData | None = CARD_ART
+    # What `display` answers per payment method ref (absent: no display); an exception is raised.
+    displays: dict[str, CardDisplayData | Exception] = field(
+        default_factory=dict[str, CardDisplayData | Exception]
+    )
+    display_calls: list[str] = field(default_factory=list[str])
     authorize_usable: bool = True
     charge_outcome: ChargeOutcome = "succeeded"
     # Raised by the next `charge` (then cleared): a provider failure or a lost credential.
@@ -79,10 +94,18 @@ class FakeCardGateway:
             exp_year=2030,
             funding="credit",
             status=self.enroll_status,
+            display=self.enroll_display,
         )
 
     async def remove(self, payment_method_ref: str) -> None:
         self.removed.append(payment_method_ref)
+
+    async def display(self, payment_method_ref: str) -> CardDisplayData | None:
+        self.display_calls.append(payment_method_ref)
+        answer = self.displays.get(payment_method_ref)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
 
     async def authorize(
         self,

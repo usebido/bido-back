@@ -23,7 +23,7 @@ from bido_back.payments.config import PaymentProviders
 from bido_back.settings import Settings
 from tests.awards.test_awards_db import World, approver, buyer
 from tests.awards.test_lifecycle import sent_po
-from tests.payments.fakes import FakeProviders
+from tests.payments.fakes import CARD_ART, FakeProviders
 from tests.payments.flow.conftest import add_payment_method
 from tests.payments.flow.test_service_db import ACCOUNT, ACCOUNT_NUMBER, member, usd_rate
 
@@ -132,7 +132,15 @@ async def test_pay_a_purchase_order_over_http(
     assert saved.status_code == 201
     card = saved.json()
     assert (card["brand"], card["last4"], card["status"]) == ("visa", "4242", "active")
-    assert [m["id"] for m in (await http.get("/v1/payment-methods")).json()] == [card["id"]]
+    assert card["display"] == {
+        "art_url": CARD_ART.art_url,
+        "background_color": CARD_ART.background_color,
+        "foreground_color": CARD_ART.foreground_color,
+        "description": CARD_ART.description,
+        "issuer_name": CARD_ART.issuer_name,
+    }
+    listed = (await http.get("/v1/payment-methods")).json()
+    assert [(m["id"], m["display"]) for m in listed] == [(card["id"], card["display"])]
     duplicate = await http.post("/v1/payment-methods", json={"token_id": "tok_http"})
     assert duplicate.status_code == 409
 
@@ -169,6 +177,7 @@ async def test_pay_a_purchase_order_over_http(
         card["id"],
         account["id"],
     )
+    assert payment["card"]["display"] == card["display"]
     again = await http.post(paying, json=pay_body(card["id"], account["id"]))
     assert again.status_code == 409
 

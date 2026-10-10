@@ -43,10 +43,21 @@ class PaymentChainTransactionView(BaseModel):
     created_at: datetime
 
 
+class PaymentMethodDisplayView(BaseModel):
+    """How the issuer brands the card, to draw it: every field may be null."""
+
+    art_url: str | None = Field(description="The card face image, an https URL")
+    background_color: str | None = Field(description="`#rrggbb`")
+    foreground_color: str | None = Field(description="`#rrggbb`, for text on the background")
+    description: str | None = Field(description="The issuer's name for the card product")
+    issuer_name: str | None
+
+
 class PaymentCardView(BaseModel):
     payment_method_id: UUID
     brand: str | None
     last4: str | None
+    display: PaymentMethodDisplayView | None
 
 
 class PaymentPayoutView(BaseModel):
@@ -152,6 +163,9 @@ class PaymentMethodView(BaseModel):
     exp_month: int | None
     exp_year: int | None
     funding: str | None
+    display: PaymentMethodDisplayView | None = Field(
+        description="The issuer's branding of the card; null when the provider gave none"
+    )
     status: PaymentMethodStatus
     created_by: UUID
     created_at: datetime

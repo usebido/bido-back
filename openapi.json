@@ -9582,6 +9582,16 @@
             ],
             "title": "Brand"
           },
+          "display": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PaymentMethodDisplayView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "last4": {
             "anyOf": [
               {
@@ -9602,7 +9612,8 @@
         "required": [
           "payment_method_id",
           "brand",
-          "last4"
+          "last4",
+          "display"
         ],
         "title": "PaymentCardView",
         "type": "object"
@@ -9745,6 +9756,79 @@
         "title": "PaymentChainView",
         "type": "object"
       },
+      "PaymentMethodDisplayView": {
+        "description": "How the issuer brands the card, to draw it: every field may be null.",
+        "properties": {
+          "art_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The card face image, an https URL",
+            "title": "Art Url"
+          },
+          "background_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`#rrggbb`",
+            "title": "Background Color"
+          },
+          "description": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The issuer's name for the card product",
+            "title": "Description"
+          },
+          "foreground_color": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`#rrggbb`, for text on the background",
+            "title": "Foreground Color"
+          },
+          "issuer_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Issuer Name"
+          }
+        },
+        "required": [
+          "art_url",
+          "background_color",
+          "foreground_color",
+          "description",
+          "issuer_name"
+        ],
+        "title": "PaymentMethodDisplayView",
+        "type": "object"
+      },
       "PaymentMethodView": {
         "properties": {
           "brand": {
@@ -9767,6 +9851,17 @@
             "format": "uuid",
             "title": "Created By",
             "type": "string"
+          },
+          "display": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PaymentMethodDisplayView"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The issuer's branding of the card; null when the provider gave none"
           },
           "exp_month": {
             "anyOf": [
@@ -9835,6 +9930,7 @@
           "exp_month",
           "exp_year",
           "funding",
+          "display",
           "status",
           "created_by",
           "created_at"

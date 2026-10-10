@@ -15,6 +15,7 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, func, inspect, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.approvals import decide_approval
@@ -44,10 +45,12 @@ from bido_back.payments.errors import (
     PaymentInvalidState,
     PaymentNotFound,
     PaymentRefused,
+    ProviderError,
 )
 from bido_back.payments.ports import (
     BankAccountDetails,
     CardConsumer,
+    CardDisplayData,
     EnrolledCard,
 )
 from bido_back.payments.proposals import (
@@ -72,6 +75,7 @@ from bido_back.payments.schemas import (
 from bido_back.payments.views import (
     CardSetupView,
     ChainSetupView,
+    PaymentMethodDisplayView,
     PaymentMethodView,
     PurchaseOrderPaymentSummary,
 )
@@ -82,7 +86,7 @@ from bido_back.settings import Settings
 from tests.approvals.conftest import People
 from tests.awards.test_awards_db import World, approver, buyer
 from tests.awards.test_lifecycle import send, sent_po, two_sent_pos
-from tests.payments.fakes import FakeCardGateway, FakeProviders, address
+from tests.payments.fakes import CARD_ART, FakeCardGateway, FakeProviders, address
 from tests.payments.flow.conftest import (
     USD_PER_EUR,
     add_payment_method,
@@ -113,6 +117,14 @@ ACCOUNT = CreatePayoutAccountRequest(
     bank_code="104584000003",
 )
 ACCOUNT_NUMBER = "6222021234567890"
+ART_VIEW = PaymentMethodDisplayView(
+    art_url=CARD_ART.art_url,
+    background_color=CARD_ART.background_color,
+    foreground_color=CARD_ART.foreground_color,
+    description=CARD_ART.description,
+    issuer_name=CARD_ART.issuer_name,
+)
+ART_JSON = ART_VIEW.model_dump()
 
 
 @pytest_asyncio.fixture
@@ -335,15 +347,116 @@ async def test_a_member_saves_a_card_and_the_company_sees_it_masked(
     assert [m.id for m in await service.list_payment_methods(world.engine, buyer(people))] == [
         saved.id
     ]
+    assert saved.display == ART_VIEW
     async with tenant_session(world.engine, people.tenant) as session:
         row = await session.get(PaymentMethod, saved.id)
     assert row is not None and (row.payment_method_ref, row.fingerprint) == ("pm_tok_a", "fp-tok_a")
+    assert row.display == ART_JSON
     [event] = await actions(world, "payment_method.added")
     assert event.payload == {"payment_method_id": str(saved.id), "status": "active"}
     assert event.actor_user_id == people.member
 
     # Another company sees none of it.
     assert await service.list_payment_methods(world.engine, outsider(people)) == []
+
+
+async def test_a_card_without_branding_is_saved_with_a_null_display(
+    world: World, providers: FakeProviders
+) -> None:
+    providers.card.enroll_display = None
+    saved = await enroll(world, providers, "tok_plain")
+    assert saved.display is None
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        # SQL NULL, not JSON null: the backfill looks for `display IS NULL`.
+        found = await session.scalar(
+            select(PaymentMethod.id).where(
+                PaymentMethod.id == saved.id, PaymentMethod.display.is_(None)
+            )
+        )
+    assert found == saved.id
+
+
+async def test_a_stored_display_is_an_object_and_read_back_cleaned(
+    world: World, providers: FakeProviders
+) -> None:
+    people = world.people
+    card_id = await add_payment_method(world.engine, people.tenant, people.owner)
+    with pytest.raises(IntegrityError, match="payment_methods_display_check"):
+        async with tenant_session(world.engine, people.tenant) as session:
+            await session.execute(
+                update(PaymentMethod)
+                .where(PaymentMethod.id == card_id)
+                .values(display=["https://cdn.example.test/a.png"])
+            )
+    async with tenant_session(world.engine, people.tenant) as session:
+        await session.execute(
+            update(PaymentMethod)
+            .where(PaymentMethod.id == card_id)
+            .values(display={"art_url": "http://cdn.example.test/a.png", "issuer_name": "Bank"})
+        )
+    [view] = await service.list_payment_methods(world.engine, buyer(people))
+    assert view.display == PaymentMethodDisplayView(
+        art_url=None,
+        background_color=None,
+        foreground_color=None,
+        description=None,
+        issuer_name="Bank",
+    )
+
+
+async def test_the_backfill_fills_only_saved_cards_without_a_display(
+    world: World, providers: FakeProviders
+) -> None:
+    people = world.people
+    tenant = people.tenant
+    card = providers.card
+    providers.card.enroll_display = None
+    plain = await enroll(world, providers, "tok_plain")
+    nothing = await enroll(world, providers, "tok_nothing")
+    failing = await enroll(world, providers, "tok_failing")
+    removed = await enroll(world, providers, "tok_removed")
+    await service.remove_payment_method(world.engine, buyer(people), removed.id, card)
+    providers.card.enroll_display = CARD_ART
+    branded = await enroll(world, providers, "tok_branded")
+    others = await add_payment_method(world.engine, people.other_tenant, people.other_approver)
+    newer = CardDisplayData(None, "#000000", "#FFFFFF", None, "Other Bank")
+    card.displays = {
+        "pm_tok_plain": CARD_ART,
+        "pm_tok_failing": ProviderError("basis_theory", "get_payment_method", "http_503"),
+        "pm_tok_removed": CARD_ART,
+        "pm_tok_branded": newer,
+    }
+
+    dry = await service.backfill_card_display(world.engine, tenant, card, apply=False)
+    assert dry == service.DisplayBackfill(missing=3, filled=1, empty=1, failed=1)
+    assert sorted(card.display_calls) == ["pm_tok_failing", "pm_tok_nothing", "pm_tok_plain"]
+    assert {
+        m.id: m.display for m in await service.list_payment_methods(world.engine, buyer(people))
+    } == {
+        plain.id: None,
+        nothing.id: None,
+        failing.id: None,
+        branded.id: ART_VIEW,
+    }
+
+    done = await service.backfill_card_display(world.engine, tenant, card, apply=True)
+    assert done == dry
+    shown = {
+        m.id: m.display for m in await service.list_payment_methods(world.engine, buyer(people))
+    }
+    assert shown == {plain.id: ART_VIEW, nothing.id: None, failing.id: None, branded.id: ART_VIEW}
+    async with tenant_session(world.engine, tenant) as session:
+        gone = await session.get(PaymentMethod, removed.id)
+    assert gone is not None and gone.display is None
+    async with tenant_session(world.engine, people.other_tenant) as session:
+        other = await session.get(PaymentMethod, others)
+    assert other is not None and other.display is None
+
+    # Re-running asks only for what is still missing.
+    card.display_calls.clear()
+    again = await service.backfill_card_display(world.engine, tenant, card, apply=True)
+    assert again == service.DisplayBackfill(missing=2, filled=0, empty=1, failed=1)
+    assert sorted(card.display_calls) == ["pm_tok_failing", "pm_tok_nothing"]
 
 
 async def test_a_card_still_provisioning_is_saved_as_pending(
