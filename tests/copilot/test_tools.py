@@ -198,7 +198,7 @@ async def test_prepare_send_records_approvals_and_sends_nothing(
     prepared = await tools.call(ctx, "prepare_send", rfq=created.ref)
 
     assert created.status == "draft" and [r.detail for r in invited.results] == ["invited"]
-    assert len(prepared.approvals) == 1 and "Nothing was sent" in prepared.note
+    assert len(prepared.approvals) == 1 and "Nothing was sent" in prepared.guidance
     assert tools.mailboxes.sender.sent == []
     async with tenant_session(app_engine, principal.tenant_id) as session:
         approval = await session.scalar(

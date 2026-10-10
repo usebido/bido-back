@@ -2,6 +2,7 @@
 runs the whole stored request."""
 
 from dataclasses import replace
+from datetime import date
 from decimal import Decimal
 from uuid import uuid4
 
@@ -9,7 +10,8 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from bido_back.copilot.journey_tools import AssessmentRfqOut
-from bido_back.purchasing.sources.contracts import Assumption
+from bido_back.purchasing.sources.contracts import Assumption, TimingCheck
+from bido_back.rfqs import service as rfq_service
 from tests.approvals.conftest import People
 from tests.purchasing.test_source_handoff import (
     assessment,
@@ -157,3 +159,62 @@ async def test_an_assessment_with_assumptions_drafts_and_shows_them_per_line(
         )
     )
     assert confirmed.rfq_id is not None and confirmed.lines == 2 and not confirmed.preliminary
+
+
+@pytest.mark.db
+async def test_confirming_moves_every_chosen_late_line_to_its_arrival_at_once(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    # 2026-10-10, RFQ-7: the model moved the dates one update_rfq_line at a time and lost
+    # the fifth. The confirmation now moves every chosen line, by code, in one call.
+    principal = buyer_of(copilot_rows)
+    ctx = context_of(principal)
+    tools = make_tools(app_engine)
+    arrivals = [date(2026, 11, 7), date(2026, 10, 29), date(2026, 11, 22)]
+    late = [
+        line(part, suppliers=[supplier("MetalNova Teste", "vendas@metalnova.example.test")])
+        for part in ("000101", "000102", "000103")
+    ]
+    lines = [
+        item.model_copy(
+            update={
+                "timing": TimingCheck(
+                    order_date=date(2026, 10, 8), outcome="meets", recommended_arrival=arrival
+                )
+            }
+        )
+        for item, arrival in zip(late, arrivals, strict=True)
+    ]
+    metalnova = supplier("MetalNova Teste", "vendas@metalnova.example.test")
+    on_time = line("000104", suppliers=[metalnova])
+    assessment_id = await saved(app_engine, principal, assessment(*lines, on_time))
+    args: dict[str, object] = {
+        "assessment_id": str(assessment_id),
+        "title": "MRP purchases",
+        "base_currency": "BRL",
+    }
+    proposed = AssessmentRfqOut.model_validate(
+        await tools.call(ctx, "create_rfq_from_assessment", **args)
+    )
+    assert proposed.preview is not None
+    assert [p.arrives_after_need_by for p in proposed.preview.lines] == [*arrivals, None]
+
+    confirmed = AssessmentRfqOut.model_validate(
+        await tools.call(
+            replace(ctx, run_id=uuid4()),
+            "create_rfq_from_assessment",
+            **args,
+            proposal_id=str(proposed.proposal_id),
+            move_to_arrival=[1, 2, 3, 4],
+        )
+    )
+
+    assert [(m.position, m.need_by) for m in confirmed.moved_to_arrival] == [
+        (1, arrivals[0]),
+        (2, arrivals[1]),
+        (3, arrivals[2]),
+    ]
+    assert [m.position for m in confirmed.not_moved] == [4]
+    assert confirmed.rfq_id is not None
+    detail = await rfq_service.get_rfq(app_engine, principal, confirmed.rfq_id)
+    assert [item.need_by for item in detail.lines] == [*arrivals, date(2026, 10, 22)]

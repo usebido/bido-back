@@ -818,7 +818,9 @@ class PreparedApproval(BaseModel):
 class PrepareSendOut(BaseModel):
     ref: str
     approvals: list[PreparedApproval]
-    note: str
+    # For the model only, never shown to the buyer: what to say and do next. Not
+    # `note`: the screen's approval card shows a `note`, and this text leaked there.
+    guidance: str
 
 
 class NegotiationLineOut(BaseModel):
@@ -887,7 +889,9 @@ class ProposeCounteroffersOut(BaseModel):
     ref: str
     proposed: int
     approval_ids: list[UUID]
-    note: str
+    # For the model only, never shown to the buyer: what to say and do next. Not
+    # `note`: the screen's approval card shows a `note`, and this text leaked there.
+    guidance: str
 
 
 # --- Award and purchase orders -------------------------------------------------------------
@@ -952,7 +956,9 @@ class PrepareAwardOut(AwaitingConfirmation):
     approval_id: UUID | None = None
     differs_from_recommendation: bool
     lines: list[AwardedLineItem]
-    note: str
+    # For the model only, never shown to the buyer: what to say and do next. Not
+    # `note`: the screen's approval card shows a `note`, and this text leaked there.
+    guidance: str
 
 
 class ListOpenPosIn(BaseModel):
@@ -2031,7 +2037,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 PreparedApproval(invite_id=p.invite_id, approval_id=p.approval_id)
                 for p in prepared.approvals
             ],
-            note=(
+            guidance=(
                 "Nothing was sent. Each email waits for approval by an approver other "
                 "than the requester; it is sent only after that."
             ),
@@ -2334,7 +2340,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             ref=rfq.ref,
             proposed=result.proposed,
             approval_ids=list(result.approval_ids),
-            note=(
+            guidance=(
                 "Nothing was sent. Each new email waits for approval (by the buyer, or by a "
                 "second person where the company requires it), unless an approved negotiation "
                 "mandate covers it. A supplier offer gets one email at most: one already "
@@ -2423,7 +2429,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 ref=rfq.ref,
                 differs_from_recommendation=checked.args.differs_from_recommendation,
                 lines=items,
-                note=(
+                guidance=(
                     "Nothing was asked yet. Confirming sends the award to the approvals "
                     "queue; nothing is awarded until it is approved."
                 ),
@@ -2444,7 +2450,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             approval_id=requested.approval_id,
             differs_from_recommendation=requested.differs_from_recommendation,
             lines=_awarded_items(requested.lines),
-            note=(
+            guidance=(
                 "Nothing was awarded yet. The award must be approved first (by the buyer, "
                 "or a second person if the company requires one); then the purchase "
                 "orders are created as drafts."

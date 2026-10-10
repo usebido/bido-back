@@ -267,3 +267,41 @@ def test_timing_alerts_are_read_before_the_lines() -> None:
 
     assert list(view)[:2] == ["timing_alerts", "lines"]
     assert view["timing_alerts"][0]["summary"] == "Unavoidable stockout from 2026-10-12."
+
+
+def test_issue_codes_reach_the_model_as_plain_words() -> None:
+    # 2026-10-10: the copilot showed the buyer `lead_time_days:wrong_locator` and
+    # `above_buyer_lead_time_limit`. The model reads words; the output keeps the codes.
+    class Out(BaseModel):
+        issues: list[str]
+        excluded: list[dict[str, object]]
+        status: str
+
+    out = Out(
+        issues=["line 3: lead_time_days:wrong_locator", "missing:currency", "Free text."],
+        excluded=[
+            {"supplier_name": "Roltec", "reasons": ["needs_review", "above_buyer_lead_time_limit"]}
+        ],
+        status="needs_review",
+    )
+
+    view = cell_free_view(out)
+
+    assert view == {
+        "issues": [
+            "line 3: the lead time is not where the file points, so it is not confirmed",
+            "the file does not give the currency",
+            "Free text.",
+        ],
+        "excluded": [
+            {
+                "supplier_name": "Roltec",
+                "reasons": [
+                    "needs a person to check it",
+                    "delivers later than the lead time you set",
+                ],
+            }
+        ],
+        "status": "needs_review",
+    }
+    assert out.issues[0] == "line 3: lead_time_days:wrong_locator"
