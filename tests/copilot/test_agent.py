@@ -74,6 +74,7 @@ EXPECTED_TOOLS = {
     "answer_supplier_question": "draft",
     "reopen_supplier_question": "draft",
     "use_current_offer": "draft",
+    "release_negotiation_hold": "draft",
 }
 
 

@@ -3,6 +3,7 @@
 Fake writer and fake mailbox; real strategy, approvals, guard and executor.
 """
 
+from dataclasses import replace
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from typing import cast
@@ -15,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.catalog.contracts import EmailNoteOutput, NegotiationEmailInput
 from bido_back.agents.context import ToolContext
+from bido_back.agents.tools import ToolError
 from bido_back.approvals import ActToolRegistry, ApprovalExecutor, decide_approval
 from bido_back.auth import Principal
 from bido_back.db import tenant_session
@@ -1452,3 +1454,71 @@ async def test_the_sweep_settles_a_replan_whose_job_was_lost(world: World) -> No
     assert (await world.rfq()).negotiation_replan_requested_at is None
     # The next reply enqueues again.
     await _ask_replan(world)
+
+
+# --- Releasing a hold from the Copilot -------------------------------------------------------
+
+
+async def test_the_copilot_releases_a_held_offer_only_after_the_buyer_confirms(
+    world: World,
+) -> None:
+    from tests.copilot.conftest import context_of, make_tools
+
+    await world.configure()
+    proposal_id = await world.offer("rhein", ("0.050", "1.20"))
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        proposal = await session.get(Proposal, proposal_id)
+        assert proposal is not None
+        proposal.fields = {
+            "_offer_state": {
+                "reply_kind": "amendment",
+                "issues": ["amendment_without_explicit_preservation"],
+                "requires_clarification": True,
+            }
+        }
+    tools = make_tools(world.engine)
+    ctx = context_of(buyer(world.people))
+    rfq_ref = (await world.rfq()).ref
+
+    # Lyon has no offer on hold: nothing to release, nothing proposed.
+    with pytest.raises(ToolError, match="Lyon has sent no offer|not held"):
+        await tools.call(ctx, "release_negotiation_hold", rfq=rfq_ref, supplier="Lyon")
+
+    preview = await tools.call(ctx, "release_negotiation_hold", rfq=rfq_ref, supplier="rhein")
+
+    assert preview.awaiting_confirmation and preview.proposal_id is not None
+    shown = preview.preview.negotiation_hold
+    assert (shown.supplier_name, shown.offer_version) == ("Rhein", 1)
+    assert shown.reason == "offer_state_requires_review"
+    assert "offer_state_requires_review" in shown.holds
+    # The preview stores the proposal and nothing else: the offer is still held.
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        invite = await session.get(Invite, world.invites["rhein"])
+    assert invite is not None and invite.negotiation_released_proposal_id is None
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    assert not any(i.action == "rfq.negotiation_hold_released" for i in feed)
+    # Not in the same run: the buyer has not answered yet.
+    with pytest.raises(ToolError, match="not confirmed"):
+        await tools.call(
+            ctx,
+            "release_negotiation_hold",
+            rfq=rfq_ref,
+            supplier="Rhein",
+            proposal_id=str(preview.proposal_id),
+        )
+
+    done = await tools.call(
+        replace(ctx, run_id=uuid4()),
+        "release_negotiation_hold",
+        rfq=rfq_ref,
+        supplier="Rhein",
+        proposal_id=str(preview.proposal_id),
+    )
+
+    assert not done.awaiting_confirmation
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        invite = await session.get(Invite, world.invites["rhein"])
+    assert invite is not None and invite.negotiation_released_proposal_id == proposal_id
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    assert any(i.action == "rfq.negotiation_hold_released" for i in feed)
+    assert (await world.sweep(FakeNegotiationWriter())).proposed == 1

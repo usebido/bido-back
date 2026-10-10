@@ -1465,6 +1465,65 @@ async def update_negotiation(
     return await _view(db, principal.tenant_id, rfq_id, at, history)
 
 
+@dataclass(frozen=True, slots=True)
+class OfferHold:
+    """What holds a supplier's latest offer in the negotiation, as `release_hold` would
+    release it. Read-only: the same planner the sweep and the view run."""
+
+    invite_id: UUID
+    supplier_name: str
+    proposal_id: UUID | None
+    proposal_version: int | None
+    # The offer itself is on hold for the buyer and not released yet: releasing it
+    # changes what the planner does next.
+    held: bool
+    # Where the supplier stands now (phase, reason code, one sentence written by code).
+    phase: str
+    reason: str
+    label: str
+    # The comparison's hold codes on the offer (e.g. offer_state_requires_review).
+    holds: tuple[str, ...]
+
+
+async def offer_hold(
+    db: Db,
+    principal: Principal,
+    rfq_id: UUID,
+    invite_id: UUID,
+    *,
+    now: datetime | None = None,
+    history: PriceHistory = quoted_price_history,
+    expected_delivery: ExpectedDelivery = extraction_expected_delivery,
+) -> OfferHold:
+    """What `release_hold` would release for one supplier, and why it is held."""
+    at = now or datetime.now(UTC)
+    planned, comparison = await _planned(
+        db, principal.tenant_id, rfq_id, at, history, expected_delivery
+    )
+    item = next((i for i in planned.loaded.suppliers if i.invite.id == invite_id), None)
+    if item is None:
+        raise NotFound(f"supplier {invite_id} is not on rfq {rfq_id}")
+    plan = planned.plans[invite_id]
+    column = next((c for c in comparison.suppliers if c.invite_id == invite_id), None)
+    holds = (
+        _holds(column.negotiation_holds, item, planned.loaded.ledger.get(invite_id))
+        if column is not None
+        else ()
+    )
+    chases_sent = sum(1 for f in item.followups if f.kind == "chase" and f.status == "sent")
+    return OfferHold(
+        invite_id=invite_id,
+        supplier_name=item.supplier.name,
+        proposal_id=item.proposal.id if item.proposal is not None else None,
+        proposal_version=item.proposal.version if item.proposal is not None else None,
+        held=plan.offer_held,
+        phase=plan.phase,
+        reason=plan.reason,
+        label=phase_label(plan, chases_sent=chases_sent),
+        holds=tuple(holds),
+    )
+
+
 async def release_hold(
     db: Db,
     principal: Principal,
