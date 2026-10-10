@@ -128,3 +128,53 @@ async def test_assessment_http_roundtrip_and_owner_authorization(
             assert (await http.get(path)).status_code == 404
             assert (await http.post(f"{path}/rfq", json=rfq_request)).status_code == 404
             assert (await http.post("/v1/procurement-assessments", json=request)).status_code == 404
+
+
+@pytest.mark.db
+async def test_the_full_plan_downloads_as_xlsx_for_its_owner_only(
+    app_engine: AsyncEngine,
+    purchasing_rows: People,
+) -> None:
+    from io import BytesIO
+    from typing import Any, cast
+
+    from openpyxl import load_workbook  # pyright: ignore[reportMissingTypeStubs]
+
+    app = _app()
+    who = buyer(purchasing_rows)
+    identity = {"principal": who}
+    storage, mapper = TrackingStorage(), SourceMapper()
+    upload_id = await upload_source(app_engine, who, storage)
+    sessionmaker = create_sessionmaker(app_engine)
+    app.dependency_overrides[get_principal] = lambda: identity["principal"]
+    app.dependency_overrides[get_db] = lambda: sessionmaker
+    app.dependency_overrides[get_storage] = lambda: storage
+    app.dependency_overrides[get_source_mapper] = lambda: mapper
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        created = await http.post(
+            "/v1/procurement-assessments",
+            json={"upload_ids": [str(upload_id)], "objective": "Analyze material requirements"},
+        )
+        assessment = created.json()
+        path = f"/v1/procurement-assessments/{assessment['assessment_id']}/plan.xlsx"
+        response = await http.get(path, params={"lang": "en"})
+        assert response.status_code == 200, response.text
+        assert response.headers["content-type"].startswith(
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        assert "attachment; filename=" in response.headers["content-disposition"]
+        workbook = cast(Any, load_workbook(BytesIO(response.content)))
+        assert workbook.sheetnames[:2] == ["Summary", "Plan"]
+        plan_rows = list(workbook["Plan"].iter_rows(values_only=True))
+        assert len(plan_rows) - 1 == len(assessment["lines"])
+        assert (await http.get(path, params={"lang": "xx"})).status_code == 422
+        identity["principal"] = Principal(
+            tenant_id=purchasing_rows.other_tenant,
+            user_id=purchasing_rows.other_approver,
+            role="approver",
+        )
+        assert (await http.get(path)).status_code == 404
+    unauthenticated = httpx.ASGITransport(app=_app())
+    async with httpx.AsyncClient(transport=unauthenticated, base_url="http://test") as http:
+        assert (await http.get(path)).status_code == 401

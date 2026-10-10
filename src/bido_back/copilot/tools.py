@@ -61,6 +61,7 @@ from bido_back.copilot.followup_tools import (
 )
 from bido_back.copilot.journey_tools import journey_tools, reply_by_explained
 from bido_back.copilot.order_tools import order_tools
+from bido_back.copilot.plan_tools import plan_tools
 from bido_back.copilot.proposals import (
     PROPOSAL_ARG,
     AwaitingConfirmation,
@@ -2745,4 +2746,5 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         *journey_tools(deps),
         *order_tools(deps),
         *followup_tools(deps),
+        *plan_tools(deps),
     )

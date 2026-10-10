@@ -13,6 +13,9 @@ A source assessment, besides:
 - Empty values are left out (a missing `price` reads as no price), and an
   assumption that concerns every line is read once, in the assessment's
   `assumptions`, not again on each line.
+- `plan` counts every material and plant by status and plant, so the model can give
+  the totals of a plan larger than what it reads, and offers the whole plan as a file
+  (`export_procurement_plan`) or page by page (`procurement_plan_lines`).
 - Its lines and lists are cut to a budget. Lines with something to buy are read in
   full first, the others as one-row summaries (`more_lines`), and what is left out
   is counted (`<list>_left_out`), so the model can say so instead of presenting
@@ -27,6 +30,7 @@ from typing import Final
 from pydantic import BaseModel, JsonValue
 
 from bido_back.copilot.plain_codes import plain
+from bido_back.exports.procurement_plan import STATUS_LABELS, plan_counts, plan_rows
 from bido_back.purchasing.sources.contracts import SourceAssessment
 
 # The keys every `SourceRef` has.
@@ -178,6 +182,7 @@ def assessment_view(assessment: SourceAssessment) -> JsonValue:
         view["more_lines"] = [summaries[i] for i in sorted(summarized)]
     if len(lines) > len(full) + len(summarized):
         view["lines_left_out"] = len(lines) - len(full) - len(summarized)
+    view["plan"] = _plan(assessment)
     for key, item in _capped(data, ASSESSMENT_LIST_ITEMS).items():
         if key in ("lines", "timing_alerts", "timing_alerts_left_out"):
             continue
@@ -190,6 +195,25 @@ def assessment_view(assessment: SourceAssessment) -> JsonValue:
             ]
         view[key] = item
     return view
+
+
+def _plan(assessment: SourceAssessment) -> JsonValue:
+    """Every row of the plan counted (statuses in plain English), and where the rest is."""
+    counts = plan_counts(plan_rows(assessment, "en"))
+    labels = STATUS_LABELS["en"]
+    return {
+        "rows": counts.rows,
+        "by_status": {labels[status]: n for status, n in counts.by_status.items() if n},
+        "by_plant": {
+            plant or "-": {"rows": n, "to_buy": counts.to_buy_by_plant.get(plant, 0)}
+            for plant, n in counts.by_plant.items()
+        },
+        "full_plan": (
+            "These counts cover every material and plant. The whole plan, row by row, is "
+            "export_procurement_plan (an Excel file the buyer downloads) or "
+            "procurement_plan_lines (pages filtered by plant or status)."
+        ),
+    }
 
 
 def _pruned(value: JsonValue) -> JsonValue:
