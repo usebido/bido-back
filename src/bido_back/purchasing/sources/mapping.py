@@ -16,6 +16,7 @@ order they prove. A value that stays ambiguous is never guessed.
 """
 
 import asyncio
+import logging
 import re
 import unicodedata
 from collections import Counter
@@ -77,6 +78,8 @@ from bido_back.purchasing.sources.vocabulary import (
     vocabulary_key,
 )
 
+logger = logging.getLogger(__name__)
+
 CATALOG: dict[str, list[str]] = {
     "inventory": [
         "part_number",
@@ -134,6 +137,8 @@ CATALOG: dict[str, list[str]] = {
         "unit",
         "po_number",
         "po_line",
+        # A delivery schedule line of the order item, when the register lists each delivery.
+        "schedule_line",
         "location",
         "promised_at",
         "status",
@@ -1274,6 +1279,42 @@ def _better(retry: _Attempt, first: _Attempt) -> bool:
     )
 
 
+# Header texts logged per unrecognized table: enough to rank reports, never the rows.
+LOG_HEADERS = 40
+LOG_HEADER_CHARS = 60
+
+
+def _log_unrecognized(
+    table: EvidenceTable,
+    sections: Sequence[TableProposal],
+    records: Sequence[Record],
+    context: ToolContext,
+) -> None:
+    """One line per table no report pack read: its header texts (normalized), the kinds
+    the mapper chose and the row count, so the most common reports can move into code.
+    No cell value below the header row, no file or sheet name."""
+    header_row = sections[0].header_row if sections else None
+    if header_row is None or header_row > len(table.rows):
+        header_row = next(
+            (i for i, row in enumerate(table.rows, start=1) if sum(bool(v) for v in row) >= 2),
+            None,
+        )
+    cells = table.rows[header_row - 1] if header_row is not None else []
+    headers = [norm(cell)[:LOG_HEADER_CHARS] for cell in cells if cell and norm(cell)]
+    kinds = sorted({section.kind for section in sections} | {r.kind for r in records})
+    logger.info(
+        "source_unrecognized_table",
+        extra={
+            "event": "source_unrecognized_table",
+            "tenant_id": str(context.tenant_id),
+            "headers": headers[:LOG_HEADERS],
+            "kinds": kinds,
+            "rows": len(table.rows),
+            "layout": table.layout,
+        },
+    )
+
+
 async def map_sources(
     tables: Sequence[EvidenceTable],
     objective: str,
@@ -1439,6 +1480,7 @@ async def map_sources(
             issues.extend(problems)
             covered.update(rows)
             previous = sections or previous
+        _log_unrecognized(table, previous, records, context)
         if len(covered) < sum(bool(any(row)) for row in table.rows):
             issues.append(
                 Issue(

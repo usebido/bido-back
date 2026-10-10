@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import date
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
 from typing import Final
 
 from bido_back.purchasing.importers import norm
@@ -45,6 +46,7 @@ IDENTIFIER_FIELDS: Final[dict[str, str]] = {
     "supplier_code": "supplier",
     "po_number": "order",
     "po_line": "order line",
+    "schedule_line": "schedule line",
     "reference": "reference",
     "receipt_id": "receipt",
     "location": "location",
@@ -66,9 +68,14 @@ def source_text(record: Record | None, field: str) -> str | None:
 
 def source_refs(records: Sequence[Record], *fields: str) -> list[SourceRef]:
     result: list[SourceRef] = []
+    seen: set[tuple[str, str, int, int, int | None, int | None]] = set()
     for record in records:
         for field, ref in record.evidence.items():
-            if (not fields or field in fields) and ref not in result:
+            if fields and field not in fields:
+                continue
+            key = (ref.source_id, ref.table, ref.row, ref.column, ref.start, ref.end)
+            if key not in seen:
+                seen.add(key)
                 result.append(ref)
     return result
 
@@ -336,6 +343,12 @@ def join_key(value: str | None) -> str | None:
     """
     if value is None:
         return None
+    return _join_key(value)
+
+
+@lru_cache(maxsize=65_536)
+def _join_key(value: str) -> str | None:
+    # Cached: large ERP exports compare the same few thousand codes millions of times.
     text = " ".join(unicodedata.normalize("NFKC", value).casefold().split())
     if not text:
         return None

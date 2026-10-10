@@ -516,9 +516,22 @@ def incoming_for(
         and same_key(source_text(r, "part_number"), part)
         and _at_location(r, scope.location)
     ]
-    orders = coalesce(
-        candidates, ("po_number", "po_line", "location"), issues, "conflicting_purchase_order"
-    )
+    # Several delivery schedule lines of one order item are several incoming lines.
+    scheduled = [r for r in candidates if source_text(r, "schedule_line") is not None]
+    orders = [
+        *coalesce(
+            [r for r in candidates if source_text(r, "schedule_line") is None],
+            ("po_number", "po_line", "location"),
+            issues,
+            "conflicting_purchase_order",
+        ),
+        *coalesce(
+            scheduled,
+            ("po_number", "po_line", "schedule_line", "location"),
+            issues,
+            "conflicting_purchase_order",
+        ),
+    ]
     keys = {_order_key(order) for order in orders}
     for schedule in records:
         if (
@@ -610,6 +623,8 @@ def incoming_for(
             number = (
                 f"{source_text(order, 'po_number') or ''}/{source_text(order, 'po_line') or ''}"
             )
+            if (line := source_text(order, "schedule_line")) is not None:
+                number += f"/{line}"
             amount = format(quantity.normalize(), "f")
             assumptions.append(
                 Assumption(
@@ -635,6 +650,7 @@ def incoming_for(
             InboundEvidence(
                 po_number=source_text(order, "po_number") or "",
                 po_line=source_text(order, "po_line") or "",
+                schedule_line=source_text(order, "schedule_line"),
                 quantity=quantity,
                 expected_at=expected,
                 eligible=eligible,
@@ -659,7 +675,7 @@ def _not_counted(
     """Open orders and pending deliveries the reconciliation could not count, said so."""
     # Counted, or dated after the horizon's needs (rightly no coverage); undated is missed.
     counted = {
-        (join_key(r.po_number), join_key(r.po_line))
+        (join_key(r.po_number), join_key(r.po_line), join_key(r.schedule_line))
         for r in inbound
         if r.eligible or r.expected_at is not None
     }
@@ -671,11 +687,17 @@ def _not_counted(
         and _at_location(r, scope.location)
         and state(r) in PENDING
     ]
-    missed: dict[tuple[str | None, str | None], tuple[Decimal | None, list[Record]]] = {}
+    missed: dict[
+        tuple[str | None, str | None, str | None], tuple[Decimal | None, list[Record]]
+    ] = {}
     for record in [*candidates, *pending]:
         if record.kind == "purchase" and state(record) in CLOSED | CANCELLED:
             continue
-        key = (join_key(source_text(record, "po_number")), join_key(source_text(record, "po_line")))
+        key = (
+            join_key(source_text(record, "po_number")),
+            join_key(source_text(record, "po_line")),
+            join_key(source_text(record, "schedule_line")),
+        )
         if key in counted:
             continue
         amount = source_number(record, "open_quantity", [])

@@ -37,7 +37,13 @@ from bido_back.purchasing.sources.contracts import (
     Record,
     SourceRef,
 )
-from bido_back.purchasing.sources.evidence import join_key, source_date, source_number, source_text
+from bido_back.purchasing.sources.evidence import (
+    join_key,
+    same_key,
+    source_date,
+    source_number,
+    source_text,
+)
 from bido_back.purchasing.sources.formats import read_date
 from bido_back.purchasing.sources.packs.base import (
     Column,
@@ -312,6 +318,75 @@ MD04 = ReportSpec(
     ),
     required=frozenset({"material", "element", "quantity", "date"}),
 )
+MD16 = ReportSpec(
+    code="MD16",
+    title="planned orders",
+    columns=(
+        _MATERIAL,
+        _DESCRIPTION,
+        _PLANT,
+        _BASE_UNIT,
+        Column(
+            "planned_order",
+            (
+                "Ordem planejada",
+                "Planned order",
+                "Planned Order",
+                "Planauftrag",
+                "Orden planificada",
+            ),
+        ),
+        Column(
+            "order_type",
+            (
+                "Tipo de ordem planejada",
+                "Planned order type",
+                "Order type",
+                "Planauftragsart",
+                "Clase de orden planificada",
+            ),
+        ),
+        Column(
+            "order_quantity",
+            (
+                "Quantidade total da ordem",
+                "Quantidade da ordem planejada",
+                "Total order quantity",
+                "Order quantity",
+                "Gesamtauftragsmenge",
+                "Cantidad total de orden",
+            ),
+        ),
+        Column(
+            "start",
+            (
+                "Data de início",
+                "Data início",
+                "Start date",
+                "Order start",
+                "Basic start date",
+                "Eckstarttermin",
+                "Fecha de inicio",
+            ),
+        ),
+        Column(
+            "finish",
+            (
+                "Data de fim",
+                "Data fim",
+                "End date",
+                "Finish date",
+                "Order finish",
+                "Basic finish date",
+                "Eckendtermin",
+                "Fecha fin",
+            ),
+        ),
+        Column("firmed", ("Firmada", "Firming indicator", "Firmed", "Fixiert", "Fijado")),
+    ),
+    required=frozenset({"planned_order", "material", "order_quantity"}),
+    any_of=frozenset({"start", "finish"}),
+)
 MM60 = ReportSpec(
     code="MM60",
     title="material list",
@@ -448,6 +523,19 @@ PURCHASE_ORDERS = ReportSpec(
             ),
         ),
         Column("item", ("Item", "Item do documento de compra", "Position", "Pos.", "Posición")),
+        Column(
+            "schedule_line",
+            (
+                "Divisão",
+                "Linha de remessa",
+                "Schedule line",
+                "Schedule Line",
+                "Sch.line",
+                "SchLine",
+                "Einteilung",
+                "Reparto",
+            ),
+        ),
         Column(
             "document_date",
             ("Data do documento", "Document date", "Doc. date", "Belegdatum", "Fecha de documento"),
@@ -616,9 +704,10 @@ SUPPLIERS = ReportSpec(
     required=frozenset({"vendor", "name"}),
     any_of=frozenset({"country", "email", "purchase_block"}),
 )
-SPECS = (MB52, MD04, MM60, ME1M, PURCHASE_ORDERS, ME6H, SUPPLIERS)
-# "4500019725/00010": an MRP element's order and item.
-_ORDER_ITEM = re.compile(r"^\s*(\d+)\s*/\s*(\d+)\s*$")
+SPECS = (MB52, MD04, MD16, MM60, ME1M, PURCHASE_ORDERS, ME6H, SUPPLIERS)
+# "4500019725/00010", or "4500102721/00010/0001" with the schedule line: an MRP
+# element's order, item and (optionally) delivery schedule line.
+_ORDER_ITEM = re.compile(r"^\s*(\d+)\s*/\s*(\d+)\s*(?:/\s*(\d+)\s*)?$")
 # "100104 USINAGEM PRECISA BRASIL LTDA": a code, then the name.
 _CODE_NAME = re.compile(r"^\s*(\d+)\s+(\S.*?)\s*$")
 # "18 L": how many base units one order unit holds.
@@ -646,6 +735,7 @@ class SapPack:
         readers = {
             MB52: _mb52,
             MD04: _md04,
+            MD16: _md16,
             MM60: _mm60,
             ME1M: _me1m,
             PURCHASE_ORDERS: _purchase_orders,
@@ -716,7 +806,8 @@ class SapPack:
         orders = [
             r for name in ("ME2N", "ME80FN") for reading in by_report[name] for r in reading.records
         ]
-        _one_order_list(by_report["MD04"], orders, issues)
+        _one_order_list(by_report["MD04"], orders, issues, assumptions)
+        _planned_orders(by_report["MD16"], bool(mrp), assumptions)
         _expired_info_records(by_report["ME1M"], mrp, stock, context, assumptions)
         return issues, assumptions
 
@@ -796,6 +887,13 @@ def _md04(row: Row, reading: Reading) -> None:
             row.ref("element_data", order.start(1), order.end(1)),
         )
         put(found, "po_line", order.group(2), row.ref("element_data", order.start(2), order.end(2)))
+        if order.group(3) is not None:
+            put(
+                found,
+                "schedule_line",
+                order.group(3),
+                row.ref("element_data", order.start(3), order.end(3)),
+            )
         put(
             found, "quantity", row.text("quantity") or "", row.ref("quantity"), plain(abs(quantity))
         )
@@ -849,6 +947,82 @@ def _md04(row: Row, reading: Reading) -> None:
         )
 
 
+def _md16(row: Row, reading: Reading) -> None:
+    """A planned order (an MRP proposal to produce): the product, quantity and the start
+    date, when its components are needed. Firmed or not, its state is "planned"."""
+    found = record(
+        "production_plan",
+        row,
+        {
+            "reference": "planned_order",
+            "product_code": "material",
+            "description": "description",
+            "location": "plant",
+            "unit": "base_unit",
+            "quantity": "order_quantity",
+        },
+    )
+    day = "start" if row.text("start") is not None else "finish"
+    if row.text(day) is not None:
+        put(found, "need_by", row.text(day) or "", row.ref(day))
+    column = next((c for c in ("firmed", "order_type") if row.text(c) is not None), None)
+    raw = (row.text(column) if column is not None else None) or "planned"
+    put(found, "status", raw, row.ref(column) if column is not None else None, "planned")
+    reading.records.append(found)
+    # The product's own description, for the orders a component stockout puts at risk.
+    if row.text("description") is not None:
+        reading.records.append(
+            record(
+                "item",
+                row,
+                {
+                    "part_number": "material",
+                    "description": "description",
+                    "location": "plant",
+                    "unit": "base_unit",
+                },
+            )
+        )
+
+
+def _planned_orders(
+    readings: Sequence[Reading], has_mrp_list: bool, assumptions: list[Assumption]
+) -> None:
+    """Planned orders (MD16) are the MRP's own proposals. With an MRP list (MD04), its
+    dependent requirements already are their component demand: the planned orders are not
+    exploded again (that would count it twice), only their products describe the orders
+    at risk. Without one, they are the production plan to explode through a BOM."""
+    plans = [r for reading in readings for r in reading.records if r.kind == "production_plan"]
+    if not plans:
+        return
+    if has_mrp_list:
+        for reading in readings:
+            reading.records[:] = [r for r in reading.records if r.kind != "production_plan"]
+        assumptions.append(
+            Assumption(
+                code="planned_orders_in_mrp_list",
+                message=f"{len(plans)} planned order(s) (MD16) were not exploded: the MRP "
+                "list's (MD04) dependent requirements already are the component demand they "
+                "create, so counting them again would double it. They name the products of "
+                "the orders at risk.",
+                alternative="If the MRP list is older than the planned orders, its requirements "
+                "may not reflect them; a fresh MD04 export settles it.",
+            )
+        )
+        return
+    assumptions.append(
+        Assumption(
+            code="planned_orders_exploded",
+            message=f"{len(plans)} planned order(s) (MD16), MRP proposals not yet converted "
+            "to production orders, are the production plan: each needs its components on its "
+            "start date.",
+            alternative="If some planned orders will not be produced, their component demand "
+            "is lower.",
+            confidence="low",
+        )
+    )
+
+
 def _mm60(row: Row, reading: Reading) -> None:
     found = record(
         "item",
@@ -876,6 +1050,7 @@ def _me1m(row: Row, reading: Reading) -> None:
         row,
         {
             "part_number": "material",
+            "location": "plant",
             "supplier_code": "vendor",
             "valid_from": "valid_from",
             "valid_to": "valid_to",
@@ -903,6 +1078,8 @@ def _me1m(row: Row, reading: Reading) -> None:
         )
         item = Record(kind="item", values={}, evidence={})
         put(item, "part_number", link.values["part_number"], link.evidence["part_number"])
+        if "location" in link.values:
+            put(item, "location", link.values["location"], link.evidence.get("location"))
         put(item, "alt_unit", link.values["unit"], link.evidence.get("unit"))
         put(
             item,
@@ -938,6 +1115,7 @@ def _purchase_orders(row: Row, reading: Reading) -> None:
         {
             "po_number": "po",
             "po_line": "item",
+            "schedule_line": "schedule_line",
             "ordered_at": "document_date",
             "supplier_code": "vendor",
             "supplier_name": "vendor_name",
@@ -1142,21 +1320,65 @@ def _one_stock(
         )
 
 
+def _schedule_lines(orders: list[Record]) -> None:
+    """An order list without a schedule-line column lists each delivery of an item on its
+    own row: those still unnumbered are numbered by delivery date, after the numbers the
+    item's other rows already have, so each counts once (not as a conflict)."""
+    grouped: dict[tuple[str | None, str | None, str | None], list[Record]] = defaultdict(list)
+    for found in orders:
+        grouped[
+            (
+                join_key(source_text(found, "po_number")),
+                join_key(source_text(found, "po_line")),
+                join_key(source_text(found, "location")),
+            )
+        ].append(found)
+    for rows in grouped.values():
+        unnumbered = [r for r in rows if source_text(r, "schedule_line") is None]
+        if len(rows) < 2 or not unnumbered:
+            continue
+        taken = {join_key(source_text(r, "schedule_line")) for r in rows} - {None}
+        unnumbered.sort(key=lambda r: source_date(r, "promised_at", []) or date.max)
+        number = 0
+        for found in unnumbered:
+            number += 1
+            while join_key(str(number)) in taken:
+                number += 1
+            put(found, "schedule_line", str(number), None)
+
+
 def _one_order_list(
-    mrp_readings: Sequence[Reading], orders: list[Record], issues: list[Issue]
+    mrp_readings: Sequence[Reading],
+    orders: list[Record],
+    issues: list[Issue],
+    assumptions: list[Assumption],
 ) -> None:
     """With an order list, MD04's purchase order lines are the same orders: not twice.
 
-    The date MD04 asks to move an order to is carried onto the listed order line.
+    Each MRP purchase line is matched to the listed line of the same order, item and plant
+    (by schedule line, else by date, else the only one), and the date MD04 asks to move it
+    to is carried onto it. An MRP line the list does not have is still an open order: it
+    is counted from the MRP list, with the supplier the list names for the item, and said.
     """
     if not orders:
         return
-    listed: dict[tuple[str | None, str | None], Record] = {
-        (join_key(source_text(r, "po_number")), join_key(source_text(r, "po_line"))): r
-        for r in orders
-    }
-    missing = 0
+    listed: dict[tuple[str | None, str | None, str | None], list[Record]] = defaultdict(list)
+    for found in orders:
+        listed[
+            (
+                join_key(source_text(found, "po_number")),
+                join_key(source_text(found, "po_line")),
+                join_key(source_text(found, "location")),
+            )
+        ].append(found)
+    kept_lines: list[str] = []
+    used: set[int] = set()  # Listed lines already matched: each is one MRP line.
     for reading in mrp_readings:
+        dated = [
+            day
+            for r in reading.records
+            if r.kind == "inventory" and (day := source_date(r, "as_of", [])) is not None
+        ]
         kept: list[Record] = []
         for found in reading.records:
             if found.kind != "purchase":  # MD04's purchase records are its order lines.
@@ -1165,22 +1387,89 @@ def _one_order_list(
             key = (
                 join_key(source_text(found, "po_number")),
                 join_key(source_text(found, "po_line")),
+                join_key(source_text(found, "location")),
             )
-            order = listed.get(key)
-            if order is None:
-                missing += 1
-            elif (moved := source_text(found, "reschedule_to")) is not None:
-                put(order, "reschedule_to", moved, found.evidence.get("reschedule_to"))
+            candidates = [r for r in listed.get(key, []) if id(r) not in used]
+            order = _matching_line(found, candidates)
+            if order is not None:
+                used.add(id(order))
+                if (moved := source_text(found, "reschedule_to")) is not None:
+                    put(order, "reschedule_to", moved, found.evidence.get("reschedule_to"))
+                if (line := source_text(found, "schedule_line")) is not None:
+                    # The MRP list numbers the schedule line; the order list may not.
+                    put(order, "schedule_line", line, found.evidence.get("schedule_line"))
+                continue
+            # Not in the order list: the MRP list's own open quantity and date count.
+            known = dated[0] if dated else None
+            if known is not None and "ordered_at" not in found.values:
+                put(found, "ordered_at", known.isoformat(), None)
+            if candidates:
+                for field in ("supplier_code", "supplier_name", "unit_price", "currency"):
+                    if field in candidates[0].values and field not in found.values:
+                        put(
+                            found,
+                            field,
+                            candidates[0].values[field],
+                            candidates[0].evidence.get(field),
+                        )
+            kept.append(found)
+            number = f"{source_text(found, 'po_number')}/{source_text(found, 'po_line')}"
+            if (line := source_text(found, "schedule_line")) is not None:
+                number += f"/{line}"
+            kept_lines.append(number)
         reading.records[:] = kept
-    if missing:
+    _schedule_lines(orders)
+    if kept_lines:
+        assumptions.append(
+            Assumption(
+                code="mrp_order_not_listed",
+                message=f"{len(kept_lines)} open purchase order line(s) of the MRP list (MD04) "
+                f"are not in the order list (ME2N): {', '.join(kept_lines[:8])}. They are "
+                "counted with the MRP list's open quantity and date.",
+                alternative="If the order list is right and these lines are closed, more must "
+                "be bought.",
+                confidence="low",
+            )
+        )
         issues.append(
             Issue(
                 code="mrp_order_not_listed",
                 severity="warning",
-                message=f"{missing} purchase order line(s) of the MRP list are not in the order "
-                "list and were not counted.",
+                message=f"{len(kept_lines)} purchase order line(s) of the MRP list are not in the "
+                "order list; they were counted from the MRP list.",
             )
         )
+
+
+def _matching_line(found: Record, candidates: Sequence[Record]) -> Record | None:
+    """The listed line an MRP purchase line is: same delivery date, else the same
+    schedule line as the order list states it, else the only one."""
+    if not candidates:
+        return None
+    line = source_text(found, "schedule_line")
+    day = source_date(found, "promised_at", [])
+    if day is not None:
+        same = [r for r in candidates if source_date(r, "promised_at", []) == day]
+        if len(same) > 1:
+            # Several deliveries on one date: the one with the same open quantity first.
+            amount = source_number(found, "open_quantity", [])
+            same.sort(key=lambda r: source_number(r, "open_quantity", []) != amount)
+        if same:
+            return same[0]
+    if line is not None:
+        # Only a schedule line the order list itself states (not one numbered here by date).
+        same = [
+            r
+            for r in candidates
+            if "schedule_line" in r.evidence and same_key(source_text(r, "schedule_line"), line)
+        ]
+        if len(same) == 1:
+            return same[0]
+    if len(candidates) == 1 and (
+        line is None or source_text(candidates[0], "schedule_line") is None
+    ):
+        return candidates[0]
+    return None
 
 
 def _expired_info_records(

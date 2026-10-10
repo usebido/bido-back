@@ -333,6 +333,9 @@ class DemandContribution(BaseModel):
 class InboundEvidence(BaseModel):
     po_number: str
     po_line: str
+    # The item's delivery schedule line, when the order is delivered in several (e.g. SAP
+    # "4500102721/00010/0001"): each schedule line is its own incoming quantity and date.
+    schedule_line: str | None = None
     quantity: Decimal
     expected_at: date | None = None
     eligible: bool = False
@@ -417,7 +420,12 @@ class SupplierEvidence(BaseModel):
     # The agreement ended before the reference date: price history only, not a price.
     contract_expired: bool | None = None
     contract_lead_time_days: Decimal | None = None
+    # The agreement's minimum order quantity, in the item's base unit.
     min_order_quantity: Decimal | None = None
+    # The unit the agreement orders in when it is not the base unit (e.g. "BD") and how
+    # many base units one holds (18): quantities are bought in whole order units.
+    order_unit: str | None = None
+    order_unit_factor: Decimal | None = None
     evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
     # Measured by Bido from reconciled source orders and receipts, in the line's price
     # currency. otif_pct/quality_pct/lead_time_days above stay the source-REPORTED values.
@@ -590,6 +598,7 @@ class ExpediteAction(BaseModel):
 
     po_number: str
     po_line: str
+    schedule_line: str | None = None
     supplier_code: str | None = None
     supplier_name: str | None = None
     quantity: Decimal

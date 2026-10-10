@@ -6,6 +6,7 @@ import json
 from collections import Counter
 from collections.abc import Mapping, Sequence
 from datetime import date
+from typing import Final
 from uuid import UUID
 
 from sqlalchemy import select
@@ -28,7 +29,13 @@ from bido_back.purchasing.sources.contracts import (
     ScopeResolution,
     SourceAssessment,
 )
-from bido_back.purchasing.sources.evidence import describe_locations, same_key
+from bido_back.purchasing.sources.evidence import (
+    describe_locations,
+    join_key,
+    same_key,
+    source_refs,
+    source_text,
+)
 from bido_back.purchasing.sources.mapping import Mapper, map_sources
 from bido_back.purchasing.sources.packs import PackResult, read_known
 from bido_back.purchasing.sources.packs.base import PackContext
@@ -123,7 +130,108 @@ async def analyze_documents(
     )
 
 
+# Record kinds that switch the analysis into a product build (BOM explosion).
+_MODE_KINDS: Final = frozenset({"production_plan", "bom"})
+
+
 def _settle(
+    known: PackResult,
+    mapped: Sequence[Record],
+    problems: Sequence[Issue],
+    coverage: Sequence[Coverage],
+    issues: Sequence[Issue],
+    unread: Sequence[Coverage],
+    names: Mapping[str, str],
+    scope: ScopeRequest | PlanningScope | None,
+    today: date,
+    tables: Sequence[EvidenceTable] = (),
+) -> SourceAssessment:
+    """The assessment, with the reports a pack read in charge: a table the model mapped
+    never switches the analysis mode (e.g. into a product build) nor contradicts a report
+    read by code (its records are kept as evidence, with a warning, and left out of the
+    calculation), and never empties the plan those reports give."""
+    kept, guarded = _guard_mapped(known, mapped)
+    result = _settle_records(
+        known, kept, [*problems, *guarded], coverage, issues, unread, names, scope, today, tables
+    )
+    if not result.lines and kept and known.records:
+        alone = _settle_records(
+            known, [], [*problems, *guarded], coverage, issues, unread, names, scope, today, tables
+        )
+        if alone.lines:
+            alone.issues.append(
+                Issue(
+                    code="mapped_tables_left_out",
+                    severity="warning",
+                    message=f"The {len(kept)} record(s) the model read from unrecognized tables "
+                    "left no plan with the reports read by code; the plan uses those reports "
+                    "alone and the unrecognized tables stay as evidence.",
+                    evidence=source_refs(list(kept))[:10],
+                )
+            )
+            return alone
+    return result
+
+
+def _guard_mapped(known: PackResult, mapped: Sequence[Record]) -> tuple[list[Record], list[Issue]]:
+    """Model-mapped records that would switch the analysis mode, or that repeat what a
+    report read by code states for the same item and plant, are left out (said so)."""
+    if not known.records or not mapped:
+        return list(mapped), []
+    read: set[tuple[str, str | None, str | None]] = {
+        (r.kind, join_key(source_text(r, "part_number")), join_key(source_text(r, "location")))
+        for r in known.records
+        if source_text(r, "part_number") is not None
+    }
+    parts = {(kind, part) for kind, part, _ in read}
+    kept: list[Record] = []
+    switching: list[Record] = []
+    overlapping: list[Record] = []
+    for record in mapped:
+        key = (
+            record.kind,
+            join_key(source_text(record, "part_number")),
+            join_key(source_text(record, "location")),
+        )
+        if record.kind in _MODE_KINDS:
+            switching.append(record)
+        elif key[1] is not None and (
+            key in read
+            or (key[0], key[1], None) in read
+            or (key[2] is None and (key[0], key[1]) in parts)
+        ):
+            overlapping.append(record)
+        else:
+            kept.append(record)
+    issues: list[Issue] = []
+    if switching:
+        kinds = ", ".join(sorted({r.kind for r in switching}))
+        issues.append(
+            Issue(
+                code="mapped_mode_records_left_out",
+                severity="warning",
+                message=f"{len(switching)} {kinds} record(s) read by the model from an "
+                "unrecognized table were kept as evidence but left out of the calculation: "
+                "with ERP reports read by code, an unrecognized table does not turn the plan "
+                "into a product build.",
+                evidence=source_refs(switching)[:10],
+            )
+        )
+    if overlapping:
+        issues.append(
+            Issue(
+                code="mapped_records_overlap_reports",
+                severity="warning",
+                message=f"{len(overlapping)} record(s) read by the model from an unrecognized "
+                "table repeat facts a report read by code states for the same item and plant; "
+                "they were kept as evidence and the report's were used.",
+                evidence=source_refs(overlapping)[:10],
+            )
+        )
+    return kept, issues
+
+
+def _settle_records(
     known: PackResult,
     mapped: Sequence[Record],
     problems: Sequence[Issue],
