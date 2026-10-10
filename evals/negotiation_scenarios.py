@@ -2501,7 +2501,7 @@ GAPS: Final[dict[str, Gap]] = {
     ),
     "double_signature": Gap(
         "writer",
-        "prompts/rfq_followup_writer.v1.md, rfq_negotiation_writer.v1.md; "
+        "prompts/rfq_followup_writer.v1.md, rfq_negotiation_writer.v2.md; "
         "rfqs/service.py buyer_display_name",
         "The writers are told to 'sign with the buyer's name and company'. Without a buyer "
         "name on file buyer_display_name returns the company, so buyer_name == buyer_company "
@@ -2520,7 +2520,7 @@ GAPS: Final[dict[str, Gap]] = {
     "negotiation_reply_by_unchecked": Gap(
         "writer (live)",
         "agents/catalog/definitions.py negotiation_email_problems; "
-        "prompts/rfq_negotiation_writer.v1.md",
+        "prompts/rfq_negotiation_writer.v2.md",
         "The negotiation task carries reply_by and the prompt says to ask for the revised "
         "offer by that date, but the draft check does not require it: the live writer "
         "sometimes ends with 'Poderiam enviar uma oferta revisada?' and no date, and it goes "
@@ -2645,7 +2645,7 @@ GAPS: Final[dict[str, Gap]] = {
     "refused_drafts": Gap(
         "writer (live)",
         "agents/catalog/definitions.py negotiation_email_problems; "
-        "negotiation/service.py evaluate_rfq; prompts/rfq_negotiation_writer.v1.md",
+        "negotiation/service.py evaluate_rfq; prompts/rfq_negotiation_writer.v2.md",
         "Seen in 1 of 2 live runs: the writer's best-and-final drafts were refused by the "
         "draft check (unknown_amount) and dropped silently; nothing records the round, the "
         "next sweep tries again, and the request went out late (after the supplier had sent "

@@ -36,7 +36,9 @@ from bido_back.quotes.extract_job import JOB_TYPE, handle_quote_extract, quote_e
 from bido_back.quotes.lead_time import decode_lead_time, decode_validity
 from bido_back.quotes.terms import line_terms, offer_terms
 from bido_back.worker.envelope import Envelope
+from bido_back.worker.job_types import NEGOTIATION_REPLAN
 from tests.agents.test_runner import Script, final, script
+from tests.approvals.conftest import FakeJobQueue
 from tests.db.conftest import TwoTenants, app_engine, migrator_engine, two_tenants
 from tests.documents.fixtures import build_xlsx
 from tests.quotes import rfq6
@@ -830,3 +832,61 @@ async def test_rfq6_second_reply_is_read_per_line_in_business_days(
     assert event["header"]["valid_until"]["parsed"] == "2026-10-24"
     validity = decode_validity(event["header"]["validity"]["parsed"])
     assert validity is not None and validity.anchor_kind == "original_offer"
+
+
+# --- A reply moves an open negotiation right away -----------------------------------------
+
+
+async def _negotiation(seeded: Seeded, status: str) -> UUID:
+    async with tenant_session(seeded.engine, seeded.tenant_id) as session:
+        invite = await session.get(Invite, seeded.invite_id)
+        assert invite is not None
+        rfq = await session.get(Rfq, invite.rfq_id)
+        assert rfq is not None
+        rfq.status = "open"
+        rfq.negotiation_status = status
+        return rfq.id
+
+
+async def test_a_burst_of_replies_enqueues_one_negotiation_replan(
+    seeded: Seeded, script: Script
+) -> None:
+    rfq_id = await _negotiation(seeded, "open")
+    script(final(**quote_output()), final(**quote_output()))
+    first, second = await seeded.add_message(), await seeded.add_message()
+    jobs = FakeJobQueue()
+    handler = quote_extract_handler(
+        db=seeded.engine, storage=seeded.storage, runner_config=CONFIG, jobs=jobs
+    )
+
+    await handler(seeded.envelope(first))
+    await handler(seeded.envelope(second))
+    await handler(seeded.envelope(second))  # a redelivery stores nothing and asks nothing
+
+    [job] = jobs.jobs
+    assert (job.type, job.tenant_id, job.payload) == (
+        NEGOTIATION_REPLAN,
+        seeded.tenant_id,
+        {"rfq_id": str(rfq_id)},
+    )
+    async with tenant_session(seeded.engine, seeded.tenant_id) as session:
+        rfq = await session.get(Rfq, rfq_id)
+    assert rfq is not None and rfq.negotiation_replan_requested_at is not None
+
+
+async def test_a_reply_outside_a_negotiation_enqueues_no_replan(
+    seeded: Seeded, script: Script
+) -> None:
+    rfq_id = await _negotiation(seeded, "not_started")
+    script(final(**quote_output()))
+    jobs = FakeJobQueue()
+    handler = quote_extract_handler(
+        db=seeded.engine, storage=seeded.storage, runner_config=CONFIG, jobs=jobs
+    )
+
+    await handler(seeded.envelope(await seeded.add_message()))
+
+    assert jobs.jobs == []
+    async with tenant_session(seeded.engine, seeded.tenant_id) as session:
+        rfq = await session.get(Rfq, rfq_id)
+    assert rfq is not None and rfq.negotiation_replan_requested_at is None

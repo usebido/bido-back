@@ -17,6 +17,7 @@ from bido_back.agents.catalog.contracts import (
 )
 from bido_back.agents.context import ToolContext
 from bido_back.approvals import (
+    APPROVAL_EXECUTE_JOB,
     ApprovalExecutor,
     ApprovalRecipientsUnconfirmed,
     decide_approval,
@@ -50,6 +51,8 @@ from bido_back.rfqs.errors import InvalidState, ReplyByRequired
 from bido_back.rfqs.overview import list_rfq_overviews
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
 from bido_back.rfqs.send import SEND_RFQ_EMAIL
+from bido_back.worker.envelope import Envelope
+from bido_back.worker.job_types import NEGOTIATION_REPLAN
 from tests.approvals.conftest import People
 from tests.negotiation.test_negotiation_db import FakeNegotiationWriter, World, approver, buyer
 from tests.rfqs.conftest import FakeIntake, FakeWriter
@@ -74,6 +77,7 @@ class MandateWorld(World):
         super().__init__(engine, people)
         register_mandate_act_tools(self.registry, MandateActDeps(db=engine, jobs=self.jobs))
         self.executor = ApprovalExecutor(engine, self.registry)
+        self.other_jobs: list[Envelope] = []
 
     async def setup(  # noqa: ARG002
         self,
@@ -161,6 +165,10 @@ class MandateWorld(World):
     async def run_jobs(self) -> None:
         while self.jobs.jobs:
             job = self.jobs.jobs.pop(0)
+            if job.type != APPROVAL_EXECUTE_JOB:
+                # A negotiation re-plan: the tests sweep themselves.
+                self.other_jobs.append(job)
+                continue
             await self.executor(job)
 
     async def start(self, approval_id: UUID | None = None, **overrides: object) -> UUID:
@@ -796,3 +804,173 @@ async def test_a_buyers_lead_time_limit_is_never_replaced_by_the_need_by_date(
     # The RFQ's own limit (42 days) stays; an explicit "no limit" override stays empty.
     assert [line.max_lead_time_days for line in terms.lines] == [42, None]
     assert {line.lead_time_need_by for line in terms.lines} == {None}
+
+
+# --- Replacing a live mandate (new limits) ---------------------------------------------------
+
+
+async def _propose_replacement(world: MandateWorld) -> mandates.ProposedMandate:
+    return await mandates.propose_mandate(
+        world.engine,
+        buyer(world.people),
+        world.rfq_id,
+        ProposeMandateRequest(
+            deadline=DEADLINE,
+            lines=[
+                LineLimitsUpdate(
+                    rfq_line_id=world.lines[0],
+                    target_unit_price=Decimal("0.045"),
+                    max_unit_price=Decimal("0.070"),
+                    max_lead_time_days=42,
+                )
+            ],
+        ),
+        writer=FakeWriter(),
+        mailboxes=world.mailboxes,
+    )
+
+
+async def _mandates(world: MandateWorld) -> list[NegotiationMandate]:
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        return list(
+            await session.scalars(
+                select(NegotiationMandate).order_by(NegotiationMandate.created_at)
+            )
+        )
+
+
+async def test_an_approved_replacement_ends_the_old_mandate_and_withdraws_stale_emails(
+    world: MandateWorld,
+) -> None:
+    await world.start()
+    [old] = await _mandates(world)
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.offer("lyon", ("0.045", "1.10"))
+    assert (await world.sweep(FakeNegotiationWriter())).proposed == 2
+    # Both counters auto-approved under the old limits, their sends still queued.
+    result = await mandates.auto_approve_pending(world.engine, world.people.tenant, jobs=world.jobs)
+    assert len(result.approved) == 2
+    queued = list(world.jobs.jobs)
+    sent_before = len(world.mailboxes.sender.sent)
+
+    proposed = await _propose_replacement(world)
+
+    assert proposed.replaces_mandate_id == old.id
+    approval = await world.approval(proposed.approval_id)
+    assert approval.args["replaces_mandate_id"] == str(old.id)
+    # Proposing changes nothing: the old mandate runs, the old limits apply.
+    assert [m.status for m in await _mandates(world)] == ["active"]
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        line = await session.get(RfqLine, world.lines[0])
+    assert line is not None and line.max_unit_price == Decimal("0.060")
+
+    await world.start(proposed.approval_id)
+
+    first, second = await _mandates(world)
+    assert (first.id, first.status) == (old.id, "ended") and first.ended_at is not None
+    assert second.status == "active" and second.approval_id == proposed.approval_id
+    assert ApproveMandateArgs.model_validate(second.terms).replaces_mandate_id == old.id
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        line = await session.get(RfqLine, world.lines[0])
+    assert line is not None and line.max_unit_price == Decimal("0.070")
+    [event] = await _audit(world, "mandate.replaced")
+    assert event.payload["mandate_id"] == str(old.id)
+    assert event.payload["replaced_by"] == str(second.id)
+    assert event.payload["negotiation_emails_withdrawn"] == 2
+    # Decided under the old limits: withdrawn; their queued sends go out as nothing.
+    for name in ("rhein", "lyon"):
+        [row] = await world.messages(name)
+        assert (row.status, row.canceled_reason) == ("canceled", "mandate_replaced")
+    world.jobs.jobs.extend(queued)
+    await world.run_jobs()
+    assert len(world.mailboxes.sender.sent) == sent_before
+    # The new limits are planned at once.
+    assert [j.type for j in world.other_jobs] == [NEGOTIATION_REPLAN]
+    activity = await mandates.get_activity(world.engine, buyer(world.people), world.rfq_id)
+    assert activity.mandate is not None and activity.mandate.replaces_mandate_id == old.id
+
+    # Decided again with the new limits, and sent under the new mandate.
+    assert (await world.sweep(FakeNegotiationWriter())).proposed == 2
+    result = await world.auto()
+    assert len(result.approved) == 2
+    assert len(world.mailboxes.sender.sent) == sent_before + 2
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        decided_by = set(
+            await session.scalars(
+                select(MandateSend.mandate_id).where(MandateSend.approval_id.in_(result.approved))
+            )
+        )
+    assert decided_by == {second.id}
+
+
+async def test_a_rejected_replacement_leaves_the_current_mandate_untouched(
+    app_engine: AsyncEngine, rfq_rows: People
+) -> None:
+    # The initial emails still wait for the mailbox under the current mandate.
+    world = await MandateWorld(app_engine, rfq_rows).setup(connected=False)
+    await world.start()
+    [current] = await _mandates(world)
+    proposed = await _propose_replacement(world)
+    replacement = ApproveMandateArgs.model_validate(
+        (await world.approval(proposed.approval_id)).args
+    )
+    # It carries the initial emails the current mandate waits to send, unchanged.
+    assert {e.approval_id for e in replacement.initial_emails} == {
+        e.approval_id for e in ApproveMandateArgs.model_validate(current.terms).initial_emails
+    }
+
+    await decide_approval(
+        world.engine,
+        approver(world.people),
+        proposed.approval_id,
+        "reject",
+        jobs=world.jobs,
+        on_reject=mandates.MANDATE_REJECT_HOOKS,
+    )
+
+    [still] = await _mandates(world)
+    assert (still.id, still.status, still.ended_at) == (current.id, "active", None)
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        initial = list(
+            await session.scalars(select(Approval).where(Approval.tool == SEND_RFQ_EMAIL))
+        )
+        line = await session.get(RfqLine, world.lines[0])
+    assert {a.status for a in initial} == {"pending"}
+    assert line is not None and line.max_unit_price == Decimal("0.060")
+    assert await _audit(world, "mandate.replaced") == []
+    # The current mandate still sends them once the mailbox is connected.
+    await world.connect()
+    assert len((await world.auto()).approved) == 2
+    assert len(world.mailboxes.sender.sent) == 2
+
+
+async def test_only_one_replacement_waits_at_a_time(world: MandateWorld) -> None:
+    await world.start()
+    proposed = await _propose_replacement(world)
+
+    with pytest.raises(InvalidState, match="already waiting for approval"):
+        await _propose_replacement(world)
+
+    # Once that one is decided, another may be proposed.
+    await decide_approval(
+        world.engine,
+        approver(world.people),
+        proposed.approval_id,
+        "reject",
+        jobs=world.jobs,
+        on_reject=mandates.MANDATE_REJECT_HOOKS,
+    )
+    assert (await _propose_replacement(world)).approval_id != proposed.approval_id
+
+
+async def test_a_replacement_of_a_mandate_no_longer_live_starts_nothing(
+    world: MandateWorld,
+) -> None:
+    await world.start()
+    proposed = await _propose_replacement(world)
+    await negotiation_service.close(world.engine, buyer(world.people), world.rfq_id)
+
+    with pytest.raises(InvalidState, match="no longer live"):
+        await world.start(proposed.approval_id)
+
+    assert [m.status for m in await _mandates(world)] == ["ended"]

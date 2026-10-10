@@ -48,6 +48,20 @@ the open items first and the revised offer after them, with at most three asks.
 A declared final position stays final ("best and final", "we cannot go any lower"). Later
 replies only update the standing offer.
 
+## When the plan moves
+
+- A supplier reply plans its RFQ at once: quote extraction marks the RFQ and enqueues one
+  `negotiation.replan` job per burst of replies. The 15-minute `negotiation.sweep` stays the
+  safety net.
+- New limits under a live mandate: propose a new mandate (`POST .../negotiation/mandate`, or
+  the copilot's `propose_negotiation_mandate`). It is a replacement: the current mandate keeps
+  running until the replacement is approved, which ends it, saves the new limits and
+  withdraws the emails decided under the old ones so they are decided again. A rejected
+  replacement changes nothing.
+- An offer held for the buyer is negotiated as it is with `POST
+  .../suppliers/{invite_id}/release-hold`, or the copilot's `release_negotiation_hold` (a
+  preview first, then the buyer's confirmation).
+
 ## Emails
 
 `supplier_email/` holds one layout for every negotiation email, in pt-BR, en, de, fr, it and

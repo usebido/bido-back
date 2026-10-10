@@ -47,6 +47,7 @@ from bido_back.worker.job_types import (
     FOLLOWUPS_SWEEP,
     FX_REFRESH,
     MAILBOX_SYNC,
+    NEGOTIATION_REPLAN,
     NEGOTIATION_SWEEP,
     PO_RESPONSE,
     QUOTE_EXTRACT,
@@ -119,7 +120,7 @@ def build_worker_registry(
         register_mandate_act_tools,
     )
     from bido_back.negotiation.agents import default_negotiation_writer
-    from bido_back.negotiation.jobs import NegotiationSweepHandler
+    from bido_back.negotiation.jobs import NegotiationReplanHandler, NegotiationSweepHandler
     from bido_back.negotiation.send import register_negotiation_act_tools
     from bido_back.onboarding.agents import default_onboarding_agents
     from bido_back.onboarding.jobs import (
@@ -168,8 +169,15 @@ def build_worker_registry(
         ),
     )
     registry.register(
+        NEGOTIATION_REPLAN,
+        NegotiationReplanHandler(
+            db=engine, writer=default_negotiation_writer(runner_config), jobs=jobs
+        ),
+    )
+    registry.register(
         QUOTE_EXTRACT,
-        quote_extract_handler(db=engine, storage=storage, runner_config=runner_config),
+        # A stored reply enqueues its RFQ's negotiation re-plan.
+        quote_extract_handler(db=engine, storage=storage, runner_config=runner_config, jobs=jobs),
     )
     registry.register(
         PO_RESPONSE,

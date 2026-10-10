@@ -30,6 +30,17 @@ Flow:
    to hold: the email waits, and the wait is recorded once per email with
    when it can go (`mandate.waiting`), so the buyer sees "waiting until".
 4. Pausing stops step 3 at once; closing the negotiation ends the mandate.
+5. New limits under a live mandate: the buyer proposes a new mandate, which is a
+   REPLACEMENT (`replaces_mandate_id` in its payload) while the current one keeps
+   running. Only one replacement may wait at a time. Approving it, in one
+   transaction: the current mandate ends (`mandate.replaced`), the new limits are
+   saved, the RFQ's negotiation emails decided or awaiting approval or sending
+   under the old limits are withdrawn (`mandate_replaced`; the planner decides
+   them again with the new limits, at once through a re-plan), and the new
+   mandate starts. Pending follow-ups, and emails the old mandate held, are
+   checked again against the new mandate, which has decided none of them yet.
+   Rejecting it changes nothing: the current mandate, and the initial emails it
+   still waits to send, are left as they are.
 
 A mandate can be proposed and approved before the buyer connects a mailbox:
 the emails are rendered and the limits approved, but nothing is approved for
@@ -106,9 +117,10 @@ from bido_back.mandates.waits import (
     daily_cap_until,
     mailbox_connected,
 )
+from bido_back.negotiation.hooks import replan_envelope, request_replan
 from bido_back.negotiation.schemas import LineLimitsUpdate, NegotiationSettingsUpdate
 from bido_back.negotiation.send import SendNegotiationEmailArgs
-from bido_back.negotiation.service import apply_settings
+from bido_back.negotiation.service import apply_settings, withdraw_live_emails
 from bido_back.outbound.domains import check_recipients, unconfirmed_domains
 from bido_back.rfqs.agents import EmailWriterAgent
 from bido_back.rfqs.errors import InvalidState, NotFound
@@ -177,12 +189,31 @@ async def propose_mandate(
         if rfq.negotiation_status == "closed":
             raise InvalidState(f"rfq {rfq_id}: the negotiation is closed")
         live = await session.scalar(
-            select(NegotiationMandate.id).where(
+            select(NegotiationMandate).where(
                 NegotiationMandate.rfq_id == rfq_id, NegotiationMandate.status != "ended"
             )
         )
+        # A live mandate: this one is its replacement, approved (or not) on its own.
+        replaced: ApproveMandateArgs | None = None
         if live is not None:
-            raise InvalidState(f"rfq {rfq_id} already has a live mandate")
+            waiting = await session.scalar(
+                select(Approval.id)
+                .where(
+                    Approval.tool == APPROVE_NEGOTIATION_MANDATE,
+                    Approval.session_id == f"rfq:{rfq_id}",
+                    Approval.status == "pending",
+                )
+                .limit(1)
+            )
+            if waiting is not None:
+                # One at a time. An approved one still executing is refused by the
+                # executor instead: it no longer replaces the live mandate.
+                raise InvalidState(
+                    f"rfq {rfq_id}: a mandate proposal is already waiting for approval "
+                    f"({waiting}); approve or reject it before proposing another"
+                )
+            replaced = ApproveMandateArgs.model_validate(live.terms)
+        replaces_mandate_id = live.id if live is not None else None
         lines = list(
             await session.scalars(
                 select(RfqLine).where(RfqLine.rfq_id == rfq_id).order_by(RfqLine.position)
@@ -249,6 +280,19 @@ async def propose_mandate(
                 )
             )
             to_by_invite[item.invite_id] = list(args.to)
+        # A replacement keeps the initial emails the current mandate still waits to
+        # send (no mailbox yet): exactly those approvals, unchanged.
+        for email in replaced.initial_emails if replaced is not None else ():
+            approval = await session.get(Approval, email.approval_id)
+            if (
+                approval is None
+                or approval.status != "pending"
+                or approval.args_hash != email.args_hash
+                or email.invite_id in to_by_invite
+            ):
+                continue
+            initial.append(email)
+            to_by_invite[email.invite_id] = list(SendRfqEmailArgs.model_validate(approval.args).to)
         rows = await session.execute(
             select(Invite, Supplier, Contact)
             .join(Supplier, Supplier.id == Invite.supplier_id)
@@ -286,8 +330,15 @@ async def propose_mandate(
         suppliers=suppliers,
         lines=mandate_lines,
         initial_emails=initial,
+        replaces_mandate_id=replaces_mandate_id,
     )
-    payload = cast(dict[str, JsonValue], args.model_dump(mode="json"))
+    # A first mandate's payload stays exactly what it was before replacements existed.
+    payload = cast(
+        dict[str, JsonValue],
+        args.model_dump(
+            mode="json", exclude={"replaces_mandate_id"} if replaces_mandate_id is None else None
+        ),
+    )
     run_id, call_id = mandate_proposal_ids(rfq_id, attempts or 0)
     try:
         await PostgresApprovalSink(db).request_approval(
@@ -313,13 +364,15 @@ async def propose_mandate(
     if approval_id is None:
         raise NotFound(f"mandate approval for rfq {rfq_id} not found")
     logger.info(
-        "mandate proposed tenant=%s rfq=%s approval=%s suppliers=%d lines=%d initial=%d",
+        "mandate proposed tenant=%s rfq=%s approval=%s suppliers=%d lines=%d initial=%d "
+        "replaces=%s",
         principal.tenant_id,
         rfq_id,
         approval_id,
         len(suppliers),
         len(mandate_lines),
         len(initial),
+        replaces_mandate_id,
     )
     addresses = list(dict.fromkeys(a for supplier in suppliers for a in supplier.to))
     async with tenant_session(db, principal.tenant_id) as session:
@@ -336,6 +389,7 @@ async def propose_mandate(
         lines=len(mandate_lines),
         initial_emails=len(initial),
         deadline=request.deadline,
+        replaces_mandate_id=replaces_mandate_id,
     )
 
 
@@ -347,6 +401,9 @@ class MandateOutcome(BaseModel):
     initial_emails_approved: int
     # In bounds, waiting for the buyer to connect a mailbox (released on connect).
     initial_emails_waiting: int = 0
+    # A replacement: the mandate it ended, and the negotiation emails it withdrew.
+    replaced_mandate_id: UUID | None = None
+    negotiation_emails_withdrawn: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -450,13 +507,32 @@ class _ApproveMandate:
                 return MandateOutcome(mandate_id=existing.id, initial_emails_approved=0)
             if approval.requested_by != args.sender_user_id:
                 raise InvalidState("the mandate's sender is not its requester")
+            # The RFQ first, then its mandate: the order closing the negotiation takes.
+            rfq = await session.scalar(select(Rfq).where(Rfq.id == args.rfq_id).with_for_update())
+            if rfq is None:
+                raise NotFound(f"rfq {args.rfq_id} not found")
             live = await session.scalar(
-                select(NegotiationMandate.id).where(
+                select(NegotiationMandate)
+                .where(
                     NegotiationMandate.rfq_id == args.rfq_id, NegotiationMandate.status != "ended"
                 )
+                .with_for_update()
             )
-            if live is not None:
-                raise InvalidState(f"rfq {args.rfq_id} already has a live mandate")
+            if args.replaces_mandate_id is None:
+                if live is not None:
+                    raise InvalidState(f"rfq {args.rfq_id} already has a live mandate")
+            elif live is None or live.id != args.replaces_mandate_id:
+                # Closed or replaced meanwhile: what the approver saw replaces nothing now.
+                raise InvalidState(
+                    f"rfq {args.rfq_id}: mandate {args.replaces_mandate_id} it replaces is "
+                    "no longer live"
+                )
+            replaced = live
+            if replaced is not None:
+                # Ended before the new one exists: one live mandate per RFQ (unique index).
+                replaced.status = "ended"
+                replaced.ended_at = now
+                await session.flush()
             await apply_settings(
                 session,
                 tenant_id=ctx.tenant_id,
@@ -477,6 +553,12 @@ class _ApproveMandate:
                     ],
                 ),
             )
+            withdrawn = 0
+            replan = False
+            if replaced is not None:
+                # Decided under the old limits: withdrawn, decided again with the new ones.
+                withdrawn = await withdraw_live_emails(session, args.rfq_id, "mandate_replaced")
+                replan = request_replan(rfq, now)
             mandate = NegotiationMandate(
                 tenant_id=ctx.tenant_id,
                 rfq_id=args.rfq_id,
@@ -530,6 +612,22 @@ class _ApproveMandate:
                         payload={"mandate_id": str(mandate.id), "emails": waiting},
                     )
                 )
+            if replaced is not None:
+                session.add(
+                    AuditEvent(
+                        tenant_id=ctx.tenant_id,
+                        actor_user_id=ctx.user_id,
+                        action="mandate.replaced",
+                        payload={
+                            "rfq_id": str(args.rfq_id),
+                            "mandate_id": str(replaced.id),
+                            "replaced_by": str(mandate.id),
+                            "approval_id": str(approval.id),
+                            "reason": "replaced",
+                            "negotiation_emails_withdrawn": withdrawn,
+                        },
+                    )
+                )
             session.add(
                 AuditEvent(
                     tenant_id=ctx.tenant_id,
@@ -546,18 +644,31 @@ class _ApproveMandate:
             )
             await session.flush()
             mandate_id = mandate.id
+            replan_at = rfq.negotiation_replan_requested_at if replan else None
         await _enqueue(self._deps.jobs, ctx.tenant_id, approved)
+        if replan_at is not None and self._deps.jobs is not None:
+            try:
+                await self._deps.jobs.enqueue(
+                    replan_envelope(ctx.tenant_id, args.rfq_id, replan_at)
+                )
+            except Exception:
+                # Pending in the database: the next sweep plans with the new limits.
+                logger.exception("mandate replan of rfq %s not enqueued", args.rfq_id)
         logger.info(
-            "mandate started tenant=%s rfq=%s mandate=%s initial=%d",
+            "mandate started tenant=%s rfq=%s mandate=%s initial=%d replaced=%s withdrawn=%d",
             ctx.tenant_id,
             args.rfq_id,
             mandate_id,
             len(approved),
+            replaced.id if replaced is not None else None,
+            withdrawn,
         )
         return MandateOutcome(
             mandate_id=mandate_id,
             initial_emails_approved=len(approved),
             initial_emails_waiting=waiting,
+            replaced_mandate_id=replaced.id if replaced is not None else None,
+            negotiation_emails_withdrawn=withdrawn,
         )
 
 
@@ -592,9 +703,20 @@ def register_mandate_act_tools(registry: ActToolRegistry, deps: MandateActDeps) 
 
 async def release_rejected_mandate(session: AsyncSession, approval: Approval) -> None:
     """A rejected mandate: its initial emails expire and their invites go back to draft,
-    so the RFQ can be proposed again (with or without a mandate)."""
+    so the RFQ can be proposed again (with or without a mandate).
+
+    A rejected replacement leaves the mandate it would have replaced untouched: the
+    initial emails that mandate still waits to send stay pending for it."""
     args = ApproveMandateArgs.model_validate(approval.args)
+    kept: set[UUID] = set()
+    if args.replaces_mandate_id is not None:
+        current = await session.get(NegotiationMandate, args.replaces_mandate_id)
+        if current is not None:
+            terms = ApproveMandateArgs.model_validate(current.terms)
+            kept = {email.approval_id for email in terms.initial_emails}
     for email in args.initial_emails:
+        if email.approval_id in kept:
+            continue
         row = await session.scalar(
             select(Approval).where(Approval.id == email.approval_id).with_for_update()
         )
@@ -901,6 +1023,7 @@ def _view(mandate: NegotiationMandate) -> MandateView:
         created_at=mandate.created_at,
         paused_at=mandate.paused_at,
         ended_at=mandate.ended_at,
+        replaces_mandate_id=terms.replaces_mandate_id,
     )
 
 

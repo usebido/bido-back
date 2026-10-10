@@ -82,6 +82,10 @@ class ApproveMandateArgs(BaseModel):
     initial_emails: list[MandateInitialEmail] = Field(
         default_factory=list[MandateInitialEmail], max_length=50
     )
+    # Set when the RFQ already had a live mandate: approving this one ends that one
+    # ("replaced") and starts this one, atomically. Rejecting it leaves that one as it
+    # is. Absent from the payload of a first mandate (as before this field existed).
+    replaces_mandate_id: UUID | None = None
 
 
 class ProposeMandateRequest(BaseModel):
@@ -112,6 +116,9 @@ class ProposedMandate(BaseModel):
     # False: the mandate can still be approved, but sending starts only once the
     # buyer connects a mailbox (the emails wait, then go out on their own).
     mailbox_connected: bool = True
+    # The live mandate this one replaces once approved (new limits under a running
+    # negotiation); until then that one keeps running. Null: a first mandate.
+    replaces_mandate_id: UUID | None = None
 
 
 class MandateView(BaseModel):
@@ -127,6 +134,8 @@ class MandateView(BaseModel):
     created_at: datetime
     paused_at: datetime | None
     ended_at: datetime | None
+    # The mandate this one replaced (it ended when this one was approved).
+    replaces_mandate_id: UUID | None = None
 
 
 class MandateActivityItem(BaseModel):

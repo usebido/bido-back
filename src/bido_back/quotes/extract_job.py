@@ -81,7 +81,7 @@ from bido_back.documents import DocumentText, extract_text, render_documents
 from bido_back.followups import ledger
 from bido_back.followups import missing as missing_rules
 from bido_back.followups.hooks import pause_on_question
-from bido_back.negotiation.hooks import cancel_on_new_offer
+from bido_back.negotiation.hooks import cancel_on_new_offer, replan_envelope, request_replan
 from bido_back.quotes.parsing import decimal_separator_for
 from bido_back.quotes.state import (
     OfferEvent,
@@ -117,6 +117,7 @@ from bido_back.quotes.validation import (
 from bido_back.storage import BlobStorage
 from bido_back.worker.envelope import Envelope
 from bido_back.worker.job_types import QUOTE_EXTRACT
+from bido_back.worker.jobs import JobQueue
 
 logger = logging.getLogger(__name__)
 
@@ -165,8 +166,13 @@ async def handle_quote_extract(
     approvals: ApprovalSink | None = None,
     agent: AgentDefinition[QuoteExtractionOutput] = QUOTE_EXTRACTION,
     today: date | None = None,
+    jobs: JobQueue | None = None,
 ) -> None:
-    """Handle one QUOTE_EXTRACT envelope. Idempotent per message."""
+    """Handle one QUOTE_EXTRACT envelope. Idempotent per message.
+
+    A reply stored for an RFQ whose negotiation is open asks for its re-plan now
+    (`negotiation.replan`, enqueued on `jobs` after the commit; one per burst of
+    replies). Without `jobs`, or if the enqueue fails, the next sweep plans it."""
     tenant_id = envelope.tenant_id
     message_id = _message_id(envelope)
     if message_id is None:
@@ -230,7 +236,16 @@ async def handle_quote_extract(
         "model": agent.model,
         "run_id": str(context.run_id),
     }
-    await _persist(db, tenant_id, loaded, validated, meta, today or datetime.now(UTC).date())
+    replan = await _persist(
+        db, tenant_id, loaded, validated, meta, today or datetime.now(UTC).date()
+    )
+    if replan is not None and jobs is not None:
+        rfq_id, requested_at = replan
+        try:
+            await jobs.enqueue(replan_envelope(tenant_id, rfq_id, requested_at))
+        except Exception:
+            # Stored and committed; the request stays pending and the sweep plans it.
+            logger.exception("quote.extract: re-plan of rfq %s not enqueued", rfq_id)
 
 
 def quote_extract_handler(
@@ -239,6 +254,7 @@ def quote_extract_handler(
     storage: BlobStorage,
     runner_config: RunnerConfig,
     approvals: ApprovalSink | None = None,
+    jobs: JobQueue | None = None,
 ) -> Callable[[Envelope], Awaitable[None]]:
     """`handle_quote_extract` bound to its dependencies: a worker `Handler`.
 
@@ -247,7 +263,12 @@ def quote_extract_handler(
 
     async def handle(envelope: Envelope) -> None:
         await handle_quote_extract(
-            envelope, db=db, storage=storage, runner_config=runner_config, approvals=approvals
+            envelope,
+            db=db,
+            storage=storage,
+            runner_config=runner_config,
+            approvals=approvals,
+            jobs=jobs,
         )
 
     return handle
@@ -696,13 +717,17 @@ async def _persist(
     validated: ValidatedQuote,
     meta: RunMeta,
     today: date,
-) -> None:
+) -> tuple[UUID, datetime] | None:
+    """Store the reply; returns the RFQ and request time of a re-plan to enqueue."""
     async with tenant_session(db, tenant_id) as session:
         # Corrections and negotiation preparation lock the RFQ first. Replay
         # must observe a committed correction consistently across its fields.
         rfq_id = await session.scalar(select(Invite.rfq_id).where(Invite.id == loaded.invite_id))
-        if rfq_id is not None:
-            await session.scalar(select(Rfq.id).where(Rfq.id == rfq_id).with_for_update())
+        rfq = (
+            await session.scalar(select(Rfq).where(Rfq.id == rfq_id).with_for_update())
+            if rfq_id is not None
+            else None
+        )
         message = await session.scalar(
             select(Message).where(Message.id == loaded.message_id).with_for_update()
         )
@@ -713,10 +738,10 @@ async def _persist(
             logger.warning(
                 "quote.extract: message or invite vanished message=%s", loaded.message_id
             )
-            return
+            return None
         if await _has_proposal(session, loaded.message_id) or message.status == "extracted":
             logger.info("quote.extract: concurrent extraction won message=%s", loaded.message_id)
-            return
+            return None
         await persist_quote(
             session,
             tenant_id=tenant_id,
@@ -726,6 +751,11 @@ async def _persist(
             meta=meta,
             today=today,
         )
+        # The reply is stored: an open negotiation plans it now, not at the next sweep.
+        requested_at = datetime.now(UTC)
+        if rfq is not None and request_replan(rfq, requested_at):
+            return rfq.id, requested_at
+        return None
 
 
 async def persist_quote(

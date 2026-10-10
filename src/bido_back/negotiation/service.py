@@ -6,7 +6,9 @@ and per-line limits (target, maximum, lead time, in the RFQ's base currency).
 Until then, nothing is negotiated.
 
 The `negotiation.sweep` job (every 15 minutes, see `bido_back.negotiation.jobs`)
-does, per tenant, per RFQ whose negotiation is open:
+does, per tenant, per RFQ whose negotiation is open (a supplier reply runs steps
+2-5 for its RFQ right away: `replan_rfq`, the `negotiation.replan` job; the
+sweep stays the safety net):
 
 1. Reconcile: a negotiation email decided or proposed whose reason is gone is
    canceled and its pending approval expired (the negotiation closed, or the
@@ -253,7 +255,6 @@ class SweepResult:
     skipped: int = 0
     held: int = 0
     rfqs: list[UUID] = field(default_factory=list[UUID])
-    held: int = 0
 
 
 # --- Loading what the planner needs ------------------------------------------------------
@@ -1433,7 +1434,8 @@ async def update_negotiation(
     """Save the settings and open the negotiation. Current offers are re-evaluated.
 
     Refused while a negotiation mandate is live: its bounds are what a person
-    approved; pause and replace the mandate to change them.
+    approved. To change them, propose a new mandate (`POST .../negotiation/mandate`):
+    it replaces the live one once approved (`bido_back.mandates`).
     """
     at = now or datetime.now(UTC)
     async with tenant_session(db, principal.tenant_id) as session:
@@ -1444,7 +1446,8 @@ async def update_negotiation(
         )
         if live is not None:
             raise InvalidState(
-                f"rfq {rfq_id}: a negotiation mandate is live; its limits cannot change"
+                f"rfq {rfq_id}: a negotiation mandate is live; propose a new mandate "
+                "to replace it with these limits"
             )
         await apply_settings(
             session,
@@ -1460,6 +1463,65 @@ async def update_negotiation(
         principal.user_id,
     )
     return await _view(db, principal.tenant_id, rfq_id, at, history)
+
+
+@dataclass(frozen=True, slots=True)
+class OfferHold:
+    """What holds a supplier's latest offer in the negotiation, as `release_hold` would
+    release it. Read-only: the same planner the sweep and the view run."""
+
+    invite_id: UUID
+    supplier_name: str
+    proposal_id: UUID | None
+    proposal_version: int | None
+    # The offer itself is on hold for the buyer and not released yet: releasing it
+    # changes what the planner does next.
+    held: bool
+    # Where the supplier stands now (phase, reason code, one sentence written by code).
+    phase: str
+    reason: str
+    label: str
+    # The comparison's hold codes on the offer (e.g. offer_state_requires_review).
+    holds: tuple[str, ...]
+
+
+async def offer_hold(
+    db: Db,
+    principal: Principal,
+    rfq_id: UUID,
+    invite_id: UUID,
+    *,
+    now: datetime | None = None,
+    history: PriceHistory = quoted_price_history,
+    expected_delivery: ExpectedDelivery = extraction_expected_delivery,
+) -> OfferHold:
+    """What `release_hold` would release for one supplier, and why it is held."""
+    at = now or datetime.now(UTC)
+    planned, comparison = await _planned(
+        db, principal.tenant_id, rfq_id, at, history, expected_delivery
+    )
+    item = next((i for i in planned.loaded.suppliers if i.invite.id == invite_id), None)
+    if item is None:
+        raise NotFound(f"supplier {invite_id} is not on rfq {rfq_id}")
+    plan = planned.plans[invite_id]
+    column = next((c for c in comparison.suppliers if c.invite_id == invite_id), None)
+    holds = (
+        _holds(column.negotiation_holds, item, planned.loaded.ledger.get(invite_id))
+        if column is not None
+        else ()
+    )
+    chases_sent = sum(1 for f in item.followups if f.kind == "chase" and f.status == "sent")
+    return OfferHold(
+        invite_id=invite_id,
+        supplier_name=item.supplier.name,
+        proposal_id=item.proposal.id if item.proposal is not None else None,
+        proposal_version=item.proposal.version if item.proposal is not None else None,
+        held=plan.offer_held,
+        phase=plan.phase,
+        reason=plan.reason,
+        label=phase_label(plan, chases_sent=chases_sent),
+        holds=tuple(holds),
+    )
 
 
 async def release_hold(
@@ -1582,6 +1644,34 @@ async def _cancel(session: AsyncSession, rows: Sequence[NegotiationMessage], rea
             session.add(approval_audit(approval, "approval.expired", None))
     await session.flush()
     return len(rows)
+
+
+async def withdraw_live_emails(session: AsyncSession, rfq_id: UUID, reason: str) -> int:
+    """Withdraw the RFQ's negotiation emails decided, awaiting approval or approved and not
+    sent yet, in the caller's transaction: each row ends `canceled` (`reason`; a canceled
+    email uses no round), its pending approval expires, and an approved one is skipped by
+    the send handler. The planner decides those offers again. An email whose Message-ID
+    was already claimed may be with the supplier: it is left to finish."""
+    rows = list(
+        await session.scalars(
+            select(NegotiationMessage)
+            .join(Invite, Invite.id == NegotiationMessage.invite_id)
+            .where(
+                Invite.rfq_id == rfq_id,
+                NegotiationMessage.status.in_(_LIVE),
+                NegotiationMessage.message_id_header.is_(None),
+            )
+            .with_for_update(of=NegotiationMessage)
+        )
+    )
+    if not rows:
+        return 0
+    await session.execute(
+        update(Invite)
+        .where(Invite.rfq_id == rfq_id, Invite.negotiation_status.not_in(_FINAL_INVITE))
+        .values(negotiation_evaluated_proposal_id=None)
+    )
+    return await _cancel(session, rows, reason)
 
 
 async def close_negotiation(
@@ -2452,6 +2542,67 @@ async def _propose(
     return None
 
 
+async def _settle_replan(db: Db, tenant_id: UUID, rfq_id: UUID, seen: datetime) -> datetime | None:
+    """The re-plan asked at `seen` ran: clear the request, unless a reply asked again
+    meanwhile. Returns that newer request (still pending), else None."""
+    async with tenant_session(db, tenant_id) as session:
+        cleared = await session.scalar(
+            update(Rfq)
+            .where(Rfq.id == rfq_id, Rfq.negotiation_replan_requested_at == seen)
+            .values(negotiation_replan_requested_at=None)
+            .returning(Rfq.id)
+        )
+        if cleared is not None:
+            return None
+        return await session.scalar(
+            select(Rfq.negotiation_replan_requested_at).where(Rfq.id == rfq_id)
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReplanResult:
+    # False: no re-plan was pending (another delivery, or the sweep, already ran it).
+    ran: bool = False
+    evaluation: EvaluationResult = field(default_factory=EvaluationResult)
+    # A reply asked again while this one ran: the request still pending.
+    again: datetime | None = None
+
+
+async def replan_rfq(
+    db: Db,
+    tenant_id: UUID,
+    rfq_id: UUID,
+    *,
+    writer: NegotiationWriter,
+    now: datetime | None = None,
+    history: PriceHistory = quoted_price_history,
+) -> ReplanResult:
+    """Plan one RFQ now because a supplier replied: the sweep's per-RFQ unit.
+
+    Runs only while a request is pending (`negotiation_replan_requested_at`, set by
+    quote extraction), so a duplicate delivery or a job the sweep already covered does
+    nothing. `evaluate_rfq` takes the same locks as the sweep and never decides an offer
+    twice, so running beside the sweep is safe. The request is cleared afterwards unless
+    a newer reply bumped it meanwhile (`again`: the caller asks for one more run)."""
+    async with tenant_session(db, tenant_id) as session:
+        seen = await session.scalar(
+            select(Rfq.negotiation_replan_requested_at).where(Rfq.id == rfq_id)
+        )
+    if seen is None:
+        return ReplanResult()
+    evaluation = await evaluate_rfq(db, tenant_id, rfq_id, writer=writer, now=now, history=history)
+    again = await _settle_replan(db, tenant_id, rfq_id, seen)
+    logger.info(
+        "negotiation replanned tenant=%s rfq=%s proposed=%d held=%d again=%s",
+        tenant_id,
+        rfq_id,
+        evaluation.proposed,
+        evaluation.held,
+        again is not None,
+    )
+    return ReplanResult(ran=True, evaluation=evaluation, again=again)
+
+
 async def sweep_tenant(
     db: Db,
     tenant_id: UUID,
@@ -2463,18 +2614,21 @@ async def sweep_tenant(
     at = now or datetime.now(UTC)
     async with tenant_session(db, tenant_id) as session:
         canceled = await _reconcile(session)
-        rfq_ids = list(
-            await session.scalars(
-                select(Rfq.id)
+        rows = list(
+            await session.execute(
+                select(Rfq.id, Rfq.negotiation_replan_requested_at)
                 .where(Rfq.status == "open", Rfq.negotiation_status.in_(_ACTIVE))
                 .order_by(Rfq.created_at)
             )
         )
     result = SweepResult(canceled=canceled)
-    for rfq_id in rfq_ids:
+    for rfq_id, replan_requested in rows:
         evaluation = await evaluate_rfq(
             db, tenant_id, rfq_id, writer=writer, now=at, history=history
         )
+        if replan_requested is not None:
+            # The safety net: this run planned what a reply asked for (a lost job too).
+            await _settle_replan(db, tenant_id, rfq_id, replan_requested)
         result.proposed += evaluation.proposed
         result.skipped += evaluation.skipped
         result.held += evaluation.held

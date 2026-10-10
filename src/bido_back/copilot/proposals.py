@@ -140,6 +140,18 @@ class ProposedOrderAction(BaseModel):
     note: str | None = None
 
 
+class ProposedHoldRelease(BaseModel):
+    """A supplier's offer the negotiation holds for the buyer (release_negotiation_hold)."""
+
+    supplier_name: str
+    offer_version: int
+    state: str = Field(description="Where the supplier stands now, in one sentence")
+    reason: str = Field(description="Why the offer is held (a code)")
+    holds: list[str] = Field(
+        default_factory=list[str], description="What on the offer holds it (codes)"
+    )
+
+
 class ProposalPreview(BaseModel):
     """Exactly what the action would do: show all of it to the buyer and ask."""
 
@@ -168,6 +180,8 @@ class ProposalPreview(BaseModel):
     lines_without_limits: list[int] = Field(default_factory=list[int])
     # A purchase-order action (`copilot.order_tools`): the order and what would change.
     purchase_order: ProposedOrderAction | None = None
+    # A negotiation hold release (`release_negotiation_hold`): the offer and why it waits.
+    negotiation_hold: ProposedHoldRelease | None = None
     questions: list[str] = Field(default_factory=list[str])
     issues: list[str] = Field(
         default_factory=list[str], description="What would stop it, if anything"

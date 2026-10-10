@@ -16,6 +16,10 @@
 - `use_current_offer` (draft, two calls): take a supplier's held offer as shown,
   releasing its holds. The first call only shows what is held; the buyer
   confirms in a later message.
+- `release_negotiation_hold` (draft, two calls): negotiate a supplier's offer the
+  negotiation holds for the buyer as it is (`POST .../release-hold`, the same
+  service). The first call only shows the offer and why it is held; the buyer
+  confirms in a later message, and only that offer version is released.
 
 Nothing here sends an email or decides on its own.
 """
@@ -33,7 +37,12 @@ from bido_back.agents.context import ToolContext
 from bido_back.agents.tools import AnyTool, Tool, ToolError
 from bido_back.auth import Principal
 from bido_back.copilot import proposals, queries
-from bido_back.copilot.proposals import PROPOSAL_ARG
+from bido_back.copilot.proposals import (
+    PROPOSAL_ARG,
+    AwaitingConfirmation,
+    ProposalPreview,
+    ProposedHoldRelease,
+)
 from bido_back.corrections import service as corrections
 from bido_back.corrections.schemas import UseCurrentOfferRequest
 from bido_back.db import tenant_session
@@ -42,6 +51,7 @@ from bido_back.followups import ledger, questions
 from bido_back.followups import missing as missing_rules
 from bido_back.followups.missing import OpenItem
 from bido_back.followups.schemas import AnswerQuestionsRequest, DismissQuestionRequest
+from bido_back.negotiation import service as negotiation_service
 from bido_back.rfqs.errors import RfqError
 
 if TYPE_CHECKING:
@@ -311,6 +321,19 @@ class UseCurrentOfferOut(BaseModel):
     note: str
 
 
+class ReleaseHoldIn(BaseModel):
+    rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
+    supplier: str = Field(description="The supplier's name")
+    proposal_id: UUID | None = Field(default=None, description=PROPOSAL_ARG)
+
+
+class ReleaseHoldOut(AwaitingConfirmation):
+    supplier_name: str
+    note: str
+    # Done: where the supplier stands now (what the negotiation does next).
+    state: str | None = None
+
+
 def _principal(ctx: ToolContext) -> Principal:
     if ctx.user_id is None:
         raise ToolError("the copilot needs a signed-in user")
@@ -484,6 +507,93 @@ def followup_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:
             note="Done: the offer as shown is the offer; the negotiation evaluates it again.",
         )
 
+    async def release_negotiation_hold(ctx: ToolContext, args: ReleaseHoldIn) -> ReleaseHoldOut:
+        principal = _principal(ctx)
+        if deps.conversation_id is None:
+            raise ToolError("this action needs a conversation to ask the buyer in")
+        async with tenant_session(db, ctx.tenant_id) as session:
+            rfq_id, invite_id, name = await _invite(session, args.rfq, args.supplier)
+        if args.proposal_id is None:
+            try:
+                hold = await negotiation_service.offer_hold(db, principal, rfq_id, invite_id)
+            except RfqError as exc:
+                raise ToolError(str(exc)) from None
+            if hold.proposal_id is None or hold.proposal_version is None:
+                raise ToolError(f"{name} has sent no offer yet")
+            if not hold.held or hold.phase == "closed":
+                raise ToolError(
+                    f"{name}'s offer is not held in the negotiation: nothing to release "
+                    f"({hold.label})"
+                )
+            preview = ProposalPreview(
+                action="release_negotiation_hold",
+                rfq=args.rfq,
+                negotiation_hold=ProposedHoldRelease(
+                    supplier_name=name,
+                    offer_version=hold.proposal_version,
+                    state=hold.label,
+                    reason=hold.reason,
+                    holds=list(hold.holds),
+                ),
+            )
+            confirmation = await proposals.propose(
+                db,
+                principal,
+                conversation_id=deps.conversation_id,
+                run_id=ctx.run_id,
+                action="release_negotiation_hold",
+                args={
+                    "rfq_id": str(rfq_id),
+                    "invite_id": str(invite_id),
+                    "proposal_id": str(hold.proposal_id),
+                },
+                preview={"shown": preview.model_dump(mode="json")},
+            )
+            return ReleaseHoldOut(
+                awaiting_confirmation=True,
+                proposal_id=confirmation,
+                preview=preview,
+                supplier_name=name,
+                note=(
+                    "Nothing was done. Show the buyer the offer version and why it is held. "
+                    "If they confirm in their next message, Bido negotiates that offer as it "
+                    "is (nothing is sent without its own approval or the mandate's checks)."
+                ),
+            )
+        try:
+            claimed = await proposals.claim(
+                db,
+                principal,
+                conversation_id=deps.conversation_id,
+                run_id=ctx.run_id,
+                action="release_negotiation_hold",
+                proposal_id=args.proposal_id,
+            )
+        except proposals.ProposalRefused as exc:
+            raise ToolError(str(exc)) from None
+        stored = claimed.args
+        try:
+            view = await negotiation_service.release_hold(
+                db,
+                principal,
+                UUID(str(stored["rfq_id"])),
+                UUID(str(stored["invite_id"])),
+                UUID(str(stored["proposal_id"])),
+            )
+        except RfqError as exc:
+            await proposals.release(db, principal, args.proposal_id)
+            raise ToolError(str(exc)) from None
+        released = next(
+            (i for i in view.invites if i.invite_id == UUID(str(stored["invite_id"]))), None
+        )
+        return ReleaseHoldOut(
+            awaiting_confirmation=False,
+            proposal_id=args.proposal_id,
+            supplier_name=name,
+            state=released.state.label if released and released.state else None,
+            note="Done: the offer is negotiated as it is from the next planning run.",
+        )
+
     return (
         Tool(
             "answer_supplier_question",
@@ -516,5 +626,19 @@ def followup_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:
             UseCurrentOfferOut,
             "draft",
             use_current_offer,
+        ),
+        Tool(
+            "release_negotiation_hold",
+            "When get_negotiation_status shows a supplier needing the buyer's decision or "
+            "answer because its offer is on hold (a question the buyer answered outside Bido, "
+            "a reply Bido could not apply) and the buyer says to negotiate that offer as it "
+            "is: release the hold. Two calls: the first shows the offer version and why it is "
+            "held and does nothing; call again with proposal_id only after the buyer confirms "
+            "in a later message. A newer offer that arrived meanwhile is not released. Only "
+            "when the buyer asks for it.",
+            ReleaseHoldIn,
+            ReleaseHoldOut,
+            "draft",
+            release_negotiation_hold,
         ),
     )

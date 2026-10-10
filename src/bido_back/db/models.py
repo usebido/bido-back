@@ -272,6 +272,11 @@ class Rfq(Base):
     # The one best-and-final cut-off for every supplier, set by the first
     # best-and-final request (migration 0037).
     negotiation_cutoff_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # A supplier reply asked for a re-plan that has not run yet (migration 0039); NULL:
+    # none pending. Set by quote extraction, cleared by the re-plan job or the sweep.
+    negotiation_replan_requested_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True)
+    )
     # Every PO of the RFQ closed or cancelled, at least one closed (migration 0035).
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     comparison_policy: Mapped[dict[str, JsonValue]] = mapped_column(
