@@ -22,6 +22,7 @@ from bido_back.purchasing.sources.snapshots import (
     draft_from_snapshot,
     get_snapshot,
     list_snapshots,
+    rfq_need_by,
     save_snapshot,
 )
 from evals.source_fixtures import SCOPE
@@ -286,6 +287,7 @@ async def test_draft_preserves_decimal_units_evidence_and_does_not_send(
         assert rfq is not None and rfq.status == "draft"
         assert line is not None and line.unit == "kg" and line.part_number == "000010"
         assert Decimal(str(line.quantities[0])) == exact
+        assert line.need_by == rfq_need_by(source.lines[0])
         assert line.source_evidence == {
             "assessment_id": str(source.assessment_id),
             "line": source.lines[0].model_dump(mode="json"),

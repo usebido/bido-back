@@ -259,6 +259,25 @@ def rfq_lines(assessment: SourceAssessment) -> tuple[list[AssessmentLine], list[
     return lines, skipped
 
 
+def rfq_need_by(line: AssessmentLine) -> date | None:
+    """The date the line's RFQ asks delivery by: its first dated purchase (the netting's
+    first step that buys), else the first need. A schedule is not one lump on the first
+    date: a line that only runs short in December is not asked for in October."""
+    first = next((d.need_by for d in line.need_schedule if d.quantity > 0), None)
+    return first or line.need_by
+
+
+def late_arrival(line: AssessmentLine) -> date | None:
+    """The recommended source's estimated arrival, when it lands after the line's RFQ
+    need-by: the buyer keeps that date or moves it; the mandate's lead-time limit follows
+    the line's need-by either way."""
+    need_by = rfq_need_by(line)
+    arrival = line.timing.recommended_arrival if line.timing is not None else None
+    if need_by is None or arrival is None or arrival <= need_by:
+        return None
+    return arrival
+
+
 def _title(request: AssessmentRfqRequest) -> str:
     if request.pending_validation is None:
         return request.title
@@ -406,7 +425,7 @@ async def draft_from_snapshot(
                 part_number=line.part_number,
                 quantity=line.calculated_to_buy,
                 unit=line.unit,
-                need_by=line.need_by,
+                need_by=rfq_need_by(line),
             )
             for line in lines
             if line.calculated_to_buy is not None and line.unit is not None

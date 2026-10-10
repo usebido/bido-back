@@ -784,6 +784,35 @@ async def test_a_line_with_a_need_by_date_gets_a_lead_time_limit_the_buyer_appro
     assert {s.outcome for s in await world.sends()} == {"auto_approved"}
 
 
+async def test_each_line_gets_the_lead_time_of_its_own_need_by(world: MandateWorld) -> None:
+    """Regression (2026-10-10): an RFQ whose lines all said 12/10 got "≤ 2 d" on every line
+    and no real offer could be awarded. Lines with their own need-by dates get their own
+    limits, and a buyer's edit of one date moves only that line's limit."""
+    now = datetime.now(UTC)
+    soon, later = now.date() + timedelta(days=16), now.date() + timedelta(days=58)
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        for line_id, need_by in zip(world.lines, (soon, later), strict=True):
+            await session.execute(
+                update(RfqLine)
+                .where(RfqLine.id == line_id)
+                .values(max_lead_time_days=None, need_by=need_by)
+            )
+    proposed = await mandates.propose_mandate(
+        world.engine,
+        buyer(world.people),
+        world.rfq_id,
+        ProposeMandateRequest(deadline=DEADLINE),
+        writer=FakeWriter(),
+        mailboxes=world.mailboxes,
+        now=now,
+    )
+    terms = ApproveMandateArgs.model_validate((await world.approval(proposed.approval_id)).args)
+    assert [(line.max_lead_time_days, line.lead_time_need_by) for line in terms.lines] == [
+        (16, soon),
+        (58, later),
+    ]
+
+
 async def test_a_buyers_lead_time_limit_is_never_replaced_by_the_need_by_date(
     world: MandateWorld,
 ) -> None:

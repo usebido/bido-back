@@ -56,6 +56,10 @@ class ProposedLine(BaseModel):
     quantities: list[Decimal]
     unit: str
     need_by: date | None = None
+    # From an assessment: the recommended source's estimated arrival, set only when it
+    # lands after `need_by`. Say so and ask whether to keep the date or move it to this
+    # one; the negotiation's lead-time limit follows the line's need-by.
+    arrives_after_need_by: date | None = None
     incoterm: str | None = None
     delivery_location: str | None = None
     # The negotiation's default limits, in the RFQ's currency (from an assessment: its

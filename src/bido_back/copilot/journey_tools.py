@@ -68,9 +68,11 @@ from bido_back.purchasing.sources.snapshots import (
     AssessmentSnapshotSummary,
     draft_from_snapshot,
     get_snapshot,
+    late_arrival,
     list_snapshots,
     plan_from_snapshot,
     rfq_lines,
+    rfq_need_by,
 )
 from bido_back.purchasing.workbook import WorkbookFileError, WorkbookImportReport, import_workbook
 from bido_back.rfqs import suppliers as supplier_service
@@ -480,7 +482,8 @@ def _assessment_preview(
                 part_number=line.part_number,
                 quantities=[line.calculated_to_buy],
                 unit=line.unit or "",
-                need_by=line.need_by,
+                need_by=rfq_need_by(line),
+                arrives_after_need_by=late_arrival(line),
                 delivery_location=line.location,
                 target_unit_price=found.target_unit_price if found else None,
                 max_unit_price=found.max_unit_price if found else None,
@@ -538,6 +541,12 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         ctx: ToolContext, args: ImportSpreadsheetIn
     ) -> WorkbookImportReport:
         principal = _principal(ctx)
+        if deps.files_only:
+            raise ToolError(
+                "the buyer sent these files without asking to store them: read them with "
+                "analyze_procurement_sources; import only when the buyer asks to import "
+                "or save the data"
+            )
         upload_id = _conversation_upload(
             args.upload_id, deps.attachment_ids, deps.earlier_attachment_ids
         )
@@ -1117,8 +1126,10 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
         ),
         Tool(
             "import_spreadsheet",
-            "Import a spreadsheet the buyer attached (any layout, every sheet): parts, BOM, "
-            "stock, purchase history, production plan, supplier contacts. If it returns "
+            "Store a spreadsheet the buyer attached in the company's data (any layout, every "
+            "sheet): parts, BOM, stock, purchase history, production plan, supplier contacts. "
+            "Only when the buyer asks to import or save it; reading or analyzing files is "
+            "analyze_procurement_sources, which stores nothing. If it returns "
             "needs_confirmation, ask the buyer its questions and call again with "
             "confirmed=true only after they answer.",
             ImportSpreadsheetIn,
