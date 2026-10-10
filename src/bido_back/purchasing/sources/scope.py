@@ -822,11 +822,6 @@ def _provenance(
             )
         else:
             result.append(ScopeProvenance(field=field, source="default"))
-    # Selectors settled before planning (`selectors`): always the buyer's.
-    if request.plants is not None:
-        result.append(ScopeProvenance(field="plants", source="buyer"))
-    if request.mrp_element is not None:
-        result.append(ScopeProvenance(field="mrp_element", source="buyer"))
     return result
 
 

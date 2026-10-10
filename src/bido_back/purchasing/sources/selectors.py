@@ -28,6 +28,7 @@ from bido_back.purchasing.sources.contracts import (
     Assumption,
     FoundValues,
     Record,
+    ScopeFilter,
     ScopeOption,
     ScopeQuestion,
     ScopeRequest,
@@ -69,6 +70,8 @@ class Selection:
     found: FoundValues
     # A count of plants that is not the number found: ask which ones.
     question: ScopeQuestion | None = None
+    # The plant and MRP element selectors as said, and what they settled on.
+    filters: tuple[ScopeFilter, ...] = ()
 
 
 def found_values(records: Sequence[Record]) -> FoundValues:
@@ -123,7 +126,7 @@ def select_scope(records: Sequence[Record], request: ScopeRequest | None) -> Sel
         else:
             question = ScopeQuestion(
                 code="plant_count_mismatch",
-                field="plants",
+                field="location",
                 message=f"You asked for {selector} plant(s); the sources hold "
                 f"{len(found.plants)}"
                 + (f": {', '.join(found.plants)}" if found.plants else "")
@@ -131,9 +134,27 @@ def select_scope(records: Sequence[Record], request: ScopeRequest | None) -> Sel
                 options=[ScopeOption(value=plant, label=plant) for plant in found.plants],
             )
     plants = list(dict.fromkeys(plants))
+    filters: list[ScopeFilter] = []
+    if selector is not None:
+        said = ", ".join(selector) if isinstance(selector, list) else str(selector)
+        filters.append(ScopeFilter(field="plants", selector=said, values=plants))
+    if request.mrp_element is not None:
+        filters.append(
+            ScopeFilter(
+                field="mrp_element",
+                selector=request.mrp_element,
+                values=[v for v in found.mrp_elements if _same(v, request.mrp_element)],
+            )
+        )
     if len(plants) == 1 and request.location is None:
         request = request.model_copy(update={"location": plants[0]})
-    return Selection(request=request, plants=plants, found=found, question=question)
+    return Selection(
+        request=request,
+        plants=plants,
+        found=found,
+        question=question,
+        filters=tuple(filters),
+    )
 
 
 def apply_mrp_element(

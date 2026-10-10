@@ -227,8 +227,6 @@ ScopeField = Literal[
     "horizon_end",
     "safety_stock",
     "production_lead_days",
-    "plants",
-    "mrp_element",
 ]
 # buyer: stated in the request (matched to the evidence's spelling); evidence: settled by
 # code from located evidence (an assumption); default: neither (lead days 0, or the
@@ -271,12 +269,26 @@ class ScopeProvenance(BaseModel):
     evidence: list[SourceRef] = Field(default_factory=list[SourceRef])
 
 
+class ScopeFilter(BaseModel):
+    """A selector the buyer gave, as they said it, and the values of the sources it
+    settled on before planning. Plain strings: new selectors stay additive."""
+
+    # The request field: "plants" or "mrp_element".
+    field: str
+    # As the buyer said it: "3", "all", "1000, 2000", "NecDep".
+    selector: str
+    # The values of the sources it selected, in their spelling; empty while it is asked.
+    values: list[str] = Field(default_factory=list[str])
+
+
 class ScopeResolution(BaseModel):
     request: ScopeRequest
     assumptions: list[ScopeAssumption] = Field(default_factory=list[ScopeAssumption])
     questions: list[ScopeQuestion] = Field(default_factory=list[ScopeQuestion])
     # One entry per value of the resolved scope; empty while questions are open.
     provenance: list[ScopeProvenance] = Field(default_factory=list[ScopeProvenance])
+    # The buyer's plant and MRP element selectors and what they settled on.
+    filters: list[ScopeFilter] = Field(default_factory=list[ScopeFilter])
 
 
 class DemandContribution(BaseModel):

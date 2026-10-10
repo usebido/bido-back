@@ -98,7 +98,7 @@ def test_a_count_that_is_not_the_number_found_asks_which_plants() -> None:
     assert selection.plants == []
     assert selection.question is not None
     assert selection.question.code == "plant_count_mismatch"
-    assert selection.question.field == "plants"
+    assert selection.question.field == "location"
     assert [o.value for o in selection.question.options] == ["1000", "2000"]
     assert "3 plant(s)" in selection.question.message
     assert "1000, 2000" in selection.question.message
@@ -212,7 +212,19 @@ async def test_three_plants_found_plan_all_three_and_say_what_was_found() -> Non
     assert result.found.mrp_elements == ["NecDep", "NecInd"]
     assert result.scope_resolution is not None
     assert result.scope_resolution.questions == []
-    assert ("plants", "buyer") in {(p.field, p.source) for p in result.scope_resolution.provenance}
+    assert [f.model_dump() for f in result.scope_resolution.filters] == [
+        {"field": "plants", "selector": "3", "values": ["1000", "2000", "3000"]}
+    ]
+    # The response enums stay as they were: the selectors live in `filters` only.
+    assert {p.field for p in result.scope_resolution.provenance} <= {
+        "product_code",
+        "area",
+        "location",
+        "as_of",
+        "horizon_end",
+        "safety_stock",
+        "production_lead_days",
+    }
 
 
 async def test_two_plants_found_for_three_asked_is_a_question_and_no_plan() -> None:
@@ -220,8 +232,11 @@ async def test_two_plants_found_for_three_asked_is_a_question_and_no_plan() -> N
     assert result.lines == []
     assert result.scope_resolution is not None
     [question] = result.scope_resolution.questions
-    assert question.code == "plant_count_mismatch"
+    assert (question.code, question.field) == ("plant_count_mismatch", "location")
     assert [o.value for o in question.options] == ["1000", "2000"]
+    assert [f.model_dump() for f in result.scope_resolution.filters] == [
+        {"field": "plants", "selector": "3", "values": []}
+    ]
     assert [i.code for i in result.issues if i.severity == "blocker"] == ["plant_selection_open"]
     assert result.found is not None and result.found.plants == ["1000", "2000"]
 
@@ -242,9 +257,10 @@ async def test_the_mrp_element_filters_the_demand_and_is_disclosed() -> None:
         assert [d.need_by for d in only.demand_schedule] == [date(2026, 10, 12), date(2026, 10, 20)]
     assert "mrp_element_filter" in {a.code for a in dependent.assumptions}
     assert dependent.scope_resolution is not None
-    assert ("mrp_element", "buyer") in {
-        (p.field, p.source) for p in dependent.scope_resolution.provenance
-    }
+    assert [f.model_dump() for f in dependent.scope_resolution.filters] == [
+        {"field": "plants", "selector": "all", "values": ["1000", "2000", "3000"]},
+        {"field": "mrp_element", "selector": "NecDep", "values": ["NecDep"]},
+    ]
 
 
 async def test_every_evaluated_line_has_a_reason_for_being_or_not_being_an_alert() -> None:

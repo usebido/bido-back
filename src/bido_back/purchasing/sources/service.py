@@ -163,7 +163,9 @@ def _settle(
             ],
             record_counts=dict(Counter(record.kind for record in records)),
             scope_resolution=ScopeResolution(
-                request=selection.request, questions=[selection.question]
+                request=selection.request,
+                questions=[selection.question],
+                filters=list(selection.filters),
             ),
             planning_candidates=candidates,
             snapshot_dates=snapshot_dates,
@@ -282,12 +284,15 @@ def _settle(
         )
     _disclose(result, all_coverage)
     excluded, excluded_left_out = alert_exclusions(result.lines)
+    resolution = resolved.resolution if resolved is not None else None
+    if resolution is not None and selection.filters:
+        resolution = resolution.model_copy(update={"filters": list(selection.filters)})
     # The assessment's own objects, not a dump and a re-validation: on a large source the
     # copy would nearly double the memory this call needs.
     return SourceAssessment(
         **dict(result),
         scope=planning,
-        scope_resolution=resolved.resolution if resolved is not None else None,
+        scope_resolution=resolution,
         planning_candidates=candidates,
         snapshot_dates=snapshot_dates,
         coverage=all_coverage,

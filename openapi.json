@@ -12854,9 +12854,7 @@
               "as_of",
               "horizon_end",
               "safety_stock",
-              "production_lead_days",
-              "plants",
-              "mrp_element"
+              "production_lead_days"
             ],
             "title": "Field",
             "type": "string"
@@ -12883,6 +12881,32 @@
           "message"
         ],
         "title": "ScopeAssumption",
+        "type": "object"
+      },
+      "ScopeFilter": {
+        "description": "A selector the buyer gave, as they said it, and the values of the sources it\nsettled on before planning. Plain strings: new selectors stay additive.",
+        "properties": {
+          "field": {
+            "title": "Field",
+            "type": "string"
+          },
+          "selector": {
+            "title": "Selector",
+            "type": "string"
+          },
+          "values": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Values",
+            "type": "array"
+          }
+        },
+        "required": [
+          "field",
+          "selector"
+        ],
+        "title": "ScopeFilter",
         "type": "object"
       },
       "ScopeOption": {
@@ -12928,9 +12952,7 @@
               "as_of",
               "horizon_end",
               "safety_stock",
-              "production_lead_days",
-              "plants",
-              "mrp_element"
+              "production_lead_days"
             ],
             "title": "Field",
             "type": "string"
@@ -12967,9 +12989,7 @@
               "as_of",
               "horizon_end",
               "safety_stock",
-              "production_lead_days",
-              "plants",
-              "mrp_element"
+              "production_lead_days"
             ],
             "title": "Field",
             "type": "string"
@@ -13326,6 +13346,13 @@
               "$ref": "#/components/schemas/ScopeAssumption"
             },
             "title": "Assumptions",
+            "type": "array"
+          },
+          "filters": {
+            "items": {
+              "$ref": "#/components/schemas/ScopeFilter"
+            },
+            "title": "Filters",
             "type": "array"
           },
           "provenance": {
