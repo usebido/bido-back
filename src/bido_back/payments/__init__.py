@@ -1,7 +1,8 @@
 """Pay an issued purchase order by card, mint Bido's stablecoin and lock it in the PO's escrow.
 
     buyer: POST /v1/purchase-orders/{id}/payment ──► pending approval (`pay_purchase_order`)
-    person: POST /v1/approvals/{id}/decision ──► the worker runs the act once:
+    person: POST /v1/approvals/{id}/decision, or Basis Theory verification on `vic`,
+        ──► the worker runs the act once:
         Basis Theory allowance (`spt` rail) ─► single-use Stripe token ─► Stripe charge
     worker, one step per `payment.advance` job, each idempotent:
         mint the stablecoin into the company's Privy wallet (relayer pays, Bido's mint
@@ -12,8 +13,9 @@ Next steps, not here: the supplier's documents, milestone releases against Solan
 Attestation Service attestations, refunds, and the payout in the supplier's currency.
 
 * Nothing commits without a person: paying is an `act` behind the approval guard
-  (`payments.execute`), and every later step only carries out what was approved
-  (amount, card, payout account, milestones, escrow id), re-checked each time.
+  (`payments.execute`). On `vic`, the cardholder's Basis Theory passkey verification
+  decides the approval. Every later step only carries out what was approved (amount,
+  card, payout account, milestones, escrow id), re-checked each time.
 * The card never reaches Bido: Basis Theory Elements tokenize it in the browser; the
   Stripe token is minted and charged inside one call and never stored.
 * The supplier's bank account is sealed in Bido's database (`payments.bank_details`,

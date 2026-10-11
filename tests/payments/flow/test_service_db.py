@@ -86,7 +86,7 @@ from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs.activity import rfq_activity
 from bido_back.rfqs.audit import rfq_event
 from bido_back.settings import Settings
-from tests.approvals.conftest import People
+from tests.approvals.conftest import FakeJobQueue, People
 from tests.awards.test_awards_db import World, approver, buyer
 from tests.awards.test_lifecycle import send, sent_po, two_sent_pos
 from tests.payments.fakes import CARD_ART, FakeCardGateway, FakeProviders, address
@@ -1059,6 +1059,7 @@ async def test_a_visa_payment_waits_for_the_buyers_passkey(
     world: World, providers: FakeProviders, usd_rate: date
 ) -> None:
     people = world.people
+    jobs = FakeJobQueue()
     card = providers.card
     card.rail_mode, card.simulated_mode = "vic", True
     target = await payable(world)
@@ -1085,15 +1086,24 @@ async def test_a_visa_payment_waits_for_the_buyers_passkey(
 
     # Only the person paying approves their card; Basis Theory says where it stands.
     with pytest.raises(PaymentForbidden):
-        await service.confirm_card_verification(world.engine, approver(people), target.po.id, card)
-    still = await service.confirm_card_verification(world.engine, buyer(people), target.po.id, card)
+        await service.confirm_card_verification(
+            world.engine, approver(people), target.po.id, card, jobs
+        )
+    still = await service.confirm_card_verification(
+        world.engine, buyer(people), target.po.id, card, jobs
+    )
     assert still == pending
     card.verification_status = "verified"
-    done = await service.confirm_card_verification(world.engine, buyer(people), target.po.id, card)
+    done = await service.confirm_card_verification(
+        world.engine, buyer(people), target.po.id, card, jobs
+    )
     assert (done.status, done.allowance_id) == ("verified", "alw_1")
     assert done.verified_at is not None
+    assert [job.idempotency_key for job in jobs.jobs] == [f"approval:{requested.approval_id}"]
     # Read once: confirmed again, the provider is not asked.
-    again = await service.confirm_card_verification(world.engine, buyer(people), target.po.id, card)
+    again = await service.confirm_card_verification(
+        world.engine, buyer(people), target.po.id, card, jobs
+    )
     assert again == done
     assert card.verification_calls == ["alw_1", "alw_1"]
     [event] = await actions(world, PAYMENT_CARD_VERIFIED)
@@ -1101,8 +1111,7 @@ async def test_a_visa_payment_waits_for_the_buyers_passkey(
     view = await service.get_po_payment(world.engine, buyer(people), target.po.id, SETTINGS)
     assert view.card_verification == done
     queue = await rfq_service.list_approvals(world.engine, approver(people), "pending")
-    [item] = [i for i in queue if i.tool == PAY_PURCHASE_ORDER]
-    assert item.payment is not None and item.payment.card_verified is True
+    assert [i for i in queue if i.tool == PAY_PURCHASE_ORDER] == []
 
 
 async def test_a_visa_allowance_not_created_with_the_request_is_created_on_confirmation(
@@ -1110,6 +1119,7 @@ async def test_a_visa_allowance_not_created_with_the_request_is_created_on_confi
 ) -> None:
     people = world.people
     card = FailingAuthorizationCard(rail_mode="vic", simulated_mode=True)
+    jobs = FakeJobQueue()
     providers.card = card
     target = await payable(world)
     requested = await request(world, providers, target)
@@ -1118,7 +1128,7 @@ async def test_a_visa_allowance_not_created_with_the_request_is_created_on_confi
 
     card.fail = False
     started = await service.confirm_card_verification(
-        world.engine, buyer(people), target.po.id, card
+        world.engine, buyer(people), target.po.id, card, jobs
     )
     assert (started.status, started.allowance_id) == ("pending", "alw_1")
     assert list(card.authorizations) == [f"payment:{requested.payment.id}:authorize"]
@@ -1134,7 +1144,7 @@ async def test_a_payment_without_the_visa_rail_has_no_passkey(
     assert providers.card.authorizations == {}
     with pytest.raises(PaymentInvalidState, match="not on the Visa rail"):
         await service.confirm_card_verification(
-            world.engine, buyer(people), target.po.id, providers.card
+            world.engine, buyer(people), target.po.id, providers.card, FakeJobQueue()
         )
 
 
