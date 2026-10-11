@@ -1,5 +1,10 @@
 """Job type names shared by producers and the worker registry."""
 
+# One approved milestone of a funded escrow released on chain, from
+# `bido_back.payments.milestones.proposals`.
+# payload: {"payment_id": "<uuid>", "milestone_index": <int>}
+from bido_back.payments.milestones.proposals import MILESTONE_RELEASE as MILESTONE_RELEASE
+
 # One chain step of a charged payment (mint, create the escrow, fund it), from
 # `bido_back.payments.proposals`. payload: {"payment_id": "<uuid>"}
 from bido_back.payments.proposals import PAYMENT_ADVANCE as PAYMENT_ADVANCE

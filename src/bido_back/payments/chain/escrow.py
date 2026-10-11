@@ -4,10 +4,12 @@ The decoders read `PoEscrow` and `Config` account data. The builders return one
 program instruction each, with the accounts in IDL order and the IDL's signer and
 writable flags, and the data from the IDL-driven Borsh coder: `create_po` (the
 operator signs, the relayer pays the escrow and both token accounts), `fund` (the
-buyer moves exactly `total` into the vault) and `update_config` (the upgrade
-authority changes `Config`; only the ops script sends it). The program id is a
-setting, so callers pass it; nothing here reads settings, keys or the network.
-The `codec` section of `solana/tests/fixtures/vectors.json` pins all of it.
+buyer moves exactly `total` into the vault), `release` (no signer: one milestone's
+fixed amount goes to the fixed payout against its gate's SAS attestation) and
+`update_config` (the upgrade authority changes `Config`; only the ops script sends
+it). The program id is a setting, so callers pass it; nothing here reads settings,
+keys or the network. The `codec` section of `solana/tests/fixtures/vectors.json`
+pins all of it.
 """
 
 from collections.abc import Mapping, Sequence
@@ -247,6 +249,35 @@ def fund_ix(
         "program": program_id,
     }
     return _instruction(program_id, "fund", accounts, {})
+
+
+def release_ix(
+    *,
+    program_id: Pubkey,
+    escrow: Pubkey,
+    vault: Pubkey,
+    payout_token: Pubkey,
+    mint: Pubkey,
+    attestation: Pubkey,
+    milestone: int,
+) -> Instruction:
+    """`release(milestone)`: the milestone's amount from the vault to `payout_token`.
+
+    Permissionless (no signer): the program pays only against `attestation`, the SAS
+    attestation of the milestone's gate (`gates[gate].attestation`). `vault`,
+    `payout_token` and `mint` are the escrow's own, which the program checks.
+    """
+    accounts = {
+        "escrow": escrow,
+        "vault": vault,
+        "payout_token": payout_token,
+        "mint": mint,
+        "attestation": attestation,
+        "token_program": TOKEN_PROGRAM_ID,
+        "event_authority": event_authority_pda(program_id),
+        "program": program_id,
+    }
+    return _instruction(program_id, "release", accounts, {"milestone": milestone})
 
 
 def update_config_ix(

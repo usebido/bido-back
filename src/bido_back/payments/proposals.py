@@ -9,7 +9,6 @@ from uuid import UUID, uuid5
 PAY_PURCHASE_ORDER: Final = "pay_purchase_order"
 # payload: {"payment_id": "<uuid>"}. One step of a charged payment (mint, escrow, fund).
 PAYMENT_ADVANCE: Final = "payment.advance"
-DEFAULT_MILESTONE_NAME: Final = "Delivery"
 
 _NAMESPACE: Final = UUID("52a6ef1b-cf15-43f9-b7ac-4d2737b5cecf")
 

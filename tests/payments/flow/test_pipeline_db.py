@@ -175,7 +175,11 @@ async def test_a_charged_payment_is_minted_escrowed_and_funded_once(charged: Cha
     assert spec is not None and account is not None
     assert spec.buyer == payment.wallet_address and spec.total == total
     assert spec.po_hash == bytes.fromhex(payment.po_hash) and spec.cad_hash == bytes(32)
-    assert [(m.name, m.bps) for m in spec.milestones] == [("Delivery", 10_000)]
+    assert [(m.name, m.bps) for m in spec.milestones] == [
+        ("Tool start", 3_000),
+        ("T1", 3_000),
+        ("PPAP", 4_000),
+    ]
     assert spec.payout_ref == payout_ref(
         str(account.id), account.bank_fingerprint, payment.chain_po_id
     )
@@ -199,6 +203,23 @@ async def test_a_charged_payment_is_minted_escrowed_and_funded_once(charged: Cha
     # Nothing left to do.
     assert await charged.advance() == "funded"
     assert charged.jobs.jobs == []
+
+
+async def test_a_completed_payment_has_no_step_left(charged: Charged) -> None:
+    """Its escrow released every milestone (`payments.milestones`): nothing is built or woken."""
+    await charged.until("funded")
+    async with tenant_session(charged.paying.engine, charged.tenant) as session:
+        await session.execute(
+            update(PoPayment)
+            .where(PoPayment.id == charged.payment_id)
+            .values(completed_at=func.now(), updated_at=func.now())
+        )
+    built = len(charged.fake.built)
+    charged.jobs.jobs.clear()
+
+    assert await charged.advance() == "funded"
+
+    assert len(charged.fake.built) == built and charged.wakes() == []
 
 
 async def test_a_company_has_one_wallet_for_all_its_payments(
@@ -590,6 +611,26 @@ async def test_a_step_refuses_a_payment_that_no_longer_holds_its_approved_terms(
 
     assert (await charged.payment()).failure_code == "approval_mismatch"
     assert charged.fake.built == [] and charged.fake.minted_total == 0
+
+
+async def test_a_milestone_is_part_of_the_approved_terms_with_its_key(charged: Charged) -> None:
+    """The key fixes what the factory must send for the milestone: changed, nothing runs."""
+    payment = await charged.payment()
+    assert [m["key"] for m in payment.milestones] == ["tool_start", "t1", "ppap"]
+    async with tenant_session(charged.paying.engine, charged.tenant) as session:
+        await session.execute(
+            update(PoPayment)
+            .where(PoPayment.id == charged.payment_id)
+            .values(
+                milestones=[{**m, "key": None} for m in payment.milestones],
+                updated_at=func.now(),
+            )
+        )
+
+    assert await charged.advance() == "failed"
+
+    assert (await charged.payment()).failure_code == "approval_mismatch"
+    assert charged.fake.built == []
 
 
 async def test_bad_jobs_are_refused(charged: Charged) -> None:

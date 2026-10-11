@@ -1450,7 +1450,7 @@ PAYMENT_STATES = (
     "declined",
     "failed",
 )
-CHAIN_STEPS = ("mint", "create_escrow", "fund")
+CHAIN_STEPS = ("mint", "create_escrow", "fund", "release")
 CHAIN_TRANSACTION_STATES = ("sent", "confirmed", "failed", "expired")
 
 
@@ -1565,6 +1565,8 @@ class PoPayment(Base):
     vault_address: Mapped[str | None] = mapped_column(Text)
     refund_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     funded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # When the escrow released every milestone (migration 0043); the payment stays `funded`.
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     failure_code: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -1579,6 +1581,8 @@ class PaymentChainTransaction(Base):
     tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
     payment_id: Mapped[UUID] = mapped_column(ForeignKey("po_payments.id"))
     step: Mapped[str] = mapped_column(Text)
+    # `release` only: the milestone it releases (attempts are counted per milestone).
+    milestone_index: Mapped[int | None] = mapped_column(SmallInteger)
     attempt: Mapped[int] = mapped_column(Integer)
     signature: Mapped[str] = mapped_column(Text)
     last_valid_block_height: Mapped[int] = mapped_column(BigInteger)
@@ -1586,3 +1590,103 @@ class PaymentChainTransaction(Base):
     error: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PoFactoryLink(Base):
+    """The factory's link to one payment (migration 0043): only the token's sha256 is kept."""
+
+    __tablename__ = "po_factory_links"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    payment_id: Mapped[UUID] = mapped_column(ForeignKey("po_payments.id"))
+    token_hash: Mapped[str] = mapped_column(Text)
+    created_by: Mapped[UUID] = mapped_column(ForeignKey("users.id"))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    revoked_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    # The factory confirmed the order and its milestones (it does so before uploading).
+    accepted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class PoPaymentMilestone(Base):
+    """One milestone of a payment's escrow and where its release stands (migration 0043)."""
+
+    __tablename__ = "po_payment_milestones"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    payment_id: Mapped[UUID] = mapped_column(ForeignKey("po_payments.id"))
+    # Also the gate whose attestation releases it.
+    milestone_index: Mapped[int] = mapped_column(SmallInteger)
+    # The catalog key (`tool_start`, `t1`, `ppap`), or None for a custom milestone.
+    key: Mapped[str | None] = mapped_column(Text)
+    name: Mapped[str] = mapped_column(Text)
+    bps: Mapped[int] = mapped_column(Integer)
+    # Base units of the stablecoin mint the release pays (the escrow's own amount).
+    token_amount: Mapped[Decimal] = mapped_column(Numeric(20, 0))
+    state: Mapped[str] = mapped_column(Text, server_default=text("'open'"))
+    # The current `release_po_milestone` approval. No FK on purpose (see migration 0040).
+    approval_id: Mapped[UUID | None] = mapped_column()
+    submission_id: Mapped[UUID | None] = mapped_column(ForeignKey("po_milestone_submissions.id"))
+    evidence_hash: Mapped[str | None] = mapped_column(Text)
+    release_signature: Mapped[str | None] = mapped_column(Text)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    failure_code: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PoMilestoneSubmission(Base):
+    """One attempt at a milestone: its documents, then a person's decision (migration 0043)."""
+
+    __tablename__ = "po_milestone_submissions"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    payment_id: Mapped[UUID] = mapped_column(ForeignKey("po_payments.id"))
+    milestone_id: Mapped[UUID] = mapped_column(ForeignKey("po_payment_milestones.id"))
+    milestone_index: Mapped[int] = mapped_column(SmallInteger)
+    attempt: Mapped[int] = mapped_column(Integer)
+    state: Mapped[str] = mapped_column(Text, server_default=text("'draft'"))
+    # `factory` (through its link) or `buyer` (a person of the company, on its behalf).
+    source: Mapped[str] = mapped_column(Text)
+    factory_link_id: Mapped[UUID | None] = mapped_column(ForeignKey("po_factory_links.id"))
+    submitted_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    note: Mapped[str | None] = mapped_column(Text)
+    evidence_hash: Mapped[str | None] = mapped_column(Text)
+    approval_id: Mapped[UUID | None] = mapped_column()
+    # Why a person asked for changes: a code (`schemas.ChangeReason`) and their words.
+    rejection_code: Mapped[str | None] = mapped_column(Text)
+    rejection_reason: Mapped[str | None] = mapped_column(Text)
+    failure_code: Mapped[str | None] = mapped_column(Text)
+    decided_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class PoMilestoneDocument(Base):
+    """One evidence file of a milestone submission (migration 0043). Never its content."""
+
+    __tablename__ = "po_milestone_documents"
+
+    id: Mapped[UUID] = mapped_column(primary_key=True, server_default=text("gen_random_uuid()"))
+    tenant_id: Mapped[UUID] = mapped_column(ForeignKey("tenants.id"))
+    payment_id: Mapped[UUID] = mapped_column(ForeignKey("po_payments.id"))
+    milestone_id: Mapped[UUID] = mapped_column(ForeignKey("po_payment_milestones.id"))
+    submission_id: Mapped[UUID] = mapped_column(ForeignKey("po_milestone_submissions.id"))
+    doc_type: Mapped[str] = mapped_column(Text)
+    filename: Mapped[str] = mapped_column(Text)
+    content_type: Mapped[str] = mapped_column(Text)
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    sha256: Mapped[str] = mapped_column(Text)
+    storage_key: Mapped[str] = mapped_column(Text)
+    source: Mapped[str] = mapped_column(Text)
+    factory_link_id: Mapped[UUID | None] = mapped_column(ForeignKey("po_factory_links.id"))
+    uploaded_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id"))
+    removed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

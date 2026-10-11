@@ -1,10 +1,12 @@
 """An RFQ's activity feed: audit events plus received replies, newest first.
 
 Only ids, names and summaries written here in code reach the response; never
-an email body, subject or attachment name.
+an email body, subject or attachment name, nor a milestone's note, file names or
+the reason changes were asked for.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Final, cast
 from uuid import UUID
@@ -19,12 +21,17 @@ from bido_back.db.models import (
     Attachment,
     AuditEvent,
     Invite,
+    IssuedPurchaseOrder,
     Message,
     NegotiationMandate,
+    PoMilestoneSubmission,
+    PoPayment,
+    PoPaymentMilestone,
     Rfq,
     Supplier,
 )
 from bido_back.negotiation.labels import reason_text
+from bido_back.payments.milestones.catalog import EVIDENCE, TOOLING_PLAN
 from bido_back.rfqs.errors import NotFound
 from bido_back.rfqs.overview import owner_names
 from bido_back.rfqs.schemas import ActivityKind, RfqActivityItem
@@ -46,6 +53,7 @@ _TOOLS: Final[Mapping[str, str]] = {
     "send_po_cancellation": "purchase order cancellation",
     "approve_negotiation_mandate": "negotiation mandate",
     "pay_purchase_order": "purchase order payment",
+    "release_po_milestone": "milestone release",
 }
 _FOLLOWUP_KINDS: Final[Mapping[str, str]] = {
     "chase": "Reminder",
@@ -95,6 +103,15 @@ _FIELD_LABELS: Final[Mapping[str, str]] = {
     "logo_placement": "logo placement",
 }
 _FIELD_ORDER: Final[Mapping[str, int]] = {f: i for i, f in enumerate(_FIELD_LABELS)}
+# A PO payment's milestones (`bido_back.payments.milestones`): the factory's link, the
+# documents, the approval, the release. Their events carry ids, the milestone's index and
+# codes; its name and share come from the payment's milestones, the supplier from its PO.
+_MILESTONE_EVENTS: Final = ("purchase_order.milestone_", "purchase_order.factory_")
+_CHANGES_REQUESTED: Final = "purchase_order.milestone_changes_requested"
+# The catalog's document types (codes are unique across the plan).
+_DOCUMENT_LABELS: Final[Mapping[str, str]] = {
+    document.code: document.label for milestone in TOOLING_PLAN for document in milestone.documents
+} | {EVIDENCE.code: EVIDENCE.label}
 _VALUED_FIELDS: Final = frozenset(
     {
         "quantities",
@@ -189,8 +206,9 @@ async def rfq_activity(
         people = await owner_names(
             session, {e.actor_user_id for e in events if e.actor_user_id is not None}
         )
+        facts = await _milestone_facts(session, events)
 
-    items = [_event_item(e, suppliers, people) for e in events]
+    items = [_event_item(e, suppliers, people, facts) for e in events]
     items += [
         RfqActivityItem(
             at=occurred_at,
@@ -207,8 +225,69 @@ async def rfq_activity(
     return items[:limit]
 
 
+type _MilestoneKey = tuple[str, int]  # (payment id, milestone index)
+
+
+@dataclass(frozen=True, slots=True)
+class _MilestoneFacts:
+    """What milestone events name by id only: the milestones (by payment id and index), the
+    supplier each payment pays (by payment id), and why a submission was sent back (by
+    submission id: the code a person chose, never their text)."""
+
+    milestones: Mapping[_MilestoneKey, PoPaymentMilestone]
+    suppliers: Mapping[str, str]
+    rejections: Mapping[str, str]
+
+
+def _uuids(events: Sequence[AuditEvent], key: str) -> set[UUID]:
+    """The ids the events' payloads hold under `key`."""
+    found: set[UUID] = set()
+    for event in events:
+        raw = (event.payload or {}).get(key)
+        if not isinstance(raw, str):
+            continue
+        try:
+            found.add(UUID(raw))
+        except ValueError:
+            continue
+    return found
+
+
+async def _milestone_facts(session: AsyncSession, events: Sequence[AuditEvent]) -> _MilestoneFacts:
+    ours = [e for e in events if e.action.startswith(_MILESTONE_EVENTS)]
+    payment_ids = _uuids(ours, "payment_id")
+    if not payment_ids:
+        return _MilestoneFacts({}, {}, {})
+    milestones = await session.scalars(
+        select(PoPaymentMilestone).where(PoPaymentMilestone.payment_id.in_(payment_ids))
+    )
+    suppliers = await session.execute(
+        select(PoPayment.id, Supplier.name)
+        .join(IssuedPurchaseOrder, IssuedPurchaseOrder.id == PoPayment.purchase_order_id)
+        .join(Supplier, Supplier.id == IssuedPurchaseOrder.supplier_id)
+        .where(PoPayment.id.in_(payment_ids))
+    )
+    rejections: dict[str, str] = {}
+    sent_back = _uuids([e for e in ours if e.action == _CHANGES_REQUESTED], "submission_id")
+    if sent_back:
+        rows = await session.execute(
+            select(PoMilestoneSubmission.id, PoMilestoneSubmission.rejection_code).where(
+                PoMilestoneSubmission.id.in_(sent_back)
+            )
+        )
+        rejections = {str(sid): code for sid, code in rows if code is not None}
+    return _MilestoneFacts(
+        {(str(row.payment_id), row.milestone_index): row for row in milestones},
+        {str(payment_id): name for payment_id, name in suppliers},
+        rejections,
+    )
+
+
 def _event_item(
-    event: AuditEvent, suppliers: Mapping[UUID, str], people: Mapping[UUID, str]
+    event: AuditEvent,
+    suppliers: Mapping[UUID, str],
+    people: Mapping[UUID, str],
+    facts: _MilestoneFacts,
 ) -> RfqActivityItem:
     data: Mapping[str, Any] = event.payload or {}
     person = people.get(event.actor_user_id) if event.actor_user_id else None
@@ -304,6 +383,14 @@ def _event_item(
             if kind == "system":
                 # The worker moves the money once a person approved it.
                 actor = actor or BIDO
+        case action if action.startswith(_MILESTONE_EVENTS):
+            supplier = supplier or facts.suppliers.get(str(data.get("payment_id")))
+            kind, summary = _milestone_event(action, data, facts)
+            if kind == "system":
+                actor = actor or BIDO
+            elif event.actor_user_id is None:
+                # The factory's page has no login: the supplier acted, through its link.
+                actor = supplier or "The factory"
         case "rfq.completed":
             kind = "system"
             closed, cancelled = data.get("closed"), data.get("cancelled")
@@ -503,7 +590,7 @@ def _payment_event(action: str, data: Mapping[str, Any]) -> tuple[ActivityKind, 
 
     Reads `purchase_order_ref`, `charge_currency` and `charge_amount`, `simulated`,
     `card_rail`, `failure_code` and `step` from the event; all optional. A failure at a chain `step`
-    came after the card was charged.
+    came after the card was charged. `completed`: the escrow released its last milestone.
     """
     ref = data.get("purchase_order_ref")
     order = f"purchase order {ref}" if isinstance(ref, str) and ref else "the purchase order"
@@ -536,8 +623,86 @@ def _payment_event(action: str, data: Mapping[str, Any]) -> tuple[ActivityKind, 
             return "system", f"Escrow for {order} created on Solana"
         case "purchase_order.escrow_funded":
             return "system", f"Escrow for {order} funded: the payment waits for its milestones"
+        case "purchase_order.payment_completed":
+            return "system", f"Payment of {order} completed: the escrow released every milestone"
         case _:
             return "system", action
+
+
+def _milestone_event(
+    action: str, data: Mapping[str, Any], facts: _MilestoneFacts
+) -> tuple[ActivityKind, str]:
+    """One step of a PO payment's milestone release (`bido_back.payments.milestones`).
+
+    Reads `purchase_order_ref`, `payment_id` and `milestone_index` (the milestone's name and
+    share come from the payment's milestones), `doc_type`, `attempt`, `submission_id` (why
+    it was sent back: the code stored with the decision), `failure_code` and
+    `previous_failure_code`; all optional. Never a note, a file name or the reason's text,
+    even when given.
+    """
+    ref = data.get("purchase_order_ref")
+    order = f"purchase order {ref}" if isinstance(ref, str) and ref else "the purchase order"
+    raw_index, payment = data.get("milestone_index"), data.get("payment_id")
+    index = raw_index if isinstance(raw_index, int) and not isinstance(raw_index, bool) else None
+    row = (
+        facts.milestones.get((payment, index))
+        if isinstance(payment, str) and index is not None
+        else None
+    )
+    if row is not None:
+        milestone = f"milestone {row.name}"
+    elif index is not None:
+        milestone = f"milestone {index + 1}"
+    else:
+        milestone = "a milestone"
+    of = f"{milestone} of {order}"
+    match action:
+        case "purchase_order.factory_link_issued":
+            return (
+                "user",
+                f"Factory link created for {order}: the factory sends its documents there",
+            )
+        case "purchase_order.factory_link_revoked":
+            return "user", f"Factory link for {order} revoked"
+        case "purchase_order.factory_order_accepted":
+            return "user", _sentence(f"{order} and its milestones confirmed by the factory")
+        case "purchase_order.milestone_document_added":
+            label = _DOCUMENT_LABELS.get(str(data.get("doc_type")))
+            return "user", f"Document added to {of}" + (f": {label}" if label else "")
+        case "purchase_order.milestone_document_removed":
+            label = _DOCUMENT_LABELS.get(str(data.get("doc_type")))
+            return "user", f"Document removed from {of}" + (f": {label}" if label else "")
+        case "purchase_order.milestone_submitted":
+            attempt = data.get("attempt")
+            again = " again" if isinstance(attempt, int) and attempt > 1 else ""
+            return "user", _sentence(f"{of} sent for approval{again}")
+        case "purchase_order.milestone_changes_requested":
+            code = facts.rejections.get(str(data.get("submission_id")))
+            why = _words(data.get("reason_code") or code)
+            reason = f" ({why})" if why else ""
+            return "user", f"Changes requested on {of}{reason}: the factory sends it again"
+        case "purchase_order.milestone_releasing":
+            return "system", _sentence(f"{of} approved: releasing it from the escrow")
+        case "purchase_order.milestone_released":
+            share = f" ({row.bps / 100:g}% of the total)" if row is not None else ""
+            return "system", _sentence(f"{of} released from the escrow{share}")
+        case "purchase_order.milestone_release_failed":
+            # Refused when the approval ran (back to the factory) or failed on chain (for a
+            # person): either way nothing left the escrow.
+            why = _words(data.get("failure_code"))
+            reason = f" ({why})" if why else ""
+            return "system", _sentence(f"{of} not released{reason}: the money stays in the escrow")
+        case "purchase_order.milestone_release_retried":
+            why = _words(data.get("previous_failure_code"))
+            after = f" after it failed ({why})" if why else ""
+            return "user", f"Release of {of} retried{after}"
+        case _:
+            return "system", action
+
+
+def _sentence(text: str) -> str:
+    """`text` with a capital first letter (`str.capitalize` would lower the rest: `T1`)."""
+    return text[:1].upper() + text[1:]
 
 
 def _received_lines(data: Mapping[str, Any]) -> str:

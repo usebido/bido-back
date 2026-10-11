@@ -23,10 +23,12 @@ from bido_back.api.copilot import copilot_router
 from bido_back.api.cors import add_cors
 from bido_back.api.deps import ApiResources
 from bido_back.api.exports import exports_router
+from bido_back.api.factory import factory_router
 from bido_back.api.files import files_router
 from bido_back.api.followups import followups_router
 from bido_back.api.mailbox import mailbox_router
 from bido_back.api.me import me_router
+from bido_back.api.milestones import milestones_router
 from bido_back.api.negotiation import negotiation_router
 from bido_back.api.onboarding import onboarding_router
 from bido_back.api.outbound import outbound_router
@@ -100,6 +102,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(procurement_assessments_router())
     app.include_router(awards_router())
     app.include_router(payments_router())
+    app.include_router(milestones_router())
+    # The factory's page: no login, its link's token in `X-Factory-Token`.
+    app.include_router(factory_router())
     app.include_router(outbound_router())
     app.include_router(uploads_router())
     app.include_router(files_router())

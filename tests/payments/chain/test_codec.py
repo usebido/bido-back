@@ -27,6 +27,7 @@ from bido_back.payments.chain.escrow import (
     decode_po_escrow,
     fund_ix,
     milestone_amounts,
+    release_ix,
     update_config_ix,
 )
 from bido_back.payments.chain.hashes import payout_ref_memo
@@ -51,11 +52,11 @@ from bido_back.payments.chain.spl import (
 from tests.payments.chain.vectors import (
     FUNDED_ESCROW_FILE,
     IDL_SOURCE,
-    InstructionVector,
     JsonValue,
     chain_vectors,
     codec_vectors,
     harness_keypair,
+    instruction_vector,
 )
 
 # The devnet deployment (`solana/deployments/devnet.json`).
@@ -86,21 +87,6 @@ def as_json(value: object) -> JsonValue:
     raise TypeError(f"no vector form for {value!r}")
 
 
-def instruction_vector(ix: Instruction) -> InstructionVector:
-    return {
-        "program_id": str(ix.program_id),
-        "accounts": [
-            {
-                "pubkey": str(account.pubkey),
-                "is_signer": account.is_signer,
-                "is_writable": account.is_writable,
-            }
-            for account in ix.accounts
-        ],
-        "data": bytes(ix.data).hex(),
-    }
-
-
 # ---- the IDL ----
 
 
@@ -119,6 +105,7 @@ def test_every_discriminator_is_anchors_hash() -> None:
         assert discriminator == hashlib.sha256(f"event:{name}".encode()).digest()[:8]
     assert idl.instructions["create_po"].discriminator.hex() == "46f1413ec788b3f5"
     assert idl.instructions["fund"].discriminator.hex() == "dabc6fdd9871ae07"
+    assert idl.instructions["release"].discriminator.hex() == "fdf90fce1c7fc1f1"
     assert idl.instructions["update_config"].discriminator.hex() == "1d9efcbf0a53db63"
 
 
@@ -233,6 +220,53 @@ def test_create_po_with_its_payout_memo_and_fund_equal_their_templates() -> None
         "create_po"
     ]
     assert [instruction_vector(fund_from_inputs())] == templates["fund"]
+
+
+def release_from_funded(milestone: int) -> Instruction:
+    """`release(milestone)` of PO-1042's funded escrow, every account from its decoded state."""
+    state = decode_po_escrow(FUNDED_ESCROW_FILE.read_bytes())
+    return release_ix(
+        program_id=pk(codec_vectors()["inputs"]["program_id"]),
+        escrow=pk(chain_vectors()["escrow"]),
+        vault=state.vault,
+        payout_token=state.payout_token,
+        mint=state.mint,
+        attestation=state.gates[state.milestones[milestone].gate].attestation,
+        milestone=milestone,
+    )
+
+
+def test_release_equals_the_instructions_the_program_accepted() -> None:
+    recorded = codec_vectors()["instructions"]["release"]
+    assert [instruction_vector(release_from_funded(index)) for index in range(3)] == recorded
+    # Permissionless: no account signs; `#[event_cpi]` adds the event authority and program.
+    release = release_from_funded(0)
+    assert not any(account.is_signer for account in release.accounts)
+    assert [account.pubkey for account in release.accounts][-2:] == [
+        DEVNET_EVENT_AUTHORITY,
+        DEVNET_PROGRAM,
+    ]
+    assert bytes(release.data) == bytes.fromhex("fdf90fce1c7fc1f1") + b"\x00"
+
+
+def test_the_release_crank_equals_its_template() -> None:
+    crank = [instruction_vector(release_from_funded(index)) for index in (1, 2)]
+    assert crank == codec_vectors()["templates"]["release_attempt"]
+
+
+@pytest.mark.parametrize("milestone", [-1, 256])
+def test_a_release_index_is_a_u8(milestone: int) -> None:
+    key = harness_keypair("x").pubkey()
+    with pytest.raises(ValueError, match="u8"):
+        release_ix(
+            program_id=DEVNET_PROGRAM,
+            escrow=key,
+            vault=key,
+            payout_token=key,
+            mint=key,
+            attestation=key,
+            milestone=milestone,
+        )
 
 
 def test_update_config_replacing_the_allowed_mints() -> None:

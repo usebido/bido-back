@@ -14,6 +14,7 @@ from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 from bido_back.awards.views import DecimalText
+from bido_back.payments.milestones.catalog import CATALOG, TOOLING_PLAN
 from bido_back.payments.views import PaymentView
 
 Hex64 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
@@ -37,6 +38,11 @@ class MilestoneInput(BaseModel):
 
     name: str = Field(min_length=1, max_length=MAX_MILESTONE_NAME_BYTES)
     bps: int = Field(ge=1, le=BPS_TOTAL)
+    key: str | None = Field(
+        default=None,
+        description="A milestone of Bido's tooling plan (`tool_start`, `t1`, `ppap`): what the "
+        "factory sends for it. It keeps the plan's name; null for a custom milestone",
+    )
 
     @model_validator(mode="after")
     def _fits_on_chain(self) -> Self:
@@ -44,6 +50,12 @@ class MilestoneInput(BaseModel):
             raise ValueError(f"a milestone name is at most {MAX_MILESTONE_NAME_BYTES} bytes")
         if self.name != self.name.strip():
             raise ValueError("a milestone name has no leading or trailing spaces")
+        if self.key is not None:
+            definition = CATALOG.get(self.key)
+            if definition is None:
+                raise ValueError(f"unknown milestone key; known: {', '.join(CATALOG)}")
+            if self.name != definition.name:
+                raise ValueError(f"the {self.key} milestone is named {definition.name!r}")
         return self
 
 
@@ -52,9 +64,17 @@ def check_milestones(milestones: list[MilestoneInput]) -> list[MilestoneInput]:
         raise ValueError(f"between 1 and {MAX_MILESTONES} milestones")
     if sum(m.bps for m in milestones) != BPS_TOTAL:
         raise ValueError(f"milestone shares (bps) must add up to {BPS_TOTAL}")
+    keys = [m.key for m in milestones if m.key is not None]
+    if len(set(keys)) != len(keys):
+        raise ValueError("a milestone of the tooling plan (key) appears at most once")
     if len({m.name for m in milestones}) != len(milestones):
         raise ValueError("milestone names must be different")
     return milestones
+
+
+def tooling_plan() -> list[MilestoneInput]:
+    """Bido's tooling plan, in order: Tool start 30%, T1 30%, PPAP 40% (`milestones.catalog`)."""
+    return [MilestoneInput(name=m.name, bps=m.bps, key=m.key) for m in TOOLING_PLAN]
 
 
 # --- Requests -------------------------------------------------------------------------------
@@ -153,7 +173,9 @@ class PayPurchaseOrderRequest(BaseModel):
     milestones: list[MilestoneInput] | None = Field(
         default=None,
         description="How the escrow releases the payment (1-4 milestones adding up to 10000 "
-        "bps). Default: one milestone, 'Delivery', 100%",
+        "bps), in order. Default: Bido's tooling plan, Tool start 30% (`tool_start`), T1 30% "
+        "(`t1`), PPAP 40% (`ppap`). A milestone with a `key` asks the factory for that "
+        "milestone's documents; a custom one (no key) for one piece of evidence",
     )
 
     @model_validator(mode="after")

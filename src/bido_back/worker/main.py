@@ -29,7 +29,7 @@ import time
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
-from typing import Literal, Protocol, cast
+from typing import TYPE_CHECKING, Literal, Protocol, cast
 from uuid import UUID
 
 from pydantic import ValidationError
@@ -47,6 +47,7 @@ from bido_back.worker.job_types import (
     FOLLOWUPS_SWEEP,
     FX_REFRESH,
     MAILBOX_SYNC,
+    MILESTONE_RELEASE,
     NEGOTIATION_REPLAN,
     NEGOTIATION_SWEEP,
     PAYMENT_ADVANCE,
@@ -55,7 +56,10 @@ from bido_back.worker.job_types import (
     TEMPLATE_BUILD,
     TEMPLATE_SCAN,
 )
-from bido_back.worker.jobs import SqsJobQueue
+from bido_back.worker.jobs import JobQueue, SqsJobQueue
+
+if TYPE_CHECKING:
+    from bido_back.payments.config import PaymentProviders
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +106,38 @@ def build_registry(
     return registry
 
 
+def payment_handlers(
+    act_tools: ActToolRegistry,
+    db: AsyncEngine | async_sessionmaker[AsyncSession],
+    providers: "PaymentProviders",
+    jobs: JobQueue | None,
+    *,
+    settings: Settings,
+) -> dict[str, Handler]:
+    """What payments add to a worker, on servers with every provider set up only: their
+    act tools (`pay_purchase_order`, `release_po_milestone`, registered into `act_tools`)
+    and their jobs' handlers by type (`payment.advance`, `milestone.release`)."""
+    from bido_back.payments.execute import PaymentActDeps, register_payment_act_tools
+    from bido_back.payments.milestones.execute import (
+        MilestoneActDeps,
+        register_milestone_act_tools,
+    )
+    from bido_back.payments.milestones.release import MilestoneReleaseHandler
+    from bido_back.payments.pipeline import PaymentAdvanceHandler
+
+    register_payment_act_tools(act_tools, PaymentActDeps(db=db, providers=providers, jobs=jobs))
+    register_milestone_act_tools(act_tools, MilestoneActDeps(db=db, providers=providers, jobs=jobs))
+    return {
+        PAYMENT_ADVANCE: PaymentAdvanceHandler(
+            db, providers, jobs, refund_after_days=settings.payments_escrow_refund_days
+        ),
+        # Without the attester's key a release waits (retried) instead of being parked.
+        MILESTONE_RELEASE: MilestoneReleaseHandler(
+            db, providers, jobs, attester=settings.solana_gate_attester
+        ),
+    }
+
+
 def build_worker_registry(
     settings: Settings, engine: AsyncEngine, *, sqs: "_SqsApi | None" = None
 ) -> HandlerRegistry:
@@ -131,8 +167,6 @@ def build_worker_registry(
         TemplateScanHandler,
     )
     from bido_back.payments.config import build_payment_providers, payments_enabled
-    from bido_back.payments.execute import PaymentActDeps, register_payment_act_tools
-    from bido_back.payments.pipeline import PaymentAdvanceHandler
     from bido_back.quotes.extract_job import quote_extract_handler
     from bido_back.rfqs.mailbox import mailbox_senders_for
     from bido_back.rfqs.send import RfqActDeps, register_act_tools
@@ -162,14 +196,10 @@ def build_worker_registry(
     # Payments only when every provider is set up (`payments.config`): otherwise
     # nothing that could move money is registered.
     payments = payments_enabled(settings)
-    advance_payment: PaymentAdvanceHandler | None = None
+    payment_jobs: dict[str, Handler] = {}
     if payments:
-        providers = build_payment_providers(settings)
-        register_payment_act_tools(
-            act_tools, PaymentActDeps(db=engine, providers=providers, jobs=jobs)
-        )
-        advance_payment = PaymentAdvanceHandler(
-            engine, providers, jobs, refund_after_days=settings.payments_escrow_refund_days
+        payment_jobs = payment_handlers(
+            act_tools, engine, build_payment_providers(settings), jobs, settings=settings
         )
     registry = build_registry(engine, act_tools)
     storage = build_storage(settings)
@@ -183,8 +213,8 @@ def build_worker_registry(
             payments=payments,
         ),
     )
-    if advance_payment is not None:
-        registry.register(PAYMENT_ADVANCE, advance_payment)
+    for job_type, handler in payment_jobs.items():
+        registry.register(job_type, handler)
     registry.register(
         NEGOTIATION_SWEEP,
         NegotiationSweepHandler(

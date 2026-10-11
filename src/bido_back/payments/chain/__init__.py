@@ -5,10 +5,12 @@
 
 - `hashes`: the escrow id and the payout reference (standard library only; the service
   imports it before anything reaches Solana).
-- `idl`, `borsh`, `pdas`, `escrow`, `spl`: the programs' codec, pinned by the golden
-  vectors of `solana/tests/fixtures/vectors.json`.
-- `rpc`: Solana JSON-RPC over httpx. `keys`: the relayer's, the operator's and the
-  mint authority's hot keys. `transactions`: v0 messages and their signatures.
+- `idl`, `borsh`, `pdas`, `escrow`, `spl`, `sas`: the programs' codec (the escrow, SPL
+  Token and Memo, the Solana Attestation Service), pinned by the golden vectors of
+  `solana/tests/fixtures/vectors.json`.
+- `rpc`: Solana JSON-RPC over httpx. `keys`: the relayer's, the operator's, the mint
+  authority's and the gate attester's hot keys. `transactions`: v0 messages and their
+  signatures.
 
 Importing this package does not import solders: `build_payment_chain` loads the
 adapter on first use, so a server without payments never does.

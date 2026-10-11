@@ -12,14 +12,19 @@ Solana, so it must stay free of solders and of I/O.
 - `payout_ref(beneficiary_ref, fingerprint_hex, chain_po_id)`: the reference
   `create_po` carries as the memo `bido:payout_ref:<hex>`, so the payout of a
   released milestone can be matched to the account the buyer approved.
+- `compute_evidence_hash(chain_po_id, gate, file_hashes)`: what a milestone's
+  approval attests on chain (`evidence_hash` of the gate's SAS attestation): the
+  files the person approved, bound to the escrow and the gate. Twin of the TS
+  client's `computeEvidenceHash`.
 
 Golden values: `signing.bank_fingerprint` and `signing.payout_ref` of
-`solana/tests/fixtures/vectors.json`.
+`solana/tests/fixtures/vectors.json`, and its `chain.evidence_hashes`.
 """
 
 import hashlib
 import re
 import secrets
+from collections.abc import Iterable
 from typing import Final
 
 # `<1-27 of [A-Z0-9-]>-<4 Crockford base32>`: 6 to 32 bytes, the program's limits for a
@@ -31,10 +36,12 @@ PAYOUT_REF_MEMO_PREFIX: Final = "bido:payout_ref:"
 _CROCKFORD_BASE32: Final = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 _SUFFIX_LEN: Final = 4
 _BANK_DOMAIN: Final = b"bido-bank-v1"
+_EVIDENCE_DOMAIN: Final = b"bido-evidence-v1"
 _PAYOUT_REF_DOMAIN: Final = b"bido-payout-ref-v1"
 _SEPARATOR: Final = b"\x00"
 # The u8 length prefix of each string in the payout reference.
 _MAX_FIELD_BYTES: Final = 255
+_U8_MAX: Final = 255
 _HEX64: Final = re.compile(r"[0-9a-f]{64}")
 
 
@@ -82,6 +89,32 @@ def payout_ref(beneficiary_ref: str, fingerprint_hex: str, chain_po_id: str) -> 
             _length_prefixed(beneficiary_ref, "beneficiary_ref"),
             bytes.fromhex(fingerprint_hex),
             _length_prefixed(chain_po_id, "chain_po_id"),
+        )
+    )
+    return hashlib.sha256(data).hexdigest()
+
+
+def compute_evidence_hash(chain_po_id: str, gate: int, file_hashes: Iterable[str]) -> str:
+    """`sha256("bido-evidence-v1" ‖ chain_po_id ‖ u8 gate ‖ sorted file hashes)`, hex.
+
+    `file_hashes` are the sha256 of each evidence file (64 lowercase hex digits), in any
+    order; equal-length lowercase hex sorts in the order of its bytes. Raises
+    `ValueError` for a gate outside u8, a hash that is not 64 lowercase hex digits, or
+    an id that is not a chain PO id.
+    """
+    if not 0 <= gate <= _U8_MAX:
+        raise ValueError("the gate must be a u8")
+    if not is_chain_po_id(chain_po_id):
+        raise ValueError("not a chain PO id")
+    hashes = list(file_hashes)
+    if any(_HEX64.fullmatch(value) is None for value in hashes):
+        raise ValueError("a file hash must be 64 lowercase hex digits")
+    data = b"".join(
+        (
+            _EVIDENCE_DOMAIN,
+            chain_po_id.encode("utf-8"),
+            bytes((gate,)),
+            *(bytes.fromhex(value) for value in sorted(hashes)),
         )
     )
     return hashlib.sha256(data).hexdigest()

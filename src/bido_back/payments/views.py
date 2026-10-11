@@ -20,6 +20,8 @@ PaymentState = Literal[
     "declined",
     "failed",
 ]
+# The payment's own steps. Milestone releases are shown on each milestone
+# (`GET .../payment/milestones`: `release_signature`, `release_explorer_url`).
 ChainStep = Literal["mint", "create_escrow", "fund"]
 ChainTransactionState = Literal["sent", "confirmed", "failed", "expired"]
 PaymentMethodStatus = Literal["active", "pending", "failed", "removed"]
@@ -31,6 +33,11 @@ class PaymentMilestone(BaseModel):
 
     name: str
     bps: int = Field(description="Share of the total in basis points; all add up to 10000")
+    key: str | None = Field(
+        default=None,
+        description="Its milestone in Bido's tooling plan (`tool_start`, `t1`, `ppap`), which "
+        "fixes what the factory sends for it; null for a custom milestone",
+    )
 
 
 class PaymentChainTransactionView(BaseModel):
@@ -155,6 +162,10 @@ class PaymentView(BaseModel):
     created_at: datetime
     charged_at: datetime | None
     funded_at: datetime | None
+    completed_at: datetime | None = Field(
+        default=None,
+        description="When the escrow released its last milestone; the payment stays `funded`",
+    )
 
 
 class PurchaseOrderPaymentSummary(BaseModel):
@@ -168,6 +179,16 @@ class PurchaseOrderPaymentSummary(BaseModel):
     escrow_address: str | None
     funded_at: datetime | None
     needs_attention: bool
+    released_bps: int = Field(
+        default=0,
+        description="Share of the total the escrow released so far, in basis points "
+        "(10000: all of it)",
+    )
+    next_milestone: str | None = Field(
+        default=None,
+        description="The milestone to release next (its name) while the escrow is funded; "
+        "null before it is funded and once everything is released",
+    )
 
 
 class PaymentApprovalView(BaseModel):
