@@ -2,8 +2,9 @@
 
 Every read and write runs in a `tenant_session`; roles are re-read from
 `memberships`. Nothing here moves money: a payment request is a pending
-`pay_purchase_order` approval plus its `po_payments` row, and the worker charges
-the card only after a person approved it (`payments.execute`).
+`pay_purchase_order` approval plus its `po_payments` row. On the Visa rail, the
+cardholder's Basis Theory passkey verification approves that proposal; the worker
+charges the card only after approval (`payments.execute`).
 
 - Cards (`payment_methods`): any member saves a card the browser tokenized with
   Basis Theory Elements. Bido enrolls it as an agentic payment method and keeps
@@ -37,8 +38,15 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.agents.approvals import ApprovalProposal
 from bido_back.agents.events import args_hash
+from bido_back.approvals import decide_approval
 from bido_back.approvals.audit import approval_audit
-from bido_back.approvals.errors import ApprovalConflict
+from bido_back.approvals.errors import (
+    ApprovalConflict,
+    ApprovalForbidden,
+    ApprovalIntegrityError,
+    ApprovalNotFound,
+    ApprovalNotPending,
+)
 from bido_back.approvals.integrity import payload_matches
 from bido_back.approvals.sink import PostgresApprovalSink
 from bido_back.auth import Principal
@@ -123,6 +131,7 @@ from bido_back.payments.views import (
 )
 from bido_back.rfqs.audit import rfq_event
 from bido_back.settings import BASIS_THEORY_TEST_HOST, Settings
+from bido_back.worker.jobs import JobQueue
 
 logger = logging.getLogger(__name__)
 
@@ -760,8 +769,8 @@ async def request_po_payment(
     settings: Settings,
     today: date,
 ) -> PaymentRequested:
-    """Propose paying a sent PO by card into its escrow; a person decides (the buyer by
-    default, a second person in four-eyes tenants)."""
+    """Propose paying a sent PO by card into its escrow; on the Visa rail, the
+    cardholder's passkey verification decides it."""
     call_id = payment_proposal_ids(po_id)[1]
     async with tenant_session(db, principal.tenant_id) as session:
         po = await session.get(IssuedPurchaseOrder, po_id)
@@ -1129,11 +1138,13 @@ async def confirm_card_verification(
     principal: Principal,
     po_id: UUID,
     card: CardGateway,
+    jobs: JobQueue,
 ) -> PaymentCardVerificationView:
     """Where the Visa passkey approval of the order's payment stands, read from Basis
     Theory (never from the browser). Call it to get the allowance to verify (it is
-    created when missing) and again once the passkey is done. Only the person paying,
-    whose card it is, approves it."""
+    created when missing) and again once the passkey is done. A verified allowance
+    approves the payment through the normal approval guard and enqueues execution.
+    Only the person paying, whose card it is, approves it."""
     async with tenant_session(db, principal.tenant_id) as session:
         payment = (await _current_payments(session, [po_id])).get(po_id)
         if payment is None:
@@ -1162,6 +1173,7 @@ async def confirm_card_verification(
         if ref is None:
             raise PaymentInvalidState(f"payment {payment_id}: the card could not be authorized")
     verification = await card.verification(ref)
+    approve_after_commit = False
     async with tenant_session(db, principal.tenant_id) as session:
         payment = await session.scalar(
             select(PoPayment).where(PoPayment.id == payment_id).with_for_update()
@@ -1186,9 +1198,20 @@ async def confirm_card_verification(
                     )
                 )
             await session.flush()
+            approve_after_commit = True
         view = _verification_view(
             payment, None if payment.card_verified_at else verification.status
         )
+        approval_id = payment.approval_id
+    if approve_after_commit:
+        try:
+            await decide_approval(db, principal, approval_id, "approve", jobs=jobs)
+        except ApprovalNotPending:
+            pass
+        except ApprovalForbidden as exc:
+            raise PaymentForbidden("this payment cannot be approved by the person paying") from exc
+        except (ApprovalIntegrityError, ApprovalNotFound) as exc:
+            raise PaymentInvalidState(f"payment {payment_id} can no longer be approved") from exc
     logger.info(
         "payment card verification tenant=%s payment=%s status=%s",
         principal.tenant_id,

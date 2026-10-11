@@ -24,7 +24,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bido_back.api.deps import ApiResources, get_db, get_payment_providers, get_principal
+from bido_back.api.deps import (
+    ApiResources,
+    get_db,
+    get_job_queue,
+    get_payment_providers,
+    get_principal,
+)
 from bido_back.api.rfqs import error_responses
 from bido_back.auth import Principal
 from bido_back.payments import service
@@ -53,10 +59,12 @@ from bido_back.payments.views import (
 )
 from bido_back.rfqs.errors import Forbidden, InvalidState, NotFound, RfqError
 from bido_back.settings import Settings
+from bido_back.worker.jobs import JobQueue
 
 Db = Annotated[async_sessionmaker[AsyncSession], Depends(get_db)]
 CurrentPrincipal = Annotated[Principal, Depends(get_principal)]
 Providers = Annotated[PaymentProviders, Depends(get_payment_providers)]
+Jobs = Annotated[JobQueue, Depends(get_job_queue)]
 
 
 def get_payment_settings(request: Request) -> Settings:
@@ -258,14 +266,16 @@ def payments_router() -> APIRouter:
         ),
     )
     async def confirm_card_verification(  # pyright: ignore[reportUnusedFunction]
-        principal: CurrentPrincipal, po_id: UUID, db: Db, providers: Providers
+        principal: CurrentPrincipal, po_id: UUID, db: Db, providers: Providers, jobs: Jobs
     ) -> PaymentCardVerificationView:
         """The Visa passkey approval of the order's payment (`card_rail` `vic`), read from
         Basis Theory. Call it for the allowance to verify, run `verifyAllowance` in the
         browser, then call it again: `verified` lets the payment be approved and executed.
         Only the person paying (whose card it is) may call it."""
         try:
-            return await service.confirm_card_verification(db, principal, po_id, providers.card)
+            return await service.confirm_card_verification(
+                db, principal, po_id, providers.card, jobs
+            )
         except (PaymentError, RfqError) as exc:
             raise payments_http_error(exc) from None
 

@@ -15,12 +15,20 @@ from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.api.awards import awards_router
-from bido_back.api.deps import ApiResources, get_db, get_payment_providers, get_principal
+from bido_back.api.deps import (
+    ApiResources,
+    get_db,
+    get_job_queue,
+    get_payment_providers,
+    get_principal,
+)
 from bido_back.api.payments import payments_router
 from bido_back.auth import Principal
 from bido_back.db import create_sessionmaker
 from bido_back.payments.config import PaymentProviders
 from bido_back.settings import Settings
+from bido_back.worker.jobs import JobQueue
+from tests.approvals.conftest import FakeJobQueue
 from tests.awards.test_awards_db import World, approver, buyer
 from tests.awards.test_lifecycle import sent_po
 from tests.payments.fakes import CARD_ART, FakeProviders
@@ -98,6 +106,7 @@ async def clients(
 ) -> AsyncIterator[Callable[[Principal], httpx.AsyncClient]]:
     sessionmaker = create_sessionmaker(app_engine)
     bundle = providers.bundle()
+    jobs = FakeJobQueue()
 
     def db() -> async_sessionmaker[AsyncSession]:
         return sessionmaker
@@ -105,12 +114,16 @@ async def clients(
     def payment_providers() -> PaymentProviders:
         return bundle
 
+    def job_queue() -> JobQueue:
+        return jobs
+
     opened: list[httpx.AsyncClient] = []
 
     def client(principal: Principal) -> httpx.AsyncClient:
         app = build_app()
         app.dependency_overrides[get_db] = db
         app.dependency_overrides[get_payment_providers] = payment_providers
+        app.dependency_overrides[get_job_queue] = job_queue
         opened.append(as_user(app, principal))
         return opened[-1]
 
