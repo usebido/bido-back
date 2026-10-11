@@ -9,8 +9,11 @@
         authority signs) ─► `create_po` on `bido_escrow` (operator signs) ─► `fund`
         (the company's wallet signs through Privy) ─► the escrow holds the PO total.
 
-Next steps, not here: the supplier's documents, milestone releases against Solana
-Attestation Service attestations, refunds, and the payout in the supplier's currency.
+Then `payments.milestones` releases the escrow milestone by milestone (Tool start, T1,
+PPAP): the factory sends each milestone's documents through its link, a person approves
+the release, and the worker writes the gate's Solana Attestation Service attestation and
+releases that milestone, once. Next steps, not here: refunds, and the payout of each
+released milestone in the supplier's currency.
 
 * Nothing commits without a person: paying is an `act` behind the approval guard
   (`payments.execute`). On `vic`, the cardholder's Basis Theory passkey verification

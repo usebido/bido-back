@@ -939,6 +939,16 @@
               }
             ]
           },
+          "milestone_release": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MilestoneReleaseApprovalView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "negotiation_email": {
             "anyOf": [
               {
@@ -4940,6 +4950,50 @@
         "title": "DismissQuestionRequest",
         "type": "object"
       },
+      "DocumentRequirementView": {
+        "description": "One kind of document a milestone asks for.",
+        "properties": {
+          "accepts": {
+            "description": "Accepted file extensions, e.g. `pdf`, `jpg`",
+            "items": {
+              "type": "string"
+            },
+            "title": "Accepts",
+            "type": "array"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "doc_type": {
+            "title": "Doc Type",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "label_zh": {
+            "description": "The label on the factory's page (zh-CN)",
+            "title": "Label Zh",
+            "type": "string"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "doc_type",
+          "label",
+          "label_zh",
+          "required",
+          "accepts",
+          "description"
+        ],
+        "title": "DocumentRequirementView",
+        "type": "object"
+      },
       "DocumentView": {
         "properties": {
           "attachment_id": {
@@ -5204,6 +5258,328 @@
           "reason"
         ],
         "title": "ExpediteAction",
+        "type": "object"
+      },
+      "FactoryAcceptedView": {
+        "properties": {
+          "accepted_at": {
+            "format": "date-time",
+            "title": "Accepted At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "accepted_at"
+        ],
+        "title": "FactoryAcceptedView",
+        "type": "object"
+      },
+      "FactoryDocumentView": {
+        "properties": {
+          "doc_type": {
+            "title": "Doc Type",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "uploaded_at": {
+            "format": "date-time",
+            "title": "Uploaded At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "doc_type",
+          "filename",
+          "size_bytes",
+          "uploaded_at"
+        ],
+        "title": "FactoryDocumentView",
+        "type": "object"
+      },
+      "FactoryLinkView": {
+        "description": "The factory's link. The token is shown only here, once: Bido keeps its hash.",
+        "properties": {
+          "expires_at": {
+            "format": "date-time",
+            "title": "Expires At",
+            "type": "string"
+          },
+          "token": {
+            "title": "Token",
+            "type": "string"
+          },
+          "url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The factory page with the token; null when not set up",
+            "title": "Url"
+          }
+        },
+        "required": [
+          "token",
+          "url",
+          "expires_at"
+        ],
+        "title": "FactoryLinkView",
+        "type": "object"
+      },
+      "FactoryMilestoneView": {
+        "properties": {
+          "amount": {
+            "description": "This milestone's share, in the order's currency",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Amount",
+            "type": "string"
+          },
+          "bps": {
+            "title": "Bps",
+            "type": "integer"
+          },
+          "index": {
+            "title": "Index",
+            "type": "integer"
+          },
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Key"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "label_zh": {
+            "title": "Label Zh",
+            "type": "string"
+          },
+          "rejection_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the buyer asked for changes (a code)",
+            "title": "Rejection Code"
+          },
+          "rejection_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the buyer asked to change",
+            "title": "Rejection Reason"
+          },
+          "released_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Released At"
+          },
+          "requirements": {
+            "items": {
+              "$ref": "#/components/schemas/FactoryRequirementView"
+            },
+            "title": "Requirements",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "locked",
+              "awaiting_documents",
+              "changes_requested",
+              "in_review",
+              "processing",
+              "released"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "submitted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submitted At"
+          }
+        },
+        "required": [
+          "index",
+          "key",
+          "label",
+          "label_zh",
+          "bps",
+          "amount",
+          "status",
+          "rejection_code",
+          "rejection_reason",
+          "requirements",
+          "submitted_at",
+          "released_at"
+        ],
+        "title": "FactoryMilestoneView",
+        "type": "object"
+      },
+      "FactoryOrderView": {
+        "description": "The factory's view of its order: what is reserved for it and what to send.",
+        "properties": {
+          "accepted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the factory confirmed the order; it uploads only after that",
+            "title": "Accepted At"
+          },
+          "buyer_name": {
+            "title": "Buyer Name",
+            "type": "string"
+          },
+          "currency": {
+            "title": "Currency",
+            "type": "string"
+          },
+          "link_expires_at": {
+            "format": "date-time",
+            "title": "Link Expires At",
+            "type": "string"
+          },
+          "milestones": {
+            "items": {
+              "$ref": "#/components/schemas/FactoryMilestoneView"
+            },
+            "title": "Milestones",
+            "type": "array"
+          },
+          "purchase_order_ref": {
+            "title": "Purchase Order Ref",
+            "type": "string"
+          },
+          "reserved": {
+            "description": "The full amount is reserved for the factory",
+            "title": "Reserved",
+            "type": "boolean"
+          },
+          "supplier_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Name"
+          },
+          "total": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Total",
+            "type": "string"
+          }
+        },
+        "required": [
+          "purchase_order_ref",
+          "buyer_name",
+          "supplier_name",
+          "currency",
+          "total",
+          "reserved",
+          "accepted_at",
+          "milestones",
+          "link_expires_at"
+        ],
+        "title": "FactoryOrderView",
+        "type": "object"
+      },
+      "FactoryRequirementView": {
+        "properties": {
+          "accepts": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Accepts",
+            "type": "array"
+          },
+          "doc_type": {
+            "title": "Doc Type",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "label_zh": {
+            "title": "Label Zh",
+            "type": "string"
+          },
+          "required": {
+            "title": "Required",
+            "type": "boolean"
+          },
+          "uploaded": {
+            "items": {
+              "$ref": "#/components/schemas/FactoryDocumentView"
+            },
+            "title": "Uploaded",
+            "type": "array"
+          }
+        },
+        "required": [
+          "doc_type",
+          "label",
+          "label_zh",
+          "required",
+          "accepts",
+          "uploaded"
+        ],
+        "title": "FactoryRequirementView",
         "type": "object"
       },
       "FieldCorrectionView": {
@@ -8488,6 +8864,100 @@
         "title": "MessageAskView",
         "type": "object"
       },
+      "MilestoneDocumentRefView": {
+        "description": "A file of the submission being approved (the approval's arguments).",
+        "properties": {
+          "doc_type": {
+            "title": "Doc Type",
+            "type": "string"
+          },
+          "document_id": {
+            "format": "uuid",
+            "title": "Document Id",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "document_id",
+          "doc_type",
+          "label",
+          "filename",
+          "size_bytes",
+          "sha256"
+        ],
+        "title": "MilestoneDocumentRefView",
+        "type": "object"
+      },
+      "MilestoneDocumentView": {
+        "properties": {
+          "content_type": {
+            "title": "Content Type",
+            "type": "string"
+          },
+          "doc_type": {
+            "title": "Doc Type",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "sha256": {
+            "title": "Sha256",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          },
+          "source": {
+            "enum": [
+              "factory",
+              "buyer"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "uploaded_at": {
+            "format": "date-time",
+            "title": "Uploaded At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "doc_type",
+          "filename",
+          "content_type",
+          "size_bytes",
+          "sha256",
+          "source",
+          "uploaded_at"
+        ],
+        "title": "MilestoneDocumentView",
+        "type": "object"
+      },
       "MilestoneInput": {
         "additionalProperties": false,
         "properties": {
@@ -8496,6 +8966,18 @@
             "minimum": 1.0,
             "title": "Bps",
             "type": "integer"
+          },
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A milestone of Bido's tooling plan (`tool_start`, `t1`, `ppap`): what the factory sends for it. It keeps the plan's name; null for a custom milestone",
+            "title": "Key"
           },
           "name": {
             "maxLength": 24,
@@ -8509,6 +8991,315 @@
           "bps"
         ],
         "title": "MilestoneInput",
+        "type": "object"
+      },
+      "MilestoneReleaseApprovalView": {
+        "description": "What an approver sees for a `release_po_milestone` approval.",
+        "properties": {
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "bps": {
+            "title": "Bps",
+            "type": "integer"
+          },
+          "charge_amount": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Charge Amount",
+            "type": "string"
+          },
+          "charge_currency": {
+            "title": "Charge Currency",
+            "type": "string"
+          },
+          "checks": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/MilestoneDocumentRefView"
+            },
+            "title": "Documents",
+            "type": "array"
+          },
+          "evidence_hash": {
+            "title": "Evidence Hash",
+            "type": "string"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "milestone_index": {
+            "title": "Milestone Index",
+            "type": "integer"
+          },
+          "milestone_key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Milestone Key"
+          },
+          "milestone_name": {
+            "title": "Milestone Name",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "payment_id": {
+            "format": "uuid",
+            "title": "Payment Id",
+            "type": "string"
+          },
+          "po_amount": {
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Po Amount",
+            "type": "string"
+          },
+          "po_currency": {
+            "title": "Po Currency",
+            "type": "string"
+          },
+          "purchase_order_id": {
+            "format": "uuid",
+            "title": "Purchase Order Id",
+            "type": "string"
+          },
+          "purchase_order_ref": {
+            "title": "Purchase Order Ref",
+            "type": "string"
+          },
+          "simulated": {
+            "description": "The card charge was simulated: no money moved",
+            "title": "Simulated",
+            "type": "boolean"
+          },
+          "source": {
+            "enum": [
+              "factory",
+              "buyer"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "submission_id": {
+            "format": "uuid",
+            "title": "Submission Id",
+            "type": "string"
+          },
+          "supplier_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Supplier Name"
+          }
+        },
+        "required": [
+          "payment_id",
+          "purchase_order_id",
+          "purchase_order_ref",
+          "supplier_name",
+          "milestone_index",
+          "milestone_key",
+          "milestone_name",
+          "label",
+          "bps",
+          "po_currency",
+          "po_amount",
+          "charge_currency",
+          "charge_amount",
+          "attempt",
+          "submission_id",
+          "source",
+          "note",
+          "evidence_hash",
+          "documents",
+          "checks",
+          "simulated"
+        ],
+        "title": "MilestoneReleaseApprovalView",
+        "type": "object"
+      },
+      "MilestoneSubmissionView": {
+        "description": "One attempt at a milestone: the documents gathered, then the person's decision.",
+        "properties": {
+          "approval_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Approval Id"
+          },
+          "attempt": {
+            "title": "Attempt",
+            "type": "integer"
+          },
+          "decided_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Decided At"
+          },
+          "documents": {
+            "items": {
+              "$ref": "#/components/schemas/MilestoneDocumentView"
+            },
+            "title": "Documents",
+            "type": "array"
+          },
+          "evidence_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "sha256 binding the files to the escrow and the gate; set on submit",
+            "title": "Evidence Hash"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Note"
+          },
+          "rejection_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why changes were asked (a code)",
+            "title": "Rejection Code"
+          },
+          "rejection_reason": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Rejection Reason"
+          },
+          "source": {
+            "enum": [
+              "factory",
+              "buyer"
+            ],
+            "title": "Source",
+            "type": "string"
+          },
+          "state": {
+            "enum": [
+              "draft",
+              "submitted",
+              "approved",
+              "released",
+              "rejected",
+              "cancelled"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "submitted_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Submitted At"
+          }
+        },
+        "required": [
+          "id",
+          "attempt",
+          "state",
+          "source",
+          "note",
+          "evidence_hash",
+          "approval_id",
+          "rejection_code",
+          "rejection_reason",
+          "submitted_at",
+          "decided_at",
+          "documents"
+        ],
+        "title": "MilestoneSubmissionView",
+        "type": "object"
+      },
+      "MilestoneSubmitted": {
+        "description": "A milestone sent for approval: a person decides at POST /v1/approvals/{id}/decision.",
+        "properties": {
+          "approval_id": {
+            "format": "uuid",
+            "title": "Approval Id",
+            "type": "string"
+          },
+          "milestone": {
+            "$ref": "#/components/schemas/PaymentMilestoneView"
+          }
+        },
+        "required": [
+          "approval_id",
+          "milestone"
+        ],
+        "title": "MilestoneSubmitted",
         "type": "object"
       },
       "NegotiationDecisionView": {
@@ -9528,7 +10319,7 @@
                 "type": "null"
               }
             ],
-            "description": "How the escrow releases the payment (1-4 milestones adding up to 10000 bps). Default: one milestone, 'Delivery', 100%",
+            "description": "How the escrow releases the payment (1-4 milestones adding up to 10000 bps), in order. Default: Bido's tooling plan, Tool start 30% (`tool_start`), T1 30% (`t1`), PPAP 40% (`ppap`). A milestone with a `key` asks the factory for that milestone's documents; a custom one (no key) for one piece of evidence",
             "title": "Milestones"
           },
           "payment_method_id": {
@@ -10148,6 +10939,18 @@
             "title": "Bps",
             "type": "integer"
           },
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Its milestone in Bido's tooling plan (`tool_start`, `t1`, `ppap`), which fixes what the factory sends for it; null for a custom milestone",
+            "title": "Key"
+          },
           "name": {
             "title": "Name",
             "type": "string"
@@ -10158,6 +10961,197 @@
           "bps"
         ],
         "title": "PaymentMilestone",
+        "type": "object"
+      },
+      "PaymentMilestoneView": {
+        "description": "One milestone of a PO payment's escrow, as the buyer sees it.",
+        "properties": {
+          "approval_id": {
+            "anyOf": [
+              {
+                "format": "uuid",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The release waiting for, or given, approval",
+            "title": "Approval Id"
+          },
+          "bps": {
+            "description": "Share of the total in basis points",
+            "title": "Bps",
+            "type": "integer"
+          },
+          "charge_amount": {
+            "description": "Its share of the card charge",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Charge Amount",
+            "type": "string"
+          },
+          "charge_currency": {
+            "title": "Charge Currency",
+            "type": "string"
+          },
+          "checks": {
+            "description": "What the approver verifies before releasing it",
+            "items": {
+              "type": "string"
+            },
+            "title": "Checks",
+            "type": "array"
+          },
+          "evidence_hash": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Evidence Hash"
+          },
+          "failure_code": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Failure Code"
+          },
+          "index": {
+            "description": "Position in the escrow, also its approval gate",
+            "title": "Index",
+            "type": "integer"
+          },
+          "key": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "`tool_start`, `t1`, `ppap`; null for a custom one",
+            "title": "Key"
+          },
+          "label": {
+            "title": "Label",
+            "type": "string"
+          },
+          "name": {
+            "description": "The name on chain",
+            "title": "Name",
+            "type": "string"
+          },
+          "po_amount": {
+            "description": "This milestone's share of the PO total",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Po Amount",
+            "type": "string"
+          },
+          "po_currency": {
+            "title": "Po Currency",
+            "type": "string"
+          },
+          "release_explorer_url": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Explorer Url"
+          },
+          "release_signature": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Release Signature"
+          },
+          "released_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Released At"
+          },
+          "requirements": {
+            "items": {
+              "$ref": "#/components/schemas/DocumentRequirementView"
+            },
+            "title": "Requirements",
+            "type": "array"
+          },
+          "status": {
+            "enum": [
+              "locked",
+              "awaiting_documents",
+              "changes_requested",
+              "in_review",
+              "releasing",
+              "released",
+              "failed"
+            ],
+            "title": "Status",
+            "type": "string"
+          },
+          "submissions": {
+            "description": "Newest first",
+            "items": {
+              "$ref": "#/components/schemas/MilestoneSubmissionView"
+            },
+            "title": "Submissions",
+            "type": "array"
+          },
+          "token_amount": {
+            "description": "Tokens the release pays, in major units",
+            "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+            "title": "Token Amount",
+            "type": "string"
+          }
+        },
+        "required": [
+          "index",
+          "key",
+          "name",
+          "label",
+          "bps",
+          "po_currency",
+          "po_amount",
+          "charge_currency",
+          "charge_amount",
+          "token_amount",
+          "status",
+          "requirements",
+          "checks",
+          "submissions",
+          "approval_id",
+          "evidence_hash",
+          "release_signature",
+          "release_explorer_url",
+          "released_at",
+          "failure_code"
+        ],
+        "title": "PaymentMilestoneView",
         "type": "object"
       },
       "PaymentPayoutView": {
@@ -10310,6 +11304,19 @@
               }
             ],
             "title": "Charged At"
+          },
+          "completed_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the escrow released its last milestone; the payment stays `funded`",
+            "title": "Completed At"
           },
           "created_at": {
             "format": "date-time",
@@ -11845,10 +12852,28 @@
             "title": "Needs Attention",
             "type": "boolean"
           },
+          "next_milestone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The milestone to release next (its name) while the escrow is funded; null before it is funded and once everything is released",
+            "title": "Next Milestone"
+          },
           "payment_id": {
             "format": "uuid",
             "title": "Payment Id",
             "type": "string"
+          },
+          "released_bps": {
+            "default": 0,
+            "description": "Share of the total the escrow released so far, in basis points (10000: all of it)",
+            "title": "Released Bps",
+            "type": "integer"
           },
           "simulated": {
             "title": "Simulated",
@@ -12885,6 +13910,40 @@
           "name"
         ],
         "title": "RenameLogoRequest",
+        "type": "object"
+      },
+      "RequestMilestoneChangesRequest": {
+        "additionalProperties": false,
+        "description": "Refuse a milestone under review and tell the factory what to change.",
+        "properties": {
+          "reason": {
+            "description": "What to change",
+            "maxLength": 2000,
+            "minLength": 3,
+            "title": "Reason",
+            "type": "string"
+          },
+          "reason_code": {
+            "default": "other",
+            "description": "Why, as a code the factory and reports understand",
+            "enum": [
+              "missing_document",
+              "wrong_part_or_revision",
+              "dimensional_nonconformance",
+              "defect",
+              "material_certificate_issue",
+              "incomplete_ppap_package",
+              "ppap_interim_only",
+              "other"
+            ],
+            "title": "Reason Code",
+            "type": "string"
+          }
+        },
+        "required": [
+          "reason"
+        ],
+        "title": "RequestMilestoneChangesRequest",
         "type": "object"
       },
       "RequiredFieldView": {
@@ -15760,6 +16819,27 @@
           }
         },
         "title": "StartScanRequest",
+        "type": "object"
+      },
+      "SubmitMilestoneRequest": {
+        "additionalProperties": false,
+        "description": "Send a milestone's gathered documents for approval.",
+        "properties": {
+          "note": {
+            "anyOf": [
+              {
+                "maxLength": 2000,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "A message for the person who approves it",
+            "title": "Note"
+          }
+        },
+        "title": "SubmitMilestoneRequest",
         "type": "object"
       },
       "SupplierChecklist": {
@@ -18677,6 +19757,12 @@
       }
     },
     "securitySchemes": {
+      "FactoryToken": {
+        "description": "The factory link's token: the part of the link after `#`",
+        "in": "header",
+        "name": "X-Factory-Token",
+        "type": "apiKey"
+      },
       "HTTPBearer": {
         "description": "Clerk session token",
         "scheme": "bearer",
@@ -21379,6 +22465,647 @@
         "summary": "Import Any Workbook",
         "tags": [
           "purchasing"
+        ]
+      }
+    },
+    "/v1/factory/order": {
+      "get": {
+        "description": "The factory's order: the amount reserved for it, each milestone's share and\nstatus, and the documents each milestone asks for with those already sent. Reading\nit changes nothing. 401: the link is not valid (ask the buyer for a new one).",
+        "operationId": "factory_order_v1_factory_order_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactoryOrderView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "FactoryToken": []
+          }
+        ],
+        "summary": "Factory Order",
+        "tags": [
+          "factory"
+        ]
+      }
+    },
+    "/v1/factory/order/accept": {
+      "post": {
+        "description": "Confirm the order and its milestones; documents are sent only after that. Doing\nit again answers the first confirmation. 401: the link is not valid.",
+        "operationId": "accept_factory_order_v1_factory_order_accept_post",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactoryAcceptedView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          }
+        },
+        "security": [
+          {
+            "FactoryToken": []
+          }
+        ],
+        "summary": "Accept Factory Order",
+        "tags": [
+          "factory"
+        ]
+      }
+    },
+    "/v1/factory/order/milestones/{index}/documents": {
+      "post": {
+        "description": "Send one file for a milestone (the raw bytes as the body). Sending the same file\nagain answers the file already there. 401: the link is not valid; 404: no such\nmilestone; 409: the order is not confirmed yet, the milestone is not open (under\nreview or released), or the file was already sent as another type; 413: too big;\n415: not a kind this document takes, or not what its name says; 422: the milestone\ndoes not ask for that document, the file is empty, or it already has 30 files.",
+        "operationId": "add_factory_document_v1_factory_order_milestones__index__documents_post",
+        "parameters": [
+          {
+            "description": "The milestone's position in the escrow: 0 is the first",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "description": "The milestone's position in the escrow: 0 is the first",
+              "maximum": 3,
+              "minimum": 0,
+              "title": "Index",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "What the file is: one of the milestone's `requirements[].doc_type`",
+            "in": "query",
+            "name": "doc_type",
+            "required": true,
+            "schema": {
+              "description": "What the file is: one of the milestone's `requirements[].doc_type`",
+              "maxLength": 48,
+              "minLength": 1,
+              "pattern": "^[a-z][a-z0-9_]{0,47}$",
+              "title": "Doc Type",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The file's name, with its extension",
+            "in": "query",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "description": "The file's name, with its extension",
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Filename",
+              "type": "string"
+            }
+          },
+          {
+            "description": "`application/octet-stream` or the file's own type; never trusted: the file's first bytes decide its kind",
+            "in": "header",
+            "name": "Content-Type",
+            "required": false,
+            "schema": {
+              "default": "application/octet-stream",
+              "description": "`application/octet-stream` or the file's own type; never trusted: the file's first bytes decide its kind",
+              "title": "Content-Type",
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactoryDocumentView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "security": [
+          {
+            "FactoryToken": []
+          }
+        ],
+        "summary": "Add Factory Document",
+        "tags": [
+          "factory"
+        ]
+      }
+    },
+    "/v1/factory/order/milestones/{index}/documents/{document_id}": {
+      "delete": {
+        "description": "Take back a file not yet sent for approval. 401: the link is not valid; 404: no\nsuch file; 409: the order is not confirmed, or the file was already sent.",
+        "operationId": "remove_factory_document_v1_factory_order_milestones__index__documents__document_id__delete",
+        "parameters": [
+          {
+            "description": "The milestone's position in the escrow: 0 is the first",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "description": "The milestone's position in the escrow: 0 is the first",
+              "maximum": 3,
+              "minimum": 0,
+              "title": "Index",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "FactoryToken": []
+          }
+        ],
+        "summary": "Remove Factory Document",
+        "tags": [
+          "factory"
+        ]
+      }
+    },
+    "/v1/factory/order/milestones/{index}/documents/{document_id}/link": {
+      "get": {
+        "description": "A 5-minute link to one of the order's files, under its name; photos and PDFs may\nbe shown `inline`. 401: the link is not valid; 404: no such file.",
+        "operationId": "factory_document_link_v1_factory_order_milestones__index__documents__document_id__link_get",
+        "parameters": [
+          {
+            "description": "The milestone's position in the escrow: 0 is the first",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "description": "The milestone's position in the escrow: 0 is the first",
+              "maximum": 3,
+              "minimum": 0,
+              "title": "Index",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "`inline` shows a PDF or an image in the browser; anything else downloads",
+            "in": "query",
+            "name": "disposition",
+            "required": false,
+            "schema": {
+              "default": "attachment",
+              "description": "`inline` shows a PDF or an image in the browser; anything else downloads",
+              "enum": [
+                "attachment",
+                "inline"
+              ],
+              "title": "Disposition",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileLinkView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "FactoryToken": []
+          }
+        ],
+        "summary": "Factory Document Link",
+        "tags": [
+          "factory"
+        ]
+      }
+    },
+    "/v1/factory/order/milestones/{index}/submit": {
+      "post": {
+        "description": "Send the milestone's files to the buyer for approval; the milestone is then\n`in_review`. 401: the link is not valid; 404: no such milestone; 409: the order is\nnot confirmed, an earlier milestone is not released yet, or this one is already\nunder review; 422: a required document is missing (the message names them); 503:\nnot available on this server yet.",
+        "operationId": "submit_factory_milestone_v1_factory_order_milestones__index__submit_post",
+        "parameters": [
+          {
+            "description": "The milestone's position in the escrow: 0 is the first",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "description": "The milestone's position in the escrow: 0 is the first",
+              "maximum": 3,
+              "minimum": 0,
+              "title": "Index",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitMilestoneRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactoryMilestoneView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "FactoryToken": []
+          }
+        ],
+        "summary": "Submit Factory Milestone",
+        "tags": [
+          "factory"
         ]
       }
     },
@@ -26780,6 +28507,1251 @@
           }
         ],
         "summary": "Confirm Card Verification",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
+    "/v1/purchase-orders/{po_id}/payment/factory-link": {
+      "delete": {
+        "description": "Stop the factory's link now: it answers 401 from then on. Nothing to stop is\nfine. 404: no such order, or no payment.",
+        "operationId": "revoke_factory_link_v1_purchase_orders__po_id__payment_factory_link_delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "po_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Po Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Revoke Factory Link",
+        "tags": [
+          "payments"
+        ]
+      },
+      "post": {
+        "description": "A link for the factory to follow the order and send each milestone's documents,\nwith no login. The token is in this answer only (Bido keeps its hash): share `url`,\nwhich carries it after `#`. Issuing a new link stops the previous one; the factory\nconfirms the order again on the new one. 404: no such order, or no payment; 409:\nthe payment is not funded yet.",
+        "operationId": "issue_factory_link_v1_purchase_orders__po_id__payment_factory_link_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "po_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Po Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FactoryLinkView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Issue Factory Link",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
+    "/v1/purchase-orders/{po_id}/payment/milestones": {
+      "get": {
+        "description": "The milestones of the order's payment, in order: each one's share of the order,\nof the card charge and of the escrow, the documents it asks for, its submissions\n(newest first) and where its release stands. A milestone is `locked` until the\npayment is funded and every earlier one is released. 404: no such order, or it has\nno payment.",
+        "operationId": "list_payment_milestones_v1_purchase_orders__po_id__payment_milestones_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "po_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Po Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/PaymentMilestoneView"
+                  },
+                  "title": "Response List Payment Milestones V1 Purchase Orders  Po Id  Payment Milestones Get",
+                  "type": "array"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "List Payment Milestones",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
+    "/v1/purchase-orders/{po_id}/payment/milestones/{index}/documents": {
+      "post": {
+        "description": "Add one file to the milestone's documents on the factory's behalf (the raw bytes\nas the body). The same file again answers the document already there. 404: no such\norder, payment or milestone; 409: the payment is not funded, the milestone is not\nopen (under review or released), or the file is already there as another type;\n413: too big; 415: not a kind this document type takes (PDF, images, xlsx, video),\nor not what its name says; 422: the milestone does not ask for that document\ntype, the file is empty, or the milestone already has 30 files.",
+        "operationId": "add_milestone_document_v1_purchase_orders__po_id__payment_milestones__index__documents_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "po_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Po Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The milestone's position in the escrow: 0 is the first",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "description": "The milestone's position in the escrow: 0 is the first",
+              "maximum": 3,
+              "minimum": 0,
+              "title": "Index",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "What the file is: one of the milestone's `requirements[].doc_type`",
+            "in": "query",
+            "name": "doc_type",
+            "required": true,
+            "schema": {
+              "description": "What the file is: one of the milestone's `requirements[].doc_type`",
+              "maxLength": 48,
+              "minLength": 1,
+              "pattern": "^[a-z][a-z0-9_]{0,47}$",
+              "title": "Doc Type",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The file's name, with its extension",
+            "in": "query",
+            "name": "filename",
+            "required": true,
+            "schema": {
+              "description": "The file's name, with its extension",
+              "maxLength": 255,
+              "minLength": 1,
+              "title": "Filename",
+              "type": "string"
+            }
+          },
+          {
+            "description": "`application/octet-stream` or the file's own type; never trusted: the file's first bytes decide its kind",
+            "in": "header",
+            "name": "Content-Type",
+            "required": false,
+            "schema": {
+              "default": "application/octet-stream",
+              "description": "`application/octet-stream` or the file's own type; never trusted: the file's first bytes decide its kind",
+              "title": "Content-Type",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "format": "binary",
+                "type": "string"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MilestoneDocumentView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "413": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Request Entity Too Large"
+          },
+          "415": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unsupported Media Type"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Add Milestone Document",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
+    "/v1/purchase-orders/{po_id}/payment/milestones/{index}/documents/{document_id}": {
+      "delete": {
+        "description": "Take a file out of the milestone's documents before they are sent. 404: no such\nfile; 409: it was already sent for approval, or the milestone is not open.",
+        "operationId": "remove_milestone_document_v1_purchase_orders__po_id__payment_milestones__index__documents__document_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "po_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Po Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The milestone's position in the escrow: 0 is the first",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "description": "The milestone's position in the escrow: 0 is the first",
+              "maximum": 3,
+              "minimum": 0,
+              "title": "Index",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Remove Milestone Document",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
+    "/v1/purchase-orders/{po_id}/payment/milestones/{index}/documents/{document_id}/link": {
+      "get": {
+        "description": "A 5-minute link to one of the milestone's files, under its name. PDFs and images\nmay be shown `inline`; anything else always downloads. 404: no such file; 503: this\nserver cannot sign file links.",
+        "operationId": "milestone_document_link_v1_purchase_orders__po_id__payment_milestones__index__documents__document_id__link_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "po_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Po Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The milestone's position in the escrow: 0 is the first",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "description": "The milestone's position in the escrow: 0 is the first",
+              "maximum": 3,
+              "minimum": 0,
+              "title": "Index",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "path",
+            "name": "document_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Document Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "`inline` shows a PDF or an image in the browser; anything else downloads",
+            "in": "query",
+            "name": "disposition",
+            "required": false,
+            "schema": {
+              "default": "attachment",
+              "description": "`inline` shows a PDF or an image in the browser; anything else downloads",
+              "enum": [
+                "attachment",
+                "inline"
+              ],
+              "title": "Disposition",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileLinkView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Milestone Document Link",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
+    "/v1/purchase-orders/{po_id}/payment/milestones/{index}/request-changes": {
+      "post": {
+        "description": "Refuse the milestone under review and tell the factory what to change: its\napproval is rejected and the milestone goes back to the factory, which sees\n`reason_code` and `reason` and sends again (its files carry over). Decided like any\napproval: by the person who asked for the payment when the company allows\nself-approval, else by an approver or owner who did not. 403: you may not decide\nit; 404: no such order, payment or milestone; 409: the milestone is not under\nreview (or was just decided).",
+        "operationId": "request_milestone_changes_v1_purchase_orders__po_id__payment_milestones__index__request_changes_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "po_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Po Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The milestone's position in the escrow: 0 is the first",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "description": "The milestone's position in the escrow: 0 is the first",
+              "maximum": 3,
+              "minimum": 0,
+              "title": "Index",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RequestMilestoneChangesRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentMilestoneView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Request Milestone Changes",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
+    "/v1/purchase-orders/{po_id}/payment/milestones/{index}/retry-release": {
+      "post": {
+        "description": "Release again a milestone whose release failed (`status` `failed`), once what\nfailed is fixed, e.g. the gate attester's key or its authorization. No new decision\nis needed: only while its approval still vouches for the same files and terms, the\npayment is funded and every earlier milestone is released. The worker asks the chain\nfirst, so a milestone released meanwhile is only recorded. 404: no such order,\npayment or milestone; 409: its release did not fail, or its approval no longer\nvouches for it (send the milestone again).",
+        "operationId": "retry_milestone_release_v1_purchase_orders__po_id__payment_milestones__index__retry_release_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "po_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Po Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The milestone's position in the escrow: 0 is the first",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "description": "The milestone's position in the escrow: 0 is the first",
+              "maximum": 3,
+              "minimum": 0,
+              "title": "Index",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PaymentMilestoneView"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Retry Milestone Release",
+        "tags": [
+          "payments"
+        ]
+      }
+    },
+    "/v1/purchase-orders/{po_id}/payment/milestones/{index}/submit": {
+      "post": {
+        "description": "Send the milestone's documents for approval on the factory's behalf: a\n`release_po_milestone` approval, requested in the name of the person who asked for\nthe payment, that a person decides at POST /v1/approvals/{approval_id}/decision.\nApproved, the worker releases the milestone's share of the escrow. 404: no such\norder, payment or milestone; 409: the payment is not funded, an earlier milestone\nis not released yet, or this one is already under review or released; 422: a\nrequired document type is missing (the message names them); 503: releases are not\nset up on this server.",
+        "operationId": "submit_milestone_v1_purchase_orders__po_id__payment_milestones__index__submit_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "po_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Po Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The milestone's position in the escrow: 0 is the first",
+            "in": "path",
+            "name": "index",
+            "required": true,
+            "schema": {
+              "description": "The milestone's position in the escrow: 0 is the first",
+              "maximum": 3,
+              "minimum": 0,
+              "title": "Index",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitMilestoneRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MilestoneSubmitted"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unprocessable Entity"
+          },
+          "503": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Service Unavailable"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Submit Milestone",
         "tags": [
           "payments"
         ]

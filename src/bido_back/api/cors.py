@@ -25,6 +25,8 @@ ALLOWED_HEADERS = [
     "Last-Event-ID",
     # The frontend may send its own request id; the api echoes it back.
     "X-Request-ID",
+    # The factory's page (no login) sends its link's token in this header.
+    "X-Factory-Token",
 ]
 # Exports name their file in Content-Disposition; the RFQ list returns its total
 # in X-Total-Count; X-Request-ID lets the frontend show which request failed.

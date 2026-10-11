@@ -14,11 +14,13 @@ from uuid import UUID
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, update
+from pydantic import JsonValue
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.context import ToolContext
+from bido_back.agents.events import args_hash
 from bido_back.approvals import ApprovalForbidden, approval_execute_envelope, decide_approval
 from bido_back.awards import lifecycle
 from bido_back.awards.schemas import CancelRequest
@@ -51,7 +53,7 @@ from bido_back.payments.proposals import (
     PAYMENT_FAILED,
     payment_proposal_ids,
 )
-from bido_back.payments.schemas import PayPurchaseOrderResult
+from bido_back.payments.schemas import MilestoneInput, PayPurchaseOrderResult
 from tests.approvals.conftest import FakeJobQueue, audit_actions, load
 from tests.awards.test_awards_db import World, approver, buyer
 from tests.awards.test_lifecycle import sent_po
@@ -264,6 +266,69 @@ async def test_a_replayed_execution_of_a_charged_payment_only_wakes_its_next_ste
     assert paying.providers.card.charge_calls == 1
     # Its step's job may have been lost with the first run: woken again.
     assert advance_jobs(paying) == [f"payment:{proposed.payment_id}:charged"]
+
+
+async def test_a_replayed_execution_of_a_completed_payment_does_nothing(paying: Paying) -> None:
+    """Its escrow released every milestone: never charged again, and no step to wake."""
+    proposed = await paying.charged()
+    async with tenant_session(paying.engine, paying.tenant) as session:
+        await session.execute(
+            update(PoPayment)
+            .where(PoPayment.id == proposed.payment_id)
+            .values(state="funded", funded_at=func.now(), completed_at=func.now())
+        )
+    paying.world.jobs.jobs.clear()
+    [tool] = payment_tools(
+        PaymentActDeps(
+            db=paying.engine, providers=paying.providers.bundle(), jobs=paying.world.jobs
+        )
+    )
+    run_id, _ = payment_proposal_ids(paying.po.id, 0)
+    context = ToolContext(
+        tenant_id=paying.tenant, user_id=paying.world.people.approver, run_id=run_id
+    )
+
+    result = await tool.invoke(context, proposed.args)
+
+    assert result == PayPurchaseOrderResult(
+        outcome="already_charged", payment_id=proposed.payment_id
+    )
+    assert paying.providers.card.charge_calls == 1
+    assert advance_jobs(paying) == []
+    assert (await paying.payment(proposed.payment_id)).state == "funded"
+
+
+async def test_a_payment_proposed_before_milestones_had_a_key_is_still_charged(
+    paying: Paying, migrator_engine: AsyncEngine
+) -> None:
+    """Approvals waiting at deploy time carry milestones without `key` (and so do their
+    rows): the executor still reproduces their hash and the act still finds its terms."""
+    proposed = await propose_payment(
+        paying.engine,
+        paying.po,
+        requested_by=paying.world.people.owner,
+        payment_method_id=paying.method_id,
+        payout_account_id=paying.account_id,
+        milestones=[MilestoneInput(name="Delivery", bps=10_000)],
+    )
+    legacy: list[JsonValue] = [{"name": "Delivery", "bps": 10_000}]
+    async with tenant_session(migrator_engine, paying.tenant) as session:
+        approval = await session.get(Approval, proposed.approval_id)
+        assert approval is not None
+        stored: dict[str, JsonValue] = {**approval.args, "milestones": legacy}
+        approval.args = stored
+        approval.args_hash = args_hash(stored)
+        await session.execute(
+            update(PoPayment).where(PoPayment.id == proposed.payment_id).values(milestones=legacy)
+        )
+
+    await paying.world.approve(proposed.approval_id)
+
+    payment = await paying.payment(proposed.payment_id)
+    assert (payment.state, payment.milestones) == ("charged", legacy)
+    assert paying.providers.card.charge_calls == 1
+    approval = await load(paying.engine, paying.tenant, proposed.approval_id)
+    assert approval.status == "executed"
 
 
 async def test_duplicate_execution_jobs_charge_once(paying: Paying) -> None:

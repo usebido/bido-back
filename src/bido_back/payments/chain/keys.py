@@ -1,12 +1,12 @@
-"""The relayer's, the operator's and the mint authority's hot keys.
+"""The relayer's, the operator's, the mint authority's and the gate attester's hot keys.
 
-`SOLANA_RELAYER_KEY`, `SOLANA_OPERATOR_KEY` and `SOLANA_MINT_AUTHORITY_KEY` are base58
-64-byte secret keys that reach the process only through `Settings` (Secrets Manager
-in AWS). A raw `Keypair` never leaves this module, because `str(Keypair)` is the
-base58 secret and pickling or `to_json()` reveal it too: callers get a `HotKey`,
-which tells its public key and signs, nothing else. A missing or malformed key is
-`PaymentsNotConfigured` naming the setting, never its value, and the parse error is
-not chained to it.
+`SOLANA_RELAYER_KEY`, `SOLANA_OPERATOR_KEY`, `SOLANA_MINT_AUTHORITY_KEY` and (optional,
+for milestone releases) `SOLANA_GATE_ATTESTER_KEY` are base58 64-byte secret keys that
+reach the process only through `Settings` (Secrets Manager in AWS). A raw `Keypair`
+never leaves this module, because `str(Keypair)` is the base58 secret and pickling or
+`to_json()` reveal it too: callers get a `HotKey`, which tells its public key and
+signs, nothing else. A missing or malformed key is `PaymentsNotConfigured` naming the
+setting, never its value, and the parse error is not chained to it.
 """
 
 from typing import NoReturn, SupportsIndex, final

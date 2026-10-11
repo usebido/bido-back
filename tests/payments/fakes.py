@@ -2,14 +2,15 @@
 
 They follow the contracts in `bido_back.payments.ports` closely enough to test
 the flow's guarantees: the fake card gateway counts real charges per payment
-(a double charge shows), the fake chain mints, creates and funds like the
-program does (the escrow exists once, it is funded once, a mint is NOT
-idempotent), and transactions can be dropped, delayed or failed to test the
-retry rules. Switches are plain attributes set by the test.
+(a double charge shows), the fake chain mints, creates, funds and releases like
+the program does (the escrow exists once, it is funded once, a mint is NOT
+idempotent, a gate's attestation exists once, a milestone is released once and
+only against its gate's attestation), and transactions can be dropped, delayed
+or failed to test the retry rules. Switches are plain attributes set by the test.
 """
 
 import hashlib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from decimal import Decimal
 from typing import Literal
@@ -19,8 +20,15 @@ from solders.keypair import Keypair
 from solders.pubkey import Pubkey
 from solders.signature import Signature
 
+from bido_back.payments.chain.escrow import milestone_amounts
 from bido_back.payments.config import PaymentProviders
-from bido_back.payments.errors import CardCredentialLost, CardNotVerified, ProviderError
+from bido_back.payments.errors import (
+    CardCredentialLost,
+    CardNotVerified,
+    PaymentRefused,
+    PaymentsNotConfigured,
+    ProviderError,
+)
 from bido_back.payments.ports import (
     VIC_RAIL,
     BankAccountDetails,
@@ -34,9 +42,12 @@ from bido_back.payments.ports import (
     ChargeOutcome,
     CustodyWallet,
     EnrolledCard,
+    EscrowMilestoneState,
     EscrowSpec,
     EscrowState,
+    GateAttestation,
     IssuedCard,
+    ReleaseSpec,
     SignedTransaction,
     TransactionStatus,
     UnsignedTransaction,
@@ -246,8 +257,9 @@ class FakeWalletProvider:
 
 # --- Chain -----------------------------------------------------------------------------------
 
-Step = Literal["mint", "create_escrow", "fund"]
+Step = Literal["mint", "create_escrow", "fund", "release"]
 Landing = Literal["confirm", "fail", "drop"]
+ZERO_HASH = "00" * 32
 
 
 @dataclass
@@ -258,6 +270,7 @@ class _Sent:
     amount: int = 0
     spec: EscrowSpec | None = None
     escrow: str | None = None
+    release: ReleaseSpec | None = None
 
 
 @dataclass
@@ -278,6 +291,15 @@ class FakePaymentChain:
     escrows: dict[str, EscrowState] = field(default_factory=dict[str, EscrowState])
     # The next `status` calls answer like an RPC node behind a finalized slot (retryable).
     node_behind: int = 0
+    # Releases: who attests every gate, where released milestones are paid, and each
+    # gate's attestation once written (by escrow address and gate).
+    attester: str = field(default_factory=lambda: address("gate-attester"))
+    payout: str = field(default_factory=lambda: address("payout"))
+    attestations: dict[tuple[str, int], GateAttestation] = field(
+        default_factory=dict[tuple[str, int], GateAttestation]
+    )
+    # False: the server has no attester key (`build_release` raises PaymentsNotConfigured).
+    can_attest: bool = True
     _pending: dict[str, _Sent] = field(default_factory=dict[str, _Sent])
 
     @property
@@ -322,6 +344,40 @@ class FakePaymentChain:
         self._pending[signature] = _Sent("fund", "confirm", owner=buyer, escrow=escrow)
         return UnsignedTransaction(f"fund:{signature}".encode(), self.height + 150)
 
+    async def build_release(self, spec: ReleaseSpec) -> SignedTransaction:
+        """Refuses like the real chain before any send: the escrow must be funded and the
+        milestone pending; `attest` needs the attester key; the crank needs the gate's
+        attestation to be the approved one (our attester, the PO hash, the gate, the
+        evidence)."""
+        escrow = self.escrows.get(spec.escrow)
+        if escrow is None or escrow.status != "funded":
+            raise PaymentRefused("the escrow is not funded")
+        if not 0 <= spec.milestone < len(escrow.milestones):
+            raise PaymentRefused("the escrow has no such milestone")
+        if escrow.milestones[spec.milestone].status != "pending":
+            raise PaymentRefused("the milestone is not pending")
+        if spec.attest and not self.can_attest:
+            raise PaymentsNotConfigured("SOLANA_GATE_ATTESTER_KEY is not set")
+        if not spec.attest:
+            attestation = self.attestations.get((spec.escrow, spec.milestone))
+            if attestation is None or attestation != GateAttestation(
+                address=attestation.address,
+                signer=self.attester,
+                po_hash=escrow.po_hash,
+                gate=spec.milestone,
+                evidence_hash=spec.evidence_hash,
+            ):
+                raise PaymentRefused("the gate's attestation is not the approved one")
+        return self._signed(
+            "release", _Sent("release", "confirm", escrow=spec.escrow, release=spec)
+        )
+
+    async def gate_attestation(self, *, escrow: str, gate: int) -> GateAttestation | None:
+        state = self.escrows.get(escrow)
+        if state is None or not 0 <= gate < len(state.milestones):
+            raise PaymentRefused("no such escrow or gate")
+        return self.attestations.get((escrow, gate))
+
     def complete_fund(
         self, unsigned: UnsignedTransaction, *, buyer: str, signed_by_buyer: bytes
     ) -> SignedTransaction:
@@ -340,6 +396,13 @@ class FakePaymentChain:
             raise error
         if transaction.signature in self.sent:
             return  # re-sending the same bytes is a no-op on chain
+        if record.step == "release" and record.release is not None:
+            # Preflight simulates the transaction: a program error is refused here, never
+            # forwarded (the real chain's codes, e.g. `InstructionError(2, Custom(0))` for an
+            # attestation that already exists).
+            refusal = self._release_refusal(record.release)
+            if refusal is not None:
+                raise ProviderError("solana", "sendTransaction", refusal)
         record.landing = self.next_landing.pop(record.step, "confirm")
         self.sent[transaction.signature] = record
         if record.landing == "drop":
@@ -358,16 +421,37 @@ class FakePaymentChain:
             assert record.spec is not None and record.escrow is not None
             if record.escrow in self.escrows:
                 return TransactionStatus("failed", "AccountAlreadyInUse")
+            spec = record.spec
+            amounts = milestone_amounts(spec.total, [m.bps for m in spec.milestones])
             self.escrows[record.escrow] = EscrowState(
                 address=record.escrow,
                 status="created",
-                chain_po_id=record.spec.chain_po_id,
-                buyer=record.spec.buyer,
+                chain_po_id=spec.chain_po_id,
+                buyer=spec.buyer,
                 mint=self.mint_address,
-                total=record.spec.total,
+                total=spec.total,
                 vault=self.vault_address(escrow=record.escrow),
+                released=0,
+                po_hash=spec.po_hash.hex(),
+                milestones=tuple(
+                    EscrowMilestoneState(
+                        index=index,
+                        name=milestone.name,
+                        bps=milestone.bps,
+                        amount=amount,
+                        gate=index,
+                        status="pending",
+                        evidence_hash=ZERO_HASH,
+                        approved_by=None,
+                    )
+                    for index, (milestone, amount) in enumerate(
+                        zip(spec.milestones, amounts, strict=True)
+                    )
+                ),
             )
             return TransactionStatus("confirmed")
+        if record.step == "release":
+            return self._release(record)
         assert record.escrow is not None and record.owner is not None
         escrow = self.escrows.get(record.escrow)
         if escrow is None:
@@ -378,16 +462,81 @@ class FakePaymentChain:
             return TransactionStatus("failed", "InsufficientFunds")
         self.balances[record.owner] -= escrow.total
         self.balances[escrow.vault] = self.balances.get(escrow.vault, 0) + escrow.total
-        self.escrows[record.escrow] = EscrowState(
-            address=escrow.address,
-            status="funded",
-            chain_po_id=escrow.chain_po_id,
-            buyer=escrow.buyer,
-            mint=escrow.mint,
-            total=escrow.total,
-            vault=escrow.vault,
+        self.escrows[record.escrow] = replace(escrow, status="funded")
+        return TransactionStatus("confirmed")
+
+    def _release_refusal(self, spec: ReleaseSpec) -> str | None:
+        """Why `[CreateAttestation(gate)?, release(milestone)]` would fail now (the real
+        chain's code), or None. Decides without changing anything."""
+        escrow = self.escrows.get(spec.escrow)
+        if escrow is None:
+            return "AccountNotInitialized"
+        attestation = self.attestations.get((spec.escrow, spec.milestone))
+        if spec.attest and attestation is not None:
+            # SAS's `CreateAttestation` on an existing PDA: System `AccountAlreadyInUse` (0).
+            return "InstructionError(2, Custom(0))"
+        if escrow.status == "created":
+            return "NotFunded"
+        if escrow.status != "funded":
+            return "EscrowClosed"
+        if not 0 <= spec.milestone < len(escrow.milestones):
+            return "InvalidMilestone"
+        if escrow.milestones[spec.milestone].status != "pending":
+            return "MilestoneAlreadyReleased"
+        if not spec.attest and attestation is None:
+            return "AttestationMissing"
+        if attestation is not None and attestation.signer != self.attester:
+            return "AttesterMismatch"
+        return None
+
+    def _release(self, record: _Sent) -> TransactionStatus:
+        """`[CreateAttestation(gate)?, release(milestone)]`, all or nothing like a transaction."""
+        spec = record.release
+        assert spec is not None
+        refusal = self._release_refusal(spec)
+        if refusal is not None:
+            return TransactionStatus("failed", refusal)
+        escrow = self.escrows[spec.escrow]
+        gate = spec.milestone
+        attestation = self.attestations.get((spec.escrow, gate))
+        if attestation is None:
+            attestation = GateAttestation(
+                address=address(f"attestation:{spec.escrow}:{gate}"),
+                signer=self.attester,
+                po_hash=escrow.po_hash,
+                gate=gate,
+                evidence_hash=spec.evidence_hash,
+            )
+        milestone = escrow.milestones[spec.milestone]
+        self.attestations[(spec.escrow, gate)] = attestation
+        released = replace(
+            milestone,
+            status="released",
+            evidence_hash=attestation.evidence_hash,
+            approved_by=attestation.signer,
+        )
+        milestones = tuple(released if m.index == spec.milestone else m for m in escrow.milestones)
+        done = all(m.status == "released" for m in milestones)
+        self.balances[escrow.vault] = self.balances.get(escrow.vault, 0) - milestone.amount
+        self.balances[self.payout] = self.balances.get(self.payout, 0) + milestone.amount
+        self.escrows[spec.escrow] = replace(
+            escrow,
+            status="completed" if done else "funded",
+            released=escrow.released + milestone.amount,
+            milestones=milestones,
         )
         return TransactionStatus("confirmed")
+
+    def write_attestation(self, escrow: str, gate: int, evidence_hash: str) -> None:
+        """An attestation that landed on its own (its release did not): the crank case."""
+        state = self.escrows[escrow]
+        self.attestations[(escrow, gate)] = GateAttestation(
+            address=address(f"attestation:{escrow}:{gate}"),
+            signer=self.attester,
+            po_hash=state.po_hash,
+            gate=gate,
+            evidence_hash=evidence_hash,
+        )
 
     async def status(self, signature: str) -> TransactionStatus:
         if self.node_behind:

@@ -10,12 +10,13 @@ from bido_back.payments.chain.hashes import (
     CHAIN_PO_ID_RE,
     PAYOUT_REF_MEMO_PREFIX,
     bank_fingerprint,
+    compute_evidence_hash,
     is_chain_po_id,
     new_chain_po_id,
     payout_ref,
     payout_ref_memo,
 )
-from tests.payments.chain.vectors import signing_vectors
+from tests.payments.chain.vectors import chain_vectors, signing_vectors
 
 CROCKFORD_BASE32 = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 FINGERPRINT = "9bbb0c751bd6aabebc30ef882366cd78ad4ee084c03e64a83ad9ed78a6a7398a"
@@ -122,3 +123,39 @@ def test_the_service_imports_the_hashes_without_solders() -> None:
         "assert not any(name.startswith('solders') for name in sys.modules), 'solders'\n"
     )
     subprocess.run([sys.executable, "-c", script], check=True)  # noqa: S603
+
+
+# ---- evidence hash: what a milestone's attestation binds ----
+
+
+def test_evidence_hash_equals_every_vector() -> None:
+    vectors = chain_vectors()["evidence_hashes"]
+    assert len(vectors) == 3
+    for case in vectors:
+        evidence = compute_evidence_hash(case["chain_po_id"], case["gate"], case["file_hashes"])
+        assert evidence == case["evidence_hash"]
+
+
+def test_evidence_hash_ignores_order_and_binds_gate_id_and_files() -> None:
+    case = chain_vectors()["evidence_hashes"][0]
+    files = case["file_hashes"]
+    evidence = compute_evidence_hash(case["chain_po_id"], case["gate"], list(reversed(files)))
+    assert evidence == case["evidence_hash"]
+    assert compute_evidence_hash(case["chain_po_id"], case["gate"] + 1, files) != evidence
+    assert compute_evidence_hash("PO-1043-7KQ2", case["gate"], files) != evidence
+    assert compute_evidence_hash(case["chain_po_id"], case["gate"], files[:-1]) != evidence
+
+
+@pytest.mark.parametrize(
+    ("chain_po_id", "gate", "file_hash"),
+    [
+        ("PO-1042-7KQ2", 256, "ab" * 32),
+        ("PO-1042-7KQ2", -1, "ab" * 32),
+        ("PO-1042-7KQ2", 0, "AB" * 32),
+        ("PO-1042-7KQ2", 0, "ab" * 31),
+        ("po-1042", 0, "ab" * 32),
+    ],
+)
+def test_evidence_hash_refuses_bad_inputs(chain_po_id: str, gate: int, file_hash: str) -> None:
+    with pytest.raises(ValueError):
+        compute_evidence_hash(chain_po_id, gate, [file_hash])

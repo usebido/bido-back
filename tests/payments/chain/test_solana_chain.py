@@ -1,13 +1,15 @@
 """`SolanaPaymentChain` against a scripted JSON-RPC node (`httpx.MockTransport`).
 
 Keys are the escrow harness's public test seeds, so the `fund` built here is the very
-instruction the program accepted in its own tests (`vectors.json`). Nothing reaches a
-network.
+instruction the program accepted in its own tests (`vectors.json`). The releases run on
+PO-1042's funded escrow (`po_escrow_funded.bin`) re-encoded on Bido's plan: milestone i
+through gate i, every gate pinned to the gate attester. Nothing reaches a network.
 """
 
 import base64
 import dataclasses
 import json
+import logging
 import struct
 import time
 from collections.abc import Callable
@@ -18,6 +20,7 @@ import httpx
 import pytest
 from solders.compute_budget import ID as COMPUTE_BUDGET_ID
 from solders.hash import Hash
+from solders.instruction import Instruction
 from solders.message import MessageV0, to_bytes_versioned
 from solders.pubkey import Pubkey
 from solders.signature import Signature
@@ -26,23 +29,37 @@ from solders.token import ID as TOKEN_PROGRAM_ID
 from solders.transaction import VersionedTransaction
 
 from bido_back.payments.chain import build_payment_chain
-from bido_back.payments.chain.borsh import BorshCoder
+from bido_back.payments.chain.borsh import BorshCoder, BorshValue, as_int, as_list, as_struct
 from bido_back.payments.chain.escrow import (
+    PO_ESCROW_ACCOUNT_LEN,
     CreatePoArgs,
     MilestoneInput,
     create_po_ix,
     decode_config,
+    decode_po_escrow,
+    release_ix,
 )
 from bido_back.payments.chain.idl import load_idl
-from bido_back.payments.chain.pdas import config_pda, token_account
+from bido_back.payments.chain.pdas import (
+    SAS_PROGRAM_ID,
+    attestation_pda,
+    config_pda,
+    gate_nonce,
+    token_account,
+)
+from bido_back.payments.chain.sas import create_attestation_ix, encode_gate_approval_data
 from bido_back.payments.chain.solana import MAINNET_GENESIS_HASH, SolanaPaymentChain
 from bido_back.payments.chain.spl import ASSOCIATED_TOKEN_PROGRAM_ID, MEMO_PROGRAM_ID
 from bido_back.payments.errors import PaymentRefused, PaymentsNotConfigured, ProviderError
 from bido_back.payments.ports import (
     EscrowMilestone,
+    EscrowMilestoneState,
+    EscrowMilestoneStatus,
     EscrowSpec,
     EscrowState,
+    GateAttestation,
     PaymentChain,
+    ReleaseSpec,
     SignedTransaction,
     TransactionStatus,
     UnsignedTransaction,
@@ -57,6 +74,8 @@ from tests.payments.chain.support import (
     PAYOUT,
     PROGRAM,
     RELAYER,
+    attestation_account,
+    credential_account,
     decoded,
     settings,
     signers,
@@ -64,6 +83,7 @@ from tests.payments.chain.support import (
 )
 from tests.payments.chain.vectors import (
     FUNDED_ESCROW_FILE,
+    JsonValue,
     chain_vectors,
     codec_vectors,
     harness_keypair,
@@ -75,6 +95,7 @@ BLOCKHASH: Final = Hash.from_string("EkSnNWid2cvwEVnVx9aBqawnmiCNiDgp3gUdkDPTKN1
 LAST_VALID: Final = 380_000_150
 CONFIG_DATA: Final = bytes.fromhex(codec_vectors()["accounts"]["config"]["data"])
 CREDENTIAL: Final = decode_config(CONFIG_DATA).sas_credential
+SCHEMA: Final = decode_config(CONFIG_DATA).sas_schema
 PO_ID: Final = "PO-1042-7KQ2"
 PAYOUT_REF: Final = "9e" * 32
 DAY: Final = 86_400
@@ -171,8 +192,12 @@ def make_chain(node: FakeNode, **overrides: object) -> PaymentChain:
     return build_payment_chain(settings(**overrides), http=node.http())
 
 
-def with_config(node: FakeNode, data: bytes = CONFIG_DATA) -> FakeNode:
+def with_config(
+    node: FakeNode, data: bytes = CONFIG_DATA, *, signers: tuple[Pubkey, ...] = (ATTESTER,)
+) -> FakeNode:
+    """The program's `Config` and its SAS credential, whose signers can attest."""
     node.accounts[str(config_pda(PROGRAM))] = (data, PROGRAM)
+    node.accounts[str(CREDENTIAL)] = (credential_account(signers), SAS_PROGRAM_ID)
     return node
 
 
@@ -265,6 +290,16 @@ def test_a_missing_setting_is_named(setting: str) -> None:
         ("SOLANA_GATE_ATTESTER", str(PAYOUT), "SOLANA_GATE_ATTESTER must differ"),
         ("SOLANA_RELAYER_KEY", "3xQ-not-a-secret-key", "SOLANA_RELAYER_KEY is not a base58"),
         (
+            "SOLANA_GATE_ATTESTER_KEY",
+            "3xQ-not-a-secret-key",
+            "SOLANA_GATE_ATTESTER_KEY is not a base58",
+        ),
+        (
+            "SOLANA_GATE_ATTESTER_KEY",
+            str(harness_keypair("not-the-attester")),
+            "SOLANA_GATE_ATTESTER_KEY is not the key of SOLANA_GATE_ATTESTER",
+        ),
+        (
             "SOLANA_RPC_URL",
             "ftp://devnet.rpc.invalid/?api-key=sk-x",
             "SOLANA_RPC_URL is not an http",
@@ -284,6 +319,13 @@ def test_a_malformed_setting_is_named_never_shown(setting: str, value: str, mess
 
 def test_a_local_rpc_url_may_use_http() -> None:
     make_chain(FakeNode(), solana_rpc_url="http://127.0.0.1:8899")
+
+
+def test_without_the_gate_attester_key_the_chain_still_works() -> None:
+    node = FakeNode()
+    chain = make_chain(node, solana_gate_attester_key=None)
+    assert isinstance(chain, SolanaPaymentChain)
+    assert node.requests == []
 
 
 # ---- addresses ----
@@ -396,15 +438,55 @@ async def test_build_create_escrow_gives_each_milestone_its_gate_and_tags_the_pa
     ]
 
 
-async def test_the_config_is_read_once() -> None:
+async def test_the_config_and_its_credential_are_read_once() -> None:
     node = with_config(FakeNode())
     chain = make_chain(node)
 
     await chain.build_create_escrow(spec())
     await chain.build_create_escrow(spec(chain_po_id="PO-13-8MR3"))
 
-    assert node.methods().count("getAccountInfo") == 1
+    reads = [params for method, params in node.requests if method == "getAccountInfo"]
+    assert [cast(list[Json], params)[0] for params in reads] == [
+        str(config_pda(PROGRAM)),
+        str(CREDENTIAL),
+    ]
     assert node.methods().count("getGenesisHash") == 1
+
+
+@pytest.mark.parametrize(
+    ("credential", "owner", "reason"),
+    [
+        (
+            credential_account([harness_keypair("smoke-gate0").pubkey()]),
+            SAS_PROGRAM_ID,
+            "SOLANA_GATE_ATTESTER is not an authorized signer of the escrow's SAS credential",
+        ),
+        (credential_account([]), SAS_PROGRAM_ID, "not an authorized signer"),
+        (None, SAS_PROGRAM_ID, "is not a SAS credential"),
+        (credential_account([ATTESTER]), PROGRAM, "is not a SAS credential"),
+        (credential_account([ATTESTER])[:-1], SAS_PROGRAM_ID, "is not a SAS credential"),
+    ],
+    ids=["other signers", "no signer", "missing", "not SAS's", "malformed"],
+)
+async def test_an_escrow_needs_an_attester_the_credential_authorizes(
+    credential: bytes | None, owner: Pubkey, reason: str
+) -> None:
+    """The devnet build of `create_po` skips this check: such an escrow could be funded,
+    then never released."""
+    node = with_config(FakeNode())
+    if credential is None:
+        del node.accounts[str(CREDENTIAL)]
+    else:
+        node.accounts[str(CREDENTIAL)] = (credential, owner)
+    chain = make_chain(node)
+
+    with pytest.raises(PaymentsNotConfigured, match=reason):
+        await chain.build_create_escrow(spec())
+    assert "getLatestBlockhash" not in node.methods()
+
+    # Not remembered: once the issuer adds the attester, the next escrow is built.
+    node.accounts[str(CREDENTIAL)] = (credential_account([PAYOUT, ATTESTER]), SAS_PROGRAM_ID)
+    await chain.build_create_escrow(spec())
 
 
 @pytest.mark.parametrize(
@@ -731,12 +813,34 @@ async def test_status_refuses_a_string_that_is_not_a_signature() -> None:
 # ---- escrow ----
 
 
+def milestone_states(fields: dict[str, JsonValue]) -> tuple[EscrowMilestoneState, ...]:
+    """The milestones of an escrow vector as `escrow()` reports them."""
+    states: list[EscrowMilestoneState] = []
+    for index, value in enumerate(cast(list[dict[str, JsonValue]], fields["milestones"])):
+        approved_by = cast(str, value["approved_by"])
+        states.append(
+            EscrowMilestoneState(
+                index=index,
+                name=cast(str, value["name"]),
+                bps=cast(int, value["bps"]),
+                amount=cast(int, value["amount"]),
+                gate=cast(int, value["gate"]),
+                status=cast(EscrowMilestoneStatus, cast(str, value["status"]).lower()),
+                evidence_hash=cast(str, value["evidence_hash"]),
+                approved_by=None if approved_by == str(Pubkey.default()) else approved_by,
+            )
+        )
+    return tuple(states)
+
+
 async def test_escrow_reads_the_account_into_our_state() -> None:
     address = chain_vectors()["escrow"]
     node = FakeNode(accounts={address: (FUNDED_ESCROW_FILE.read_bytes(), PROGRAM)})
 
     state = await make_chain(node).escrow(address)
 
+    fields = codec_vectors()["accounts"]["po_escrow"]["Funded"]["fields"]
+    assert state is not None
     assert state == EscrowState(
         address=address,
         status="funded",
@@ -745,11 +849,44 @@ async def test_escrow_reads_the_account_into_our_state() -> None:
         mint=str(MINT),
         total=1_200_000_000_000,
         vault=chain_vectors()["vault"],
+        released=0,
+        po_hash="50" * 32,
+        milestones=milestone_states(fields),
     )
+    assert [(m.name, m.gate, m.status, m.approved_by) for m in state.milestones] == [
+        ("Tool start", 0, "pending", None),
+        ("T1", 1, "pending", None),
+        ("PPAP", 1, "pending", None),
+    ]
+    assert {m.evidence_hash for m in state.milestones} == {"00" * 32}
     assert node.params("getAccountInfo") == [
         address,
         {"encoding": "base64", "commitment": "confirmed"},
     ]
+
+
+@pytest.mark.parametrize(
+    ("status", "released", "milestones"),
+    [("Completed", 1_200_000_000_000, "rrr"), ("Refunded", 360_000_000_000, "rcc")],
+)
+async def test_escrow_reports_released_and_cancelled_milestones(
+    status: str, released: int, milestones: str
+) -> None:
+    address = chain_vectors()["escrow"]
+    account = codec_vectors()["accounts"]["po_escrow"][status]
+    node = FakeNode(accounts={address: (bytes.fromhex(account["data"]), PROGRAM)})
+
+    state = await make_chain(node).escrow(address)
+
+    assert state is not None
+    assert (state.status, state.released) == (status.lower(), released)
+    assert state.milestones == milestone_states(account["fields"])
+    assert "".join(m.status[0] for m in state.milestones) == milestones
+    first = state.milestones[0]
+    assert (first.approved_by, first.evidence_hash) == (
+        str(BUYER.pubkey()),
+        chain_vectors()["gates"][0]["evidence_hash"],
+    )
 
 
 async def test_no_escrow_is_none() -> None:
@@ -758,3 +895,486 @@ async def test_no_escrow_is_none() -> None:
     # Lamports someone sent to the address make a System account, not an escrow.
     system_owned = FakeNode(accounts={address: (b"", SYSTEM_PROGRAM_ID)})
     assert await make_chain(system_owned).escrow(address) is None
+
+
+# ---- releases: PO-1042's escrow on Bido's plan ----
+
+ESCROW: Final = Pubkey.from_string(chain_vectors()["escrow"])
+PO_HASH: Final = b"\x50" * 32
+# The evidence a person approved for each milestone: the vectors' for gates 0 and 1.
+EVIDENCE: Final = (
+    chain_vectors()["gates"][0]["evidence_hash"],
+    chain_vectors()["gates"][1]["evidence_hash"],
+    "e2" * 32,
+)
+SOMEONE: Final = harness_keypair("someone").pubkey()
+
+
+def escrow_account(
+    *,
+    status: str = "Funded",
+    attesters: tuple[Pubkey, ...] = (ATTESTER, ATTESTER, ATTESTER),
+    gates: tuple[int, ...] = (0, 1, 2),
+    released: tuple[int, ...] = (),
+) -> bytes:
+    """PO-1042's escrow with milestone i through gate `gates[i]` and gate g pinned to
+    `attesters[g]`; each `released` milestone carries its approved evidence."""
+    coder = BorshCoder(load_idl())
+    fields = coder.decode_account("PoEscrow", FUNDED_ESCROW_FILE.read_bytes())
+    pinned: list[BorshValue] = [
+        {
+            "attester": attester,
+            "attestation": attestation_pda(CREDENTIAL, SCHEMA, gate_nonce(ESCROW, gate)),
+        }
+        for gate, attester in enumerate(attesters)
+    ]
+    milestones: list[BorshValue] = []
+    total_released = 0
+    for index, value in enumerate(as_list(fields["milestones"])):
+        milestone: dict[str, BorshValue] = {**as_struct(value), "gate": gates[index]}
+        if index in released:
+            milestone |= {
+                "status": "Released",
+                "released_slot": 1_000,
+                "approved_by": attesters[gates[index]],
+                "evidence_hash": bytes.fromhex(EVIDENCE[index]),
+            }
+            total_released += as_int(milestone["amount"])
+        milestones.append(milestone)
+    changes: dict[str, BorshValue] = {
+        "status": status,
+        "gates": pinned,
+        "milestones": milestones,
+        "released": total_released,
+    }
+    data = coder.encode_account("PoEscrow", fields | changes)
+    return data + bytes(PO_ESCROW_ACCOUNT_LEN - len(data))
+
+
+def release_node(
+    escrow: bytes | None = None, *, signers: tuple[Pubkey, ...] = (ATTESTER,)
+) -> FakeNode:
+    """A node holding the escrow and its SAS credential (whose signers may attest)."""
+    node = FakeNode()
+    node.accounts[str(ESCROW)] = (escrow_account() if escrow is None else escrow, PROGRAM)
+    node.accounts[str(CREDENTIAL)] = (credential_account(signers), SAS_PROGRAM_ID)
+    return node
+
+
+def gate_address(gate: int) -> Pubkey:
+    return attestation_pda(CREDENTIAL, SCHEMA, gate_nonce(ESCROW, gate))
+
+
+def attested(
+    node: FakeNode,
+    gate: int,
+    *,
+    evidence: str | None = None,
+    signer: Pubkey = ATTESTER,
+    po_hash: bytes = PO_HASH,
+    expiry: int = 0,
+) -> str:
+    """Writes gate `gate`'s attestation (the approved one unless told otherwise)."""
+    data = attestation_account(
+        nonce=gate_nonce(ESCROW, gate),
+        credential=CREDENTIAL,
+        schema=SCHEMA,
+        po_hash=po_hash,
+        gate=gate,
+        evidence_hash=bytes.fromhex(EVIDENCE[gate] if evidence is None else evidence),
+        signer=signer,
+        expiry=expiry,
+    )
+    node.accounts[str(gate_address(gate))] = (data, SAS_PROGRAM_ID)
+    return str(gate_address(gate))
+
+
+def account_reads(node: FakeNode) -> list[Json]:
+    return [
+        cast(list[Json], params)[0]
+        for method, params in node.requests
+        if method == "getAccountInfo"
+    ]
+
+
+def compiled(ix: Instruction) -> tuple[Pubkey, list[Pubkey], bytes]:
+    return ix.program_id, [meta.pubkey for meta in ix.accounts], bytes(ix.data)
+
+
+def expected_attestation(gate: int) -> Instruction:
+    return create_attestation_ix(
+        payer=RELAYER.pubkey(),
+        signer=ATTESTER,
+        credential=CREDENTIAL,
+        schema=SCHEMA,
+        nonce=gate_nonce(ESCROW, gate),
+        data=encode_gate_approval_data(PO_HASH, gate, bytes.fromhex(EVIDENCE[gate])),
+    )
+
+
+def expected_release(milestone: int) -> Instruction:
+    state = decode_po_escrow(escrow_account())
+    return release_ix(
+        program_id=PROGRAM,
+        escrow=ESCROW,
+        vault=state.vault,
+        payout_token=state.payout_token,
+        mint=state.mint,
+        attestation=gate_address(milestone),
+        milestone=milestone,
+    )
+
+
+def test_the_release_fixture_is_po_1042s_escrow_on_bidos_plan() -> None:
+    state = decode_po_escrow(escrow_account())
+    assert (state.credential, state.schema, state.po_hash) == (CREDENTIAL, SCHEMA, PO_HASH)
+    assert [(m.name, m.gate) for m in state.milestones] == [
+        ("Tool start", 0),
+        ("T1", 1),
+        ("PPAP", 2),
+    ]
+    assert [gate.attester for gate in state.gates] == [ATTESTER] * 3
+    assert str(state.gates[1].attestation) == chain_vectors()["gates"][1]["attestation"]
+
+
+# ---- gate attestations ----
+
+
+async def test_a_gate_without_an_attestation_has_none() -> None:
+    node = release_node()
+
+    assert await make_chain(node).gate_attestation(escrow=str(ESCROW), gate=0) is None
+    assert account_reads(node) == [str(ESCROW), str(gate_address(0))]
+
+    # Lamports someone sent to the address are not an attestation: SAS still writes one.
+    node.accounts[str(gate_address(0))] = (b"", SYSTEM_PROGRAM_ID)
+    assert await make_chain(node).gate_attestation(escrow=str(ESCROW), gate=0) is None
+
+
+async def test_a_gate_attestation_is_read_as_written() -> None:
+    node = release_node()
+    address = attested(node, 1)
+
+    found = await make_chain(node).gate_attestation(escrow=str(ESCROW), gate=1)
+
+    assert found == GateAttestation(
+        address=address,
+        signer=str(ATTESTER),
+        po_hash="50" * 32,
+        gate=1,
+        evidence_hash=EVIDENCE[1],
+    )
+    assert node.params("getAccountInfo") == [
+        str(ESCROW),
+        {"encoding": "base64", "commitment": "confirmed"},
+    ]
+
+
+async def test_another_signers_attestation_is_reported_as_found() -> None:
+    """Whether it is ours is the caller's decision: signer, PO hash, gate and evidence."""
+    node = release_node()
+    attested(node, 2, evidence="ff" * 32, signer=SOMEONE)
+
+    found = await make_chain(node).gate_attestation(escrow=str(ESCROW), gate=2)
+
+    assert found is not None
+    assert (found.signer, found.gate, found.evidence_hash) == (str(SOMEONE), 2, "ff" * 32)
+
+
+def _gate_1_attestation(**changes: Pubkey) -> bytes:
+    return attestation_account(
+        nonce=changes.get("nonce", gate_nonce(ESCROW, 1)),
+        credential=changes.get("credential", CREDENTIAL),
+        schema=changes.get("schema", SCHEMA),
+        po_hash=PO_HASH,
+        gate=1,
+        evidence_hash=bytes.fromhex(EVIDENCE[1]),
+        signer=ATTESTER,
+    )
+
+
+NOT_ATTESTATIONS: Final[dict[str, tuple[bytes, Pubkey]]] = {
+    "malformed": (_gate_1_attestation()[:-1], SAS_PROGRAM_ID),
+    "tokenized": (_gate_1_attestation()[:-1] + b"\x01", SAS_PROGRAM_ID),
+    "another credential": (_gate_1_attestation(credential=SOMEONE), SAS_PROGRAM_ID),
+    "another schema": (_gate_1_attestation(schema=SOMEONE), SAS_PROGRAM_ID),
+    "another nonce": (_gate_1_attestation(nonce=gate_nonce(ESCROW, 0)), SAS_PROGRAM_ID),
+    "not SAS's": (_gate_1_attestation(), PROGRAM),
+    "System's with data": (_gate_1_attestation(), SYSTEM_PROGRAM_ID),
+}
+
+
+@pytest.mark.parametrize(("data", "owner"), NOT_ATTESTATIONS.values(), ids=NOT_ATTESTATIONS.keys())
+async def test_an_account_at_the_gate_that_is_not_an_attestation_is_an_error(
+    data: bytes, owner: Pubkey
+) -> None:
+    node = release_node()
+    node.accounts[str(gate_address(1))] = (data, owner)
+
+    with pytest.raises(ProviderError) as caught:
+        await make_chain(node).gate_attestation(escrow=str(ESCROW), gate=1)
+
+    error = caught.value
+    assert (error.provider, error.operation, error.code, error.retryable) == (
+        "solana",
+        "getAccountInfo",
+        "attestation_invalid",
+        False,
+    )
+
+
+@pytest.mark.parametrize("gate", [-1, 3])
+async def test_a_gate_the_escrow_does_not_have_is_refused(gate: int) -> None:
+    with pytest.raises(PaymentRefused, match="no gate"):
+        await make_chain(release_node()).gate_attestation(escrow=str(ESCROW), gate=gate)
+
+
+async def test_an_attestation_needs_an_escrow_of_the_program() -> None:
+    node = with_config(FakeNode())
+    chain = make_chain(node)
+
+    with pytest.raises(PaymentRefused, match="no escrow"):
+        await chain.gate_attestation(escrow=str(ESCROW), gate=0)
+    # Another account of the program (its Config) is not an escrow either.
+    with pytest.raises(PaymentRefused, match="no escrow"):
+        await chain.gate_attestation(escrow=str(config_pda(PROGRAM)), gate=0)
+
+
+# ---- building a release ----
+
+
+async def test_build_release_attests_the_gate_and_releases_its_milestone() -> None:
+    node = release_node()
+
+    signed = await make_chain(node).build_release(
+        ReleaseSpec(str(ESCROW), 1, EVIDENCE[1], attest=True)
+    )
+
+    assert_sent_shape(signed)
+    _, message = decoded(signed.wire)
+    assert signers(message) == [RELAYER.pubkey(), ATTESTER]
+    # The relayer pays the fee and the attestation's rent; the attester only signs.
+    assert message.header.num_readonly_signed_accounts == 1
+    assert compute_budget(message) == (60_000, 1_000)
+    assert instructions(message) == [
+        compiled(expected_attestation(1)),
+        compiled(expected_release(1)),
+    ]
+    # Gate 1's attestation of PO-1042 with the vector's evidence: the vector's very bytes.
+    assert (
+        instructions(message)[0][2].hex() == chain_vectors()["gates"][1]["create_attestation_data"]
+    )
+    assert account_reads(node) == [str(ESCROW), str(CREDENTIAL)]
+    assert node.methods()[-1] == "getLatestBlockhash"
+
+
+async def test_build_release_cranks_against_the_approved_attestation() -> None:
+    node = release_node()
+    attested(node, 2)
+
+    # The relayer alone signs a crank: the attester's key is not needed.
+    signed = await make_chain(node, solana_gate_attester_key=None).build_release(
+        ReleaseSpec(str(ESCROW), 2, EVIDENCE[2], attest=False)
+    )
+
+    assert_sent_shape(signed)
+    _, message = decoded(signed.wire)
+    assert signers(message) == [RELAYER.pubkey()]
+    assert compute_budget(message) == (40_000, 1_000)
+    assert instructions(message) == [compiled(expected_release(2))]
+    assert account_reads(node) == [str(ESCROW), str(gate_address(2))]
+
+
+async def test_a_release_logs_its_kind_and_signature_only(caplog: pytest.LogCaptureFixture) -> None:
+    caplog.set_level(logging.INFO, logger="bido_back.payments.chain.solana")
+    node = release_node()
+    attested(node, 2)
+    chain = make_chain(node)
+
+    attest = await chain.build_release(ReleaseSpec(str(ESCROW), 1, EVIDENCE[1], attest=True))
+    crank = await chain.build_release(ReleaseSpec(str(ESCROW), 2, EVIDENCE[2], attest=False))
+
+    assert [record.getMessage() for record in caplog.records] == [
+        f"solana transaction signed kind=release signature={attest.signature}",
+        f"solana transaction signed kind=release_crank signature={crank.signature}",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("escrow", "milestone", "reason"),
+    [
+        (escrow_account(status="Created"), 0, "the escrow is created, not funded"),
+        (escrow_account(status="Completed"), 0, "the escrow is completed, not funded"),
+        (escrow_account(status="Refunded"), 0, "the escrow is refunded, not funded"),
+        (escrow_account(released=(0,)), 0, "milestone 0 is released, not pending"),
+        (escrow_account(), 3, "no milestone 3"),
+        (escrow_account(), -1, "no milestone -1"),
+        # The fixture's old plan, T1 and PPAP through one gate: PPAP would be released
+        # against T1's evidence.
+        (escrow_account(attesters=(ATTESTER, ATTESTER), gates=(0, 1, 1)), 2, "own gate"),
+    ],
+    ids=["created", "completed", "refunded", "released", "past the end", "negative", "shared gate"],
+)
+async def test_build_release_refuses_what_must_not_be_paid(
+    escrow: bytes, milestone: int, reason: str
+) -> None:
+    node = release_node(escrow)
+    chain = make_chain(node)
+
+    for attest in (True, False):
+        with pytest.raises(PaymentRefused, match=reason):
+            await chain.build_release(ReleaseSpec(str(ESCROW), milestone, "ab" * 32, attest=attest))
+    assert "getLatestBlockhash" not in node.methods()
+
+
+@pytest.mark.parametrize("evidence", ["AB" * 32, "ab" * 31, "ab" * 33, "", "zz" * 32])
+async def test_build_release_needs_an_evidence_hash_of_64_lowercase_hex(evidence: str) -> None:
+    node = release_node()
+    with pytest.raises(PaymentRefused, match="64 lowercase hex"):
+        await make_chain(node).build_release(ReleaseSpec(str(ESCROW), 0, evidence, attest=True))
+    assert node.requests == []
+
+
+async def test_build_release_needs_an_escrow_of_the_program() -> None:
+    node = FakeNode()
+    chain = make_chain(node)
+
+    with pytest.raises(PaymentRefused, match="no escrow"):
+        await chain.build_release(ReleaseSpec(str(ESCROW), 0, EVIDENCE[0], attest=True))
+    node.accounts[str(ESCROW)] = (b"", SYSTEM_PROGRAM_ID)  # only lamports
+    with pytest.raises(PaymentRefused, match="no escrow"):
+        await chain.build_release(ReleaseSpec(str(ESCROW), 0, EVIDENCE[0], attest=True))
+    with pytest.raises(PaymentRefused, match="not a Solana address"):
+        await chain.build_release(ReleaseSpec("not-an-address", 0, EVIDENCE[0], attest=True))
+
+
+@pytest.mark.parametrize(
+    ("attesters", "authorized", "overrides", "reason"),
+    [
+        (
+            (ATTESTER,) * 3,
+            (ATTESTER,),
+            {"solana_gate_attester_key": None},
+            "SOLANA_GATE_ATTESTER_KEY is not set",
+        ),
+        (
+            (ATTESTER, SOMEONE, ATTESTER),
+            (ATTESTER,),
+            {},
+            "gate 1 of the escrow is pinned to an attester other than SOLANA_GATE_ATTESTER_KEY",
+        ),
+        (
+            (ATTESTER,) * 3,
+            (SOMEONE,),
+            {},
+            "SOLANA_GATE_ATTESTER is not an authorized signer of the escrow's SAS credential",
+        ),
+    ],
+    ids=["no key", "another attester", "not a signer"],
+)
+async def test_an_attestation_needs_our_attester_and_its_key(
+    attesters: tuple[Pubkey, ...],
+    authorized: tuple[Pubkey, ...],
+    overrides: dict[str, object],
+    reason: str,
+) -> None:
+    node = release_node(escrow_account(attesters=attesters), signers=authorized)
+    with pytest.raises(PaymentsNotConfigured, match=reason):
+        await make_chain(node, **overrides).build_release(
+            ReleaseSpec(str(ESCROW), 1, EVIDENCE[1], attest=True)
+        )
+    assert "getLatestBlockhash" not in node.methods()
+
+
+async def test_a_crank_needs_an_attestation() -> None:
+    node = release_node()
+    with pytest.raises(PaymentRefused, match="gate 2 has no attestation"):
+        await make_chain(node).build_release(ReleaseSpec(str(ESCROW), 2, EVIDENCE[2], attest=False))
+
+
+@pytest.mark.parametrize(
+    ("evidence", "signer", "po_hash", "expiry"),
+    [
+        ("ff" * 32, ATTESTER, PO_HASH, 0),
+        (EVIDENCE[2], SOMEONE, PO_HASH, 0),
+        (EVIDENCE[2], ATTESTER, b"\x51" * 32, 0),
+        (EVIDENCE[2], ATTESTER, PO_HASH, 1_900_000_000),
+    ],
+    ids=["other evidence", "another signer", "another PO document", "an expiry"],
+)
+async def test_a_crank_pays_only_against_the_approved_attestation(
+    evidence: str, signer: Pubkey, po_hash: bytes, expiry: int
+) -> None:
+    node = release_node()
+    attested(node, 2, evidence=evidence, signer=signer, po_hash=po_hash, expiry=expiry)
+
+    with pytest.raises(PaymentRefused, match="the attestation of gate 2 is not the approved one"):
+        await make_chain(node).build_release(ReleaseSpec(str(ESCROW), 2, EVIDENCE[2], attest=False))
+    assert "getLatestBlockhash" not in node.methods()
+
+
+async def test_a_crank_refuses_an_attestation_of_another_gate() -> None:
+    node = release_node()
+    node.accounts[str(gate_address(2))] = (
+        attestation_account(
+            nonce=gate_nonce(ESCROW, 2),
+            credential=CREDENTIAL,
+            schema=SCHEMA,
+            po_hash=PO_HASH,
+            gate=1,
+            evidence_hash=bytes.fromhex(EVIDENCE[2]),
+            signer=ATTESTER,
+        ),
+        SAS_PROGRAM_ID,
+    )
+    with pytest.raises(PaymentRefused, match="not the approved one"):
+        await make_chain(node).build_release(ReleaseSpec(str(ESCROW), 2, EVIDENCE[2], attest=False))
+
+
+# ---- what a failed release is called ----
+
+
+@pytest.mark.parametrize(
+    ("attest", "err", "code"),
+    [
+        # In `[CU, CU, CreateAttestation, release]` the escrow's errors are at index 3.
+        (True, {"InstructionError": [3, {"Custom": 6024}]}, "MilestoneAlreadyReleased"),
+        (True, {"InstructionError": [3, {"Custom": 6020}]}, "NotFunded"),
+        (True, {"InstructionError": [3, {"Custom": 6033}]}, "AttesterMismatch"),
+        # At index 2 the code is SAS's or System's: never one of the escrow's names.
+        (True, {"InstructionError": [2, {"Custom": 0}]}, "InstructionError(2, Custom(0))"),
+        (True, {"InstructionError": [2, {"Custom": 5}]}, "InstructionError(2, Custom(5))"),
+        (True, {"InstructionError": [2, {"Custom": 6026}]}, "InstructionError(2, Custom(6026))"),
+        # In the crank `[CU, CU, release]` they are at index 2.
+        (False, {"InstructionError": [2, {"Custom": 6026}]}, "AttestationMissing"),
+        (False, {"InstructionError": [2, {"Custom": 6024}]}, "MilestoneAlreadyReleased"),
+    ],
+)
+async def test_a_refused_release_is_named_by_the_failing_program(
+    attest: bool, err: Json, code: str
+) -> None:
+    node = release_node()
+    attested(node, 1)
+    chain = make_chain(node)
+    signed = await chain.build_release(ReleaseSpec(str(ESCROW), 1, EVIDENCE[1], attest=attest))
+    node.send_error = err
+
+    with pytest.raises(ProviderError) as caught:
+        await chain.send(signed)
+
+    assert (caught.value.code, caught.value.retryable) == (code, False)
+
+
+@pytest.mark.parametrize(
+    ("err", "code"),
+    [
+        ({"InstructionError": [3, {"Custom": 6024}]}, "MilestoneAlreadyReleased"),
+        ({"InstructionError": [2, {"Custom": 6026}]}, "AttestationMissing"),
+        ({"InstructionError": [2, {"Custom": 0}]}, "InstructionError(2, Custom(0))"),
+        ({"InstructionError": [2, {"Custom": 5}]}, "InstructionError(2, Custom(5))"),
+    ],
+)
+async def test_a_landed_release_failure_is_named(err: Json, code: str) -> None:
+    node = FakeNode(statuses=[status_json("confirmed", err)])
+    signature = str(Signature.from_bytes(bytes(range(64))))
+    assert await make_chain(node).status(signature) == TransactionStatus("failed", code)

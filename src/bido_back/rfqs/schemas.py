@@ -17,6 +17,7 @@ from bido_back.awards.views import AwardApprovalView, ThreadEmailApprovalView
 from bido_back.branding.schemas import LogoPlacement
 from bido_back.fx import REFERENCE_CURRENCIES
 from bido_back.outbound.domains import RecipientCheck
+from bido_back.payments.milestones.views import MilestoneReleaseApprovalView
 from bido_back.payments.views import PaymentApprovalView
 
 # Deliberately strict and single-line: these end up in email headers.
@@ -494,6 +495,9 @@ class ApprovalQueueItem(BaseModel):
     # Set for `pay_purchase_order`: the order, the amount charged to which card, the
     # supplier's payout account and the escrow's milestones.
     payment: PaymentApprovalView | None = None
+    # Set for `release_po_milestone`: the escrow milestone to release, its share, the
+    # documents sent for it and the checks to make before approving.
+    milestone_release: MilestoneReleaseApprovalView | None = None
 
 
 ActivityKind = Literal["agent", "email", "user", "system"]

@@ -35,12 +35,8 @@ from bido_back.db.models import (
     SupplierPayoutAccount,
     TenantWallet,
 )
-from bido_back.payments.proposals import (
-    DEFAULT_MILESTONE_NAME,
-    PAY_PURCHASE_ORDER,
-    payment_proposal_ids,
-)
-from bido_back.payments.schemas import MilestoneInput, PayPurchaseOrderArgs
+from bido_back.payments.proposals import PAY_PURCHASE_ORDER, payment_proposal_ids
+from bido_back.payments.schemas import MilestoneInput, PayPurchaseOrderArgs, tooling_plan
 from tests.approvals.conftest import People
 from tests.awards.conftest import (
     app_engine,
@@ -165,7 +161,8 @@ async def propose_payment(
     attempt: int = 0,
     card_rail: Literal["spt", "vic"] = "spt",
 ) -> ProposedPayment:
-    """A pending `pay_purchase_order` approval and its `po_payments` row (as the service does)."""
+    """A pending `pay_purchase_order` approval and its `po_payments` row (as the service does:
+    the tooling plan unless `milestones` are given)."""
     tenant_id = po.tenant_id
     async with tenant_session(engine, tenant_id) as session:
         fresh = await session.get(IssuedPurchaseOrder, po.id)
@@ -191,7 +188,7 @@ async def propose_payment(
     rate = Decimal(1) if currency == "USD" else USD_PER_EUR
     charge = (total * rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
     payment_id = uuid4()
-    chosen = milestones or [MilestoneInput(name=DEFAULT_MILESTONE_NAME, bps=10_000)]
+    chosen = milestones or tooling_plan()
     args = PayPurchaseOrderArgs(
         payment_id=payment_id,
         purchase_order_id=po.id,

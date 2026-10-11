@@ -288,6 +288,21 @@ class EscrowSpec:
 
 
 EscrowStatus = Literal["created", "funded", "completed", "refunded"]
+EscrowMilestoneStatus = Literal["pending", "released", "cancelled"]
+
+
+@dataclass(frozen=True, slots=True)
+class EscrowMilestoneState:
+    """One milestone as the escrow holds it: fixed at `create_po`, then released once."""
+
+    index: int
+    name: str
+    bps: int
+    amount: int  # base units
+    gate: int  # the gate whose attestation releases it (Bido: gate = index)
+    status: EscrowMilestoneStatus
+    evidence_hash: str  # 64 lowercase hex, from the attestation; zeros until released
+    approved_by: str | None  # the attestation's signer; None until released
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,6 +314,38 @@ class EscrowState:
     mint: str
     total: int
     vault: str
+    # Base units released so far, the PO document's hash (64 lowercase hex) and the
+    # milestones. The defaults only keep older callers valid: the chain always sets them.
+    released: int = 0
+    po_hash: str = ""
+    milestones: tuple[EscrowMilestoneState, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class GateAttestation:
+    """The SAS attestation of one gate of an escrow (one per gate: its address is fixed)."""
+
+    address: str
+    signer: str
+    po_hash: str  # 64 lowercase hex
+    gate: int
+    evidence_hash: str  # 64 lowercase hex
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseSpec:
+    """Release one milestone of a funded escrow to its fixed payout.
+
+    `attest`: the transaction first writes the gate's attestation (`CreateAttestation`,
+    signed by the gate attester, carrying `evidence_hash` and the escrow's PO hash), then
+    `release(milestone)`. False: the attestation already exists and is ours (an earlier
+    transaction wrote it): `release(milestone)` only.
+    """
+
+    escrow: str
+    milestone: int
+    evidence_hash: str  # 64 lowercase hex
+    attest: bool
 
 
 class PaymentChain(Protocol):
@@ -353,3 +400,18 @@ class PaymentChain(Protocol):
         ...
 
     async def escrow(self, address: str) -> EscrowState | None: ...
+
+    async def gate_attestation(self, *, escrow: str, gate: int) -> GateAttestation | None:
+        """The attestation at the gate's fixed address (read at `confirmed`); None while
+        none exists. Raises `ProviderError` when the account there is not one of ours."""
+        ...
+
+    async def build_release(self, spec: ReleaseSpec) -> SignedTransaction:
+        """`[CU, CU, (CreateAttestation(gate),) release(milestone)]`, signed by the relayer
+        (fee payer and the attestation's rent) and, with `attest`, the gate attester.
+
+        Reads the escrow first: `PaymentRefused` unless it is funded and the milestone is
+        pending; `PaymentsNotConfigured` without the attester's key or when the gate is
+        pinned to another attester.
+        """
+        ...

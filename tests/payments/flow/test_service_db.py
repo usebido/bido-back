@@ -14,6 +14,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
+from pydantic import ValidationError
 from sqlalchemy import delete, func, inspect, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -784,7 +785,12 @@ async def test_a_payment_request_freezes_the_quote_and_waits_for_a_person(
     )
     assert args.content_hash == doc_hash
     assert hashes.is_chain_po_id(args.chain_po_id) and args.chain_po_id.startswith("PO-1-")
-    assert args.milestones == [MilestoneInput(name="Delivery", bps=10_000)]
+    # Bido's tooling plan by default: each milestone released through its own gate.
+    assert [(m.key, m.name, m.bps) for m in args.milestones] == [
+        ("tool_start", "Tool start", 3_000),
+        ("t1", "T1", 3_000),
+        ("ppap", "PPAP", 4_000),
+    ]
     assert args.charge_mode == "stripe"
     assert args.quote_expires_at.microsecond == 0
     ttl = args.quote_expires_at - before
@@ -819,7 +825,11 @@ async def test_a_payment_request_freezes_the_quote_and_waits_for_a_person(
         Decimal(1_815_000_000),
         args.chain_po_id,
         doc_hash,
-        [{"name": "Delivery", "bps": 10_000}],
+        [
+            {"name": "Tool start", "bps": 3_000, "key": "tool_start"},
+            {"name": "T1", "bps": 3_000, "key": "t1"},
+            {"name": "PPAP", "bps": 4_000, "key": "ppap"},
+        ],
         "stripe",
     )
     assert (row.charged_at, row.wallet_id, row.escrow_address, row.failure_code) == (
@@ -854,7 +864,13 @@ async def test_a_payment_request_freezes_the_quote_and_waits_for_a_person(
         args.chain_po_id,
         [],
     )
+    assert [(m.key, m.name, m.bps) for m in payment.milestones] == [
+        ("tool_start", "Tool start", 3_000),
+        ("t1", "T1", 3_000),
+        ("ppap", "PPAP", 4_000),
+    ]
     assert payment.needs_attention is False
+    assert payment.completed_at is None
     [event] = await actions(world, PAYMENT_REQUESTED)
     assert event.actor_user_id == people.owner
     assert {k: event.payload[k] for k in ("rfq_id", "payment_id", "approval_id")} == {
@@ -910,11 +926,62 @@ async def test_a_simulated_charge_and_chosen_milestones_are_frozen_too(
     requested = await request(world, providers, target, milestones=milestones)
     row = await load_payment(world.engine, world.people.tenant, requested.payment.id)
     assert row.charge_mode == "simulated" and requested.payment.simulated
-    assert row.milestones == [{"name": "Deposit", "bps": 3_000}, {"name": "Delivery", "bps": 7_000}]
-    assert [(m.name, m.bps) for m in requested.payment.milestones] == [
-        ("Deposit", 3_000),
-        ("Delivery", 7_000),
+    assert row.milestones == [
+        {"name": "Deposit", "bps": 3_000, "key": None},
+        {"name": "Delivery", "bps": 7_000, "key": None},
     ]
+    assert [(m.key, m.name, m.bps) for m in requested.payment.milestones] == [
+        (None, "Deposit", 3_000),
+        (None, "Delivery", 7_000),
+    ]
+
+
+async def test_the_plan_milestones_may_take_other_shares_next_to_custom_ones(
+    world: World, providers: FakeProviders, usd_rate: date
+) -> None:
+    """30/40/30, common with Chinese mold makers; a custom milestone next to them asks for
+    one piece of evidence."""
+    target = await payable(world)
+    milestones = [
+        MilestoneInput(name="Tool start", bps=3_000, key="tool_start"),
+        MilestoneInput(name="T1", bps=4_000, key="t1"),
+        MilestoneInput(name="Delivery", bps=3_000),
+    ]
+    requested = await request(world, providers, target, milestones=milestones)
+    [approval] = await payment_approvals(world)
+    args = PayPurchaseOrderArgs.model_validate(approval.args)
+    assert args.milestones == milestones
+    row = await load_payment(world.engine, world.people.tenant, requested.payment.id)
+    assert [(m["key"], m["name"], m["bps"]) for m in row.milestones] == [
+        ("tool_start", "Tool start", 3_000),
+        ("t1", "T1", 4_000),
+        (None, "Delivery", 3_000),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("milestones", "error"),
+    [
+        (
+            [{"name": "Tool start", "bps": 5_000, "key": "tool_start"}] * 2,
+            "appears at most once",
+        ),
+        ([{"name": "Tooling", "bps": 10_000, "key": "tool_start"}], "is named 'Tool start'"),
+        ([{"name": "FAI", "bps": 10_000, "key": "fai"}], "unknown milestone key"),
+        ([{"name": "A", "bps": 5_000}, {"name": "A", "bps": 5_000}], "names must be different"),
+    ],
+)
+def test_milestones_are_refused_before_anything_is_proposed(
+    milestones: list[dict[str, object]], error: str
+) -> None:
+    with pytest.raises(ValidationError, match=error):
+        PayPurchaseOrderRequest.model_validate(
+            {
+                "payment_method_id": str(uuid4()),
+                "payout_account_id": str(uuid4()),
+                "milestones": milestones,
+            }
+        )
 
 
 async def test_without_an_exchange_rate_nothing_is_proposed(
@@ -1012,8 +1079,26 @@ async def test_one_live_payment_per_order(
     with pytest.raises(PaymentInvalidState, match="already has payment"):
         await request(world, providers, target)
 
+    # Completed (the escrow released every milestone): the order is paid, nothing pays it again.
+    await set_payment(
+        world,
+        second.payment.id,
+        state="funded",
+        funded_at=func.now(),
+        completed_at=func.now(),
+    )
+    with pytest.raises(PaymentInvalidState, match="already has payment"):
+        await request(world, providers, target)
+
     # Declined: no money moved, the order can be paid again.
-    await set_payment(world, second.payment.id, state="declined", charged_at=None)
+    await set_payment(
+        world,
+        second.payment.id,
+        state="declined",
+        charged_at=None,
+        funded_at=None,
+        completed_at=None,
+    )
     third = await request(world, providers, target)
     [*_, newest] = await payment_approvals(world)
     assert newest.id == third.approval_id
@@ -1165,6 +1250,9 @@ async def test_the_order_and_the_approval_queue_show_the_payment(
         escrow_address=None,
         funded_at=None,
         needs_attention=False,
+        # Nothing is released, nor next, before the escrow is funded.
+        released_bps=0,
+        next_milestone=None,
     )
     [summary] = await award_service.list_purchase_orders(world.engine, buyer(people))
     assert summary.payment_state == "pending_approval"
@@ -1202,9 +1290,14 @@ async def test_the_order_and_the_approval_queue_show_the_payment(
         item.payment.payout_account_last4,
         item.payment.simulated,
     ) == ("visa", "4242", "CNY", "4567", False)
-    assert [(m.name, m.bps) for m in item.payment.milestones] == [("Delivery", 10_000)]
+    assert [(m.key, m.name, m.bps) for m in item.payment.milestones] == [
+        ("tool_start", "Tool start", 3_000),
+        ("t1", "T1", 3_000),
+        ("ppap", "PPAP", 4_000),
+    ]
     # No email recipients in a payment: the outbound guard has nothing to check.
     assert item.recipient_checks is None
+    assert item.milestone_release is None
     assert all(i.payment is None for i in queue if i.tool != PAY_PURCHASE_ORDER)
 
 

@@ -5,6 +5,9 @@ its state, and wakes the next one after its commit:
 
     charged --mint--> minted --create_escrow--> escrow_created --fund--> funded
 
+(`funded` -> `completed` is not a step here: the escrow is released milestone by
+milestone, each after its own approval, by `payments.milestones`.)
+
 * mint: the approved token amount of Bido's stablecoin into the company's wallet (one
   Privy server wallet per tenant, created on first use and kept in `tenant_wallets`);
   the relayer pays, Bido's mint authority signs; memo `bido:payment:<payment id>`.
@@ -178,8 +181,11 @@ async def authorize_payment_card(
 
 
 def approved_terms_match(payment: PoPayment, args: PayPurchaseOrderArgs) -> bool:
-    """The row holds exactly what was approved: whose card, how much, which escrow."""
-    milestones = [(m.get("name"), m.get("bps")) for m in payment.milestones]
+    """The row holds exactly what was approved: whose card, how much, which escrow.
+
+    A milestone's `key` is compared too (None for a custom milestone, and in rows and
+    proposals made before the tooling plan, which carry none)."""
+    milestones = [(m.get("name"), m.get("bps"), m.get("key")) for m in payment.milestones]
     return (
         payment.id == args.payment_id
         and payment.purchase_order_id == args.purchase_order_id
@@ -194,7 +200,7 @@ def approved_terms_match(payment: PoPayment, args: PayPurchaseOrderArgs) -> bool
         and payment.po_hash == args.content_hash
         and payment.charge_mode == args.charge_mode
         and payment.card_rail == args.card_rail
-        and milestones == [(m.name, m.bps) for m in args.milestones]
+        and milestones == [(m.name, m.bps, m.key) for m in args.milestones]
     )
 
 

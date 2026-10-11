@@ -152,8 +152,10 @@ class Settings(BaseSettings):
     payments_consumer_country: str = "US"
     # How long a payment's quote (amount, FX rate) may wait for its approval.
     payments_quote_ttl_minutes: int = Field(default=24 * 60, ge=5, le=7 * 24 * 60)
-    # The escrow returns the unreleased balance to the buyer only after this.
-    payments_escrow_refund_days: int = Field(default=90, ge=1, le=3650)
+    # The escrow returns the unreleased balance to the buyer only after this. Milestones of
+    # a tooling program (Tool start, T1, PPAP) are released over months: PPAP usually comes
+    # well after 90 days, and the buyer must not be able to reclaim its share before.
+    payments_escrow_refund_days: int = Field(default=365, ge=1, le=3650)
     # Suppliers' bank details are sealed in Bido's database until the payout provider
     # (Tazapay, next step) holds them. Local: a Fernet key. AWS: KMS envelope
     # encryption under `payout_details_kms_key_id` (required in prd).
@@ -182,7 +184,20 @@ class Settings(BaseSettings):
     solana_payout_owner: str | None = None
     # Who attests each milestone's gate (Solana Attestation Service signer).
     solana_gate_attester: str | None = None
+    # Its secret key (base58, 64 bytes): the worker signs a milestone's attestation with it
+    # once a person approved the release. Without it milestones cannot be submitted.
+    solana_gate_attester_key: str | None = Field(default=None, repr=False)
     solana_priority_fee_micro_lamports: int = Field(default=1_000, ge=0, le=1_000_000)
+    # Milestone releases (Tool start, T1, PPAP): the factory sends each milestone's
+    # documents through a link with no login. The link is the web page's URL with the
+    # token in its fragment (`<FACTORY_PAGE_URL>#<token>`); unset, only the token is
+    # returned. It expires after `factory_link_ttl_days`.
+    factory_page_url: str | None = None
+    factory_link_ttl_days: int = Field(default=90, ge=1, le=730)
+    # One evidence file at most this big (photos, PDFs, spreadsheets).
+    milestone_document_max_bytes: int = Field(
+        default=20 * 1024 * 1024, ge=1024 * 1024, le=100 * 1024 * 1024
+    )
 
     @field_validator("log_level", mode="before")
     @classmethod

@@ -50,6 +50,21 @@ def payments_enabled(settings: Settings) -> bool:
     return not missing_payment_settings(settings)
 
 
+def missing_release_settings(settings: Settings) -> list[str]:
+    """What milestone releases still need beyond payments (names only, never values): the
+    gate attester's secret key, which signs each approved milestone's attestation."""
+    missing = missing_payment_settings(settings)
+    if not settings.solana_gate_attester_key:
+        missing.append("SOLANA_GATE_ATTESTER_KEY")
+    return missing
+
+
+def releases_enabled(settings: Settings) -> bool:
+    """Milestones can be submitted and released: without it nothing is proposed that the
+    worker could not carry out."""
+    return not missing_release_settings(settings)
+
+
 def build_payment_providers(
     settings: Settings, *, http: httpx.AsyncClient | None = None
 ) -> PaymentProviders:

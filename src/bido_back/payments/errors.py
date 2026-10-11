@@ -30,6 +30,11 @@ class PaymentRefused(PaymentError):
     """The request cannot be honored as given (HTTP 422): bad milestones, unusable card, ..."""
 
 
+class FactoryLinkInvalid(PaymentError):
+    """No active, unexpired factory link has this token (HTTP 401). One answer for every
+    case (unknown, revoked, expired), so a token cannot be probed."""
+
+
 class ProviderError(PaymentError):
     """A provider call failed. Carries the provider, the operation and a code, nothing else.
 

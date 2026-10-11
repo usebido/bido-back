@@ -1586,10 +1586,12 @@ async def list_approvals(
             reviewed = {rfq_id: _line_reviews(found) for rfq_id, found in by_rfq.items()}
         # Imported here: the award service builds on this module, the payment service on it.
         from bido_back.awards.service import queue_details
+        from bido_back.payments.milestones.queue import queue_details as milestone_queue_details
         from bido_back.payments.service import queue_details as payment_queue_details
 
         details = await queue_details(session, approvals)
         payments = await payment_queue_details(session, approvals)
+        milestone_releases = await milestone_queue_details(session, approvals)
 
         mandate_views = await _mandate_views(session, approvals)
 
@@ -1676,6 +1678,7 @@ async def list_approvals(
                 recipient_checks=checks.get(approval.id),
                 mandate=mandate_views.get(approval.id),
                 payment=payments.get(approval.id),
+                milestone_release=milestone_releases.get(approval.id),
             )
         )
     return items

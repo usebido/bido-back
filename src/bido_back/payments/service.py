@@ -17,8 +17,9 @@ charges the card only after approval (`payments.execute`).
   which binds every payment proposed to it.
 - `request_po_payment`: refuses early whatever a person would approve in vain (the
   order is not sent or no longer open, something already pays it, the card or the
-  account is not usable, no USD quote), freezes the quote, the escrow terms and the
-  PO document's hash in the approval's arguments, and records the payment.
+  account is not usable, no USD quote), freezes the quote, the escrow terms (by
+  default Bido's tooling plan: Tool start 30%, T1 30%, PPAP 40%) and the PO
+  document's hash in the approval's arguments, and records the payment.
 """
 
 import logging
@@ -61,6 +62,7 @@ from bido_back.db.models import (
     PaymentChainTransaction,
     PaymentMethod,
     PoPayment,
+    PoPaymentMilestone,
     Supplier,
     SupplierPayoutAccount,
     User,
@@ -89,7 +91,6 @@ from bido_back.payments.ports import (
 )
 from bido_back.payments.proposals import (
     CARD_NOT_VERIFIED,
-    DEFAULT_MILESTONE_NAME,
     PAY_PURCHASE_ORDER,
     PAYMENT_CARD_VERIFIED,
     PAYMENT_REQUESTED,
@@ -97,13 +98,12 @@ from bido_back.payments.proposals import (
 )
 from bido_back.payments.quote import CHARGE_CURRENCY, quote_charge, token_base_units
 from bido_back.payments.schemas import (
-    BPS_TOTAL,
     CreatePayoutAccountRequest,
     EnrollPaymentMethodRequest,
-    MilestoneInput,
     PaymentRequested,
     PayPurchaseOrderArgs,
     PayPurchaseOrderRequest,
+    tooling_plan,
 )
 from bido_back.payments.views import (
     CardSetupView,
@@ -138,6 +138,8 @@ logger = logging.getLogger(__name__)
 Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
 MANAGER_ROLES: Final = frozenset({"approver", "owner"})
+# The chain steps of the payment itself (`ChainStep`); `release` rows belong to milestones.
+PAYMENT_STEPS: Final = ("mint", "create_escrow", "fund")
 _OPEN_APPROVAL: Final = ("pending", "approved")
 # A payment that ended before any money moved; every other payment is live (one per PO).
 _ENDED_STATES: Final = ("rejected", "expired", "declined")
@@ -831,8 +833,7 @@ async def request_po_payment(
             payout_currency=account.currency,
             payout_account_last4=account.account_last4,
             chain_po_id=hashes.new_chain_po_id(po.ref),
-            milestones=body.milestones
-            or [MilestoneInput(name=DEFAULT_MILESTONE_NAME, bps=BPS_TOTAL)],
+            milestones=body.milestones or tooling_plan(),
             charge_mode="simulated" if providers.card.simulated else "stripe",
             card_rail=providers.card.rail,
         )
@@ -969,9 +970,13 @@ async def payment_view(
     )
     if method is None or account is None or po_ref is None:
         raise PaymentNotFound(f"payment {payment.id}: its card, payout account or order is gone")
+    # The payment's own steps; each milestone's release is shown on the milestone.
     transactions = await session.scalars(
         select(PaymentChainTransaction)
-        .where(PaymentChainTransaction.payment_id == payment.id)
+        .where(
+            PaymentChainTransaction.payment_id == payment.id,
+            PaymentChainTransaction.step.in_(PAYMENT_STEPS),
+        )
         .order_by(PaymentChainTransaction.created_at, PaymentChainTransaction.attempt)
     )
     cluster = settings.solana_cluster
@@ -1038,6 +1043,7 @@ async def payment_view(
         created_at=payment.created_at,
         charged_at=payment.charged_at,
         funded_at=payment.funded_at,
+        completed_at=payment.completed_at,
     )
 
 
@@ -1224,9 +1230,22 @@ async def confirm_card_verification(
 async def payment_summaries(
     session: AsyncSession, po_ids: Collection[UUID]
 ) -> dict[UUID, PurchaseOrderPaymentSummary]:
-    """The purchase-order views' `payment`, by PO id (live payment, else the latest)."""
-    return {
-        po_id: PurchaseOrderPaymentSummary(
+    """The purchase-order views' `payment`, by PO id (live payment, else the latest), with
+    how far the escrow released it ("30% released, next: T1")."""
+    current = await _current_payments(session, po_ids)
+    milestones: dict[UUID, list[PoPaymentMilestone]] = {}
+    if current:
+        rows = await session.scalars(
+            select(PoPaymentMilestone)
+            .where(PoPaymentMilestone.payment_id.in_([p.id for p in current.values()]))
+            .order_by(PoPaymentMilestone.payment_id, PoPaymentMilestone.milestone_index)
+        )
+        for row in rows:
+            milestones.setdefault(row.payment_id, []).append(row)
+    summaries: dict[UUID, PurchaseOrderPaymentSummary] = {}
+    for po_id, payment in current.items():
+        released_bps, next_milestone = _release_progress(payment, milestones.get(payment.id, []))
+        summaries[po_id] = PurchaseOrderPaymentSummary(
             payment_id=payment.id,
             state=cast(PaymentState, payment.state),
             charge_currency=payment.charge_currency,
@@ -1235,9 +1254,27 @@ async def payment_summaries(
             escrow_address=payment.escrow_address,
             funded_at=payment.funded_at,
             needs_attention=_needs_attention(payment),
+            released_bps=released_bps,
+            next_milestone=next_milestone,
         )
-        for po_id, payment in (await _current_payments(session, po_ids)).items()
-    }
+    return summaries
+
+
+def _release_progress(
+    payment: PoPayment, milestones: Sequence[PoPaymentMilestone]
+) -> tuple[int, str | None]:
+    """(bps released, the next milestone's name). The milestone rows are created on first
+    use (`payments.milestones.state.ensure_milestones`): without them nothing was released,
+    and the next milestone is the first of the approved terms. A next one only while the
+    escrow is funded."""
+    released = sum(m.bps for m in milestones if m.state == "released")
+    if payment.state != "funded":
+        return released, None
+    if milestones:
+        pending = next((m for m in milestones if m.state != "released"), None)
+        return released, pending.name if pending is not None else None
+    first = payment.milestones[0].get("name") if payment.milestones else None
+    return released, first if isinstance(first, str) else None
 
 
 async def queue_details(
@@ -1284,7 +1321,9 @@ async def queue_details(
             card_last4=args.card_last4,
             payout_currency=args.payout_currency,
             payout_account_last4=args.payout_account_last4,
-            milestones=[PaymentMilestone(name=m.name, bps=m.bps) for m in args.milestones],
+            milestones=[
+                PaymentMilestone(name=m.name, bps=m.bps, key=m.key) for m in args.milestones
+            ],
             simulated=args.charge_mode == "simulated",
             card_rail=args.card_rail,
             card_verified=verified.get(args.payment_id, False) if args.card_rail == "vic" else None,
