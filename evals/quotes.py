@@ -28,7 +28,9 @@ class LineTruth:
 class QuoteCase:
     name: str
     description: str
-    language: str  # ISO 639-1, for the decimal separator
+    # ISO 639-1, as registered. Validation never reads the separator from it: the quote
+    # proves its own (`proven_decimal_separator`).
+    language: str
     subject: str
     body: str
     documents: tuple[tuple[str, str, bytes], ...]

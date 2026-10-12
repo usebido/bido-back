@@ -82,7 +82,6 @@ from bido_back.followups import ledger
 from bido_back.followups import missing as missing_rules
 from bido_back.followups.hooks import pause_on_question
 from bido_back.negotiation.hooks import cancel_on_new_offer, replan_envelope, request_replan
-from bido_back.quotes.parsing import decimal_separator_for
 from bido_back.quotes.state import (
     OfferEvent,
     StoredField,
@@ -111,6 +110,7 @@ from bido_back.quotes.validation import (
     QuoteSources,
     RequestedLine,
     ValidatedQuote,
+    proven_decimal_separator,
     quantity_bases,
     validate_quote,
 )
@@ -144,7 +144,6 @@ class _Loaded:
     rfq_ref: str
     subject: str
     body: str
-    supplier_language: str | None
     supplier_country: str | None
     requested: list[RfqEmailLine]
     # The same lines, as validation compares a quoted line against them.
@@ -215,16 +214,18 @@ async def handle_quote_extract(
         await _mark_failed(db, tenant_id, message_id)
         return
 
+    sources = QuoteSources(
+        email_subject=loaded.subject,
+        email_body=body,
+        documents={doc.filename: doc for doc in documents},
+    )
     validated = validate_quote(
         result.output,
         requested=loaded.requested_checks,
-        sources=QuoteSources(
-            email_subject=loaded.subject,
-            email_body=body,
-            documents={doc.filename: doc for doc in documents},
-        ),
+        sources=sources,
         today=today or datetime.now(UTC).date(),
-        decimal=decimal_separator_for(loaded.supplier_language),
+        # What the reply's numbers prove, not the supplier's registered language.
+        decimal=proven_decimal_separator(sources),
         offer_date=loaded.offer_date,
         original_offer_date=loaded.original_offer_date,
         country=loaded.supplier_country,
@@ -312,7 +313,6 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
                     Rfq.id,
                     Rfq.ref,
                     Rfq.base_currency,
-                    Supplier.language,
                     Supplier.country,
                 )
                 .join(Rfq, Rfq.id == Invite.rfq_id)
@@ -323,7 +323,7 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
         if row is None:
             logger.warning("quote.extract: invite not found message=%s", message_id)
             return None
-        invite_id, rfq_id, rfq_ref, rfq_currency, language, country = row
+        invite_id, rfq_id, rfq_ref, rfq_currency, country = row
 
         lines = (
             await session.scalars(
@@ -350,7 +350,6 @@ async def _load(db: Db, tenant_id: UUID, message_id: UUID) -> _Loaded | None:
             rfq_ref=rfq_ref,
             subject=message.subject or "",
             body=message.body_text or "",
-            supplier_language=language,
             supplier_country=country,
             offer_date=message_date(message.occurred_at, message.created_at),
             original_offer_date=min(

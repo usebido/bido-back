@@ -13,7 +13,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.catalog.contracts import QuoteExtractionInput, QuoteExtractionOutput
@@ -30,6 +30,7 @@ from bido_back.db.models import (
     Proposal,
     ProposalLine,
     RfqLine,
+    Supplier,
 )
 from bido_back.onboarding import service as onboarding
 from bido_back.rfqs import service
@@ -251,6 +252,65 @@ async def test_the_preview_reads_the_quote_and_stores_nothing(
 
     # A preview only: nothing on the invite yet.
     assert await scene.messages() == [] and await scene.proposals() == []
+
+
+# An English quote from a supplier registered as Italian (a decimal comma).
+ENGLISH_LINES = (
+    "ARTHUR TESTE MOTORES LTDA",
+    "COMMERCIAL PROPOSAL - Ref. RFQ",
+    "Item 1 - MLCC 100nF - MPN GRM188R71H104KA93D",
+    "Quantity: 4,000 pcs",
+    "Unit price: BRL 0.45",
+    "Tooling: BRL 1,250 one-off",
+    "Lead time: 25 days",
+)
+
+
+async def test_the_file_proves_its_separator_not_the_suppliers_language(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    scene = await scene_of(app_engine, copilot_rows)
+    async with tenant_session(app_engine, scene.principal.tenant_id) as session:
+        await session.execute(
+            update(Supplier).where(Supplier.id == scene.supplier_id).values(language="it")
+        )
+    upload_id = await scene.upload("quote.pdf", quote_pdf(ENGLISH_LINES))
+    pdf = "quote.pdf"
+    extractor = FakeExtractor(
+        quote_output(
+            {
+                **line_output(attachment=pdf),
+                "min_quantity": _pdf("4000", "Quantity: 4,000 pcs", pdf),
+                "unit_price": _pdf("0.45", "Unit price: BRL 0.45", pdf),
+                "unit": _pdf("pcs", "Quantity: 4,000 pcs", pdf),
+                "tooling_cost": _pdf("1250", "Tooling: BRL 1,250 one-off", pdf),
+                "lead_time_days": _pdf("25", "Lead time: 25 days", pdf),
+            },
+            attachment=pdf,
+            currency=_pdf("BRL", "Unit price: BRL 0.45", pdf),
+            valid_until=_NONE,
+            incoterm=_NONE,
+            delivery_location=_NONE,
+            payment_terms=_NONE,
+            missing_fields=[],
+        )
+    )
+    tools = make_tools(
+        app_engine, attachment_ids=(upload_id,), storage=scene.storage, quote_extractor=extractor
+    )
+
+    out = await tools.call(
+        context_of(scene.principal),
+        "register_quote",
+        rfq=scene.rfq.ref,
+        supplier=SUPPLIER,
+        upload_ids=[str(upload_id)],
+    )
+
+    # "4,000" and "1,250" read as the file's "0.45" proves, not with the Italian comma.
+    [quoted] = out.preview.quoted
+    assert (quoted.quantity, quoted.unit_price) == (Decimal(4000), Decimal("0.45"))
+    assert quoted.issues == []
 
 
 async def test_confirming_stores_the_quote_as_an_email_reply_would(
