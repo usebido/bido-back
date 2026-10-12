@@ -26,7 +26,9 @@ buyer's limits and the deadlines, and decides ONE action:
 
 First match wins:
 
-1. Not open (not started, closed, RFQ not sent, declined, no reply yet).
+1. Not open (not started, closed, RFQ not sent, declined, no reply yet). A reply
+   without an offer waits while Bido is still reading it (`reading_reply`); only a
+   reply read without an offer (a question, a request) needs the buyer's answer.
 2. An email already decided for this supplier and not sent (being written,
    awaiting approval, the daily cap, the mailbox): wait. One that could not
    be written, or that the buyer rejected, for the current offer: hold. Never
@@ -261,6 +263,9 @@ class SupplierFacts:
     chases_sent: int = 0
     chases_max: int = 0
     chases_waiting: bool = False
+    # A reply from the supplier is stored and not read yet (quote extraction is running
+    # or queued): whether it holds an offer is not known yet.
+    reply_unread: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -670,6 +675,9 @@ def plan_supplier(
     offer = supplier.offer
     if offer is None:
         if status == "responded":
+            if supplier.reply_unread:
+                # Bido is still reading the reply: it may well be the quote.
+                return SupplierPlan("wait", "waiting", "reading_reply")
             return SupplierPlan("hold", "needs_answer", "reply_without_offer")
         until = end_of_day(ctx.response_due) if ctx.response_due is not None else ctx.deadline
         if until is not None and until < ctx.now:
@@ -1179,3 +1187,26 @@ def ready_to_close(
             continue
         accepted |= {line.rfq_line_id for line in plan.lines if line.acceptable}
     return all(line_id in accepted for line_id in line_ids)
+
+
+def _final_word(plan: SupplierPlan) -> bool:
+    """Nothing more is negotiated with this supplier and nothing waits for the buyer
+    before it could be: accepted internally, or closed (its best-and-final answered, its
+    own final offer, the round cap, the final round's cut-off, no reply after the reminder,
+    declined, rejected). A hold, an open question or an email in flight is not final."""
+    return (
+        plan.action in ("accept", "close")
+        and not plan.offer_held
+        and not plan.questions_open
+        and plan.phase not in ("needs_answer", "held_for_approval")
+    )
+
+
+def every_supplier_final(*, waiting_suppliers: int, plans: Sequence[SupplierPlan]) -> bool:
+    """Every invited supplier answered and gave its last word: nothing is left to
+    negotiate, whatever the prices. Lines within the maximum but above the target are the
+    buyer's decision (the outcome says `above_target`); an offer above the maximum is never
+    recommended."""
+    if waiting_suppliers > 0 or not plans:
+        return False
+    return all(_final_word(plan) for plan in plans)

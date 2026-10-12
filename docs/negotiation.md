@@ -48,11 +48,36 @@ the open items first and the revised offer after them, with at most three asks.
 A declared final position stays final ("best and final", "we cannot go any lower"). Later
 replies only update the standing offer.
 
+## Ready to close
+
+The RFQ's negotiation becomes `ready_to_close` (with `ready_at` and an
+`rfq.negotiation_ready` audit event carrying the reason) when every invited supplier
+answered and either:
+
+- **every line has an offer accepted internally** (`every_line_in_target`): early close,
+  only when `early_close` is on; or
+- **every supplier gave its last word** (`every_supplier_final`): its best and final
+  answered, its own final offer, the round cap or the final round's cut-off reached, no
+  reply after the reminder, or declined. None may be held for the buyer (a question, an
+  offer to review or withdrawn, no progress), have an open clarification, or have an email
+  in flight. This applies whatever `early_close` says: nothing is left to negotiate, so
+  waiting for the deadline only delays the buyer.
+
+While ready to close, `GET /v1/rfqs/{id}/negotiation` returns `recommendation`: what
+closing now would keep, the best eligible offer per line and tier. An offer above the
+maximum is never recommended (that line has no supplier and reads `no_feasible_offer`).
+An offer within the maximum but above the target is recommended with `above_target:
+true`, and the copilot's `get_negotiation_status` and `get_negotiation_outcome` say so.
+The mandate keeps running as it does while open; closing (by the buyer, or the deadline)
+ends it and stores the same lines as `outcome`.
+
 ## When the plan moves
 
 - A supplier reply plans its RFQ at once: quote extraction marks the RFQ and enqueues one
   `negotiation.replan` job per burst of replies. The 15-minute `negotiation.sweep` stays the
   safety net.
+- An approved mandate plans its RFQ at once when the RFQ is already out: offers that arrived
+  while the negotiation was not started are decided (and, in bounds, sent) right away.
 - New limits under a live mandate: propose a new mandate (`POST .../negotiation/mandate`, or
   the copilot's `propose_negotiation_mandate`). It is a replacement: the current mandate keeps
   running until the replacement is approved, which ends it, saves the new limits and

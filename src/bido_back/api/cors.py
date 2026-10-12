@@ -14,6 +14,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from bido_back.settings import Settings
 
+PRODUCTION_FRONTEND_ORIGIN = "https://app.usebido.com"
+
 ALLOWED_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
 # Authorization: the Clerk bearer token. Accept/Cache-Control/Last-Event-ID:
 # the Copilot's Server-Sent Events stream.
@@ -42,9 +44,13 @@ def add_cors(app: FastAPI, settings: Settings) -> None:
     headers = list(ALLOWED_HEADERS)
     if settings.environment == "local":
         headers.append("X-Dev-User")  # dev-mode auth; refused anywhere else
+    origins = list(settings.cors_allowed_origins)
+    if settings.environment == "dev" and PRODUCTION_FRONTEND_ORIGIN not in origins:
+        # Dev auth can be served from the canonical app domain while it points at api.dev.
+        origins.append(PRODUCTION_FRONTEND_ORIGIN)
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_allowed_origins,
+        allow_origins=origins,
         allow_origin_regex=settings.cors_allowed_origin_regex,
         allow_credentials=False,
         allow_methods=ALLOWED_METHODS,

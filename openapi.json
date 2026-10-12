@@ -10104,6 +10104,11 @@
       },
       "OutcomeLine": {
         "properties": {
+          "above_target": {
+            "default": false,
+            "title": "Above Target",
+            "type": "boolean"
+          },
           "alternatives": {
             "items": {
               "$ref": "#/components/schemas/OfferAlternative"
@@ -14112,7 +14117,7 @@
         "description": "One event in an RFQ's activity feed: ids and a code-written summary, never content.",
         "properties": {
           "action": {
-            "description": "Stable code, e.g. rfq.created, rfq.line_updated, rfq.invite_added, rfq.email_sent, approval.approved, reply",
+            "description": "Stable code, e.g. rfq.created, rfq.line_updated, rfq.invite_added, rfq.email_sent, approval.approved, reply, quote.received",
             "title": "Action",
             "type": "string"
           },
@@ -15202,6 +15207,20 @@
               }
             ],
             "title": "Ready At"
+          },
+          "recommendation": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/OutcomeLine"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommendation"
           },
           "rfq_id": {
             "format": "uuid",

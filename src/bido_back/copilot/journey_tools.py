@@ -415,6 +415,9 @@ class OutcomeLineOut(BaseModel):
     unit_price: Decimal | None
     lead_time_days: int | None
     within_target: bool | None
+    # The best offer is above the buyer's target (within the maximum: an offer above the
+    # maximum is never the best offer). Always tell the buyer.
+    above_target: bool = False
     covered: bool
     why_not: list[str]
     justification: str = ""
@@ -1016,6 +1019,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
                     unit_price=price,
                     lead_time_days=rec.lead_time_days,
                     within_target=(price <= target) if price is not None and target else None,
+                    above_target=price is not None and target is not None and price > target,
                     covered=rec.invite_id is not None,
                     why_not=[str(r) for r in rec.reasons] if rec.invite_id is None else [],
                     justification=rec.justification,
@@ -1043,6 +1047,12 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
                 "more suppliers or contacts. No order is created by this workflow."
             )
         )
+        above = sorted({line.position for line in out if line.above_target})
+        if above:
+            note += (
+                f" Line(s) {', '.join(str(p) for p in above)}: the best offer is above the "
+                "target (within the maximum); say so, the buyer decides."
+            )
         return OutcomeOut(
             rfq=ref,
             negotiation_status=status,

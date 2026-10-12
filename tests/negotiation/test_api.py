@@ -143,3 +143,22 @@ async def test_policy_endpoint_does_not_start_negotiation(
         )
     ).status_code == 422
     assert (await http.put(f"/v1/rfqs/{uuid4()}/comparison/policy", json={})).status_code == 404
+
+
+def test_an_outcome_stored_before_above_target_existed_still_says_it() -> None:
+    from bido_back.negotiation.schemas import OutcomeLine
+
+    stored = {
+        "rfq_line_id": str(uuid4()),
+        "tier": 0,
+        "quantity": "100",
+        "invite_id": str(uuid4()),
+        "supplier_name": "Rhein",
+        "effective_unit_price_base": "2.75",
+        "lead_time_days": 10,
+        "within_target": False,
+        "justification": "Rhein is the only eligible offer, at 2.75 per unit",
+    }
+    assert OutcomeLine.model_validate(stored).above_target is True
+    assert OutcomeLine.model_validate({**stored, "within_target": True}).above_target is False
+    assert OutcomeLine.model_validate({**stored, "within_target": None}).above_target is False

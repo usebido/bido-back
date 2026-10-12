@@ -25,6 +25,7 @@ from bido_back.negotiation.planner import (
     SupplierPlan,
     ask_slots,
     bafo_cutoff,
+    every_supplier_final,
     plan_supplier,
     ready_to_close,
 )
@@ -128,6 +129,7 @@ def facts(
     rfq_email_wait: EmailWait | None = None,
     chases_sent: int = 0,
     chases_max: int = 0,
+    reply_unread: bool = False,
 ) -> SupplierFacts:
     return SupplierFacts(
         invite_status=status,
@@ -137,6 +139,7 @@ def facts(
         rfq_email_wait=rfq_email_wait,
         chases_sent=chases_sent,
         chases_max=chases_max,
+        reply_unread=reply_unread,
     )
 
 
@@ -238,6 +241,15 @@ def test_a_reply_without_an_offer_needs_the_buyers_answer() -> None:
         "reply_without_offer",
     )
     assert "question" in phase_label(result).lower()
+
+
+def test_a_reply_still_being_read_waits_for_bido_not_for_the_buyer() -> None:
+    reading = plan(facts(None, status="responded", reply_unread=True))
+    assert (reading.action, reading.phase, reading.reason) == ("wait", "waiting", "reading_reply")
+    assert phase_label(reading) == "Waiting: Bido is reading the supplier's reply."
+    assert ready_to_close(line_ids=[L1], waiting_suppliers=0, plans=[reading]) is False
+    # A newer reply being read does not unplan the current offer (it is planned once read).
+    assert plan(facts(WITHIN, reply_unread=True)).phase == "accepted_internally"
 
 
 def test_nothing_is_negotiated_before_the_negotiation_opens_or_after_it_closes() -> None:
@@ -931,6 +943,89 @@ def test_ready_to_close_needs_every_line_accepted_and_every_supplier_answered() 
     assert not ready_to_close(line_ids=ids, waiting_suppliers=0, plans=[question])
     clarifying = plan(facts(WITHIN, clarification=ClarificationState(to_ask=("valid_until",))))
     assert not ready_to_close(line_ids=ids, waiting_suppliers=0, plans=[clarifying])
+
+
+# RFQ-8 (2026-10-12): one line, target 2.60, maximum 2.90, two rounds. The supplier quoted
+# 3.20, moved to 2.85 after our counter and answered the best-and-final with 2.75.
+RFQ8_LINE = line(L1, 1, "2.60", "2.90")
+RFQ8_COUNTER = email(sequence=1, round=1, version=1, asks=[asked(L1, "2.60", "3.20")])
+RFQ8_BAFO = email(
+    sequence=2,
+    round=2,
+    version=2,
+    kind="bafo",
+    asks=[asked(L1, "2.72", "2.85")],
+    cutoff=NOW + timedelta(days=2),
+)
+
+
+def test_a_final_offer_above_target_within_the_maximum_leaves_nothing_to_negotiate() -> None:
+    final = plan(facts(offer(quote(L1, "2.75"), version=3), RFQ8_COUNTER, RFQ8_BAFO), [RFQ8_LINE])
+    assert (final.action, final.phase, final.reason, final.status) == (
+        "close",
+        "closed",
+        "bafo_answered",
+        "closed",
+    )
+    assert [p.price_status for p in final.lines] == ["in_range"]
+    # Early close is only for offers within target: unchanged.
+    assert not ready_to_close(line_ids=[L1], waiting_suppliers=0, plans=[final])
+    # Every supplier gave its last word: ready to close, whatever the prices.
+    assert every_supplier_final(waiting_suppliers=0, plans=[final])
+    # A supplier who declined is final too; one above the maximum after its BAFO as well
+    # (the comparison never recommends it).
+    declined = plan(facts(None, status="declined"), [RFQ8_LINE])
+    above_max = plan(
+        facts(offer(quote(L1, "2.95"), version=3), RFQ8_COUNTER, RFQ8_BAFO), [RFQ8_LINE]
+    )
+    assert (above_max.action, above_max.status) == ("close", "rejected")
+    assert every_supplier_final(waiting_suppliers=0, plans=[final, declined, above_max])
+    # So is the supplier's own final offer, and a final offer whose remaining problem is
+    # named for the buyer (no more emails: the buyer decides at award).
+    own_final = plan(
+        facts(replace(offer(quote(L1, "2.85"), version=2), declared_final=True), RFQ8_COUNTER),
+        [RFQ8_LINE],
+    )
+    assert (own_final.action, own_final.reason) == ("close", "supplier_declared_final")
+    assert every_supplier_final(waiting_suppliers=0, plans=[own_final])
+
+
+def test_one_supplier_still_negotiating_keeps_the_negotiation_open() -> None:
+    final = plan(facts(offer(quote(L1, "2.75"), version=3), RFQ8_COUNTER, RFQ8_BAFO), [RFQ8_LINE])
+    # Still within its best-and-final cut-off.
+    waiting_bafo = plan(
+        facts(offer(quote(L1, "2.85"), version=2), RFQ8_COUNTER, RFQ8_BAFO), [RFQ8_LINE]
+    )
+    assert waiting_bafo.phase == "waiting_for_supplier"
+    assert not every_supplier_final(waiting_suppliers=0, plans=[final, waiting_bafo])
+    # An invited supplier who has not quoted yet.
+    assert not every_supplier_final(waiting_suppliers=1, plans=[final])
+    # A counter-offer still to send.
+    asking = plan(facts(offer(quote(L1, "3.20"))), [RFQ8_LINE])
+    assert asking.action == "revised_offer"
+    assert not every_supplier_final(waiting_suppliers=0, plans=[final, asking])
+    # Held for the buyer: a supplier question, an offer to review, a withdrawn offer,
+    # an open clarification, no progress.
+    question = plan(facts(replace(offer(quote(L1, "2.75")), questions=1)), [RFQ8_LINE])
+    review = plan(
+        facts(replace(offer(quote(L1, "2.75")), holds=("offer_state_requires_review",))),
+        [RFQ8_LINE],
+    )
+    withdrawn = plan(
+        facts(replace(offer(quote(L1, "2.75")), holds=("offer_withdrawn",))), [RFQ8_LINE]
+    )
+    clarifying = plan(
+        facts(offer(quote(L1, "2.75")), clarification=ClarificationState(to_ask=("valid_until",))),
+        [RFQ8_LINE],
+    )
+    stuck = plan(
+        facts(offer(quote(L1, "3.20"), version=2), RFQ8_COUNTER), [RFQ8_LINE], max_rounds=3
+    )
+    assert stuck.reason == "no_progress"
+    for held in (question, review, withdrawn, clarifying, stuck):
+        assert not every_supplier_final(waiting_suppliers=0, plans=[final, held]), held.reason
+    # Nobody answered at all.
+    assert not every_supplier_final(waiting_suppliers=0, plans=[])
 
 
 def test_every_phase_reads_as_the_buyer_expects() -> None:
