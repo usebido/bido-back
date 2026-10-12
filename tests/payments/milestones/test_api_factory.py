@@ -19,6 +19,7 @@ from tests.payments.milestones.test_documents_db import (
     definition_at,
     factory_link,
     jpeg,
+    pdf,
     sample,
 )
 from tests.payments.milestones.test_service_db import CHAIN_WORDS, strings_of
@@ -137,6 +138,22 @@ async def test_the_factory_sends_a_milestone_over_http(funded: Funded, api: Mile
 
     missing = await http.post(f"{ORDER}/milestones/0/submit", headers=token, json={})
     assert missing.status_code == 422
+
+    certificate = await http.post(
+        upload_url,
+        headers=token,
+        params={"doc_type": "steel_certificate"},
+        files={
+            "steel_certificate": (
+                "03_steel_certificate_EN10204_3.1.pdf",
+                pdf(),
+                "application/pdf",
+            )
+        },
+    )
+    assert certificate.status_code == 201, certificate.text
+    assert certificate.json()["filename"] == "03_steel_certificate_EN10204_3.1.pdf"
+
     for code in sorted(definition.required_codes):
         document_type = definition.document(code)
         assert document_type is not None

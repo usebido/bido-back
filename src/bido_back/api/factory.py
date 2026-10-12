@@ -33,7 +33,7 @@ from bido_back.api.milestones import (
     Storage,
     declared_type,
     milestones_http_error,
-    read_document_body,
+    read_document_upload,
 )
 from bido_back.api.payments import PaymentSettings
 from bido_back.api.rfqs import error_responses
@@ -124,11 +124,11 @@ def factory_router() -> APIRouter:
         access: CurrentFactory,
         index: MilestoneIndex,
         doc_type: DocType,
-        filename: Filename,
         db: Db,
         storage: Storage,
         settings: PaymentSettings,
         content_type: DeclaredType = "application/octet-stream",
+        filename: Filename = None,
     ) -> FactoryDocumentView:
         """Send one file for a milestone (the raw bytes as the body). Sending the same file
         again answers the file already there. 401: the link is not valid; 404: no such
@@ -137,7 +137,9 @@ def factory_router() -> APIRouter:
         415: not a kind this document takes, or not what its name says; 422: the milestone
         does not ask for that document, the file is empty, or it already has 30 files."""
         try:
-            data = await read_document_body(request, settings)
+            upload = await read_document_upload(
+                request, settings, filename, fallback_filename=doc_type
+            )
             added = await documents.add_document(
                 db,
                 storage,
@@ -145,9 +147,9 @@ def factory_router() -> APIRouter:
                 access.payment_id,
                 index,
                 doc_type=doc_type,
-                filename=filename,
+                filename=upload.filename,
                 content_type=declared_type(content_type),
-                data=data,
+                data=upload.data,
                 settings=settings,
             )
         except (PaymentError, RfqError) as exc:
