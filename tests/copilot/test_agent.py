@@ -109,7 +109,7 @@ def test_definition_and_tools() -> None:
     agent = copilot_agent(tools)
 
     assert agent.model == DEFAULT_MODEL
-    assert (agent.prompt_file, agent.prompt_version) == ("copilot.v33.md", 33)
+    assert (agent.prompt_file, agent.prompt_version) == ("copilot.v34.md", 34)
     # The copilot runs its newest prompt: a new version is never left unused.
     newest = max(int(p.stem.removeprefix("copilot.v")) for p in PROMPTS.glob("copilot.v*.md"))
     assert agent.prompt_version == newest
@@ -159,6 +159,7 @@ async def test_analysis_turns_hand_their_reply_to_the_writer_on_the_stronger_mod
     call = HandoffCall(tool="analyze_procurement_sources", args={"objective": "x"}, output={"a": 1})
     writer, writer_input = await agent.handoff.writer([call])
     assert (writer.model, writer.effort) == (ANALYSIS_REPLY_MODEL, ANALYSIS_REPLY_EFFORT)
+    assert (writer.prompt_file, writer.prompt_version) == ("analysis_reply_writer.v3.md", 3)
     assert writer.model != agent.model
     assert writer.tools == () and writer.history_runs == 0 and writer.stream_text
     assert isinstance(writer_input, AnalysisReplyInput)
