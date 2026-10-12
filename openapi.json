@@ -22615,16 +22615,23 @@
             }
           },
           {
-            "description": "The file's name, with its extension",
+            "description": "The file's name, with its extension; optional for multipart/form-data",
             "in": "query",
             "name": "filename",
-            "required": true,
+            "required": false,
             "schema": {
-              "description": "The file's name, with its extension",
-              "maxLength": 255,
-              "minLength": 1,
-              "title": "Filename",
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The file's name, with its extension; optional for multipart/form-data",
+              "title": "Filename"
             }
           },
           {
@@ -22646,6 +22653,20 @@
               "schema": {
                 "format": "binary",
                 "type": "string"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "file": {
+                    "format": "binary",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "type": "object"
               }
             }
           },
@@ -28881,16 +28902,23 @@
             }
           },
           {
-            "description": "The file's name, with its extension",
+            "description": "The file's name, with its extension; optional for multipart/form-data",
             "in": "query",
             "name": "filename",
-            "required": true,
+            "required": false,
             "schema": {
-              "description": "The file's name, with its extension",
-              "maxLength": 255,
-              "minLength": 1,
-              "title": "Filename",
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The file's name, with its extension; optional for multipart/form-data",
+              "title": "Filename"
             }
           },
           {
@@ -28930,6 +28958,20 @@
               "schema": {
                 "format": "binary",
                 "type": "string"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "file": {
+                    "format": "binary",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "type": "object"
               }
             }
           },
