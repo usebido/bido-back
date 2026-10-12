@@ -73,8 +73,10 @@ from bido_back.copilot.proposals import (
 )
 from bido_back.db import tenant_session
 from bido_back.db.models import Analysis, Contact, Invite, Rfq, RfqLine, RfqTemplate, Supplier
+from bido_back.mandates import service as mandates
 from bido_back.negotiation import service as negotiation_service
 from bido_back.negotiation.agents import NegotiationWriter, default_negotiation_writer
+from bido_back.negotiation.labels import reason_text
 from bido_back.negotiation.strategy import plain
 from bido_back.onboarding.standard import STANDARD_TEMPLATE
 from bido_back.purchasing import service as purchasing_service
@@ -113,6 +115,7 @@ from bido_back.storage import BlobStorage
 from bido_back.templates import service as template_service
 from bido_back.templates.schemas import TemplateEdit
 from bido_back.templates.service import RequiredFieldsRemoved
+from bido_back.worker.jobs import JobQueue
 
 logger = logging.getLogger(__name__)
 
@@ -133,6 +136,10 @@ class CopilotToolDeps:
     attachments_text: str = ""
     # Writes counter-offers for propose_counteroffers; None = the default agent.
     negotiation_writer: NegotiationWriter | None = None
+    # Where the negotiation mandate's approvals are enqueued for sending. With it,
+    # propose_counteroffers runs the RFQ's mandate pass at once (as the worker would),
+    # so its result says what was approved; None: the worker's next pass decides.
+    jobs: JobQueue | None = None
     # This message's attachments (upload ids) and where their bytes live, for
     # import_spreadsheet; the sheet mapper reads sheets the rules cannot.
     attachment_ids: tuple[UUID, ...] = ()
@@ -886,13 +893,118 @@ class NegotiationStatusOut(BaseModel):
     warnings: list[str] = Field(default_factory=list[str])
 
 
+CounterofferEmailStatus = Literal[
+    "sent",
+    "sending",
+    "will_send_automatically",
+    "waiting",
+    "awaiting_approval",
+    "rejected",
+    "expired",
+]
+
+
+class CounterofferEmailOut(BaseModel):
+    """One email propose_counteroffers prepared, and what happens to it now (code-written)."""
+
+    approval_id: UUID
+    supplier_name: str | None
+    # sent; sending (approved, going out now); will_send_automatically (inside the
+    # negotiation mandate, the automatic pass approves it shortly); waiting (inside the
+    # mandate, goes out after `waiting_until` or once the mailbox is connected);
+    # awaiting_approval (a person must approve it: `held_reason`); rejected; expired.
+    status: CounterofferEmailStatus
+    approved_by_mandate: bool = False
+    will_send_automatically: bool = False
+    held_reason: str | None = None
+    waiting_until: datetime | None = None
+    # The status in one plain sentence, for the buyer.
+    status_text: str
+
+
 class ProposeCounteroffersOut(BaseModel):
     ref: str
     proposed: int
     approval_ids: list[UUID]
+    # Per email, in the order of approval_ids: sent, going out on its own under the
+    # negotiation mandate, or waiting for a person's approval.
+    emails: list[CounterofferEmailOut] = Field(default_factory=list[CounterofferEmailOut])
     # For the model only, never shown to the buyer: what to say and do next. Not
     # `note`: the screen's approval card shows a `note`, and this text leaked there.
     guidance: str
+
+
+def _counteroffer_email(
+    outlook: mandates.EmailOutlook, names: dict[UUID, str]
+) -> CounterofferEmailOut:
+    status: CounterofferEmailStatus
+    if outlook.approval_status == "executed":
+        status, text = "sent", "Sent to the supplier"
+    elif outlook.approval_status == "approved":
+        status = "sending"
+        text = (
+            "Approved by the negotiation mandate: going out now"
+            if outlook.approved_by_mandate
+            else "Approved: going out now"
+        )
+    elif outlook.approval_status in ("rejected", "expired"):
+        status = "rejected" if outlook.approval_status == "rejected" else "expired"
+        text = "Rejected: it will not be sent" if status == "rejected" else "Expired: not sent"
+    elif outlook.will_send_automatically and outlook.waiting_reason == "daily_cap":
+        status, text = "waiting", reason_text("daily_limit")
+    elif outlook.will_send_automatically and outlook.waiting_reason is not None:
+        status, text = "waiting", reason_text("mailbox_not_connected")
+    elif outlook.will_send_automatically:
+        status = "will_send_automatically"
+        text = "Inside the negotiation mandate: goes out on its own shortly, no approval needed"
+    else:
+        status = "awaiting_approval"
+        hold = outlook.held_reason
+        if hold in (None, "no_active_mandate", "not_covered_by_mandate"):
+            text = reason_text("email_awaiting_approval")
+        elif hold in ("mandate_paused", "mandate_expired", "negotiation_not_open"):
+            text = (
+                reason_text("mandate_paused")
+                if hold == "mandate_paused"
+                else "Held for your approval: the negotiation mandate no longer applies"
+            )
+        else:
+            text = reason_text(f"held_by_mandate:{hold}")
+    return CounterofferEmailOut(
+        approval_id=outlook.approval_id,
+        supplier_name=names.get(outlook.invite_id) if outlook.invite_id else None,
+        status=status,
+        approved_by_mandate=outlook.approved_by_mandate,
+        will_send_automatically=outlook.will_send_automatically,
+        held_reason=outlook.held_reason if status == "awaiting_approval" else None,
+        waiting_until=outlook.waiting_until,
+        status_text=text,
+    )
+
+
+def _counteroffer_guidance(emails: Sequence[CounterofferEmailOut]) -> str:
+    automatic = [e for e in emails if e.will_send_automatically]
+    waiting = [e for e in emails if e.status == "awaiting_approval"]
+    parts: list[str] = []
+    if automatic:
+        parts.append(
+            f"{len(automatic)} email(s) go out WITHOUT any further approval: the approved "
+            "negotiation mandate covers them (each email's status_text says whether it is "
+            "sent, going out now, or waiting for the daily limit or the mailbox). Never say "
+            "they wait for approval or that nothing was sent."
+        )
+    if waiting:
+        parts.append(
+            f"{len(waiting)} email(s) wait for a person's approval in the approvals queue (by "
+            "the buyer, or a second person where the company requires one); status_text says "
+            "why. Nothing of these was sent."
+        )
+    parts.append(
+        "A supplier offer gets one email at most: one already decided, waiting, sent, held "
+        "or rejected is never repeated, so 0 proposed can be right; get_negotiation_status "
+        "says where each supplier stands."
+    )
+    return " ".join(parts)
 
 
 # --- Award and purchase orders -------------------------------------------------------------
@@ -2360,17 +2472,28 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             writer=deps.negotiation_writer or default_negotiation_writer(),
             force=True,
         )
+        if result.approval_ids and deps.jobs is not None:
+            # A live mandate approves what is inside it now, not at the worker's next
+            # pass: the buyer is told what really happens. The same pass, same checks.
+            try:
+                await mandates.auto_approve_pending(
+                    db, ctx.tenant_id, jobs=deps.jobs, rfq_id=rfq.id
+                )
+            except Exception:
+                # Still pending: the worker's next pass decides; the outlook says so.
+                logger.exception(
+                    "copilot mandate pass failed tenant=%s rfq=%s", ctx.tenant_id, rfq.id
+                )
+        outlook = await mandates.email_outlook(db, ctx.tenant_id, rfq.id, result.approval_ids)
+        async with tenant_session(db, ctx.tenant_id) as session:
+            names = {invite.id: name for invite, name in await queries.invites(session, rfq.id)}
+        emails = [_counteroffer_email(o, names) for o in outlook]
         return ProposeCounteroffersOut(
             ref=rfq.ref,
             proposed=result.proposed,
             approval_ids=list(result.approval_ids),
-            guidance=(
-                "Nothing was sent. Each new email waits for approval (by the buyer, or by a "
-                "second person where the company requires it), unless an approved negotiation "
-                "mandate covers it. A supplier offer gets one email at most: one already "
-                "decided, waiting, sent, held or rejected is never repeated, so 0 proposed "
-                "can be right; get_negotiation_status says where each supplier stands."
-            ),
+            emails=emails,
+            guidance=_counteroffer_guidance(emails),
         )
 
     async def get_award_status(ctx: ToolContext, args: RfqRef) -> AwardStatusOut:
@@ -2730,8 +2853,9 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             "propose_counteroffers",
             "Plan the negotiation now: a revised-offer, delivery-date or best-and-final "
             "request to the suppliers that need one. The prices and dates asked are decided "
-            "by rules, not by you, and an offer never gets a second email. Nothing is sent: "
-            "each email waits for approval." + rfq_ref_hint,
+            "by rules, not by you, and an offer never gets a second email. Each email waits "
+            "for approval, unless the negotiation's mandate covers it: then it goes out on "
+            "its own. `emails` says which." + rfq_ref_hint,
             RfqRef,
             ProposeCounteroffersOut,
             "draft",

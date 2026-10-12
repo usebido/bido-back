@@ -5,7 +5,7 @@ Fake writers and mailbox; real strategy, approvals, guard, executor and mandate 
 
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select, update
@@ -16,12 +16,15 @@ from bido_back.agents.catalog.contracts import (
     NegotiationEmailInput,
 )
 from bido_back.agents.context import ToolContext
+from bido_back.agents.tools import AnyTool
 from bido_back.approvals import (
     APPROVAL_EXECUTE_JOB,
     ApprovalExecutor,
     ApprovalRecipientsUnconfirmed,
     decide_approval,
 )
+from bido_back.copilot.journey_tools import ProposeMandateOut
+from bido_back.copilot.tools import CopilotToolDeps, ProposeCounteroffersOut, copilot_tools
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
@@ -1122,3 +1125,152 @@ async def test_the_queue_lists_the_mandate_not_the_emails_it_covers(world: Manda
     await world.run_jobs()
     assert await rfq_service.list_approvals(world.engine, buyer(world.people), "pending") == []
     assert len(world.mailboxes.sender.sent) == 2
+
+
+# --- What the copilot tells the buyer -----------------------------------------------------
+# 2026-10-12, RFQ-8 under an active mandate: propose_counteroffers answered "nothing was
+# sent, it waits for approval" and the counter went out 10 s later, approved by the
+# mandate. Proposing the mandate on an RFQ already sent read as "the RFQ email waits".
+
+
+def _copilot_tools(world: MandateWorld, *, jobs: bool) -> dict[str, AnyTool]:
+    from tests.rfqs.conftest import fake_agents
+
+    return {
+        tool.name: tool
+        for tool in copilot_tools(
+            CopilotToolDeps(
+                db=world.engine,
+                agents=fake_agents(),
+                mailboxes=world.mailboxes,
+                negotiation_writer=FakeNegotiationWriter(),
+                jobs=world.jobs if jobs else None,
+            )
+        )
+    }
+
+
+async def _counteroffers(world: MandateWorld, *, jobs: bool = True) -> ProposeCounteroffersOut:
+    tool = _copilot_tools(world, jobs=jobs)["propose_counteroffers"]
+    ctx = ToolContext(tenant_id=world.people.tenant, user_id=world.people.owner, run_id=uuid4())
+    out = await tool.invoke(ctx, tool.parse_input({"rfq": (await world.rfq()).ref}))
+    assert isinstance(out, ProposeCounteroffersOut)
+    return out
+
+
+async def test_the_copilot_reports_an_in_bounds_counter_as_going_out_under_the_mandate(
+    world: MandateWorld,
+) -> None:
+    await world.start()
+    await world.offer("rhein", ("0.050", "1.20"))
+    sent_before = len(world.mailboxes.sender.sent)
+    world.jobs.jobs.clear()
+
+    out = await _counteroffers(world)
+
+    [email] = out.emails
+    assert email.approval_id in out.approval_ids
+    assert (email.supplier_name, email.status) == ("Rhein", "sending")
+    assert email.approved_by_mandate and email.will_send_automatically
+    assert email.held_reason is None
+    # Approved by the mandate within the tool call, and its execution enqueued.
+    assert (await world.approval(email.approval_id)).status == "approved"
+    assert [s.outcome for s in await world.sends_for(SEND_NEGOTIATION_EMAIL)] == ["auto_approved"]
+    await world.run_jobs()
+    assert len(world.mailboxes.sender.sent) == sent_before + 1
+
+
+async def test_the_copilot_reports_an_out_of_bounds_counter_as_held_with_its_reason(
+    world: MandateWorld,
+) -> None:
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        await session.execute(
+            update(Rfq).where(Rfq.id == world.rfq_id).values(title="Contract for MLCC")
+        )
+    await world.start()
+    await world.offer("rhein", ("0.050", "1.20"))
+
+    out = await _counteroffers(world)
+
+    [email] = out.emails
+    assert (email.status, email.held_reason) == ("awaiting_approval", "commitment_language")
+    assert not email.will_send_automatically and not email.approved_by_mandate
+    assert (await world.approval(email.approval_id)).status == "pending"
+    [held] = await world.sends_for(SEND_NEGOTIATION_EMAIL)
+    assert (held.outcome, held.reason) == ("held", "commitment_language")
+
+
+async def test_without_a_job_queue_the_copilot_predicts_with_the_mandates_own_checks(
+    world: MandateWorld,
+) -> None:
+    await world.start()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.offer("lyon", ("0.045", "1.10"))
+    # Lyon taken out of the mandate's suppliers: the mandate would hold its counter.
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        mandate = await session.scalar(select(NegotiationMandate))
+        assert mandate is not None
+        terms = ApproveMandateArgs.model_validate(mandate.terms)
+        lyon = next(s for s in terms.suppliers if s.supplier_name == "Lyon")
+        mandate.terms = {
+            **mandate.terms,
+            "suppliers": [
+                s.model_dump(mode="json") for s in terms.suppliers if s.invite_id != lyon.invite_id
+            ],
+        }
+
+    out = await _counteroffers(world, jobs=False)
+
+    by_supplier = {e.supplier_name: e for e in out.emails}
+    rhein, lyon_email = by_supplier["Rhein"], by_supplier["Lyon"]
+    assert (rhein.status, rhein.will_send_automatically) == ("will_send_automatically", True)
+    assert (lyon_email.status, lyon_email.held_reason) == (
+        "awaiting_approval",
+        "supplier_not_in_mandate",
+    )
+    # A prediction only: nothing approved, nothing recorded as held.
+    assert {(await world.approval(e.approval_id)).status for e in out.emails} == {"pending"}
+    assert await world.sends_for(SEND_NEGOTIATION_EMAIL) == []
+
+
+async def test_under_a_paused_mandate_the_copilot_says_the_counter_waits_for_approval(
+    world: MandateWorld,
+) -> None:
+    await world.start()
+    await world.offer("rhein", ("0.050", "1.20"))
+    await mandates.set_paused(world.engine, buyer(world.people), world.rfq_id, paused=True)
+
+    out = await _counteroffers(world)
+
+    [email] = out.emails
+    assert (email.status, email.held_reason) == ("awaiting_approval", "mandate_paused")
+    assert (await world.approval(email.approval_id)).status == "pending"
+
+
+async def test_the_mandate_proposal_says_which_rfq_emails_were_already_sent(
+    world: MandateWorld,
+) -> None:
+    tools = _copilot_tools(world, jobs=True)
+    ctx = ToolContext(tenant_id=world.people.tenant, user_id=world.people.owner, run_id=uuid4())
+    ref = (await world.rfq()).ref
+    args = {"rfq": ref, "deadline": (DEADLINE.date()).isoformat()}
+    tool = tools["propose_negotiation_mandate"]
+
+    first = await tool.invoke(ctx, tool.parse_input(args))
+    assert isinstance(first, ProposeMandateOut)
+    assert first.initial_emails == 2
+    assert {(i.supplier_name, i.rfq_email) for i in first.invites} == {
+        ("Rhein", "in_this_approval"),
+        ("Lyon", "in_this_approval"),
+    }
+
+    await world.start(first.approval_id)
+    await world.offer("rhein", ("0.050", "1.20"))
+    # New limits under the running mandate: a replacement, with no RFQ email in it.
+    again = await tool.invoke(ctx, tool.parse_input(args))
+    assert isinstance(again, ProposeMandateOut)
+    assert again.initial_emails == 0 and again.replaces_current_mandate
+    assert {(i.supplier_name, i.rfq_email) for i in again.invites} == {
+        ("Rhein", "sent_and_answered"),
+        ("Lyon", "sent"),
+    }
