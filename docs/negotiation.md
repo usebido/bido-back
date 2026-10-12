@@ -53,6 +53,8 @@ replies only update the standing offer.
 - A supplier reply plans its RFQ at once: quote extraction marks the RFQ and enqueues one
   `negotiation.replan` job per burst of replies. The 15-minute `negotiation.sweep` stays the
   safety net.
+- An approved mandate plans its RFQ at once when the RFQ is already out: offers that arrived
+  while the negotiation was not started are decided (and, in bounds, sent) right away.
 - New limits under a live mandate: propose a new mandate (`POST .../negotiation/mandate`, or
   the copilot's `propose_negotiation_mandate`). It is a replacement: the current mandate keeps
   running until the replacement is approved, which ends it, saves the new limits and
