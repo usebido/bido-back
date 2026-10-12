@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.config import RunnerConfig
@@ -380,6 +380,69 @@ async def test_ungrounded_value_is_stored_for_review(seeded: Seeded, script: Scr
     assert line.fields["unit_price"]["issues"] == ["not_grounded"]
     assert line.fields["_review"]["needs_review"] is True
     assert proposal.fields["_review"]["needs_review"] is True
+
+
+@pytest.mark.parametrize(
+    ("body", "quantity", "price", "tooling"),
+    [
+        (
+            "Dear Ms Weber,\nfor LM317DCYR we offer 2,000 pcs at EUR 3.20 each,"
+            " tooling EUR 1,250 one-off.\nLead time: 6 weeks.\n",
+            "2,000 pcs",
+            "EUR 3.20",
+            "tooling EUR 1,250",
+        ),
+        (
+            "Gentile Sig.ra Weber,\nper LM317DCYR offriamo 2.000 pz a 3,20 EUR cad.,"
+            " attrezzatura 1.250 EUR una tantum.\nConsegna: 6 settimane.\n",
+            "2.000 pz",
+            "3,20 EUR",
+            "attrezzatura 1.250 EUR",
+        ),
+    ],
+)
+async def test_numbers_are_read_with_the_separator_the_reply_proves(
+    seeded: Seeded, script: Script, body: str, quantity: str, price: str, tooling: str
+) -> None:
+    # Registered as Italian (a decimal comma), the supplier may answer in English: the
+    # reply's own numbers decide, not the language, and Bido's quoted RFQ does not vote.
+    async with tenant_session(seeded.engine, seeded.tenant_id) as session:
+        await session.execute(
+            update(Supplier).where(Supplier.tenant_id == seeded.tenant_id).values(language="it")
+        )
+    lead = "Lead time: 6 weeks" if "Lead time" in body else "Consegna: 6 settimane"
+    reply: dict[str, object] = {
+        **quote_output(
+            {
+                **_line(2, "2000", "3.20"),
+                "rfq_line_position": 2,
+                "offered_mpn": _body("LM317DCYR", "LM317DCYR"),
+                "min_quantity": _body("2000", quantity),
+                "unit_price": _body("3.20", price),
+                "tooling_cost": _body("1250", tooling),
+                "lead_time_days": _body("42", lead),
+            }
+        ),
+        "currency": _body("EUR", price),
+        "valid_until": _NONE,
+        "incoterm": _NONE,
+        "missing_fields": [],
+    }
+    script(final(**reply))
+    quoted = "\nIl giorno lun 5 ott 2026, Bido ha scritto:\n> Quantità: 2.000 pz\n"
+    message_id = await seeded.add_message(body=body + quoted, with_sheet=False)
+
+    await run_job(seeded, message_id)
+
+    [(proposal, [line])] = await proposals_of(seeded)
+    assert (line.min_quantity, line.unit_price, line.tooling_cost) == (
+        Decimal(2000),
+        Decimal("3.20"),
+        Decimal(1250),
+    )
+    assert line.fields["tooling_cost"]["issues"] == []
+    assert not line.needs_review
+    assert proposal.fields["_review"]["needs_review"] is False
 
 
 async def test_second_delivery_does_nothing(seeded: Seeded, script: Script) -> None:

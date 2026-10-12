@@ -3,7 +3,9 @@
 Suppliers write `1.234,56 €`, `EUR 1,234.56`, `1 234,56`, `0,45`, `1'000`.
 Some tokens are genuinely ambiguous (`1,000` is one thousand in English and
 one in German). Nothing here guesses silently: a token yields every valid
-reading, and the caller decides with a locale hint, or flags it for review.
+reading, and the caller decides with the separator the writer's own numbers
+prove (`decimal_separator_in`), never the language they are registered with,
+or flags it for review.
 """
 
 import re
@@ -14,23 +16,6 @@ from decimal import Decimal, InvalidOperation
 from typing import Literal
 
 DecimalSeparator = Literal[",", "."]
-
-# Languages whose suppliers write a decimal comma (ISO 639-1).
-DECIMAL_COMMA_LANGUAGES = frozenset(
-    {
-        "bg", "cs", "da", "de", "el", "es", "et", "fi", "fr", "hr", "hu", "id", "it", "lt",
-        "lv", "nl", "no", "nb", "pl", "pt", "ro", "ru", "sk", "sl", "sr", "sv", "tr", "uk",
-        "vi",
-    }
-)  # fmt: skip
-
-
-def decimal_separator_for(language: str | None) -> DecimalSeparator | None:
-    """The decimal separator a supplier writing in `language` most likely uses."""
-    if not language:
-        return None
-    code = language.strip().lower().split("-", 1)[0].split("_", 1)[0]
-    return "," if code in DECIMAL_COMMA_LANGUAGES else "."
 
 
 def normalize_text(text: str) -> str:
@@ -239,6 +224,25 @@ def decimal_separator_in(text: str) -> DecimalSeparator | None:
         if len(token) == 1 and token[0].decimal is not None
     }
     return votes.pop() if len(votes) == 1 else None
+
+
+# Where a reply's own words end: a reply header or the quoted original below it.
+_QUOTED = re.compile(
+    r"^\s*(?:>|-{2,}\s*(?:original|mensagem|ursprüngliche|message d'origine|mensaje)"
+    r"|(?:on|em|am|le|el|il)\s.+(?:wrote|escreveu|schrieb|a écrit|escribió|ha scritto)\s*:"
+    r"|(?:from|de|von|da):\s)",
+    re.IGNORECASE,
+)
+
+
+def own_words(body: str) -> str:
+    """The supplier's text above the quoted original (the email Bido sent them)."""
+    kept: list[str] = []
+    for line in body.splitlines():
+        if _QUOTED.match(line):
+            break
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def stated_values(

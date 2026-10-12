@@ -24,8 +24,12 @@ from bido_back.agents.catalog.contracts import (
     NegotiationLineAsk,
 )
 from bido_back.agents.config import RunnerConfig
-from bido_back.quotes.parsing import decimal_separator_for
-from bido_back.quotes.validation import QuoteSources, RequestedLine, validate_quote
+from bido_back.quotes.validation import (
+    QuoteSources,
+    RequestedLine,
+    proven_decimal_separator,
+    validate_quote,
+)
 from evals.harness import Env, MemoryStorage
 from evals.negotiation_scenarios import (
     EXPECTED_MOCK_FAILURES,
@@ -75,13 +79,14 @@ def test_scripted_extractions_are_grounded_in_each_email() -> None:
                 email = action.write(thread)
                 where = f"{scenario.name}/{step.key}"
                 assert not missing_quotes(email), (where, missing_quotes(email))
-                language = "en" if spec.created == "copilot" else spec.language
+                # As the extraction job reads it: the separator the email's numbers prove.
+                sources = QuoteSources(email_subject="Re: [RFQ-1]", email_body=email.body)
                 validated = validate_quote(
                     email.truth,
                     requested=requested,
-                    sources=QuoteSources(email_subject="Re: [RFQ-1]", email_body=email.body),
+                    sources=sources,
                     today=START,
-                    decimal=decimal_separator_for(language),
+                    decimal=proven_decimal_separator(sources),
                 )
                 issues = {i for line in validated.lines for i in line.issues}
                 issues |= {

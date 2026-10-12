@@ -6,8 +6,11 @@ any model:
 
 - the quote really is in the cited source (email body, PDF page, sheet cell);
 - the value is really in the quote: numbers read locale-aware (`1.234,56` vs
-  `1,234.56`), weeks converted to days, dates in the usual written forms,
-  currencies by code or symbol;
+  `1,234.56`) with the separator the supplier's own numbers prove, never the
+  language it is registered with (`proven_decimal_separator`); a number that
+  still reads two ways (`1,500`) is a requested tier quantity when one reading
+  is, else it goes to review. Weeks converted to days, dates in the usual
+  written forms, currencies by code or symbol;
 - the value is well-formed and in range (ISO currency, Incoterm, ISO date...);
 - the confidence is at least `REVIEW_CONFIDENCE`;
 - each line maps to a requested RFQ line; an offered MPN that differs from the
@@ -98,6 +101,7 @@ from bido_back.quotes.parsing import (
     business_days_to_calendar,
     dates_in,
     day_months_in,
+    decimal_separator_in,
     detect_currencies,
     find_number,
     incoterms_in,
@@ -112,9 +116,11 @@ from bido_back.quotes.parsing import (
     mentions_weeks,
     mentions_working_days,
     normalize_text,
+    own_words,
     parse_canonical,
     parse_decimal,
     ranges_in,
+    stated_values,
 )
 from bido_back.quotes.terms import (
     DeclinedLineSignal,
@@ -357,8 +363,10 @@ def validate_quote(
 ) -> ValidatedQuote:
     """Check an extraction against its sources and the RFQ.
 
-    `decimal` is the supplier's likely decimal separator (from its language);
-    without it, numbers like `1,000` are ambiguous and go to review.
+    `decimal` is the decimal separator the supplier's own writing proves
+    (`proven_decimal_separator`, never its registered language); without it, numbers
+    like `1,000` are ambiguous and go to review, unless a tier quantity can be read
+    as one of the requested quantities.
     `offer_date` is the date of the supplier's message (default `today`):
     lead times and validity periods run from it. `original_offer_date` is the
     date of the supplier's first offer in this thread, for a validity "from the
@@ -418,10 +426,10 @@ def validate_quote(
             if name not in _DERIVED_LINE
         }
         fields.update(_line_lead_time(draft, offer_lead, output.lead_time, ctx))
+        asked = by_position.get(position) if position is not None else None
+        fields["min_quantity"] = _as_requested_tier(fields["min_quantity"], asked, sources, decimal)
         fields["min_quantity"], draft = _without_copied_quantity(
-            fields["min_quantity"],
-            draft,
-            by_position.get(position) if position is not None else None,
+            fields["min_quantity"], draft, asked
         )
         drafts.append(draft)
         line_fields.append({name: fields[name] for name in LINE_FIELDS})
@@ -1363,7 +1371,12 @@ def check_field(
         # A sheet value is grounded in the cell it cites when the quote spans more cells
         # than that one: the value must be that cell's, not any number of the span.
         cell = _spanned_cell(source, sources)
-        issues.extend(_grounding(kind, parsed, cell or source.quote, decimal))
+        scope = cell or source.quote
+        # A workbook's numeric cell is in machine form: read with a point, whatever the
+        # supplier's separator.
+        numeric = _numeric_cell(source, sources)
+        machine = numeric is not None and _FORMAT_HINT.sub("", scope).strip() == numeric
+        issues.extend(_grounding(kind, parsed, scope, "." if machine else decimal))
     return FieldCheck(name=name, extracted=extracted, parsed=parsed, issues=tuple(issues))
 
 
@@ -1476,6 +1489,86 @@ def cell_text(document: DocumentText, sheet: str | None, cell: str) -> str | Non
     )
     match = pattern.search(document.text)
     return match.group(1) if match is not None else None
+
+
+# --- Which decimal separator? -----------------------------------------------------------
+
+# A locator marker of the extracted text: `[quote.pdf p.2]`, `[offer.xlsx Prices!C14]`.
+_MARKER: Final = re.compile(r"\[[^\]\n]*\]")
+# One cell of an extracted workbook: its marker and its text (`documents.extract`).
+_CELL_TEXT: Final = re.compile(r"\[[^\]\n]*\] (.*?)(?= \| \[|$)", re.MULTILINE)
+# The number format the extraction appends to a cell whose format names a currency.
+_FORMAT_HINT: Final = re.compile(r" \(format: .*\)$")
+# How the extraction renders a workbook's numeric cell: `1234.5`, in machine form.
+_NUMERIC_CELL: Final = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def proven_decimal_separator(sources: QuoteSources) -> DecimalSeparator | None:
+    """The decimal separator the supplier's own numbers prove, or None (`decimal_separator_in`).
+
+    Never the language the supplier is registered with: a supplier registered as Italian
+    may quote in English ("2,000 pcs at BRL 3.20"). The evidence is the subject, the body
+    above the quoted RFQ email (Bido wrote that one, in the registered language) and the
+    readable attachments, without their locator markers. A workbook's numeric cells do not
+    count: the extraction renders them in machine form (`3.2`), so they were never written
+    with a separator and prove none; its text cells do.
+    """
+    parts = [sources.email_subject, own_words(sources.email_body)]
+    for document in sources.documents.values():
+        if not document.readable:
+            continue
+        if document.kind != "sheet":
+            parts.append(_MARKER.sub(" ", document.text))
+            continue
+        for match in _CELL_TEXT.finditer(document.text):
+            text = _FORMAT_HINT.sub("", match.group(1)).strip()
+            if _NUMERIC_CELL.fullmatch(text) is None:
+                parts.append(text)
+    return decimal_separator_in("\n".join(parts))
+
+
+def _numeric_cell(source: SourceRef, sources: QuoteSources) -> str | None:
+    """The cited workbook cell's value when it is a numeric cell (`_NUMERIC_CELL`), else None."""
+    if source.kind != "sheet" or not source.cell or source.attachment is None:
+        return None
+    document = sources.documents.get(source.attachment)
+    if document is None or document.kind != "sheet" or not document.readable:
+        return None
+    text = cell_text(document, source.sheet, source.cell)
+    if text is None:
+        return None
+    value = _FORMAT_HINT.sub("", text).strip()
+    return value if _NUMERIC_CELL.fullmatch(value) is not None else None
+
+
+def _as_requested_tier(
+    check: FieldCheck,
+    requested: RequestedLine | None,
+    sources: QuoteSources,
+    decimal: DecimalSeparator | None,
+) -> FieldCheck:
+    """A tier quantity that reads two ways, read as the requested quantity it can be.
+
+    `1,500` with no separator proven is 1500 or 1.5: for a 1,500 pcs request it is
+    1500. When no reading (or more than one) is a requested quantity it stays
+    `ambiguous_number`, for a person: code never picks a reading on its own.
+    """
+    source = check.extracted.source
+    raw = check.extracted.value
+    if (
+        requested is None
+        or not requested.quantities
+        or "ambiguous_number" not in check.issues
+        or source is None
+        or raw is None
+    ):
+        return check
+    words = _spanned_cell(source, sources) or source.quote
+    tiers = stated_values(raw, words, decimal=decimal) & set(requested.quantities)
+    if len(tiers) != 1:
+        return check
+    issues = tuple(issue for issue in check.issues if issue != "ambiguous_number")
+    return replace(check, parsed=tiers.pop(), issues=issues)
 
 
 # --- Is the value well-formed, and in the quote? ----------------------------------------

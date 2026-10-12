@@ -10,7 +10,6 @@ from bido_back.quotes.parsing import (
     business_days_to_calendar,
     dates_in,
     day_months_in,
-    decimal_separator_for,
     decimal_separator_in,
     detect_currencies,
     find_number,
@@ -123,14 +122,6 @@ def test_find_number_in_supplier_text() -> None:
     assert find_number(Decimal("1000"), "MOQ 1,000", decimal=".").ambiguous is False
     assert find_number(Decimal("1"), "MOQ 1,000", decimal=".").ambiguous
     assert find_number(Decimal("1000"), "MOQ 1,000").ambiguous
-
-
-def test_decimal_separator_from_language() -> None:
-    assert decimal_separator_for("de") == ","
-    assert decimal_separator_for("pt-BR") == ","
-    assert decimal_separator_for("en") == "."
-    assert decimal_separator_for("zh") == "."
-    assert decimal_separator_for(None) is None
 
 
 @pytest.mark.parametrize(

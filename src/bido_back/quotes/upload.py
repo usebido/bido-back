@@ -72,9 +72,13 @@ from bido_back.quotes.extract_job import (
     persist_quote,
     requested_line,
 )
-from bido_back.quotes.parsing import decimal_separator_for
 from bido_back.quotes.state import reconcile
-from bido_back.quotes.validation import QuoteSources, ValidatedQuote, validate_quote
+from bido_back.quotes.validation import (
+    QuoteSources,
+    ValidatedQuote,
+    proven_decimal_separator,
+    validate_quote,
+)
 from bido_back.rfqs import audit
 from bido_back.storage import BlobStorage
 
@@ -168,7 +172,6 @@ class QuoteTarget:
     invite_id: UUID
     supplier_id: UUID
     supplier_name: str
-    supplier_language: str | None
     # Its holiday calendar counts business-day lead times and validity periods.
     supplier_country: str | None
     contact_email: str | None
@@ -228,7 +231,6 @@ async def quote_target(session: AsyncSession, rfq: Rfq, invite_id: UUID) -> Quot
         invite_id=invite.id,
         supplier_id=supplier.id,
         supplier_name=supplier.name,
-        supplier_language=supplier.language,
         supplier_country=supplier.country,
         contact_email=email,
         line_descriptions=descriptions,
@@ -298,16 +300,16 @@ async def extract_uploaded_quote(
     output = await extractor(
         task, ToolContext(tenant_id=principal.tenant_id, user_id=None, run_id=run_id)
     )
+    sources = QuoteSources(
+        email_subject="", email_body="", documents={doc.filename: doc for doc in documents}
+    )
     validated = validate_quote(
         output,
         requested=[requested_line(line) for line in lines],
-        sources=QuoteSources(
-            email_subject="",
-            email_body="",
-            documents={doc.filename: doc for doc in documents},
-        ),
+        sources=sources,
         today=today,
-        decimal=decimal_separator_for(target.supplier_language),
+        # What the file's numbers prove, not the supplier's registered language.
+        decimal=proven_decimal_separator(sources),
         offer_date=today,
         original_offer_date=original_offer_date,
         country=target.supplier_country,

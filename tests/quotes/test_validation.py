@@ -19,6 +19,7 @@ from bido_back.quotes.validation import (
     QuoteSources,
     RequestedLine,
     ValidatedQuote,
+    proven_decimal_separator,
     validate_quote,
 )
 from tests.documents.fixtures import PdfPage, PdfText, build_pdf, build_xlsx
@@ -249,6 +250,163 @@ def test_ambiguous_separator_without_locale_needs_review() -> None:
     assert issues_of(english, "moq") == ()
     # A German "1,000" is one; reading it as a thousand needs a person.
     assert issues_of(german, "moq") == ("ambiguous_number",)
+
+
+# --- The separator the supplier's own numbers prove, never its registered language ---------
+
+XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+# Bido's RFQ email quoted below the reply, written in the supplier's registered language
+# (Italian): its numbers are Bido's, not the supplier's, and prove nothing.
+QUOTED_ITALIAN_RFQ = (
+    "\nIl giorno lun 5 ott 2026, Bido ha scritto:\n"
+    "> Quantità: 2.000 pz\n"
+    "> Prezzo obiettivo: 3,10 BRL\n"
+)
+
+
+def priced(quantity: ExtractedValue, price: ExtractedValue) -> QuoteExtractionOutput:
+    draft = line(
+        offered_mpn=NONE,
+        min_quantity=quantity,
+        unit_price=price,
+        unit=NONE,
+        lead_time_days=NONE,
+        origin_country=NONE,
+    )
+    return output(
+        draft,
+        currency=ev("BRL", price.source.quote if price.source else None),
+        valid_until=NONE,
+        incoterm=NONE,
+        payment_terms=NONE,
+    )
+
+
+def validate_proven(
+    out: QuoteExtractionOutput,
+    body: str,
+    *,
+    quantities: tuple[Decimal, ...] = (),
+    documents: list[DocumentText] | None = None,
+) -> ValidatedQuote:
+    """Validated as the extraction job does: the separator proven by the reply itself."""
+    sources = QuoteSources(
+        email_subject="Re: [RFQ-12] LDO regulators",
+        email_body=body,
+        documents={d.filename: d for d in documents or []},
+    )
+    return validate_quote(
+        out,
+        requested=[replace(LINE_1, quantities=quantities), LINE_2],
+        sources=sources,
+        today=TODAY,
+        decimal=proven_decimal_separator(sources),
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "quantity_quote", "price_quote", "separator"),
+    [
+        # Registered as Italian, answering in English.
+        (
+            "Dear Ms Weber,\nfor TPS7A4701RGWR we offer 2,000 pcs at BRL 3.20 each.\n",
+            "2,000 pcs",
+            "BRL 3.20",
+            ".",
+        ),
+        (
+            "Gentile Sig.ra Weber,\nper TPS7A4701RGWR offriamo 2.000 pz a 3,20 BRL cad.\n",
+            "2.000 pz",
+            "3,20 BRL",
+            ",",
+        ),
+    ],
+)
+def test_a_quote_is_read_with_the_separator_its_own_numbers_prove(
+    body: str, quantity_quote: str, price_quote: str, separator: str
+) -> None:
+    out = priced(ev("2000", quantity_quote), ev("3.20", price_quote))
+    full = body + QUOTED_ITALIAN_RFQ
+
+    result = validate_proven(out, full)
+
+    assert proven_decimal_separator(QuoteSources(email_subject="", email_body=full)) == separator
+    assert result.lines[0].parsed("min_quantity") == Decimal(2000)
+    assert result.lines[0].parsed("unit_price") == Decimal("3.20")
+    assert issues_of(result, "min_quantity") == ()
+    assert issues_of(result, "unit_price") == ()
+    assert not result.needs_review
+
+
+def test_the_registered_language_would_have_misread_an_english_quote() -> None:
+    body = "Dear Ms Weber,\nfor TPS7A4701RGWR we offer 2,000 pcs at BRL 3.20 each.\n"
+    out = priced(ev("2000", "2,000 pcs"), ev("3.20", "BRL 3.20"))
+
+    # The Italian comma, as the supplier's registered language used to decide: 2,000 is two.
+    by_language = validate(out, body=body, decimal=",")
+
+    assert issues_of(by_language, "min_quantity") == ("ambiguous_number",)
+    assert issues_of(validate_proven(out, body), "min_quantity") == ()
+
+
+@pytest.mark.parametrize("value", ["1500", "1.5"])
+def test_an_ambiguous_quantity_reads_as_the_requested_tier(value: str) -> None:
+    # Nothing proves the separator: 1,500 is 1500 or 1.5, and the RFQ asked for 1500.
+    body = "Dear Ms Weber,\nwe can supply 1,500 pcs at BRL 3 each.\n"
+    out = priced(ev(value, "1,500 pcs"), ev("3", "BRL 3"))
+
+    result = validate_proven(out, body, quantities=(Decimal(1500), Decimal(5000)))
+
+    assert result.lines[0].parsed("min_quantity") == Decimal(1500)
+    assert issues_of(result, "min_quantity") == ()
+    assert not result.lines[0].needs_review
+
+
+@pytest.mark.parametrize("quantities", [(), (Decimal(2000),)])
+def test_an_ambiguous_quantity_matching_no_tier_waits_for_a_person(
+    quantities: tuple[Decimal, ...],
+) -> None:
+    body = "Dear Ms Weber,\nwe can supply 1,500 pcs at BRL 3 each.\n"
+    out = priced(ev("1500", "1,500 pcs"), ev("3", "BRL 3"))
+
+    result = validate_proven(out, body, quantities=quantities)
+
+    # Code picks no reading: the field is flagged and the line goes to review.
+    assert issues_of(result, "min_quantity") == ("ambiguous_number",)
+    assert result.lines[0].fields["min_quantity"].provenance()["needs_review"] is True
+    assert result.lines[0].needs_review
+
+
+def in_cell(value: str, cell: str, quote: str | None = None) -> ExtractedValue:
+    return ev(value, quote, kind="sheet", attachment="Offerta.xlsx", sheet="Prezzi", cell=cell)
+
+
+def separator_of(document: DocumentText) -> str | None:
+    return proven_decimal_separator(
+        QuoteSources(email_subject="", email_body="", documents={document.filename: document})
+    )
+
+
+def test_numeric_cells_of_a_workbook_need_and_prove_no_separator() -> None:
+    # The extraction renders numeric cells in machine form ("12.345", "0.45"): they
+    # were never written with a separator. Its text cells are the supplier's writing.
+    rows: list[list[object]] = [["Codice", "Quantità", "Prezzo"], ["TPS7A4701RGWR", 2000, 12.345]]
+    numeric = extract_text("Offerta.xlsx", XLSX, build_xlsx({"Prezzi": rows}))
+    with_text = extract_text(
+        "Offerta.xlsx", XLSX, build_xlsx({"Prezzi": [*rows, ["Totale", None, "24.690,00 BRL"]]})
+    )
+    out = priced(in_cell("2000", "B2"), in_cell("12.345", "C2")).model_copy(
+        update={"currency": in_cell("BRL", "C3", "24.690,00 BRL")}
+    )
+
+    result = validate_proven(out, "In allegato la nostra offerta.", documents=[with_text])
+
+    assert "[Offerta.xlsx Prezzi!C2] 12.345" in numeric.text
+    assert separator_of(numeric) is None
+    assert separator_of(with_text) == ","
+    # The comma the text proves does not apply to a numeric cell: 12.345 is not 12345.
+    assert result.lines[0].parsed("unit_price") == Decimal("12.345")
+    assert issues_of(result, "unit_price") == ()
 
 
 def test_lead_time_in_weeks_and_working_days() -> None:

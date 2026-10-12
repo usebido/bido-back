@@ -60,8 +60,12 @@ from bido_back.onboarding.service import store_upload
 from bido_back.purchasing import service as purchasing
 from bido_back.purchasing.schemas import AnalysisRequest
 from bido_back.purchasing.workbook import SheetMapper, default_sheet_mapper, import_workbook
-from bido_back.quotes.parsing import decimal_separator_for
-from bido_back.quotes.validation import QuoteSources, RequestedLine, validate_quote
+from bido_back.quotes.validation import (
+    QuoteSources,
+    RequestedLine,
+    proven_decimal_separator,
+    validate_quote,
+)
 from evals.golden import golden_analysis, golden_contacts
 from evals.layouts import Fixture
 from evals.quotes import REQUESTED, QuoteCase
@@ -1015,18 +1019,20 @@ async def scenario_extraction(
         result.error = "extraction run failed"
         return
     ids = {line.position: uuid4() for line in REQUESTED}
+    sources = QuoteSources(
+        email_subject=case.subject,
+        email_body=case.body,
+        documents={d.filename: d for d in documents},
+    )
     validated = validate_quote(
         output,
         requested=[
             RequestedLine(id=ids[r.position], position=r.position, mpn=r.mpn) for r in REQUESTED
         ],
-        sources=QuoteSources(
-            email_subject=case.subject,
-            email_body=case.body,
-            documents={d.filename: d for d in documents},
-        ),
+        sources=sources,
         today=env.today,
-        decimal=decimal_separator_for(case.language),
+        # As the extraction job: what the quote's numbers prove, not its language.
+        decimal=proven_decimal_separator(sources),
     )
     result.check("is_quote", output.is_quote == case.is_quote, f"is_quote={output.is_quote}")
     if case.declined:

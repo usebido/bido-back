@@ -62,6 +62,7 @@ from bido_back.quotes.parsing import (
     dates_in,
     decimal_separator_in,
     normalize_text,
+    own_words,
     stated_values,
 )
 from bido_back.rfqs.audit import rfq_event
@@ -76,14 +77,6 @@ type Db = AsyncEngine | async_sessionmaker[AsyncSession]
 
 _READABLE: Final = frozenset({"stored", "failed"})
 MAX_BODY_CHARS: Final = 60_000
-
-# Where the supplier's own words end: a reply header or the quoted original.
-_QUOTED: Final = re.compile(
-    r"^\s*(?:>|-{2,}\s*(?:original|mensagem|ursprüngliche|message d'origine|mensaje)"
-    r"|(?:on|em|am|le|el|il)\s.+(?:wrote|escreveu|schrieb|a écrit|escribió|ha scritto)\s*:"
-    r"|(?:from|de|von|da):\s)",
-    re.IGNORECASE,
-)
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,16 +121,6 @@ class Reading:
             and not self.changes
             and not self.other_dates
         )
-
-
-def own_words(body: str) -> str:
-    """The supplier's text above the quoted original (the PO email we sent)."""
-    kept: list[str] = []
-    for line in body.splitlines():
-        if _QUOTED.match(line):
-            break
-        kept.append(line)
-    return "\n".join(kept)
 
 
 def _grounded(quoted: Quoted | None, text: str) -> str | None:
