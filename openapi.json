@@ -23029,7 +23029,7 @@
     },
     "/v1/factory/order/milestones/{index}/submit": {
       "post": {
-        "description": "Send the milestone's files to the buyer for approval; the milestone is then\n`in_review`. 401: the link is not valid; 404: no such milestone; 409: the order is\nnot confirmed, an earlier milestone is not released yet, or this one is already\nunder review; 422: a required document is missing (the message names them); 503:\nnot available on this server yet.",
+        "description": "Send the milestone's files to the buyer for approval; the milestone is then\n`in_review`. 401: the link is not valid; 404: no such milestone; 409: the order is\nnot confirmed, an earlier milestone is not released yet, or this one is already\nunder review; 422: a required document is missing (the message names them).",
         "operationId": "submit_factory_milestone_v1_factory_order_milestones__index__submit_post",
         "parameters": [
           {
@@ -23126,16 +23126,6 @@
               }
             },
             "description": "Unprocessable Entity"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
           }
         },
         "security": [
@@ -29670,7 +29660,7 @@
     },
     "/v1/purchase-orders/{po_id}/payment/milestones/{index}/submit": {
       "post": {
-        "description": "Send the milestone's documents for approval on the factory's behalf: a\n`release_po_milestone` approval, requested in the name of the person who asked for\nthe payment, that a person decides at POST /v1/approvals/{approval_id}/decision.\nApproved, the worker releases the milestone's share of the escrow. 404: no such\norder, payment or milestone; 409: the payment is not funded, an earlier milestone\nis not released yet, or this one is already under review or released; 422: a\nrequired document type is missing (the message names them); 503: releases are not\nset up on this server.",
+        "description": "Send the milestone's documents for approval on the factory's behalf: a\n`release_po_milestone` approval, requested in the name of the person who asked for\nthe payment, that a person decides at POST /v1/approvals/{approval_id}/decision.\nApproved, the worker releases the milestone's share of the escrow. 404: no such\norder, payment or milestone; 409: the payment is not funded, an earlier milestone\nis not released yet, or this one is already under review or released; 422: a\nrequired document type is missing (the message names them).",
         "operationId": "submit_milestone_v1_purchase_orders__po_id__payment_milestones__index__submit_post",
         "parameters": [
           {
@@ -29795,16 +29785,6 @@
               }
             },
             "description": "Unprocessable Entity"
-          },
-          "503": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            },
-            "description": "Service Unavailable"
           }
         },
         "security": [

@@ -29,7 +29,6 @@ from bido_back.payments.chain.hashes import compute_evidence_hash
 from bido_back.payments.errors import (
     PaymentInvalidState,
     PaymentRefused,
-    PaymentsNotConfigured,
 )
 from bido_back.payments.milestones import service
 from bido_back.payments.milestones.documents import Uploader, remove_document
@@ -311,16 +310,17 @@ async def test_the_factory_sends_a_milestone_through_its_confirmed_link(funded: 
     assert (event["source"], event["factory_link_id"]) == ("factory", str(third.link_id))
 
 
-async def test_nothing_is_proposed_without_the_attester_key(funded: Funded) -> None:
+async def test_the_milestone_can_be_submitted_without_the_attester_key(funded: Funded) -> None:
     storage = FakeStorage()
     owner = buyer(funded.people)
     await upload_required(funded, owner, 0, storage=storage)
 
-    with pytest.raises(PaymentsNotConfigured):
-        await submit(funded, owner, 0, settings=release_settings(solana_gate_attester_key=None))
+    submitted = await submit(
+        funded, owner, 0, settings=release_settings(solana_gate_attester_key=None)
+    )
 
-    assert await release_approvals(funded) == []
-    assert (await milestone_row(funded, 0)).state == "open"
+    assert [approval.id for approval in await release_approvals(funded)] == [submitted.approval_id]
+    assert (await milestone_row(funded, 0)).state == "submitted"
 
 
 async def test_every_required_document_is_needed(funded: Funded) -> None:

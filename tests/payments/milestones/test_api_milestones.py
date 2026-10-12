@@ -254,14 +254,26 @@ async def test_uploads_are_refused_by_size_kind_and_type(funded: Funded, api: Mi
 
 
 @pytest.mark.db
-async def test_without_the_attester_key_a_milestone_is_not_sent(
+async def test_without_the_attester_key_a_milestone_is_submitted(
     funded: Funded, api: MilestoneApi
 ) -> None:
     http = api.client(
         buyer(funded.people), settings=release_settings(solana_gate_attester_key=None)
     )
-    response = await http.post(f"{PO.format(po=funded.po_id)}/milestones/0/submit", json={})
-    assert response.status_code == 503
+    base = PO.format(po=funded.po_id)
+    definition = await definition_at(funded, 0)
+    for code in sorted(definition.required_codes):
+        document_type = definition.document(code)
+        assert document_type is not None
+        name, content = sample(document_type)
+        upload = await http.post(
+            f"{base}/milestones/0/documents", params=document(code, name), content=content
+        )
+        assert upload.status_code == 201, upload.text
+
+    response = await http.post(f"{base}/milestones/0/submit", json={})
+    assert response.status_code == 202
+    assert response.json()["milestone"]["status"] == "in_review"
 
 
 @pytest.mark.db

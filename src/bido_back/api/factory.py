@@ -212,7 +212,6 @@ def factory_router() -> APIRouter:
             status.HTTP_404_NOT_FOUND,
             status.HTTP_409_CONFLICT,
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            status.HTTP_503_SERVICE_UNAVAILABLE,
         ),
     )
     async def submit_factory_milestone(  # pyright: ignore[reportUnusedFunction]
@@ -225,8 +224,7 @@ def factory_router() -> APIRouter:
         """Send the milestone's files to the buyer for approval; the milestone is then
         `in_review`. 401: the link is not valid; 404: no such milestone; 409: the order is
         not confirmed, an earlier milestone is not released yet, or this one is already
-        under review; 422: a required document is missing (the message names them); 503:
-        not available on this server yet."""
+        under review; 422: a required document is missing (the message names them)."""
         try:
             await service.submit_milestone(
                 db, access, access.payment_id, index, body, settings=settings

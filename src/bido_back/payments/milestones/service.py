@@ -62,14 +62,13 @@ from bido_back.db.models import (
     Tenant,
 )
 from bido_back.decimals import format_decimal
-from bido_back.payments.config import explorer_tx_url, releases_enabled
+from bido_back.payments.config import explorer_tx_url
 from bido_back.payments.errors import (
     FactoryLinkInvalid,
     PaymentForbidden,
     PaymentInvalidState,
     PaymentNotFound,
     PaymentRefused,
-    PaymentsNotConfigured,
 )
 from bido_back.payments.milestones.catalog import (
     MilestoneDefinition,
@@ -723,12 +722,10 @@ async def submit_milestone(
 ) -> MilestoneSubmitted:
     """Send milestone `index`'s draft for approval: a pending `release_po_milestone`.
 
-    `PaymentsNotConfigured` without releases on this server; `PaymentInvalidState` unless
-    it is the next milestone to release of a funded payment (and, for the factory, its link
-    confirmed); `PaymentRefused` naming the required document types still missing.
+    `PaymentInvalidState` unless it is the next milestone to release of a funded payment
+    (and, for the factory, its link confirmed); `PaymentRefused` naming the required
+    document types still missing.
     """
-    if not releases_enabled(settings):
-        raise PaymentsNotConfigured("milestone releases are not set up on this server")
     tenant_id = submitter.tenant_id
     async with tenant_session(db, tenant_id) as session:
         payment, milestones = await locked_milestones(session, payment_id, index)

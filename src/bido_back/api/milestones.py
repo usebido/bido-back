@@ -398,7 +398,6 @@ def milestones_router() -> APIRouter:
             status.HTTP_404_NOT_FOUND,
             status.HTTP_409_CONFLICT,
             status.HTTP_422_UNPROCESSABLE_CONTENT,
-            status.HTTP_503_SERVICE_UNAVAILABLE,
         ),
     )
     async def submit_milestone(  # pyright: ignore[reportUnusedFunction]
@@ -415,8 +414,7 @@ def milestones_router() -> APIRouter:
         Approved, the worker releases the milestone's share of the escrow. 404: no such
         order, payment or milestone; 409: the payment is not funded, an earlier milestone
         is not released yet, or this one is already under review or released; 422: a
-        required document type is missing (the message names them); 503: releases are not
-        set up on this server."""
+        required document type is missing (the message names them)."""
         try:
             payment_id = await service.payment_id_for(db, principal, po_id)
             return await service.submit_milestone(
