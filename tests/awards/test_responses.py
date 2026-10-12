@@ -8,7 +8,7 @@ from bido_back.agents.catalog.contracts import (
     PoResponseOutput,
     Quoted,
 )
-from bido_back.awards.responses import own_words, read_response
+from bido_back.awards.responses import Reading, own_words, read_response
 
 LINES = [
     PoResponseOrderedLine(
@@ -174,3 +174,82 @@ def test_unknown_lines_are_ignored_and_refusals_are_not_confirmations() -> None:
     )
     reading = read(output, "Leider können wir nicht liefern. 1")
     assert reading.changes == [] and not reading.plain_confirmation
+
+
+# PO-4 in dev (2026-10-12): an Italian-registered supplier answered in English.
+PO4_LINE = PoResponseOrderedLine(
+    position=1,
+    description="Capacitor 100uF 50V",
+    mpn="EEE-FK1H101P",
+    quantity="2000",
+    unit="pcs",
+    unit_price="2.75",
+    currency="BRL",
+    delivery_date="2026-11-07",
+)
+# The order as we sent it, quoted under the reply: Italian numbers prove nothing about theirs.
+PO4_QUOTED = (
+    "\n\nIl giorno lun 12 ott 2026, Ana <ana@buyer.example.test> ha scritto:\n"
+    "> Ordine di acquisto PO-4: 2.000 pz a 2,75 BRL, totale 5.500,00 BRL"
+)
+
+
+def read_po4(
+    words: str, quantity: str, unit_price: str | None = None, ordered: str = "2000"
+) -> Reading:
+    line: dict[str, object] = {"position": 1, "quantity": {"value": quantity, "quote": words}}
+    if unit_price is not None:
+        line["unit_price"] = {"value": unit_price, "quote": words}
+    output = confirmation(
+        words,
+        supplier_order_ref={"value": "ET-7781", "quote": "ET-7781"},
+        lines=[line],
+    )
+    return read_response(
+        output,
+        lines=[PO4_LINE.model_copy(update={"quantity": ordered})],
+        subject="Re: Ordine di acquisto PO-4",
+        body=f"{words}\nOur order reference: ET-7781.{PO4_QUOTED}",
+        attachments_text="",
+        language="it",
+        known_dates=KNOWN,
+    )
+
+
+def test_an_english_reply_to_an_italian_supplier_reads_english_numbers() -> None:
+    words = (
+        "we confirm purchase order PO-4: 2,000 pcs Panasonic EEE-FK1H101P at BRL 2.75 "
+        "per piece, total BRL 5,500.00"
+    )
+    reading = read_po4(words, quantity="2,000", unit_price="2.75")
+    assert reading.changes == []
+    assert reading.plain_confirmation
+    assert reading.supplier_order_ref == "ET-7781"
+
+
+def test_an_italian_reply_reads_italian_numbers() -> None:
+    reading = read_po4("confermiamo 2.000 pz a 2,75 BRL", quantity="2.000", unit_price="2,75")
+    assert reading.changes == [] and reading.plain_confirmation
+
+
+def test_a_real_quantity_change_in_italian_is_read_with_the_proven_comma() -> None:
+    reading = read_po4("confermiamo 1.500 pz a 2,75 BRL", quantity="1.500", unit_price="2,75")
+    [change] = reading.changes
+    assert (change.field, change.ordered, change.stated) == ("quantity", "2000", "1500")
+    assert not change.unverified and not change.ambiguous
+    assert not reading.plain_confirmation
+
+
+def test_an_ambiguous_number_matching_the_order_is_no_change() -> None:
+    # Nothing in the supplier's words proves the separator: 2000 or 2.
+    reading = read_po4("we confirm 2,000 pcs", quantity="2,000")
+    assert reading.changes == [] and reading.plain_confirmation
+
+
+def test_an_ambiguous_number_not_matching_the_order_waits_as_written() -> None:
+    reading = read_po4("we confirm 2,000 pcs", quantity="2,000", ordered="3000")
+    [change] = reading.changes
+    assert (change.field, change.ordered, change.stated) == ("quantity", "3000", "2,000")
+    assert change.unverified and change.ambiguous
+    assert change.as_json()["ambiguous"] is True
+    assert not reading.plain_confirmation
