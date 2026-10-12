@@ -116,12 +116,18 @@ jobs:
       - name: pyright
         run: uv run pyright
 
+  # The suite is split across parallel jobs, each with its own Postgres (one job
+  # took ~14 min); tests/conftest.py picks each job's files. ci-ok gates on all.
   test:
-    name: Migrations, RLS check, and tests
+    name: Migrations, RLS check, and tests (shard ${{ matrix.shard }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     services:
       db:
         image: pgvector/pgvector:pg16
@@ -141,6 +147,8 @@ jobs:
       MIGRATION_DATABASE_URL: postgresql+asyncpg://bido_migrator:migrator@localhost:5432/bido
       AGNO_DATABASE_URL: postgresql+asyncpg://bido_agno:agno@localhost:5432/bido
       AGNO_TELEMETRY: "false"
+      PYTEST_SHARD_TOTAL: 4
+      PYTEST_SHARD_INDEX: ${{ matrix.shard }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
