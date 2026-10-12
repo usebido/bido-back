@@ -9,6 +9,7 @@ key, the simulated mode that never calls Stripe, and the builders.
 # ruff: noqa: S105, S106 - fake keys and tokens, never real credentials
 
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Final
@@ -900,23 +901,25 @@ async def test_a_visa_allowance_is_usable_once_the_passkey_approved_it(
     assert authorization.usable is usable
 
 
+# Each answer is built when the test runs: a live allowance expires minutes after it is made,
+# and the whole suite takes longer than that between collection and this test.
 @pytest.mark.parametrize(
     ("answer", "status"),
     [
-        (Answer(200, live_allowance(visa("pending_verification"))), "pending"),
-        (Answer(200, live_allowance(visa("active"))), "verified"),
-        (Answer(200, live_allowance(visa("error"))), "failed"),
-        (Answer(200, live_allowance(rail("spt", "stripe", "active"))), "failed"),
-        (Answer(200, live_allowance(visa("active"), status="cancelled")), "failed"),
-        (Answer(200, live_allowance(visa("active"), status="expired")), "expired"),
-        (Answer(200, live_allowance(visa("active"), minutes=-1)), "expired"),
-        (Answer(404, {"type": "ALLOWANCE_NOT_FOUND", "status": 404}), "failed"),
+        (lambda: Answer(200, live_allowance(visa("pending_verification"))), "pending"),
+        (lambda: Answer(200, live_allowance(visa("active"))), "verified"),
+        (lambda: Answer(200, live_allowance(visa("error"))), "failed"),
+        (lambda: Answer(200, live_allowance(rail("spt", "stripe", "active"))), "failed"),
+        (lambda: Answer(200, live_allowance(visa("active"), status="cancelled")), "failed"),
+        (lambda: Answer(200, live_allowance(visa("active"), status="expired")), "expired"),
+        (lambda: Answer(200, live_allowance(visa("active"), minutes=-1)), "expired"),
+        (lambda: Answer(404, {"type": "ALLOWANCE_NOT_FOUND", "status": 404}), "failed"),
     ],
 )
 async def test_the_verification_is_read_from_the_allowance(
-    answer: Answer, status: CardVerificationStatus
+    answer: Callable[[], Answer], status: CardVerificationStatus
 ) -> None:
-    recorder = Recorder(scripted({ALLOWANCE: [answer]}))
+    recorder = Recorder(scripted({ALLOWANCE: [answer()]}))
 
     verification = await gateway(recorder, simulated=True, rail="vic").verification("alw_1")
 
