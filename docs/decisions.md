@@ -156,8 +156,8 @@ Choices we have not made yet. Each states the recommendation and the strongest o
   explicitly asked and nothing is missing. Sending still goes through approvals.
 - **Objection:** the model judges what counts as "explicitly asked". The worst case is
   an editable draft the buyer never previewed.
-- **PRs:** [#121](https://github.com/usebido/bido-back/pull/121), open. It needs a
-  rebase onto `copilot.v34` from #126.
+- **PRs:** [#121](https://github.com/usebido/bido-back/pull/121), open, as
+  `copilot.v36` (main's v35 plus this rule).
 
 ### Dates written by the copilot
 
