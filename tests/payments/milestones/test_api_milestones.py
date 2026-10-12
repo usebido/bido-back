@@ -247,8 +247,10 @@ async def test_uploads_are_refused_by_size_kind_and_type(funded: Funded, api: Mi
 
     assert too_big.status_code == 413
     assert (a_pdf.status_code, misnamed.status_code) == (415, 415)
-    assert [r.status_code for r in (unknown, bad_code, empty, no_name)] == [422] * 4
-    assert api.storage.puts == []
+    assert [r.status_code for r in (unknown, bad_code, empty)] == [422] * 3
+    assert no_name.status_code == 201
+    assert no_name.json()["filename"] == f"{photos.code}.jpg"
+    assert len(api.storage.puts) == 1
 
 
 @pytest.mark.db
