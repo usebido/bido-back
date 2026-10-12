@@ -45,6 +45,7 @@ from bido_back.mandates.service import (
     register_mandate_act_tools,
 )
 from bido_back.negotiation import service as negotiation_service
+from bido_back.negotiation.jobs import NegotiationReplanHandler
 from bido_back.negotiation.schemas import LineLimitsUpdate, NegotiationSettingsUpdate
 from bido_back.negotiation.send import SEND_NEGOTIATION_EMAIL
 from bido_back.rfqs import service as rfq_service
@@ -53,6 +54,7 @@ from bido_back.rfqs.activity import rfq_activity
 from bido_back.rfqs.errors import InvalidState, ReplyByRequired
 from bido_back.rfqs.overview import list_rfq_overviews
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest
+from bido_back.rfqs.send import REJECT_HOOKS as RFQ_REJECT_HOOKS
 from bido_back.rfqs.send import SEND_RFQ_EMAIL
 from bido_back.worker.envelope import Envelope
 from bido_back.worker.job_types import NEGOTIATION_REPLAN
@@ -1006,6 +1008,99 @@ async def test_a_replacement_of_a_mandate_no_longer_live_starts_nothing(
         await world.start(proposed.approval_id)
 
     assert [m.status for m in await _mandates(world)] == ["ended"]
+
+
+async def _send_without_a_mandate(world: MandateWorld, *, reject: str | None = None) -> None:
+    """The RFQ emails approved one by one, before any mandate; `reject` stays unsent."""
+    prepared = await rfq_service.prepare_send(
+        world.engine, buyer(world.people), world.rfq_id, FakeWriter(), world.mailboxes
+    )
+    rejected = world.invites[reject] if reject is not None else None
+    for item in prepared.approvals:
+        if item.invite_id == rejected:
+            await decide_approval(
+                world.engine,
+                approver(world.people),
+                item.approval_id,
+                "reject",
+                jobs=world.jobs,
+                on_reject=RFQ_REJECT_HOOKS,
+            )
+        else:
+            await world.approve(item.approval_id)
+    world.jobs.jobs.clear()
+
+
+def _replan_handler(world: MandateWorld) -> NegotiationReplanHandler:
+    return NegotiationReplanHandler(
+        db=world.engine, writer=FakeNegotiationWriter(), jobs=world.jobs
+    )
+
+
+async def test_a_first_mandate_plans_an_offer_already_in_at_once(world: MandateWorld) -> None:
+    # 2026-10-12: the quote arrived before the mandate (negotiation not started), and the
+    # approved mandate sat idle until the 15-minute sweep: nothing decided, nothing sent.
+    await _send_without_a_mandate(world)
+    assert (await world.rfq()).status == "open"
+    await world.offer("rhein", ("0.050", "1.20"))
+    approval_id = await world.propose()
+    assert (
+        ApproveMandateArgs.model_validate((await world.approval(approval_id)).args).initial_emails
+        == []
+    )
+    sent_before = len(world.mailboxes.sender.sent)
+
+    await world.start(approval_id)
+
+    # Exactly one re-plan, enqueued after the commit that opened the negotiation.
+    [job] = world.other_jobs
+    assert job.type == NEGOTIATION_REPLAN and job.payload == {"rfq_id": str(world.rfq_id)}
+    rfq = await world.rfq()
+    assert rfq.negotiation_status == "open"
+    assert rfq.negotiation_replan_requested_at is not None
+    assert job.idempotency_key.endswith(rfq.negotiation_replan_requested_at.isoformat())
+
+    await _replan_handler(world)(job)
+    await world.run_jobs()
+
+    # Decided, approved under the mandate and sent, without waiting for a sweep.
+    [counter] = await world.messages("rhein")
+    assert (counter.action, counter.status) == ("counter", "sent")
+    assert len(world.mailboxes.sender.sent) == sent_before + 1
+    assert [s.outcome for s in await world.sends_for(SEND_NEGOTIATION_EMAIL)] == ["auto_approved"]
+    assert await world.messages("lyon") == []
+
+
+async def test_the_replan_leaves_a_supplier_whose_rfq_email_is_not_sent_yet(
+    world: MandateWorld,
+) -> None:
+    await _send_without_a_mandate(world, reject="lyon")
+    await world.offer("rhein", ("0.050", "1.20"))
+    approval_id = await world.propose()
+    terms = ApproveMandateArgs.model_validate((await world.approval(approval_id)).args)
+    assert [e.invite_id for e in terms.initial_emails] == [world.invites["lyon"]]
+    await decide_approval(
+        world.engine, approver(world.people), approval_id, "approve", jobs=world.jobs
+    )
+    [mandate_job] = world.jobs.jobs
+    world.jobs.jobs.clear()
+    await world.executor(mandate_job)
+    # Lyon's RFQ email is queued for sending; the re-plan is queued after it.
+    assert [j.type for j in world.jobs.jobs] == [APPROVAL_EXECUTE_JOB, NEGOTIATION_REPLAN]
+    replan = world.jobs.jobs.pop()
+
+    # The re-plan runs first: Rhein is countered, Lyon (RFQ email unsent) is left waiting.
+    await _replan_handler(world)(replan)
+
+    [counter] = await world.messages("rhein")
+    assert counter.action == "counter" and counter.status in ("proposed", "approved")
+    assert await world.messages("lyon") == []
+    await world.run_jobs()
+    assert (await world.messages("rhein"))[0].status == "sent"
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        lyon = await session.get(Invite, world.invites["lyon"])
+    assert lyon is not None and lyon.status == "sent"
+    assert await world.messages("lyon") == []
 
 
 async def test_the_queue_lists_the_mandate_not_the_emails_it_covers(world: MandateWorld) -> None:

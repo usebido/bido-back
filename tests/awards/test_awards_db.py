@@ -1,13 +1,13 @@
 """Award, purchase orders and "not selected" notices against Postgres; fake writer and mailbox."""
 
 import io
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.catalog.contracts import AwardNoticeInput, EmailNoteOutput
@@ -32,18 +32,23 @@ from bido_back.db.models import (
     Invite,
     IssuedPurchaseOrder,
     Message,
+    NegotiationMandate,
+    NegotiationMessage,
     Proposal,
     ProposalLine,
     Rfq,
     Supplier,
     Tenant,
 )
+from bido_back.negotiation import service as negotiation_service
+from bido_back.negotiation.schemas import LineLimitsUpdate, NegotiationSettingsUpdate
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs import suppliers
 from bido_back.rfqs.errors import InvalidState, NotFound
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest, RfqDetail
 from bido_back.rfqs.send import RfqActDeps, register_act_tools
 from tests.approvals.conftest import FakeJobQueue, People
+from tests.negotiation.test_negotiation_db import FakeNegotiationWriter
 from tests.rfqs.conftest import FakeIntake, FakeMailboxes, FakeWriter
 
 pytestmark = pytest.mark.db
@@ -180,6 +185,18 @@ class World:
         )
         await self.approve(requested.approval_id)
         return requested.approval_id
+
+    async def rfq_row(self) -> Rfq:
+        async with tenant_session(self.engine, self.people.tenant) as session:
+            rfq = await session.get(Rfq, self.rfq.id)
+        assert rfq is not None
+        return rfq
+
+    async def approval_status(self, approval_id: UUID) -> str:
+        async with tenant_session(self.engine, self.people.tenant) as session:
+            approval = await session.get(Approval, approval_id)
+        assert approval is not None
+        return approval.status
 
     async def orders(self) -> list[IssuedPurchaseOrder]:
         async with tenant_session(self.engine, self.people.tenant) as session:
@@ -472,3 +489,158 @@ async def test_another_tenant_sees_nothing(world: World) -> None:
         await service.get_purchase_order(world.engine, other, po.id)
     with pytest.raises(NotFound):
         await service.get_award(world.engine, other, world.rfq.id)
+
+
+async def _negotiating(world: World) -> tuple[NegotiationMessage, UUID]:
+    """Open a negotiation on the RFQ, under an active mandate, with a counter-offer to
+    Rhein proposed and awaiting approval. Returns the counter and the mandate id."""
+    line1, line2 = world.rfq.lines
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        await session.execute(
+            update(Invite).where(Invite.rfq_id == world.rfq.id).values(status="responded")
+        )
+    await negotiation_service.update_negotiation(
+        world.engine,
+        buyer(world.people),
+        world.rfq.id,
+        NegotiationSettingsUpdate(
+            max_rounds=3,
+            early_close=False,
+            lines=[
+                LineLimitsUpdate(
+                    rfq_line_id=line1.id,
+                    target_unit_price=Decimal("0.05"),
+                    max_unit_price=Decimal("0.20"),
+                    max_lead_time_days=42,
+                ),
+                LineLimitsUpdate(
+                    rfq_line_id=line2.id,
+                    target_unit_price=Decimal("1.00"),
+                    max_unit_price=Decimal("3.00"),
+                    max_lead_time_days=42,
+                ),
+            ],
+        ),
+    )
+    await negotiation_service.sweep_tenant(
+        world.engine, world.people.tenant, writer=FakeNegotiationWriter(), now=datetime.now(UTC)
+    )
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        [counter] = list(
+            await session.scalars(
+                select(NegotiationMessage).where(
+                    NegotiationMessage.invite_id == world.invites["Rhein"]
+                )
+            )
+        )
+        # What an approved mandate leaves behind (its terms are not read by the close).
+        mandate = NegotiationMandate(
+            tenant_id=world.people.tenant,
+            rfq_id=world.rfq.id,
+            approval_id=uuid4(),
+            args_hash="0" * 64,
+            requested_by=world.people.owner,
+            approved_by=world.people.owner,
+            sender_user_id=world.people.owner,
+            terms={},
+            status="active",
+            deadline=datetime.now(UTC) + timedelta(days=7),
+        )
+        session.add(mandate)
+        await session.flush()
+        mandate_id = mandate.id
+    assert counter.status == "proposed" and counter.approval_id is not None
+    assert (await world.approval_status(counter.approval_id)) == "pending"
+    rfq = await world.rfq_row()
+    assert rfq.negotiation_status == "open"
+    return counter, mandate_id
+
+
+async def test_an_award_closes_the_open_negotiation_and_withdraws_its_emails(
+    world: World,
+) -> None:
+    counter, mandate_id = await _negotiating(world)
+    line1, line2 = world.rfq.lines
+    # The buyer decides before the negotiation is over (not blocked), and not for the
+    # recommendation on line 1.
+    requested = await service.request_award(
+        world.engine,
+        buyer(world.people),
+        world.rfq.id,
+        AwardRequest(
+            lines=[
+                AwardSelection(rfq_line_id=line1.id, invite_id=world.invites["Lyon"]),
+                AwardSelection(rfq_line_id=line2.id),
+            ],
+            reason="Lyon is the approved source",
+        ),
+        TODAY,
+    )
+    await world.approve(requested.approval_id)
+
+    rfq = await world.rfq_row()
+    assert (rfq.status, rfq.negotiation_status) == ("closed", "closed")
+    assert rfq.negotiation_closed_at is not None
+    # The pending counter is canceled and its approval expired: it can never go out.
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        row = await session.get(NegotiationMessage, counter.id)
+        mandate = await session.get(NegotiationMandate, mandate_id)
+        invites = list(
+            await session.scalars(select(Invite.negotiation_status).where(Invite.rfq_id == rfq.id))
+        )
+        closed = await session.scalar(
+            select(AuditEvent).where(AuditEvent.action == "rfq.negotiation_closed")
+        )
+    assert row is not None and (row.status, row.canceled_reason) == (
+        "canceled",
+        "negotiation_closed",
+    )
+    assert counter.approval_id is not None
+    assert (await world.approval_status(counter.approval_id)) == "expired"
+    # The mandate ends with it: nothing more is approved on the buyer's behalf.
+    assert mandate is not None and mandate.status == "ended" and mandate.ended_at is not None
+    assert set(invites) == {"closed"}
+    assert closed is not None and closed.payload["reason"] == "awarded"
+    assert closed.actor_user_id == world.people.approver
+
+    # The outcome is what was awarded, not the recommendation.
+    view = await negotiation_service.get_negotiation(world.engine, buyer(world.people), rfq.id)
+    assert view.status == "closed" and view.outcome is not None
+    by_line = {o.rfq_line_id: o for o in view.outcome}
+    assert set(by_line) == {line1.id, line2.id}
+    lyon, rhein = by_line[line1.id], by_line[line2.id]
+    assert (lyon.invite_id, lyon.supplier_name) == (world.invites["Lyon"], "Lyon")
+    assert lyon.effective_unit_price_base == Decimal("0.12") and lyon.within_target is False
+    assert lyon.justification == "Awarded by the buyer instead of the recommended offer."
+    assert (rhein.invite_id, rhein.supplier_name) == (world.invites["Rhein"], "Rhein")
+    assert rhein.effective_unit_price_base == Decimal("2.50")
+    assert {o.proposal_line_id for o in view.outcome} == {
+        line.proposal_line_id for line in requested.lines
+    }
+
+    # The sweep leaves the awarded RFQ alone: nothing new is decided or proposed.
+    result = await negotiation_service.sweep_tenant(
+        world.engine, world.people.tenant, writer=FakeNegotiationWriter(), now=datetime.now(UTC)
+    )
+    assert result.proposed == 0
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        live = await session.scalar(
+            select(func.count())
+            .select_from(NegotiationMessage)
+            .join(Invite, Invite.id == NegotiationMessage.invite_id)
+            .where(Invite.rfq_id == rfq.id, NegotiationMessage.status.in_(("decided", "proposed")))
+        )
+    assert live == 0
+
+
+async def test_an_award_without_a_negotiation_leaves_it_not_started(world: World) -> None:
+    await world.award()
+    rfq = await world.rfq_row()
+    assert rfq.status == "closed"
+    assert (rfq.negotiation_status, rfq.negotiation_outcome) == ("not_started", None)
+    assert rfq.negotiation_closed_at is None
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        closed = await session.scalar(
+            select(AuditEvent.id).where(AuditEvent.action == "rfq.negotiation_closed")
+        )
+    assert closed is None

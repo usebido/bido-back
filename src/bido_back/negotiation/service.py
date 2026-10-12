@@ -39,11 +39,22 @@ sweep stays the safety net):
    refuses is `held` at once with the reason codes (a code-level refusal would
    only recur) and the buyer decides; a writer failure only leaves the note out.
    The same offer version never gets a second decision.
-5. Early close: when every invited supplier answered and every line has an
-   offer accepted internally, the RFQ becomes `ready_to_close`.
+5. Ready to close: the RFQ becomes `ready_to_close` (once, audited as
+   `rfq.negotiation_ready` with its reason) when every invited supplier answered and
+   either every line has an offer accepted internally (early close, only with
+   `early_close` on: `every_line_in_target`), or every supplier gave its last word
+   (best-and-final answered, its own final offer, round cap, cut-off, declined; none
+   held, none with an open question or an email in flight: `every_supplier_final`).
+   The second applies whatever `early_close` says: nothing is left to negotiate, and
+   waiting for the deadline only delays the buyer's decision. While ready, the view's
+   `recommendation` is what closing would keep: the best eligible offer per line and
+   tier (never one above the maximum), `above_target` when it is above the target.
 
 The view (`get_negotiation`) runs the same planner read-only, so what the buyer
 sees per supplier is what the next sweep does.
+
+An award closes a live negotiation too, in the award's transaction
+(`close_for_award`): the same close, with the awarded lines as the outcome.
 
 An email the send gate refuses (a code bug or an inconsistent decision) is
 recorded once for a person and never rendered again by the sweep: its row ends
@@ -83,10 +94,11 @@ from bido_back.approvals.audit import approval_audit
 from bido_back.approvals.errors import ApprovalConflict
 from bido_back.approvals.sink import PostgresApprovalSink
 from bido_back.auth import Principal
+from bido_back.awards.views import AwardLine
 from bido_back.comparison.compute import Cell as ComparisonCell
-from bido_back.comparison.compute import Comparison
+from bido_back.comparison.compute import Comparison, Recommendation
 from bido_back.comparison.loader import load_comparison
-from bido_back.comparison.policy import ComparisonPolicy
+from bido_back.comparison.policy import ComparisonPolicy, SupplierPerformance
 from bido_back.comparison.rules import policy_blockers
 from bido_back.db import tenant_session
 from bido_back.db.models import (
@@ -147,6 +159,7 @@ from bido_back.negotiation.planner import (
     SupplierFacts,
     SupplierPlan,
     end_of_day,
+    every_supplier_final,
     plan_supplier,
     ready_to_close,
 )
@@ -227,6 +240,11 @@ _REFUSED: Final = "email_refused"
 DRAFT_REFUSED: Final = "draft_refused"
 DRAFT_REFUSED_REASON: Final = "draft_refused_requires_buyer"
 _DAYS: Final = re.compile(r"\d{1,3}")
+# The outcome of a negotiation closed by an award, for a line the comparison has no
+# matching recommendation for (an awarded recommendation keeps its own justification).
+_AWARDED_RECOMMENDATION: Final = "Awarded by the buyer: the recommended offer."
+_AWARDED_OVER_RECOMMENDATION: Final = "Awarded by the buyer instead of the recommended offer."
+_AWARDED_WITHOUT_RECOMMENDATION: Final = "Awarded by the buyer; no offer was recommended."
 # Planner decisions written to the audit log when they change (by action, then phase).
 _EVENTS: Final[Mapping[str, str]] = {
     "accept": "rfq.negotiation_accepted",
@@ -276,6 +294,8 @@ class _Supplier:
     received_on: date | None = None
     rows: list[NegotiationMessage] = field(default_factory=list[NegotiationMessage])
     followups: list[FollowupMessage] = field(default_factory=list[FollowupMessage])
+    # A reply from the supplier is stored and not read yet (quote extraction pending).
+    reply_unread: bool = False
     # An earlier reply already declared the supplier's final position ("best and final",
     # "we cannot go any lower"): it stays final, Bido asks nothing more of this supplier.
     final_before: bool = False
@@ -416,6 +436,19 @@ async def _load(
             .order_by(FollowupMessage.created_at, FollowupMessage.sequence)
         ):
             by_invite[followup.invite_id].followups.append(followup)
+        # Replies quote extraction has not read yet (`stored`; read ones are `extracted`,
+        # unreadable ones `failed`).
+        for invite_id in await session.scalars(
+            select(Message.invite_id)
+            .where(
+                Message.invite_id.in_(list(by_invite)),
+                Message.direction == "in",
+                Message.status == "stored",
+            )
+            .distinct()
+        ):
+            if invite_id is not None:
+                by_invite[invite_id].reply_unread = True
     approval_ids = [
         a
         for s in suppliers
@@ -972,6 +1005,7 @@ def _plan(
             chases_sent=sum(1 for c in chases if c.status == "sent"),
             chases_max=rfq.followup_max_chases if rfq.followups_enabled else 0,
             chases_waiting=any(c.status == "proposed" for c in chases),
+            reply_unread=item.reply_unread,
         )
     cutoff = _live_cutoff(loaded)
 
@@ -1263,6 +1297,12 @@ async def _view(
         if rfq.negotiation_outcome is not None
         else None
     )
+    # Ready to close: what closing would keep now, so the buyer decides without closing.
+    recommendation = (
+        _outcome(comparison, {line.row.id: line.row.target_unit_price for line in loaded.lines})
+        if rfq.negotiation_status == "ready_to_close"
+        else None
+    )
     return RfqNegotiation(
         rfq_id=rfq.id,
         status=cast(NegotiationStatus, rfq.negotiation_status),
@@ -1271,6 +1311,7 @@ async def _view(
         closed_at=rfq.negotiation_closed_at,
         invites=invites,
         outcome=outcome,
+        recommendation=recommendation,
         cutoff_at=_live_cutoff(loaded),
         warnings=_rfq_warnings(planned),
     )
@@ -1590,40 +1631,109 @@ async def release_hold(
 # --- Closing ---------------------------------------------------------------------------
 
 
+def _within(price: Decimal | None, target: Decimal | None) -> bool | None:
+    return (price <= target) if price is not None and target is not None else None
+
+
+def _outcome_line(
+    rec: Recommendation, policy: ComparisonPolicy, target: Decimal | None
+) -> OutcomeLine:
+    price = rec.effective_unit_price_base
+    return OutcomeLine(
+        rfq_line_id=rec.rfq_line_id,
+        tier=rec.tier,
+        quantity=rec.quantity,
+        invite_id=rec.invite_id,
+        supplier_name=rec.supplier_name,
+        effective_unit_price_base=price,
+        lead_time_days=rec.lead_time_days,
+        within_target=_within(price, target),
+        above_target=_within(price, target) is False,
+        justification=rec.justification,
+        readiness=rec.readiness,
+        policy=policy,
+        policy_reasons=rec.policy_reasons,
+        source_evidence=rec.source_evidence,
+        offer=rec.offer,
+        evidence_gaps=rec.evidence_gaps,
+        alternatives=rec.alternatives,
+        excluded=rec.excluded,
+        performance=rec.performance,
+        proposal_id=rec.proposal_id,
+        proposal_line_id=rec.proposal_line_id,
+        evidence_message_ids=rec.evidence_message_ids,
+        landed_total_base=rec.landed_total_base,
+    )
+
+
 def _outcome(comparison: Comparison, targets: dict[UUID, Decimal | None]) -> list[OutcomeLine]:
-    result: list[OutcomeLine] = []
-    for rec in comparison.recommendations:
-        target = targets.get(rec.rfq_line_id)
-        price = rec.effective_unit_price_base
-        result.append(
-            OutcomeLine(
-                rfq_line_id=rec.rfq_line_id,
-                tier=rec.tier,
-                quantity=rec.quantity,
-                invite_id=rec.invite_id,
-                supplier_name=rec.supplier_name,
-                effective_unit_price_base=price,
-                lead_time_days=rec.lead_time_days,
-                within_target=(price <= target)
-                if price is not None and target is not None
-                else None,
-                justification=rec.justification,
-                readiness=rec.readiness,
-                policy=comparison.policy,
-                policy_reasons=rec.policy_reasons,
-                source_evidence=rec.source_evidence,
-                offer=rec.offer,
-                evidence_gaps=rec.evidence_gaps,
-                alternatives=rec.alternatives,
-                excluded=rec.excluded,
-                performance=rec.performance,
-                proposal_id=rec.proposal_id,
-                proposal_line_id=rec.proposal_line_id,
-                evidence_message_ids=rec.evidence_message_ids,
-                landed_total_base=rec.landed_total_base,
-            )
+    return [
+        _outcome_line(rec, comparison.policy, targets.get(rec.rfq_line_id))
+        for rec in comparison.recommendations
+    ]
+
+
+def _awarded_line(
+    line: AwardLine,
+    comparison: Comparison | None,
+    *,
+    base_currency: str,
+    policy: ComparisonPolicy,
+    target: Decimal | None,
+) -> OutcomeLine:
+    """One awarded line as the negotiation's outcome: the supplier the buyer awarded.
+
+    The recommendation's own record when the award took it; otherwise the awarded
+    supplier's cell of the comparison (its price in the base currency). Without a
+    comparison the base price is known only when the award is in the base currency."""
+    if comparison is not None:
+        for rec in comparison.recommendations:
+            if (
+                rec.rfq_line_id == line.rfq_line_id
+                and rec.tier == line.tier
+                and rec.invite_id == line.invite_id
+                and rec.proposal_line_id in (None, line.proposal_line_id)
+            ):
+                return _outcome_line(rec, policy, target)
+    cell: ComparisonCell | None = None
+    if comparison is not None:
+        cell = next(
+            (
+                c
+                for column in comparison.suppliers
+                if column.invite_id == line.invite_id
+                for c in column.cells
+                if c.rfq_line_id == line.rfq_line_id and c.tier == line.tier
+            ),
+            None,
         )
-    return result
+    if cell is not None:
+        price = cell.effective_unit_price_base
+    else:
+        price = Decimal(line.unit_price) if line.currency == base_currency else None
+    return OutcomeLine(
+        rfq_line_id=line.rfq_line_id,
+        tier=line.tier,
+        quantity=Decimal(line.quantity),
+        invite_id=line.invite_id,
+        supplier_name=line.supplier_name,
+        effective_unit_price_base=price,
+        lead_time_days=line.lead_time_days,
+        within_target=_within(price, target),
+        above_target=_within(price, target) is False,
+        justification=_AWARDED_WITHOUT_RECOMMENDATION
+        if line.recommended_invite_id is None
+        else _AWARDED_RECOMMENDATION
+        if line.recommended_invite_id == line.invite_id
+        else _AWARDED_OVER_RECOMMENDATION,
+        readiness="ready_for_buyer_review",
+        policy=policy,
+        performance=cell.performance if cell is not None else SupplierPerformance(),
+        proposal_id=line.proposal_id,
+        proposal_line_id=line.proposal_line_id,
+        evidence_message_ids=cell.evidence_message_ids if cell is not None else [],
+        landed_total_base=cell.landed_total_base if cell is not None else None,
+    )
 
 
 async def _cancel(session: AsyncSession, rows: Sequence[NegotiationMessage], reason: str) -> int:
@@ -1674,6 +1784,52 @@ async def withdraw_live_emails(session: AsyncSession, rfq_id: UUID, reason: str)
     return await _cancel(session, rows, reason)
 
 
+async def _close_locked(
+    session: AsyncSession,
+    rfq: Rfq,
+    outcome: list[OutcomeLine],
+    *,
+    now: datetime,
+    closed_by: UUID | None,
+    reason: str,
+) -> None:
+    """Close the negotiation in the caller's transaction, the RFQ row locked: the outcome
+    is stored, every supplier closed, pending emails canceled, the mandate ended."""
+    rfq.negotiation_status = "closed"
+    rfq.negotiation_closed_at = now
+    rfq.negotiation_outcome = [o.model_dump(mode="json") for o in outcome]
+    await session.execute(
+        update(Invite)
+        .where(Invite.rfq_id == rfq.id, Invite.negotiation_status != "rejected")
+        .values(negotiation_status="closed")
+    )
+    pending = list(
+        await session.scalars(
+            select(NegotiationMessage)
+            .join(Invite, Invite.id == NegotiationMessage.invite_id)
+            .where(Invite.rfq_id == rfq.id, NegotiationMessage.status.in_(_LIVE))
+            .with_for_update(of=NegotiationMessage)
+        )
+    )
+    if pending:
+        await _cancel(session, pending, "negotiation_closed")
+    # A closed negotiation ends its mandate: nothing more goes out on its behalf.
+    await session.execute(
+        update(NegotiationMandate)
+        .where(NegotiationMandate.rfq_id == rfq.id, NegotiationMandate.status != "ended")
+        .values(status="ended", ended_at=now)
+    )
+    session.add(
+        AuditEvent(
+            tenant_id=rfq.tenant_id,
+            actor_user_id=closed_by,
+            action="rfq.negotiation_closed",
+            payload={"rfq_id": str(rfq.id), "reason": reason, "lines": len(outcome)},
+        )
+    )
+    await session.flush()
+
+
 async def close_negotiation(
     db: Db,
     tenant_id: UUID,
@@ -1709,41 +1865,67 @@ async def close_negotiation(
             for line in await session.scalars(select(RfqLine).where(RfqLine.rfq_id == rfq_id))
         }
         outcome = _outcome(comparison, targets)
-        rfq.negotiation_status = "closed"
-        rfq.negotiation_closed_at = now
-        rfq.negotiation_outcome = [o.model_dump(mode="json") for o in outcome]
-        await session.execute(
-            update(Invite)
-            .where(Invite.rfq_id == rfq_id, Invite.negotiation_status != "rejected")
-            .values(negotiation_status="closed")
-        )
-        pending = list(
-            await session.scalars(
-                select(NegotiationMessage)
-                .join(Invite, Invite.id == NegotiationMessage.invite_id)
-                .where(Invite.rfq_id == rfq_id, NegotiationMessage.status.in_(_LIVE))
-                .with_for_update(of=NegotiationMessage)
-            )
-        )
-        if pending:
-            await _cancel(session, pending, "negotiation_closed")
-        # A closed negotiation ends its mandate: nothing more goes out on its behalf.
-        await session.execute(
-            update(NegotiationMandate)
-            .where(NegotiationMandate.rfq_id == rfq_id, NegotiationMandate.status != "ended")
-            .values(status="ended", ended_at=now)
-        )
-        session.add(
-            AuditEvent(
-                tenant_id=tenant_id,
-                actor_user_id=closed_by,
-                action="rfq.negotiation_closed",
-                payload={"rfq_id": str(rfq_id), "reason": reason, "lines": len(outcome)},
-            )
-        )
-        await session.flush()
+        await _close_locked(session, rfq, outcome, now=now, closed_by=closed_by, reason=reason)
     logger.info("negotiation closed tenant=%s rfq=%s reason=%s", tenant_id, rfq_id, reason)
     return outcome
+
+
+async def award_comparison(db: Db, tenant_id: UUID, rfq_id: UUID, today: date) -> Comparison | None:
+    """The comparison `close_for_award` records the outcome from, read before the award's
+    transaction; None when the RFQ's negotiation is not live (nothing to close) or the
+    comparison cannot be built (the award still goes through, with a plainer outcome)."""
+    async with tenant_session(db, tenant_id) as session:
+        rfq = await session.get(Rfq, rfq_id)
+        if rfq is None or rfq.negotiation_status not in _ACTIVE:
+            return None
+        created_by = rfq.created_by
+    try:
+        return await load_comparison(
+            db, Principal(tenant_id=tenant_id, user_id=created_by), rfq_id, today
+        )
+    except Exception:
+        logger.exception(
+            "award of rfq %s: comparison unavailable, outcome from the award lines", rfq_id
+        )
+        return None
+
+
+async def close_for_award(
+    session: AsyncSession,
+    rfq: Rfq,
+    lines: Sequence[AwardLine],
+    comparison: Comparison | None,
+    *,
+    now: datetime,
+    closed_by: UUID | None,
+) -> bool:
+    """The RFQ was awarded: close its live negotiation in the award's transaction (the RFQ
+    row locked), as the buyer's close does (pending emails canceled, approvals expired,
+    the mandate ended), with the awarded lines as the outcome. True when it closed.
+
+    A negotiation never started, or already closed, is left as it is."""
+    if rfq.negotiation_status == "not_started" or (
+        rfq.negotiation_status == "closed" and rfq.negotiation_outcome is not None
+    ):
+        return False
+    targets = {
+        line.id: line.target_unit_price
+        for line in await session.scalars(select(RfqLine).where(RfqLine.rfq_id == rfq.id))
+    }
+    policy = ComparisonPolicy.model_validate(rfq.comparison_policy or {})
+    outcome = [
+        _awarded_line(
+            line,
+            comparison,
+            base_currency=rfq.base_currency,
+            policy=policy,
+            target=targets.get(line.rfq_line_id),
+        )
+        for line in sorted(lines, key=lambda line: (line.position, line.tier))
+    ]
+    await _close_locked(session, rfq, outcome, now=now, closed_by=closed_by, reason="awarded")
+    logger.info("negotiation closed tenant=%s rfq=%s reason=awarded", rfq.tenant_id, rfq.id)
+    return True
 
 
 async def close(
@@ -2106,20 +2288,27 @@ async def evaluate_rfq(
             )
         # Set by the first best-and-final decided; dropped when none carrying it is left.
         rfq.negotiation_cutoff_at = planned.cutoff
-        waiting = sum(1 for item in loaded.suppliers if item.invite.status == "sent")
-        if (
-            rfq.negotiation_status == "open"
-            and rfq.negotiation_early_close
-            and ready_to_close(
+        # A reply Bido is still reading may change what the supplier offers: wait for it.
+        waiting = sum(
+            1 for item in loaded.suppliers if item.invite.status == "sent" or item.reply_unread
+        )
+        answered = [
+            planned.plans[item.invite.id]
+            for item in loaded.suppliers
+            if item.invite.status not in ("draft", "pending_approval")
+        ]
+        ready: str | None = None
+        if rfq.negotiation_status == "open":
+            if rfq.negotiation_early_close and ready_to_close(
                 line_ids=[line.row.id for line in loaded.lines],
                 waiting_suppliers=waiting,
-                plans=[
-                    planned.plans[item.invite.id]
-                    for item in loaded.suppliers
-                    if item.invite.status not in ("draft", "pending_approval")
-                ],
-            )
-        ):
+                plans=answered,
+            ):
+                ready = "every_line_in_target"
+            elif every_supplier_final(waiting_suppliers=waiting, plans=answered):
+                # Nothing is left to negotiate: early_close or not, the buyer decides now.
+                ready = "every_supplier_final"
+        if ready is not None:
             rfq.negotiation_status = "ready_to_close"
             rfq.negotiation_ready_at = at
             became_ready = True
@@ -2128,14 +2317,16 @@ async def evaluate_rfq(
                     tenant_id=tenant_id,
                     actor_user_id=None,
                     action="rfq.negotiation_ready",
-                    payload={"rfq_id": str(rfq_id)},
+                    payload={"rfq_id": str(rfq_id), "reason": ready},
                 )
             )
         await session.flush()
 
     written = await _write_decided(db, tenant_id, rfq_id, writer=writer, now=at)
     if became_ready:
-        logger.info("negotiation ready to close tenant=%s rfq=%s", tenant_id, rfq_id)
+        logger.info(
+            "negotiation ready to close tenant=%s rfq=%s reason=%s", tenant_id, rfq_id, ready
+        )
     return EvaluationResult(
         proposed=len(written.approval_ids),
         ready=became_ready,

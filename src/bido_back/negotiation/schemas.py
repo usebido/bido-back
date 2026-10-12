@@ -2,7 +2,7 @@
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Literal
+from typing import Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
@@ -236,6 +236,9 @@ class OutcomeLine(BaseModel):
     effective_unit_price_base: Decimal | None
     lead_time_days: int | None
     within_target: bool | None
+    # The recommended price is above the buyer's target: said, never hidden. It is within
+    # the maximum (an offer above the maximum is never recommended); the buyer decides.
+    above_target: bool = False
     justification: str
     readiness: Literal["ready_for_buyer_review", "needs_review", "no_feasible_offer"] = (
         "needs_review"
@@ -253,6 +256,17 @@ class OutcomeLine(BaseModel):
     proposal_line_id: UUID | None = None
     evidence_message_ids: list[UUID] = Field(default_factory=list[UUID])
     landed_total_base: Decimal | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _derive_above_target(cls, data: object) -> object:
+        # An outcome stored before `above_target` existed: derived from `within_target`.
+        if not isinstance(data, dict):
+            return data
+        fields = cast(dict[str, object], data)
+        if "above_target" in fields:
+            return fields
+        return {**fields, "above_target": fields.get("within_target") is False}
 
 
 class NegotiationWarningView(BaseModel):
@@ -274,6 +288,10 @@ class RfqNegotiation(BaseModel):
     invites: list[InviteNegotiation]
     # Set when the negotiation is closed: the best eligible offer per line and tier.
     outcome: list[OutcomeLine] | None
+    # Set while the negotiation is ready to close: what closing now would keep (the best
+    # eligible offer per line and tier, never one above the maximum; `above_target` says
+    # when it is above the target).
+    recommendation: list[OutcomeLine] | None = None
     # The one best-and-final cut-off for every supplier, once the final round started.
     cutoff_at: datetime | None = None
     warnings: list[NegotiationWarningView] = Field(default_factory=list[NegotiationWarningView])

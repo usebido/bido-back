@@ -6,7 +6,12 @@ owner who is not the requester: the guard checks it); the worker's
 `ApprovalExecutor` runs the handler once, with the APPROVED arguments.
 
 `award_rfq` writes the award and one purchase order per awarded supplier
-(`PO-<n>`, numbered per tenant), and closes the RFQ. It refuses to award an
+(`PO-<n>`, numbered per tenant), and closes the RFQ. A live negotiation closes
+with it, in the same transaction, as the buyer's close does
+(`negotiation.service.close_for_award`): its pending emails are canceled and
+their approvals expired, the mandate ends, and the awarded lines are the
+outcome. An award may be prepared while the negotiation is still open: nothing
+negotiated goes out once it is executed. It refuses to award an
 offer that changed after the request: if a supplier sent a newer proposal, or
 a price was corrected, the outcome is `stale`, nothing is written, and the
 buyer asks again. An RFQ is awarded once.
@@ -73,6 +78,7 @@ from bido_back.db.models import (
 )
 from bido_back.email.addresses import make_message_id
 from bido_back.email.types import OutboundAttachment
+from bido_back.negotiation.service import award_comparison, close_for_award
 from bido_back.rfqs.errors import InvalidState, NotFound
 from bido_back.rfqs.send import RfqActDeps
 
@@ -134,6 +140,9 @@ class _AwardRfq:
         self._deps = deps
 
     async def __call__(self, ctx: ToolContext, args: AwardRfqArgs) -> AwardRfqResult:
+        now = datetime.now(UTC)
+        # Read outside the award's transaction (its own session), as the buyer's close does.
+        comparison = await award_comparison(self._deps.db, ctx.tenant_id, args.rfq_id, now.date())
         async with tenant_session(self._deps.db, ctx.tenant_id) as session:
             rfq = await session.scalar(select(Rfq).where(Rfq.id == args.rfq_id).with_for_update())
             if rfq is None:
@@ -212,6 +221,10 @@ class _AwardRfq:
                 po_ids.append(po.id)
                 number += 1
             rfq.status = "closed"
+            # Nothing negotiated may go out after the award: the negotiation closes with it.
+            await close_for_award(
+                session, rfq, list(args.lines), comparison, now=now, closed_by=ctx.user_id
+            )
             session.add(
                 AuditEvent(
                     tenant_id=ctx.tenant_id,

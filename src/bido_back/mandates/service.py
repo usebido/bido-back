@@ -13,7 +13,9 @@ Flow:
 2. A person approves it through the normal guard. The worker executes the act
    once (`approve_negotiation_mandate`, below): it saves the negotiation
    settings, records the mandate, and approves exactly the initial emails it
-   names (hash-checked), which the executor then sends.
+   names (hash-checked), which the executor then sends. When the RFQ is
+   already out, it also asks for a re-plan, so offers that arrived before the
+   mandate are decided at once rather than at the next sweep.
 3. From then on `auto_approve_pending` (run after every follow-up and
    negotiation sweep, and for its RFQ right after the copilot proposes
    counter-offers, so it can tell the buyer what went out) approves the RFQ's
@@ -557,11 +559,13 @@ class _ApproveMandate:
                 ),
             )
             withdrawn = 0
-            replan = False
             if replaced is not None:
                 # Decided under the old limits: withdrawn, decided again with the new ones.
                 withdrawn = await withdraw_live_emails(session, args.rfq_id, "mandate_replaced")
-                replan = request_replan(rfq, now)
+            # The negotiation is open now: offers already in (a quote that arrived before
+            # the mandate, or one decided under replaced limits) are planned at once, not
+            # at the next sweep. Suppliers whose RFQ email still awaits sending wait.
+            replan = request_replan(rfq, now)
             mandate = NegotiationMandate(
                 tenant_id=ctx.tenant_id,
                 rfq_id=args.rfq_id,
