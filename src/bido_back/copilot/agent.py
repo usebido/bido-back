@@ -19,8 +19,8 @@ from bido_back.agents.tools import AnyTool
 from bido_back.copilot.contracts import CopilotReply
 from bido_back.copilot.model_views import cell_free_view
 
-COPILOT_PROMPT_FILE: Final = "copilot.v33.md"
-COPILOT_PROMPT_VERSION: Final = 33
+COPILOT_PROMPT_FILE: Final = "copilot.v34.md"
+COPILOT_PROMPT_VERSION: Final = 34
 # Earlier turns of the same conversation the model sees (needs Agno storage).
 HISTORY_RUNS: Final = 10
 # Model requests per message: a few lookups, maybe a draft action, the answer.
@@ -29,8 +29,8 @@ MAX_TURNS: Final = 12
 
 # The tools whose result the analysis writer presents (when the Copilot has them).
 ANALYSIS_TOOLS: Final = frozenset({"analyze_procurement_sources", "run_purchase_analysis"})
-ANALYSIS_REPLY_PROMPT_FILE: Final = "analysis_reply_writer.v2.md"
-ANALYSIS_REPLY_PROMPT_VERSION: Final = 2
+ANALYSIS_REPLY_PROMPT_FILE: Final = "analysis_reply_writer.v3.md"
+ANALYSIS_REPLY_PROMPT_VERSION: Final = 3
 ANALYSIS_REPLY_MODEL: Final = "gpt-6.1-sol"
 # Live, 2026-10-09, Pedro's 8 SAP files and workbook 01 (k=2): low and medium gave the
 # same answers on the review's points; low was ~10 s faster at the same cost.
