@@ -445,6 +445,8 @@ def _event_item(
             kind, summary = "user", f"Negotiation limits set for {data.get('lines', 0)} lines"
         case "rfq.negotiation_ready":
             kind, summary, actor = "agent", "Negotiation ready to close", BIDO
+            if data.get("reason") == "every_supplier_final":
+                summary += ": every supplier gave its final offer"
         case "rfq.negotiation_closed":
             kind = "user" if person else "agent"
             summary = f"Negotiation closed ({data.get('reason', 'closed')})"

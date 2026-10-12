@@ -2235,7 +2235,11 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         notes = {
             "not_started": "No negotiation yet: the buyer sets a deadline and line targets first.",
             "open": "Negotiating.",
-            "ready_to_close": "Every line has an offer within target: it can be closed now.",
+            "ready_to_close": (
+                "Nothing is left to negotiate (every line has an offer within target, or "
+                "every supplier gave its final offer): it can be closed now. "
+                "get_negotiation_outcome gives the best offer per line."
+            ),
             "closed": "Closed: the outcome is the best eligible offer per line.",
         }
         suppliers: list[NegotiationSupplierOut] = []
@@ -2289,6 +2293,25 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 )
             )
         note = notes[view.status]
+        if view.status == "ready_to_close" and view.recommendation is not None:
+            above = sorted(
+                {positions.get(o.rfq_line_id, 0) for o in view.recommendation if o.above_target}
+            )
+            uncovered = sorted(
+                {positions.get(o.rfq_line_id, 0) for o in view.recommendation if not o.invite_id}
+            )
+            if above:
+                lines_text = ", ".join(str(p) for p in above)
+                note += (
+                    f" The best offer is ABOVE TARGET on line(s) {lines_text} (within the "
+                    "maximum): tell the buyer, it is their decision."
+                )
+            if uncovered:
+                lines_text = ", ".join(str(p) for p in uncovered)
+                note += (
+                    f" No eligible offer for line(s) {lines_text} (get_negotiation_outcome "
+                    "says why)."
+                )
         if view.status in ("open", "ready_to_close") and suppliers:
             counts: dict[str, int] = {}
             for supplier in suppliers:
