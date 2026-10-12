@@ -1187,3 +1187,26 @@ def ready_to_close(
             continue
         accepted |= {line.rfq_line_id for line in plan.lines if line.acceptable}
     return all(line_id in accepted for line_id in line_ids)
+
+
+def _final_word(plan: SupplierPlan) -> bool:
+    """Nothing more is negotiated with this supplier and nothing waits for the buyer
+    before it could be: accepted internally, or closed (its best-and-final answered, its
+    own final offer, the round cap, the final round's cut-off, no reply after the reminder,
+    declined, rejected). A hold, an open question or an email in flight is not final."""
+    return (
+        plan.action in ("accept", "close")
+        and not plan.offer_held
+        and not plan.questions_open
+        and plan.phase not in ("needs_answer", "held_for_approval")
+    )
+
+
+def every_supplier_final(*, waiting_suppliers: int, plans: Sequence[SupplierPlan]) -> bool:
+    """Every invited supplier answered and gave its last word: nothing is left to
+    negotiate, whatever the prices. Lines within the maximum but above the target are the
+    buyer's decision (the outcome says `above_target`); an offer above the maximum is never
+    recommended."""
+    if waiting_suppliers > 0 or not plans:
+        return False
+    return all(_final_word(plan) for plan in plans)

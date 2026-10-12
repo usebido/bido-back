@@ -39,8 +39,16 @@ sweep stays the safety net):
    refuses is `held` at once with the reason codes (a code-level refusal would
    only recur) and the buyer decides; a writer failure only leaves the note out.
    The same offer version never gets a second decision.
-5. Early close: when every invited supplier answered and every line has an
-   offer accepted internally, the RFQ becomes `ready_to_close`.
+5. Ready to close: the RFQ becomes `ready_to_close` (once, audited as
+   `rfq.negotiation_ready` with its reason) when every invited supplier answered and
+   either every line has an offer accepted internally (early close, only with
+   `early_close` on: `every_line_in_target`), or every supplier gave its last word
+   (best-and-final answered, its own final offer, round cap, cut-off, declined; none
+   held, none with an open question or an email in flight: `every_supplier_final`).
+   The second applies whatever `early_close` says: nothing is left to negotiate, and
+   waiting for the deadline only delays the buyer's decision. While ready, the view's
+   `recommendation` is what closing would keep: the best eligible offer per line and
+   tier (never one above the maximum), `above_target` when it is above the target.
 
 The view (`get_negotiation`) runs the same planner read-only, so what the buyer
 sees per supplier is what the next sweep does.
@@ -147,6 +155,7 @@ from bido_back.negotiation.planner import (
     SupplierFacts,
     SupplierPlan,
     end_of_day,
+    every_supplier_final,
     plan_supplier,
     ready_to_close,
 )
@@ -1279,6 +1288,12 @@ async def _view(
         if rfq.negotiation_outcome is not None
         else None
     )
+    # Ready to close: what closing would keep now, so the buyer decides without closing.
+    recommendation = (
+        _outcome(comparison, {line.row.id: line.row.target_unit_price for line in loaded.lines})
+        if rfq.negotiation_status == "ready_to_close"
+        else None
+    )
     return RfqNegotiation(
         rfq_id=rfq.id,
         status=cast(NegotiationStatus, rfq.negotiation_status),
@@ -1287,6 +1302,7 @@ async def _view(
         closed_at=rfq.negotiation_closed_at,
         invites=invites,
         outcome=outcome,
+        recommendation=recommendation,
         cutoff_at=_live_cutoff(loaded),
         warnings=_rfq_warnings(planned),
     )
@@ -1623,6 +1639,7 @@ def _outcome(comparison: Comparison, targets: dict[UUID, Decimal | None]) -> lis
                 within_target=(price <= target)
                 if price is not None and target is not None
                 else None,
+                above_target=price is not None and target is not None and price > target,
                 justification=rec.justification,
                 readiness=rec.readiness,
                 policy=comparison.policy,
@@ -2126,19 +2143,23 @@ async def evaluate_rfq(
         waiting = sum(
             1 for item in loaded.suppliers if item.invite.status == "sent" or item.reply_unread
         )
-        if (
-            rfq.negotiation_status == "open"
-            and rfq.negotiation_early_close
-            and ready_to_close(
+        answered = [
+            planned.plans[item.invite.id]
+            for item in loaded.suppliers
+            if item.invite.status not in ("draft", "pending_approval")
+        ]
+        ready: str | None = None
+        if rfq.negotiation_status == "open":
+            if rfq.negotiation_early_close and ready_to_close(
                 line_ids=[line.row.id for line in loaded.lines],
                 waiting_suppliers=waiting,
-                plans=[
-                    planned.plans[item.invite.id]
-                    for item in loaded.suppliers
-                    if item.invite.status not in ("draft", "pending_approval")
-                ],
-            )
-        ):
+                plans=answered,
+            ):
+                ready = "every_line_in_target"
+            elif every_supplier_final(waiting_suppliers=waiting, plans=answered):
+                # Nothing is left to negotiate: early_close or not, the buyer decides now.
+                ready = "every_supplier_final"
+        if ready is not None:
             rfq.negotiation_status = "ready_to_close"
             rfq.negotiation_ready_at = at
             became_ready = True
@@ -2147,14 +2168,16 @@ async def evaluate_rfq(
                     tenant_id=tenant_id,
                     actor_user_id=None,
                     action="rfq.negotiation_ready",
-                    payload={"rfq_id": str(rfq_id)},
+                    payload={"rfq_id": str(rfq_id), "reason": ready},
                 )
             )
         await session.flush()
 
     written = await _write_decided(db, tenant_id, rfq_id, writer=writer, now=at)
     if became_ready:
-        logger.info("negotiation ready to close tenant=%s rfq=%s", tenant_id, rfq_id)
+        logger.info(
+            "negotiation ready to close tenant=%s rfq=%s reason=%s", tenant_id, rfq_id, ready
+        )
     return EvaluationResult(
         proposed=len(written.approval_ids),
         ready=became_ready,

@@ -10104,6 +10104,11 @@
       },
       "OutcomeLine": {
         "properties": {
+          "above_target": {
+            "default": false,
+            "title": "Above Target",
+            "type": "boolean"
+          },
           "alternatives": {
             "items": {
               "$ref": "#/components/schemas/OfferAlternative"
@@ -15202,6 +15207,20 @@
               }
             ],
             "title": "Ready At"
+          },
+          "recommendation": {
+            "anyOf": [
+              {
+                "items": {
+                  "$ref": "#/components/schemas/OutcomeLine"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Recommendation"
           },
           "rfq_id": {
             "format": "uuid",

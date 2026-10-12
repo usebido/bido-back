@@ -432,6 +432,126 @@ async def test_rounds_advance_on_new_offers_and_end_with_best_and_final(world: W
     assert len([m for m in await world.messages("rhein") if m.action == "bafo"]) == 1
 
 
+async def _to_final_answer(
+    world: World, writer: FakeNegotiationWriter, final: tuple[str, str]
+) -> None:
+    """Rhein: counter (round 1), best-and-final (round 2), then its final answer."""
+    await world.offer("rhein", ("0.050", "1.20"))
+    await world.sweep(writer)
+    [counter] = await world.messages("rhein")
+    await world.approve(counter.approval_id or counter.id)
+    await world.offer("rhein", ("0.045", "1.10"))
+    await world.sweep(writer)
+    bafo = (await world.messages("rhein"))[-1]
+    assert bafo.kind == "bafo"
+    await world.approve(bafo.approval_id or bafo.id)
+    await world.offer("rhein", final)
+
+
+async def _decline(world: World, name: str) -> None:
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        await session.execute(
+            update(Invite).where(Invite.id == world.invites[name]).values(status="declined")
+        )
+
+
+async def test_every_final_offer_makes_the_rfq_ready_to_close_above_target(world: World) -> None:
+    from bido_back.copilot.tools import CopilotToolDeps, NegotiationStatusOut, copilot_tools
+    from tests.rfqs.conftest import fake_agents
+
+    # RFQ-8 (2026-10-12): the best-and-final answer is above target but within the maximum.
+    await world.configure(max_rounds=2)
+    writer = FakeNegotiationWriter()
+    await _to_final_answer(world, writer, ("0.044", "1.08"))
+    assert (await world.sweep(writer)).proposed == 0
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.status == "closed" and rhein.state is not None
+    assert rhein.state.reason == "bafo_answered"
+    # Lyon has not quoted yet: the negotiation stays open.
+    assert (view.status, view.ready_at, view.recommendation) == ("open", None, None)
+
+    # Lyon declines: every supplier gave its last word, nothing is left to negotiate.
+    await _decline(world, "lyon")
+    result = await world.sweep(writer)
+    assert (result.ready, result.proposed) == (1, 0)
+    rfq = await world.rfq()
+    assert rfq.negotiation_status == "ready_to_close" and rfq.negotiation_ready_at is not None
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    assert view.status == "ready_to_close" and view.outcome is None
+    assert view.recommendation is not None
+    by_line = {o.rfq_line_id: o for o in view.recommendation if o.tier == 0}
+    assert {o.supplier_name for o in by_line.values()} == {"Rhein"}
+    assert [by_line[line].effective_unit_price_base for line in world.lines] == [
+        Decimal("0.044"),
+        Decimal("1.08"),
+    ]
+    # Above the target: said explicitly, never hidden.
+    assert all(o.above_target and o.within_target is False for o in by_line.values())
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    [ready] = [a for a in feed if a.action == "rfq.negotiation_ready"]
+    assert ready.summary == "Negotiation ready to close: every supplier gave its final offer"
+
+    tools = {
+        tool.name: tool
+        for tool in copilot_tools(
+            CopilotToolDeps(
+                db=world.engine,
+                agents=fake_agents(),
+                mailboxes=world.mailboxes,
+                negotiation_writer=writer,
+            )
+        )
+    }
+    ctx = ToolContext(tenant_id=world.people.tenant, user_id=world.people.owner, run_id=uuid4())
+    tool = tools["get_negotiation_status"]
+    status = await tool.invoke(ctx, tool.parse_input({"rfq": rfq.ref}))
+    assert isinstance(status, NegotiationStatusOut)
+    assert status.status == "ready_to_close"
+    assert "ABOVE TARGET on line(s) 1, 2" in status.note
+
+    # Closing keeps that offer, with the same disclosure.
+    outcome = await service.close(world.engine, buyer(world.people), world.rfq_id)
+    assert [(o.supplier_name, o.above_target) for o in outcome if o.tier == 0] == [
+        ("Rhein", True),
+        ("Rhein", True),
+    ]
+
+
+async def test_a_final_offer_above_the_maximum_is_never_recommended(world: World) -> None:
+    # Early close off: the "every supplier final" rule applies anyway.
+    await world.configure(max_rounds=2, early_close=False)
+    writer = FakeNegotiationWriter()
+    await _decline(world, "lyon")
+    # Line 1 within the maximum (above target), line 2 above the maximum (1.50).
+    await _to_final_answer(world, writer, ("0.044", "1.60"))
+    assert (await world.sweep(writer)).ready == 1
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    assert view.status == "ready_to_close" and view.recommendation is not None
+    by_line = {o.rfq_line_id: o for o in view.recommendation if o.tier == 0}
+    first, second = (by_line[line] for line in world.lines)
+    assert (first.supplier_name, first.above_target) == ("Rhein", True)
+    assert (second.invite_id, second.supplier_name, second.effective_unit_price_base) == (
+        None,
+        None,
+        None,
+    )
+    assert second.readiness == "no_feasible_offer" and not second.above_target
+
+
+async def test_early_close_on_target_is_unchanged(world: World) -> None:
+    await world.configure()
+    await world.offer("rhein", ("0.039", "0.99"))
+    await _decline(world, "lyon")
+    assert (await world.sweep(FakeNegotiationWriter())).ready == 1
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    assert view.status == "ready_to_close" and view.recommendation is not None
+    assert all(o.within_target and not o.above_target for o in view.recommendation)
+    feed = await rfq_activity(world.engine, buyer(world.people), world.rfq_id)
+    [ready] = [a for a in feed if a.action == "rfq.negotiation_ready"]
+    assert ready.summary == "Negotiation ready to close"
+
+
 async def test_a_writer_outage_only_leaves_the_note_out(world: World) -> None:
     await world.configure()
     await world.offer("rhein", ("0.050", "1.20"))
