@@ -544,6 +544,16 @@ _CURRENCY_RESULT = (
 )
 
 
+_ASKED_NOW_ARG = (
+    "True only when the buyer's own message in this turn explicitly asks for this very step "
+    "now ('create the RFQ', 'invite only Rhein'), including a message that answers an earlier "
+    "preview's questions and asks to go ahead. Then, when the preview leaves nothing to ask "
+    "(no questions; for invites, every supplier has an email), the step runs in this call and "
+    "the result is the done step, not a preview. Otherwise the preview comes back as usual. "
+    "False when you are the one suggesting the step or the buyer only described a need"
+)
+
+
 class CreateRfqIn(BaseModel):
     text: str = Field(
         min_length=1,
@@ -576,6 +586,7 @@ class CreateRfqIn(BaseModel):
         ),
     )
     currency: str | None = Field(default=None, description=_CURRENCY_ARG)
+    buyer_asked_now: bool = Field(default=False, description=_ASKED_NOW_ARG)
     proposal_id: UUID | None = Field(default=None, description=PROPOSAL_ARG)
 
 
@@ -771,6 +782,7 @@ def _edited(detail: RfqDetail, change: CurrencyChange | None = None) -> EditedRf
 class InviteSuppliersIn(BaseModel):
     rfq: str = Field(description="The RFQ's reference (e.g. RFQ-12) or id")
     supplier_ids: list[UUID] = Field(min_length=1, max_length=10)
+    buyer_asked_now: bool = Field(default=False, description=_ASKED_NOW_ARG)
     proposal_id: UUID | None = Field(default=None, description=PROPOSAL_ARG)
 
 
@@ -1313,6 +1325,10 @@ _CONFIRM_FIRST: Final = (
     "proposal_id; show it to the buyer and ask. Call again with that proposal_id only after "
     "they confirm in their own later message."
 )
+_UNLESS_ASKED: Final = (
+    " With buyer_asked_now, a step the buyer's message already asked for runs in the first "
+    "call when there is nothing to ask."
+)
 
 
 def _analysis_request(args: RfqFromAnalysisIn) -> RfqFromAnalysisRequest:
@@ -1774,7 +1790,9 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             },
         )
 
-    async def _claim(ctx: ToolContext, action: str, proposal_id: UUID) -> proposals.Claimed:
+    async def _claim(
+        ctx: ToolContext, action: str, proposal_id: UUID, *, same_run: bool = False
+    ) -> proposals.Claimed:
         if deps.conversation_id is None:
             raise ToolError("this action needs a conversation to ask the buyer in")
         try:
@@ -1785,6 +1803,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 run_id=ctx.run_id,
                 action=action,
                 proposal_id=proposal_id,
+                same_run=same_run,
             )
         except proposals.ProposalRefused as exc:
             raise ToolError(str(exc)) from None
@@ -1850,11 +1869,17 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 "title": title,
             },
         )
+        # The buyer's message already asked for this draft and nothing is left to ask:
+        # no second round for a go-ahead they gave. The stored proposal is what runs.
+        if args.buyer_asked_now and not preview.questions:
+            return await _confirm_create_rfq(ctx, proposal_id, same_run=True)
         return CreateRfqOut(awaiting_confirmation=True, proposal_id=proposal_id, preview=preview)
 
-    async def _confirm_create_rfq(ctx: ToolContext, proposal_id: UUID) -> CreateRfqOut:
+    async def _confirm_create_rfq(
+        ctx: ToolContext, proposal_id: UUID, *, same_run: bool = False
+    ) -> CreateRfqOut:
         principal = _principal(ctx)
-        claimed = await _claim(ctx, "create_rfq", proposal_id)
+        claimed = await _claim(ctx, "create_rfq", proposal_id, same_run=same_run)
         stored = cast(dict[str, Any], claimed.preview["draft"])
         draft = RfqIntakeOutput.model_validate(stored["draft"])
         drafted = rfq_service.TextDraft(
@@ -1962,7 +1987,6 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         return _edited(edited.detail, edited.currency_change)
 
     async def invite_suppliers(ctx: ToolContext, args: InviteSuppliersIn) -> InviteSuppliersOut:
-        principal = _principal(ctx)
         if args.proposal_id is None:
             async with tenant_session(db, ctx.tenant_id) as session:
                 rfq = await _rfq(session, args.rfq)
@@ -2018,10 +2042,23 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
             proposal_id = await _propose(
                 ctx, "invite_suppliers", args.model_copy(update={"rfq": str(rfq.id)}), preview
             )
+            # Asked for by the buyer, every supplier reachable, nothing to ask: invite now.
+            ready = not preview.questions and all(s.email for s in preview.suppliers)
+            if args.buyer_asked_now and ready:
+                # The preview stays on the result: the buyer never saw it, so the model
+                # reports each supplier's email and document language from it.
+                done = await _invite(ctx, proposal_id, same_run=True)
+                return done.model_copy(update={"preview": preview})
             return InviteSuppliersOut(
                 ref=rfq.ref, awaiting_confirmation=True, proposal_id=proposal_id, preview=preview
             )
-        claimed = await _claim(ctx, "invite_suppliers", args.proposal_id)
+        return await _invite(ctx, args.proposal_id)
+
+    async def _invite(
+        ctx: ToolContext, proposal_id: UUID, *, same_run: bool = False
+    ) -> InviteSuppliersOut:
+        principal = _principal(ctx)
+        claimed = await _claim(ctx, "invite_suppliers", proposal_id, same_run=same_run)
         stored = InviteSuppliersIn.model_validate(claimed.args)
         async with tenant_session(db, ctx.tenant_id) as session:
             rfq = await _rfq(session, stored.rfq)
@@ -2045,7 +2082,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 results.append(InviteResult(supplier_id=supplier_id, ok=False, detail=str(exc)))
                 continue
             results.append(InviteResult(supplier_id=supplier_id, ok=True, detail="invited"))
-        return InviteSuppliersOut(ref=rfq.ref, results=results, proposal_id=args.proposal_id)
+        return InviteSuppliersOut(ref=rfq.ref, results=results, proposal_id=proposal_id)
 
     async def register_quote(ctx: ToolContext, args: RegisterQuoteIn) -> RegisterQuoteOut:
         principal = _principal(ctx)
@@ -2744,7 +2781,7 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         Tool(
             "create_rfq",
             "Create a DRAFT RFQ from a description of what to buy (and the attached "
-            "files). Nothing is sent." + _CURRENCY_RESULT + _CONFIRM_FIRST,
+            "files). Nothing is sent." + _CURRENCY_RESULT + _CONFIRM_FIRST + _UNLESS_ASKED,
             CreateRfqIn,
             CreateRfqOut,
             "draft",
@@ -2801,7 +2838,8 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
         Tool(
             "invite_suppliers",
             "Add suppliers to a draft or open RFQ as DRAFT invites. Nothing is sent."
-            + _CONFIRM_FIRST,
+            + _CONFIRM_FIRST
+            + _UNLESS_ASKED,
             InviteSuppliersIn,
             InviteSuppliersOut,
             "draft",
