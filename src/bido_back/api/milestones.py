@@ -158,17 +158,21 @@ async def read_document_body(request: Request, settings: Settings) -> bytes:
 
 
 async def read_document_upload(
-    request: Request, settings: Settings, filename: str | None
+    request: Request, settings: Settings, filename: str | None, fallback_filename: str
 ) -> DocumentUpload:
     """The uploaded file, either as raw body or as the `file` part of a multipart form."""
     content_type = request.headers.get("content-type", "")
     if content_type.lower().startswith("multipart/form-data"):
         body = await read_document_body_with_overhead(request, settings)
-        multipart_filename, data = _multipart_file(content_type, body)
-        return DocumentUpload(filename=filename or multipart_filename, data=data)
-    if filename is None:
-        raise PaymentRefused("filename is required")
-    return DocumentUpload(filename=filename, data=await read_document_body(request, settings))
+        multipart_filename, data = _multipart_file(content_type, body, settings)
+        return DocumentUpload(
+            filename=filename or multipart_filename or fallback_filename,
+            data=data,
+        )
+    return DocumentUpload(
+        filename=filename or fallback_filename,
+        data=await read_document_body(request, settings),
+    )
 
 
 async def read_document_body_with_overhead(request: Request, settings: Settings) -> bytes:
@@ -190,18 +194,34 @@ async def read_document_body_with_overhead(request: Request, settings: Settings)
     return b"".join(chunks)
 
 
-def _multipart_file(content_type: str, body: bytes) -> tuple[str, bytes]:
-    """The filename and bytes of the `file` part in a multipart/form-data body."""
+def _multipart_file(content_type: str, body: bytes, settings: Settings) -> tuple[str | None, bytes]:
+    """The filename and bytes of the multipart file part.
+
+    Prefer the conventional `file` part, but accept the first named file-like part too:
+    browser clients and generated SDKs do not all agree on the field name.
+    """
     envelope = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode() + body
     form = BytesParser(policy=policy.default).parsebytes(envelope)
+    first: tuple[str | None, bytes] | None = None
     for part in form.iter_parts():
         name = part.get_param("name", header="content-disposition")
-        if name != "file":
-            continue
+        part_name = name if isinstance(name, str) else None
         data = part.get_payload(decode=True)
         filename = part.get_filename()
-        if isinstance(data, bytes) and filename:
-            return filename, data
+        part_filename = filename if isinstance(filename, str) else None
+        if not isinstance(data, bytes) or (part_filename is None and part_name is None):
+            continue
+        if len(data) > settings.milestone_document_max_bytes:
+            raise DocumentTooLarge(
+                f"files are limited to {settings.milestone_document_max_bytes // (1024 * 1024)} MB"
+            )
+        candidate = (part_filename or part_name, data)
+        if part_name == "file":
+            return candidate
+        if first is None:
+            first = candidate
+    if first is not None:
+        return first
     raise PaymentRefused("no file in the form")
 
 
@@ -300,7 +320,9 @@ def milestones_router() -> APIRouter:
         type, the file is empty, or the milestone already has 30 files."""
         try:
             payment_id = await service.payment_id_for(db, principal, po_id)
-            upload = await read_document_upload(request, settings, filename)
+            upload = await read_document_upload(
+                request, settings, filename, fallback_filename=doc_type
+            )
             return await documents.add_document(
                 db,
                 storage,

@@ -137,7 +137,9 @@ def factory_router() -> APIRouter:
         415: not a kind this document takes, or not what its name says; 422: the milestone
         does not ask for that document, the file is empty, or it already has 30 files."""
         try:
-            upload = await read_document_upload(request, settings, filename)
+            upload = await read_document_upload(
+                request, settings, filename, fallback_filename=doc_type
+            )
             added = await documents.add_document(
                 db,
                 storage,

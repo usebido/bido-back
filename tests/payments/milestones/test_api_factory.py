@@ -144,7 +144,7 @@ async def test_the_factory_sends_a_milestone_over_http(funded: Funded, api: Mile
         headers=token,
         params={"doc_type": "steel_certificate"},
         files={
-            "file": (
+            "steel_certificate": (
                 "03_steel_certificate_EN10204_3.1.pdf",
                 pdf(),
                 "application/pdf",
