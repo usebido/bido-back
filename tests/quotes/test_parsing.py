@@ -11,6 +11,7 @@ from bido_back.quotes.parsing import (
     dates_in,
     day_months_in,
     decimal_separator_for,
+    decimal_separator_in,
     detect_currencies,
     find_number,
     incoterms_in,
@@ -28,6 +29,7 @@ from bido_back.quotes.parsing import (
     parse_canonical,
     parse_decimal,
     ranges_in,
+    stated_values,
 )
 
 
@@ -129,6 +131,45 @@ def test_decimal_separator_from_language() -> None:
     assert decimal_separator_for("en") == "."
     assert decimal_separator_for("zh") == "."
     assert decimal_separator_for(None) is None
+
+
+@pytest.mark.parametrize(
+    ("text", "separator"),
+    [
+        ("2,000 pcs at BRL 2.75 per piece, total BRL 5,500.00", "."),
+        ("2.000 pz a 2,75 BRL, totale 5.500,00 BRL", ","),
+        ("Gesamt 5.500,00 EUR", ","),
+        ("Total USD 5,500.00", "."),
+        # Nothing reads only as a decimal: a thousand or one, an integer, identifiers.
+        ("2,000 pcs, order PO-4, our ref ET-7781, part EEE-FK1H101P", None),
+        ("1.500 pz", None),
+        # A day and month, or a clock time, may look like a decimal.
+        ("Lieferung am 04.12., Preis 2,75 EUR", ","),
+        ("consegna alle 14.30, 2,75 EUR", ","),
+        ("Abholung 14.30 Uhr", None),
+        # Numbers that disagree prove nothing.
+        ("2.75 BRL, 2,75 BRL", None),
+    ],
+)
+def test_the_separator_the_numbers_prove(text: str, separator: DecimalSeparator | None) -> None:
+    assert decimal_separator_in(text) == separator
+
+
+def test_stated_values_read_in_the_words_they_came_from() -> None:
+    words = "2,000 pcs Panasonic EEE-FK1H101P"
+    # Ambiguous without a proven separator: both readings.
+    assert stated_values("2,000", words) == {Decimal("2000"), Decimal("2")}
+    assert stated_values("2,000", words, decimal=".") == {Decimal("2000")}
+    assert stated_values("2,000", words, decimal=",") == {Decimal("2")}
+    # A value the model normalized still reads as the words do.
+    assert stated_values("2000", words) == {Decimal("2000"), Decimal("2")}
+    assert stated_values("2000", words, decimal=",") == {Decimal("2")}
+    assert stated_values("2.75", "at BRL 2.75 per piece") == {Decimal("2.75")}
+    # Not in the words, not one number, negative, or part of an identifier: nothing.
+    assert stated_values("3,000", words) == set()
+    assert stated_values("2,000 or 3,000", words) == set()
+    assert stated_values("-2,000", words) == set()
+    assert stated_values("1", "EEE-FK1H101P") == set()
 
 
 def test_currency_detection() -> None:

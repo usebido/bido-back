@@ -10,7 +10,12 @@ RFQ is awarded, and a confirmation is not a new offer.
    delivery date, unit price or quantity it states, each with the exact words.
 2. Code grounds every value: words that are not in the email (subject, body,
    attachments) count as unread, and a date or number counts only when it is in
-   those words. Code parses them itself and compares them with the order.
+   those words. Code parses them itself and compares them with the order. The
+   decimal separator is the one the supplier's own numbers prove (`2.75` a point,
+   `2,75` a comma), never the language they are registered with: an Italian
+   supplier may answer in English. A number that reads two ways with nothing to
+   prove which (`2,000`: two thousand or two) is never a change; it matches the
+   order when one reading does, else it waits for the buyer as written.
 3. A plain confirmation of a `sent` order, grounded, with no stated value that
    differs from the order and no other date in the supplier's own words, is
    recorded as the acknowledgement (`purchase_order.acknowledged`, source
@@ -55,10 +60,9 @@ from bido_back.db.models import Attachment, Invite, IssuedPurchaseOrder, Message
 from bido_back.documents import DocumentText, extract_text, render_documents
 from bido_back.quotes.parsing import (
     dates_in,
-    decimal_separator_for,
-    find_number,
+    decimal_separator_in,
     normalize_text,
-    parse_decimal,
+    stated_values,
 )
 from bido_back.rfqs.audit import rfq_event
 from bido_back.rfqs.language import supplier_email_language
@@ -90,6 +94,8 @@ class Change:
     stated: str | None
     # The stated value could not be read as a date or number, or was not in the email.
     unverified: bool = False
+    # The number reads two ways (`2,000`) and neither is the order's: `stated` as written.
+    ambiguous: bool = False
 
     def as_json(self) -> dict[str, JsonValue]:
         return {
@@ -98,6 +104,7 @@ class Change:
             "ordered": self.ordered,
             "stated": self.stated,
             "unverified": self.unverified,
+            "ambiguous": self.ambiguous,
         }
 
 
@@ -188,7 +195,8 @@ def read_response(
 ) -> Reading:
     """Ground the agent's reading in the email and compare it with the order. Pure."""
     text = normalize_text("\n".join((subject, body, attachments_text)))
-    decimal = decimal_separator_for(language)
+    # Proven by the supplier's numbers, not by the quoted order below their words.
+    decimal = decimal_separator_in("\n".join((subject, own_words(body), attachments_text)))
     ordered = {line.position: line for line in lines}
     changes: list[Change] = []
     for stated in output.lines:
@@ -219,14 +227,25 @@ def read_response(
             if not isinstance(quoted, Quoted) or not quoted.value:
                 continue
             words = _grounded(quoted, text)
-            value = parse_decimal(quoted.value, decimal=decimal)
-            if value is not None and (
-                words is None or not find_number(value, words, decimal=decimal).found
-            ):
-                value = None  # The number is not in the words it claims to come from.
-            if value is None:
+            # Empty when the number is not in the words it claims to come from.
+            values: set[Decimal] = (
+                stated_values(quoted.value, words, decimal=decimal) if words else set()
+            )
+            if not values:
                 changes.append(Change(line.position, field, current, quoted.value, unverified=True))
-            elif value != Decimal(current):
+            elif len(values) > 1:
+                if Decimal(current) not in values:
+                    changes.append(
+                        Change(
+                            line.position,
+                            field,
+                            current,
+                            quoted.value,
+                            unverified=True,
+                            ambiguous=True,
+                        )
+                    )
+            elif (value := next(iter(values))) != Decimal(current):
                 changes.append(Change(line.position, field, current, _num(value)))
     expected = known_dates | {
         date.fromisoformat(line.delivery_date) for line in lines if line.delivery_date

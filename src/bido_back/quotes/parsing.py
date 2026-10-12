@@ -212,6 +212,63 @@ def _preferred(token: list[Reading], decimal: DecimalSeparator) -> Reading:
     return token[0]
 
 
+# Numbers that look like decimals but may be a day and month ("04.12", "1,05") or a clock
+# time ("14.30 Uhr", "alle 9.30"): they prove no separator.
+_DAY_MONTH_LIKE = re.compile(
+    r"(?<![\d.,])(?:[1-9]|[0-2]\d|3[01])[.,](?:0?[1-9]|1[0-2])(?!\d|[.,]\d)"
+)
+_CLOCK_TIME = re.compile(
+    r"(?<![\d.,])\d{1,2}[.:]\d{2}(?=\s*(?:h|hrs?|uhr|ore)\b)"
+    r"|\b(?:um|ore|alle|às)\s+\d{1,2}[.:]\d{2}(?!\d|[.,]\d)",
+    re.IGNORECASE,
+)
+
+
+def decimal_separator_in(text: str) -> DecimalSeparator | None:
+    """The decimal separator the numbers in `text` prove, or None.
+
+    A number with one reading only, and that reading a decimal, proves its separator:
+    `2.75` or `5,500.00` a point, `2,75` or `5.500,00` a comma. `2,000` (one thousand
+    or two) proves nothing, nor do identifiers, numbers that may be a day and month or
+    a clock time. None also when the numbers disagree.
+    """
+    masked = _CLOCK_TIME.sub(" ", _DAY_MONTH_LIKE.sub(" ", text))
+    votes: set[DecimalSeparator] = {
+        token[0].decimal
+        for token in _value_tokens(masked)
+        if len(token) == 1 and token[0].decimal is not None
+    }
+    return votes.pop() if len(votes) == 1 else None
+
+
+def stated_values(
+    value: str, words: str, *, decimal: DecimalSeparator | None = None
+) -> set[Decimal]:
+    """What the one number written as `value` may mean, read in `words` (where it came from).
+
+    `value` selects the number; `words` decide how it reads: every number of `words`
+    that `value` can be one reading of counts, read with `decimal` when the separator is
+    proven, else in each of its readings. Empty when `value` is not one unsigned number
+    or is not in `words`; several values when the number is ambiguous (`2,000` with no
+    proven separator gives 2000 and 2).
+    """
+    stripped = value.strip()
+    tokens = number_tokens(stripped, with_pieces=False)
+    if len(tokens) != 1 or re.match("^[-\u2212]", stripped) is not None:
+        return set()
+    token = tokens[0]
+    meant = {_preferred(token, decimal).value} if decimal is not None else {r.value for r in token}
+    found: set[Decimal] = set()
+    for written in _value_tokens(words):
+        if not any(r.value in meant for r in written):
+            continue
+        if decimal is not None:
+            found.add(_preferred(written, decimal).value)
+        else:
+            found.update(r.value for r in written)
+    return found
+
+
 _CANONICAL = re.compile(r"-?\d+(?:\.\d+)?")
 
 
