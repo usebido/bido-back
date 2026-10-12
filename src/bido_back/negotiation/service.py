@@ -285,6 +285,8 @@ class _Supplier:
     received_on: date | None = None
     rows: list[NegotiationMessage] = field(default_factory=list[NegotiationMessage])
     followups: list[FollowupMessage] = field(default_factory=list[FollowupMessage])
+    # A reply from the supplier is stored and not read yet (quote extraction pending).
+    reply_unread: bool = False
     # An earlier reply already declared the supplier's final position ("best and final",
     # "we cannot go any lower"): it stays final, Bido asks nothing more of this supplier.
     final_before: bool = False
@@ -425,6 +427,19 @@ async def _load(
             .order_by(FollowupMessage.created_at, FollowupMessage.sequence)
         ):
             by_invite[followup.invite_id].followups.append(followup)
+        # Replies quote extraction has not read yet (`stored`; read ones are `extracted`,
+        # unreadable ones `failed`).
+        for invite_id in await session.scalars(
+            select(Message.invite_id)
+            .where(
+                Message.invite_id.in_(list(by_invite)),
+                Message.direction == "in",
+                Message.status == "stored",
+            )
+            .distinct()
+        ):
+            if invite_id is not None:
+                by_invite[invite_id].reply_unread = True
     approval_ids = [
         a
         for s in suppliers
@@ -981,6 +996,7 @@ def _plan(
             chases_sent=sum(1 for c in chases if c.status == "sent"),
             chases_max=rfq.followup_max_chases if rfq.followups_enabled else 0,
             chases_waiting=any(c.status == "proposed" for c in chases),
+            reply_unread=item.reply_unread,
         )
     cutoff = _live_cutoff(loaded)
 
@@ -2123,7 +2139,10 @@ async def evaluate_rfq(
             )
         # Set by the first best-and-final decided; dropped when none carrying it is left.
         rfq.negotiation_cutoff_at = planned.cutoff
-        waiting = sum(1 for item in loaded.suppliers if item.invite.status == "sent")
+        # A reply Bido is still reading may change what the supplier offers: wait for it.
+        waiting = sum(
+            1 for item in loaded.suppliers if item.invite.status == "sent" or item.reply_unread
+        )
         answered = [
             planned.plans[item.invite.id]
             for item in loaded.suppliers

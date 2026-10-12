@@ -14117,7 +14117,7 @@
         "description": "One event in an RFQ's activity feed: ids and a code-written summary, never content.",
         "properties": {
           "action": {
-            "description": "Stable code, e.g. rfq.created, rfq.line_updated, rfq.invite_added, rfq.email_sent, approval.approved, reply",
+            "description": "Stable code, e.g. rfq.created, rfq.line_updated, rfq.invite_added, rfq.email_sent, approval.approved, reply, quote.received",
             "title": "Action",
             "type": "string"
           },
@@ -22634,16 +22634,23 @@
             }
           },
           {
-            "description": "The file's name, with its extension",
+            "description": "The file's name, with its extension; optional for multipart/form-data",
             "in": "query",
             "name": "filename",
-            "required": true,
+            "required": false,
             "schema": {
-              "description": "The file's name, with its extension",
-              "maxLength": 255,
-              "minLength": 1,
-              "title": "Filename",
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The file's name, with its extension; optional for multipart/form-data",
+              "title": "Filename"
             }
           },
           {
@@ -22665,6 +22672,20 @@
               "schema": {
                 "format": "binary",
                 "type": "string"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "file": {
+                    "format": "binary",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "type": "object"
               }
             }
           },
@@ -28900,16 +28921,23 @@
             }
           },
           {
-            "description": "The file's name, with its extension",
+            "description": "The file's name, with its extension; optional for multipart/form-data",
             "in": "query",
             "name": "filename",
-            "required": true,
+            "required": false,
             "schema": {
-              "description": "The file's name, with its extension",
-              "maxLength": 255,
-              "minLength": 1,
-              "title": "Filename",
-              "type": "string"
+              "anyOf": [
+                {
+                  "maxLength": 255,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "The file's name, with its extension; optional for multipart/form-data",
+              "title": "Filename"
             }
           },
           {
@@ -28949,6 +28977,20 @@
               "schema": {
                 "format": "binary",
                 "type": "string"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "file": {
+                    "format": "binary",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "file"
+                ],
+                "type": "object"
               }
             }
           },

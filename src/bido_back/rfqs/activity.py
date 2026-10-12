@@ -1,4 +1,5 @@
-"""An RFQ's activity feed: audit events plus received replies, newest first.
+"""An RFQ's activity feed: audit events plus received replies and the quotes Bido read
+from them, newest first.
 
 Only ids, names and summaries written here in code reach the response; never
 an email body, subject or attachment name, nor a milestone's note, file names or
@@ -27,6 +28,7 @@ from bido_back.db.models import (
     PoMilestoneSubmission,
     PoPayment,
     PoPaymentMilestone,
+    Proposal,
     Rfq,
     Supplier,
 )
@@ -203,6 +205,23 @@ async def rfq_activity(
                 if invite_id is not None
             ]
 
+        # Each offer version Bido read from a supplier's email (an uploaded quote has its
+        # `quote.registered` event instead). Stamped when it was read, never before the
+        # reply it came in (an email's date is the sender's clock).
+        quotes: list[tuple[UUID, datetime, int]] = []
+        if suppliers:
+            read_at = func.greatest(Proposal.created_at, Message.occurred_at)
+            quotes = [
+                (invite_id, at, version)
+                for invite_id, at, version in await session.execute(
+                    select(Proposal.invite_id, read_at, Proposal.version)
+                    .join(Message, Message.id == Proposal.message_id)
+                    .where(Proposal.invite_id.in_(list(suppliers)), Message.origin == "email")
+                    .order_by(read_at.desc())
+                    .limit(limit)
+                )
+            ]
+
         people = await owner_names(
             session, {e.actor_user_id for e in events if e.actor_user_id is not None}
         )
@@ -220,6 +239,17 @@ async def rfq_activity(
             + (f" with {count} attachment{'s' if count != 1 else ''}" if count else ""),
         )
         for invite_id, occurred_at, count in replies
+    ]
+    items += [
+        RfqActivityItem(
+            at=at,
+            kind="agent",
+            action="quote.received",
+            actor=BIDO,
+            supplier_name=suppliers[invite_id],
+            summary=f"Quote received from {suppliers[invite_id]} (version {version})",
+        )
+        for invite_id, at, version in quotes
     ]
     items.sort(key=lambda item: item.at, reverse=True)
     return items[:limit]

@@ -16,10 +16,14 @@ a milestone creates a `release_po_milestone` approval that a person decides at
 POST /v1/approvals/{approval_id}/decision; nothing here releases money. Any member of the
 company may use these routes; another company's order answers 404.
 
-Uploads take the file's raw bytes as the body (one file per request), with `doc_type` and
-`filename` in the query; its first bytes decide what kind of file it is.
+Uploads take one file per request. The public API takes the file's raw bytes as the body,
+with `doc_type` and `filename` in the query; browser forms may send multipart/form-data
+with the file part instead. Its first bytes decide what kind of file it is.
 """
 
+from dataclasses import dataclass
+from email import policy
+from email.parser import BytesParser
 from typing import Annotated, Final
 from uuid import UUID
 
@@ -40,7 +44,7 @@ from bido_back.api.deps import get_db, get_download_links, get_job_queue, get_pr
 from bido_back.api.payments import PaymentSettings, payments_http_error
 from bido_back.api.rfqs import error_responses
 from bido_back.auth import Principal
-from bido_back.payments.errors import FactoryLinkInvalid, PaymentError
+from bido_back.payments.errors import FactoryLinkInvalid, PaymentError, PaymentRefused
 from bido_back.payments.milestones import documents, execute, links, service
 from bido_back.payments.milestones.documents import DocumentTooLarge, DocumentTypeRefused
 from bido_back.payments.milestones.schemas import (
@@ -79,8 +83,12 @@ DocType = Annotated[
     ),
 ]
 Filename = Annotated[
-    str,
-    Query(min_length=1, max_length=255, description="The file's name, with its extension"),
+    str | None,
+    Query(
+        min_length=1,
+        max_length=255,
+        description="The file's name, with its extension; optional for multipart/form-data",
+    ),
 ]
 DeclaredType = Annotated[
     str,
@@ -99,10 +107,25 @@ LinkDisposition = Annotated[
 DOCUMENT_BODY: Final[dict[str, object]] = {
     "requestBody": {
         "required": True,
-        "content": {"application/octet-stream": {"schema": {"type": "string", "format": "binary"}}},
+        "content": {
+            "application/octet-stream": {"schema": {"type": "string", "format": "binary"}},
+            "multipart/form-data": {
+                "schema": {
+                    "type": "object",
+                    "required": ["file"],
+                    "properties": {"file": {"type": "string", "format": "binary"}},
+                }
+            },
+        },
     }
 }
 FACTORY_LINK_INVALID: Final = "this link is not valid: ask the buyer for a new one"
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentUpload:
+    filename: str
+    data: bytes
 
 
 def milestones_http_error(exc: PaymentError | RfqError) -> HTTPException:
@@ -132,6 +155,74 @@ async def read_document_body(request: Request, settings: Settings) -> bytes:
             raise too_large
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+async def read_document_upload(
+    request: Request, settings: Settings, filename: str | None, fallback_filename: str
+) -> DocumentUpload:
+    """The uploaded file, either as raw body or as the `file` part of a multipart form."""
+    content_type = request.headers.get("content-type", "")
+    if content_type.lower().startswith("multipart/form-data"):
+        body = await read_document_body_with_overhead(request, settings)
+        multipart_filename, data = _multipart_file(content_type, body, settings)
+        return DocumentUpload(
+            filename=filename or multipart_filename or fallback_filename,
+            data=data,
+        )
+    return DocumentUpload(
+        filename=filename or fallback_filename,
+        data=await read_document_body(request, settings),
+    )
+
+
+async def read_document_body_with_overhead(request: Request, settings: Settings) -> bytes:
+    """Read a multipart request, allowing framing bytes while still capping the file itself."""
+    limit = settings.milestone_document_max_bytes + 64 * 1024
+    too_large = DocumentTooLarge(
+        f"files are limited to {settings.milestone_document_max_bytes // (1024 * 1024)} MB"
+    )
+    declared = request.headers.get("content-length")
+    if declared is not None and declared.isdigit() and int(declared) > limit:
+        raise too_large
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > limit:
+            raise too_large
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _multipart_file(content_type: str, body: bytes, settings: Settings) -> tuple[str | None, bytes]:
+    """The filename and bytes of the multipart file part.
+
+    Prefer the conventional `file` part, but accept the first named file-like part too:
+    browser clients and generated SDKs do not all agree on the field name.
+    """
+    envelope = f"Content-Type: {content_type}\r\nMIME-Version: 1.0\r\n\r\n".encode() + body
+    form = BytesParser(policy=policy.default).parsebytes(envelope)
+    first: tuple[str | None, bytes] | None = None
+    for part in form.iter_parts():
+        name = part.get_param("name", header="content-disposition")
+        part_name = name if isinstance(name, str) else None
+        data = part.get_payload(decode=True)
+        filename = part.get_filename()
+        part_filename = filename if isinstance(filename, str) else None
+        if not isinstance(data, bytes) or (part_filename is None and part_name is None):
+            continue
+        if len(data) > settings.milestone_document_max_bytes:
+            raise DocumentTooLarge(
+                f"files are limited to {settings.milestone_document_max_bytes // (1024 * 1024)} MB"
+            )
+        candidate = (part_filename or part_name, data)
+        if part_name == "file":
+            return candidate
+        if first is None:
+            first = candidate
+    if first is not None:
+        return first
+    raise PaymentRefused("no file in the form")
 
 
 def declared_type(value: str) -> str:
@@ -214,11 +305,11 @@ def milestones_router() -> APIRouter:
         po_id: UUID,
         index: MilestoneIndex,
         doc_type: DocType,
-        filename: Filename,
         db: Db,
         storage: Storage,
         settings: PaymentSettings,
         content_type: DeclaredType = "application/octet-stream",
+        filename: Filename = None,
     ) -> MilestoneDocumentView:
         """Add one file to the milestone's documents on the factory's behalf (the raw bytes
         as the body). The same file again answers the document already there. 404: no such
@@ -229,7 +320,9 @@ def milestones_router() -> APIRouter:
         type, the file is empty, or the milestone already has 30 files."""
         try:
             payment_id = await service.payment_id_for(db, principal, po_id)
-            data = await read_document_body(request, settings)
+            upload = await read_document_upload(
+                request, settings, filename, fallback_filename=doc_type
+            )
             return await documents.add_document(
                 db,
                 storage,
@@ -237,9 +330,9 @@ def milestones_router() -> APIRouter:
                 payment_id,
                 index,
                 doc_type=doc_type,
-                filename=filename,
+                filename=upload.filename,
                 content_type=declared_type(content_type),
-                data=data,
+                data=upload.data,
                 settings=settings,
             )
         except (PaymentError, RfqError) as exc:

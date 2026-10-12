@@ -26,7 +26,9 @@ buyer's limits and the deadlines, and decides ONE action:
 
 First match wins:
 
-1. Not open (not started, closed, RFQ not sent, declined, no reply yet).
+1. Not open (not started, closed, RFQ not sent, declined, no reply yet). A reply
+   without an offer waits while Bido is still reading it (`reading_reply`); only a
+   reply read without an offer (a question, a request) needs the buyer's answer.
 2. An email already decided for this supplier and not sent (being written,
    awaiting approval, the daily cap, the mailbox): wait. One that could not
    be written, or that the buyer rejected, for the current offer: hold. Never
@@ -261,6 +263,9 @@ class SupplierFacts:
     chases_sent: int = 0
     chases_max: int = 0
     chases_waiting: bool = False
+    # A reply from the supplier is stored and not read yet (quote extraction is running
+    # or queued): whether it holds an offer is not known yet.
+    reply_unread: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -670,6 +675,9 @@ def plan_supplier(
     offer = supplier.offer
     if offer is None:
         if status == "responded":
+            if supplier.reply_unread:
+                # Bido is still reading the reply: it may well be the quote.
+                return SupplierPlan("wait", "waiting", "reading_reply")
             return SupplierPlan("hold", "needs_answer", "reply_without_offer")
         until = end_of_day(ctx.response_due) if ctx.response_due is not None else ctx.deadline
         if until is not None and until < ctx.now:

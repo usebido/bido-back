@@ -11,6 +11,7 @@ from bido_back.api.app import create_app
 from bido_back.settings import Settings
 
 FRONTEND = "https://app.dev.usebido.com"
+PRODUCTION_FRONTEND = "https://app.usebido.com"
 PREVIEW_REGEX = r"^https://bido-front-[a-z0-9-]+\.vercel\.app$"
 PREVIEW = "https://bido-front-git-feat-x-usebido.vercel.app"
 UNUSED_DB = "postgresql://app@localhost:5432/unused"
@@ -60,6 +61,16 @@ async def test_a_preview_deployment_matches_the_regex(client: httpx.AsyncClient)
     response = await client.get("/health", headers={"Origin": PREVIEW})
 
     assert response.headers["access-control-allow-origin"] == PREVIEW
+
+
+async def test_dev_api_accepts_the_canonical_app_origin(client: httpx.AsyncClient) -> None:
+    response = await client.options(
+        "/v1/purchase-orders/00000000-0000-0000-0000-000000000000/payment/milestones/0/documents",
+        headers=_preflight(PRODUCTION_FRONTEND),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["access-control-allow-origin"] == PRODUCTION_FRONTEND
 
 
 async def test_another_origin_gets_no_cors_headers(client: httpx.AsyncClient) -> None:
