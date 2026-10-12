@@ -17,7 +17,7 @@ from bido_back.api.dev import (
 )
 from bido_back.auth import Principal
 from bido_back.intake.service import IngestResult
-from bido_back.payments.demo import DebugPaymentPurchaseOrder
+from bido_back.payments.demo import DebugPaymentPurchaseOrder, DemoScenario
 from bido_back.settings import Settings
 
 RAW = b"From: a@supplier.test\r\nTo: b@quotes.test\r\nSubject: hi\r\n\r\nbody \xc3\xa9\r\n"
@@ -45,17 +45,20 @@ class FakePaymentDemoCreator:
     def __init__(self) -> None:
         self.amounts: list[Decimal] = []
         self.email_domains: list[str] = []
+        self.scenarios: list[str] = []
 
     async def __call__(
         self,
         db: async_sessionmaker[AsyncSession],
         principal: Principal,
         *,
-        amount_usd: Decimal,
         email_domain: str,
+        scenario: DemoScenario,
+        amount_usd: Decimal,
     ) -> DebugPaymentPurchaseOrder:
         self.amounts.append(amount_usd)
         self.email_domains.append(email_domain)
+        self.scenarios.append(scenario)
         return DebugPaymentPurchaseOrder(
             id=uuid4(),
             ref="PO-1",
@@ -116,27 +119,26 @@ def test_payment_demo_refused_outside_debug_environments() -> None:
     assert creator.amounts == []
 
 
-def test_payment_demo_creates_default_one_dollar_order_in_dev() -> None:
+def test_payment_demo_creates_the_rfq_quote_order_by_default_in_dev() -> None:
     creator = FakePaymentDemoCreator()
     response = _payment_client("dev", creator).post("/dev/payments/purchase-order")
     assert response.status_code == 200
     body = response.json()
     assert body["ref"] == "PO-1"
-    assert body["currency"] == "USD"
-    assert body["total"] == "1.00"
     assert body["status"] == "sent"
     assert body["fulfilment_state"] == "sent"
-    assert creator.amounts == [Decimal("1.00")]
+    assert creator.scenarios == ["rfq_quote"]
     assert creator.email_domains == ["mail.example.test"]
 
 
-def test_payment_demo_accepts_custom_amount() -> None:
+def test_payment_demo_single_line_takes_the_amount() -> None:
     creator = FakePaymentDemoCreator()
     response = _payment_client("local", creator).post(
-        "/dev/payments/purchase-order", json={"amount_usd": "2.50"}
+        "/dev/payments/purchase-order", json={"scenario": "single_line", "amount_usd": "2.50"}
     )
     assert response.status_code == 200
     assert response.json()["total"] == "2.50"
+    assert creator.scenarios == ["single_line"]
     assert creator.amounts == [Decimal("2.50")]
 
 
