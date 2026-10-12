@@ -11,6 +11,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from bido_back.agents.tools import ToolError
+from bido_back.copilot import proposals
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
@@ -611,6 +612,123 @@ async def test_nothing_is_created_until_the_buyer_confirms_in_a_later_message(
     with pytest.raises(ToolError, match="already confirmed"):
         await tools.call(
             replace(ctx, run_id=uuid4()), "create_rfq", text="x", proposal_id=proposal_id
+        )
+
+
+async def test_a_draft_step_the_buyer_asked_for_runs_without_a_second_go_ahead(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    """ "Create the RFQ and invite only X": the draft and the invite in the same turn."""
+    principal = buyer_of(copilot_rows)
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+    rhein = await supplier(app_engine, principal, "Rhein")
+
+    # The intake still has a question: asked for or not, the buyer sees the preview first.
+    asked = await tools.call(
+        ctx, "create_rfq", text="MLCC and connectors", currency="EUR", buyer_asked_now=True
+    )
+    assert asked.awaiting_confirmation and asked.id is None
+    assert asked.preview is not None and asked.preview.questions == ["Which delivery address?"]
+
+    # Nothing left to ask: created in this very call, from the stored proposal.
+    tools.intake.output = tools.intake.output.model_copy(update={"questions": []})
+    created = await tools.call(
+        ctx, "create_rfq", text="MLCC and connectors", currency="EUR", buyer_asked_now=True
+    )
+    assert not created.awaiting_confirmation and created.ref == "RFQ-1"
+    assert created.status == "draft" and len(created.lines) == 2
+
+    # Then the invite the same message asked for, still in the same run.
+    invited = await tools.call(
+        ctx,
+        "invite_suppliers",
+        rfq=created.ref,
+        supplier_ids=[str(rhein.id)],
+        buyer_asked_now=True,
+    )
+    assert not invited.awaiting_confirmation
+    assert [(r.supplier_id, r.detail) for r in invited.results] == [(rhein.id, "invited")]
+    # The buyer never saw a preview: what was done comes back for the Copilot to report.
+    assert invited.preview is not None and [
+        (s.name, s.email, s.document_language) for s in invited.preview.suppliers
+    ] == [("Rhein", "sales@rhein.example.test", "de")]
+
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        invites = list(await session.scalars(select(Invite).where(Invite.rfq_id == created.id)))
+        used = list(
+            await session.scalars(
+                select(CopilotProposal.used_at).where(
+                    CopilotProposal.id.in_([created.proposal_id, invited.proposal_id])
+                )
+            )
+        )
+        approvals = list(await session.scalars(select(Approval)))
+    # Draft steps only: a draft invite, no approval, nothing emailed. Each proposal is
+    # still stored and used once, so the record is the same as a confirmed one.
+    assert [i.status for i in invites] == ["draft"]
+    assert approvals == [] and tools.mailboxes.sender.sent == []
+    assert len(used) == 2 and all(u is not None for u in used)
+    # A done step cannot be run again with its proposal_id.
+    with pytest.raises(ToolError, match="already confirmed"):
+        await tools.call(
+            replace(ctx, run_id=uuid4()),
+            "create_rfq",
+            text="x",
+            proposal_id=str(created.proposal_id),
+        )
+
+
+async def test_an_asked_for_invite_still_asks_when_something_is_open(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+    rfq = await make_rfq(app_engine, principal)
+    acme = await suppliers.create_supplier(
+        app_engine,
+        principal,
+        CreateSupplierRequest(name="Acme Corp", contacts=[ContactIn(email="sales@acme.com")]),
+    )
+    no_email = await suppliers.create_supplier(
+        app_engine, principal, CreateSupplierRequest(name="Lyon Composants", country="FR")
+    )
+
+    # Its country is unknown (the document's language would be a guess) / it has no email.
+    for wanted in (acme, no_email):
+        proposed = await tools.call(
+            ctx,
+            "invite_suppliers",
+            rfq=rfq.ref,
+            supplier_ids=[str(wanted.id)],
+            buyer_asked_now=True,
+        )
+        assert proposed.awaiting_confirmation and proposed.results == []
+
+    async with tenant_session(app_engine, principal.tenant_id) as session:
+        assert list(await session.scalars(select(Invite).where(Invite.rfq_id == rfq.id))) == []
+
+
+async def test_only_its_own_run_runs_a_proposal_at_once(
+    app_engine: AsyncEngine, copilot_rows: People
+) -> None:
+    principal = buyer_of(copilot_rows)
+    tools = make_tools(app_engine)
+    ctx = context_of(principal)
+    proposed = await tools.call(ctx, "create_rfq", text="MLCC", currency="EUR")
+    assert proposed.proposal_id is not None
+
+    # The same-run shortcut never confirms a proposal an earlier run made.
+    with pytest.raises(proposals.ProposalRefused, match="not made in this run"):
+        await proposals.claim(
+            app_engine,
+            principal,
+            conversation_id=tools.conversation_id,
+            run_id=uuid4(),
+            action="create_rfq",
+            proposal_id=proposed.proposal_id,
+            same_run=True,
         )
 
 

@@ -13,6 +13,12 @@ never takes them on its own initiative. A gated tool works in two calls:
    model passes now, so what happens is what the buyer saw. A proposal is used
    once and expires after `PROPOSAL_TTL`.
 
+One shortcut, for draft steps only (create_rfq, invite_suppliers): when the
+buyer's own message already asked for that very step and the preview leaves
+nothing to ask, the tool claims its own proposal in the same run (`same_run`)
+and runs it at once. The proposal is still stored and used, so the record is
+the same; what is skipped is asking the buyer for a go-ahead they already gave.
+
 Claiming marks the row used in the same statement that checks it, so two
 confirmations racing cannot both run; a run that then fails releases it.
 """
@@ -224,7 +230,13 @@ class AwaitingConfirmation(BaseModel):
         ),
     )
     proposal_id: UUID | None = None
-    preview: ProposalPreview | None = None
+    preview: ProposalPreview | None = Field(
+        default=None,
+        description=(
+            "While awaiting_confirmation: what the step would do. Otherwise, when set: what "
+            "was just done at the buyer's request, which they have not seen yet; report it"
+        ),
+    )
 
 
 def created(output: Mapping[str, JsonValue]) -> bool:
@@ -277,13 +289,17 @@ async def claim(
     run_id: UUID,
     action: str,
     proposal_id: UUID,
+    same_run: bool = False,
 ) -> Claimed:
     """The proposal's stored args, marked used, if the buyer may confirm it now.
 
     Refused when it is not this user's proposal for `action` in this
     conversation, was made in this same run (the buyer has not answered yet),
-    was already used, or is older than `PROPOSAL_TTL`.
+    was already used, or is older than `PROPOSAL_TTL`. With `same_run` it is the
+    other way round: only a proposal made in this very run, for a step the
+    buyer's message of this run already asked for.
     """
+    from_run = CopilotProposal.run_id == run_id if same_run else CopilotProposal.run_id != run_id
     async with tenant_session(db, principal.tenant_id) as session:
         claimed = (
             await session.execute(
@@ -293,7 +309,7 @@ async def claim(
                     CopilotProposal.user_id == principal.user_id,
                     CopilotProposal.conversation_id == conversation_id,
                     CopilotProposal.action == action,
-                    CopilotProposal.run_id != run_id,
+                    from_run,
                     CopilotProposal.used_at.is_(None),
                     CopilotProposal.created_at > func.now() - PROPOSAL_TTL,
                 )
@@ -322,7 +338,9 @@ async def claim(
         )
     if row.used_at is not None:
         raise ProposalRefused(f"proposal {proposal_id} was already confirmed and done")
-    if row.run_id == run_id:
+    if same_run and row.run_id != run_id:
+        raise ProposalRefused(f"proposal {proposal_id} was not made in this run")
+    if not same_run and row.run_id == run_id:
         raise ProposalRefused(
             "the buyer has not confirmed yet: show them the preview, ask, and call again with "
             "proposal_id only after they answer in their own message"
