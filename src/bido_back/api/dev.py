@@ -50,7 +50,11 @@ from bido_back.api.deps import get_db, get_job_queue, get_principal, get_storage
 from bido_back.auth import Principal
 from bido_back.intake.service import InboundService
 from bido_back.onboarding.service import MAX_DIRECT_UPLOAD_BYTES
-from bido_back.payments.demo import DebugPaymentPurchaseOrder, create_debug_payment_purchase_order
+from bido_back.payments.demo import (
+    DebugPaymentPurchaseOrder,
+    DemoScenario,
+    create_debug_payment_purchase_order,
+)
 from bido_back.settings import Settings, get_settings
 from bido_back.storage import BlobNotFound, BlobStorage
 from bido_back.storage.direct import InvalidUploadForm, LocalDirectUploads
@@ -76,6 +80,9 @@ class InboundResponse(BaseModel):
 class DebugPaymentPurchaseOrderRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # `rfq_quote`: the demo RFQ's 21-line BRL quote; `single_line`: one USD line.
+    scenario: DemoScenario = "rfq_quote"
+    # The single line's price; ignored for `rfq_quote`.
     amount_usd: Decimal = Field(default=Decimal("1.00"), gt=0, max_digits=18, decimal_places=2)
 
 
@@ -85,8 +92,9 @@ class PaymentDemoCreator(Protocol):
         db: async_sessionmaker[AsyncSession],
         principal: Principal,
         *,
-        amount_usd: Decimal,
         email_domain: str,
+        scenario: DemoScenario,
+        amount_usd: Decimal,
     ) -> DebugPaymentPurchaseOrder: ...
 
 
@@ -180,12 +188,13 @@ async def post_payment_purchase_order(
         Body(default_factory=DebugPaymentPurchaseOrderRequest),
     ],
 ) -> DebugPaymentPurchaseOrder:
-    """Create a sent USD purchase order for payment-flow demos."""
+    """Create a sent purchase order for payment-flow demos (`payments.demo`)."""
     return await creator(
         db,
         principal,
-        amount_usd=body.amount_usd,
         email_domain=settings.email_domain,
+        scenario=body.scenario,
+        amount_usd=body.amount_usd,
     )
 
 
