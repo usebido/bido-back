@@ -16,8 +16,9 @@ Flow:
    names (hash-checked), which the executor then sends.
 3. From then on `auto_approve_pending` (run after every follow-up and
    negotiation sweep, and for its RFQ right after the copilot proposes
-   counter-offers, so it can tell the buyer what went out) approves the RFQ's pending chase, clarification and
-   counter/BAFO emails on the buyer's behalf, but only when code finds each one
+   counter-offers, so it can tell the buyer what went out) approves the RFQ's
+   pending chase, clarification and counter/BAFO emails on the buyer's behalf,
+   but only when code finds each one
    inside the mandate (`bido_back.mandates.policy`): a mandated invite and
    address, no copies, the buyer's mailbox, no commitment language, prices
    within the approved maximum, limits unchanged, and the rounds counted as
