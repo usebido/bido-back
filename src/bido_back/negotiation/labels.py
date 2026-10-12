@@ -53,6 +53,8 @@ _REASONS: Final[dict[str, str]] = {
     "reminder_sent": "Waiting for the supplier: reminded of our request (the one reminder)",
     "reply_overdue": "Waiting for the supplier: no reply to our last request; its current "
     "offer stands",
+    # Waiting for Bido to read the supplier's reply (quote extraction).
+    "reading_reply": "Waiting: Bido is reading the supplier's reply",
     # Waiting for Bido's own email.
     "preparing_email": "Waiting: Bido is preparing the next email to the supplier",
     "daily_limit": "Waiting: the next email is ready and goes out after the daily email limit",

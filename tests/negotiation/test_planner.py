@@ -128,6 +128,7 @@ def facts(
     rfq_email_wait: EmailWait | None = None,
     chases_sent: int = 0,
     chases_max: int = 0,
+    reply_unread: bool = False,
 ) -> SupplierFacts:
     return SupplierFacts(
         invite_status=status,
@@ -137,6 +138,7 @@ def facts(
         rfq_email_wait=rfq_email_wait,
         chases_sent=chases_sent,
         chases_max=chases_max,
+        reply_unread=reply_unread,
     )
 
 
@@ -238,6 +240,15 @@ def test_a_reply_without_an_offer_needs_the_buyers_answer() -> None:
         "reply_without_offer",
     )
     assert "question" in phase_label(result).lower()
+
+
+def test_a_reply_still_being_read_waits_for_bido_not_for_the_buyer() -> None:
+    reading = plan(facts(None, status="responded", reply_unread=True))
+    assert (reading.action, reading.phase, reading.reason) == ("wait", "waiting", "reading_reply")
+    assert phase_label(reading) == "Waiting: Bido is reading the supplier's reply."
+    assert ready_to_close(line_ids=[L1], waiting_suppliers=0, plans=[reading]) is False
+    # A newer reply being read does not unplan the current offer (it is planned once read).
+    assert plan(facts(WITHIN, reply_unread=True)).phase == "accepted_internally"
 
 
 def test_nothing_is_negotiated_before_the_negotiation_opens_or_after_it_closes() -> None:

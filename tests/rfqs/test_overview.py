@@ -310,6 +310,12 @@ async def test_activity_lists_replies_and_approvals_without_content(
     replies = await rfq_activity(app_engine, principal, quoted.rfq.id)
     [reply] = [item for item in replies if item.action == "reply"]
     assert reply.kind == "email" and reply.supplier_name and reply.supplier_name.startswith("Rhein")
+    # The offer Bido read from that reply has its own line, after the reply itself.
+    [received] = [item for item in replies if item.action == "quote.received"]
+    assert (received.kind, received.actor) == ("agent", "Bido")
+    assert received.supplier_name == reply.supplier_name
+    assert received.summary == f"Quote received from {reply.supplier_name} (version 1)"
+    assert received.at >= reply.at
     assert all("SECRET" not in item.summary for item in [*sent, *replies])
     assert [item.at for item in replies] == sorted((item.at for item in replies), reverse=True)
 

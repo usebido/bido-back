@@ -22,6 +22,7 @@ from bido_back.auth import Principal
 from bido_back.db import tenant_session
 from bido_back.db.models import (
     Approval,
+    AuditEvent,
     ClarificationAsk,
     FollowupMessage,
     Invite,
@@ -242,6 +243,25 @@ class World:
             await cancel_on_new_offer(session, invite_id)
             await session.flush()
             return proposal.id
+
+    async def reply(self, name: str) -> UUID:
+        """A reply stored by the intake and not read yet (quote extraction pending)."""
+        invite_id = self.invites[name]
+        async with tenant_session(self.engine, self.people.tenant) as session:
+            message = Message(
+                tenant_id=self.people.tenant,
+                invite_id=invite_id,
+                direction="in",
+                message_id_header=f"<reply-{name}-{uuid4()}@{name}.example.test>",
+                status="stored",
+                occurred_at=datetime.now(UTC),
+            )
+            session.add(message)
+            await session.execute(
+                update(Invite).where(Invite.id == invite_id).values(status="responded")
+            )
+            await session.flush()
+            return message.id
 
     async def sweep(
         self, writer: FakeNegotiationWriter, now: datetime | None = None
@@ -779,6 +799,57 @@ async def test_an_unchanged_reply_stops_asking_and_needs_the_buyer(world: World)
     assert rhein.stalled_rounds == 1
     assert rhein.strategy_reasons == ["no_progress"]
     assert rhein.state is not None and rhein.state.phase == "needs_decision"
+
+
+async def test_a_reply_being_read_waits_and_only_an_offerless_one_needs_the_buyer(
+    world: World,
+) -> None:
+    await world.configure()
+    await world.offer("lyon", ("0.038", "0.95"))
+    message_id = await world.reply("rhein")
+    writer = FakeNegotiationWriter()
+
+    async def needs_answer_events() -> list[AuditEvent]:
+        async with tenant_session(world.engine, world.people.tenant) as session:
+            return list(
+                await session.scalars(
+                    select(AuditEvent).where(
+                        AuditEvent.action == "rfq.negotiation_needs_answer",
+                        AuditEvent.payload["invite_id"].astext == str(world.invites["rhein"]),
+                    )
+                )
+            )
+
+    # Rhein's reply may be its quote: Bido reads it, nobody is asked to answer it, and
+    # the RFQ does not become ready to close on Lyon's offer meanwhile.
+    assert (await world.sweep(writer)).ready == 0
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.state is not None
+    assert (rhein.state.phase, rhein.state.reason, rhein.state.next_action) == (
+        "waiting",
+        "reading_reply",
+        "wait",
+    )
+    assert rhein.state.label == "Waiting: Bido is reading the supplier's reply."
+    assert rhein.strategy_reasons == ["reading_reply"]
+    assert await needs_answer_events() == []
+
+    # Read, and it held no offer (a question, a request): now the buyer answers.
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        await session.execute(
+            update(Message).where(Message.id == message_id).values(status="extracted")
+        )
+    assert (await world.sweep(writer)).ready == 1
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.state is not None
+    assert (rhein.state.phase, rhein.state.reason, rhein.state.next_action) == (
+        "needs_answer",
+        "reply_without_offer",
+        "hold",
+    )
+    assert len(await needs_answer_events()) == 1
 
 
 async def test_policy_change_cancels_pending_email_without_changing_negotiation_bounds(

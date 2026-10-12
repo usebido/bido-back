@@ -341,7 +341,7 @@ async def test_confirming_stores_the_quote_as_an_email_reply_would(
     [item] = [i for i in feed if i.action == "quote.registered"]
     assert item.kind == "user" and item.supplier_name == SUPPLIER
     assert "uploaded document" in item.summary and "version 1" in item.summary
-    assert not any(i.action == "reply" for i in feed)
+    assert not any(i.action in ("reply", "quote.received") for i in feed)
 
 
 async def test_a_line_the_rfq_does_not_have_is_an_issue_and_stored_for_review(
