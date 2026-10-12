@@ -15,7 +15,8 @@ Flow:
    settings, records the mandate, and approves exactly the initial emails it
    names (hash-checked), which the executor then sends.
 3. From then on `auto_approve_pending` (run after every follow-up and
-   negotiation sweep) approves the RFQ's pending chase, clarification and
+   negotiation sweep, and for its RFQ right after the copilot proposes
+   counter-offers, so it can tell the buyer what went out) approves the RFQ's pending chase, clarification and
    counter/BAFO emails on the buyer's behalf, but only when code finds each one
    inside the mandate (`bido_back.mandates.policy`): a mandated invite and
    address, no copies, the buyer's mailbox, no commitment language, prices
@@ -115,6 +116,7 @@ from bido_back.mandates.waits import (
     approval_invite,
     approval_waits,
     daily_cap_until,
+    live_mandate,
     mailbox_connected,
 )
 from bido_back.negotiation.hooks import replan_envelope, request_replan
@@ -871,6 +873,33 @@ async def _check(
     return _Verdict(invite_id)
 
 
+def _mandate_applies(rfq: Rfq | None, mandate: NegotiationMandate, at: datetime) -> bool:
+    """Whether a mandate may approve anything on its RFQ now (status and deadline)."""
+    # Still a draft when the RFQ emails waited for the mailbox: none went out yet.
+    return (
+        rfq is not None
+        and rfq.status in ("draft", "open")
+        and rfq.negotiation_status in ("open", "ready_to_close")
+        and at < mandate.deadline
+    )
+
+
+async def _decide(
+    session: AsyncSession,
+    approval: Approval,
+    mandate: NegotiationMandate,
+    terms: ApproveMandateArgs,
+    at: datetime,
+    *,
+    unchanged: bool,
+    mailbox_ready: bool,
+) -> _Verdict:
+    """The mandate's verdict on one pending email: what the automatic pass acts on."""
+    if not unchanged:
+        return _Verdict(None, "limits_changed")
+    return await _check(session, approval, mandate, terms, at, mailbox_ready=mailbox_ready)
+
+
 async def _record_wait(
     session: AsyncSession,
     approval: Approval,
@@ -915,29 +944,24 @@ async def auto_approve_pending(
     *,
     jobs: JobQueue | None,
     now: datetime | None = None,
+    rfq_id: UUID | None = None,
 ) -> AutoApproveResult:
-    """Approve the in-bounds pending emails of every active mandate in a tenant."""
+    """Approve the in-bounds pending emails of every active mandate in a tenant.
+
+    `rfq_id`: only that RFQ's mandate (the copilot, right after it proposed emails).
+    """
     at = now or datetime.now(UTC)
     result = AutoApproveResult()
     to_enqueue: list[UUID] = []
     async with tenant_session(db, tenant_id) as session:
-        mandates = list(
-            await session.scalars(
-                select(NegotiationMandate)
-                .where(NegotiationMandate.status == "active")
-                .with_for_update()
-            )
-        )
+        query = select(NegotiationMandate).where(NegotiationMandate.status == "active")
+        if rfq_id is not None:
+            query = query.where(NegotiationMandate.rfq_id == rfq_id)
+        mandates = list(await session.scalars(query.with_for_update()))
         for mandate in mandates:
             terms = ApproveMandateArgs.model_validate(mandate.terms)
             rfq = await session.get(Rfq, mandate.rfq_id)
-            # Still a draft when the RFQ emails waited for the mailbox: none went out yet.
-            if (
-                rfq is None
-                or rfq.status not in ("draft", "open")
-                or rfq.negotiation_status not in ("open", "ready_to_close")
-                or at >= mandate.deadline
-            ):
+            if rfq is None or not _mandate_applies(rfq, mandate, at):
                 continue
             lines = list(await session.scalars(select(RfqLine).where(RfqLine.rfq_id == rfq.id)))
             unchanged = _limits_unchanged(rfq, lines, terms)
@@ -957,11 +981,9 @@ async def auto_approve_pending(
                 )
             )
             for approval in pending:
-                if not unchanged:
-                    _hold(session, approval, mandate, None, "limits_changed")
-                    result.held += 1
-                    continue
-                verdict = await _check(session, approval, mandate, terms, at, mailbox_ready=ready)
+                verdict = await _decide(
+                    session, approval, mandate, terms, at, unchanged=unchanged, mailbox_ready=ready
+                )
                 if verdict.wait is not None:
                     if await _record_wait(
                         session, approval, mandate, verdict.invite_id, verdict.wait
@@ -1003,6 +1025,144 @@ async def auto_approve_pending(
             result.re_enqueued,
         )
     return result
+
+
+# --- Where proposed emails stand ---------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class EmailOutlook:
+    """Where one proposed email stands, by the same checks the automatic pass runs.
+
+    Reads only: what the mandate did with it (approved, held) or, for an email no pass
+    has decided yet, what it would do.
+    """
+
+    approval_id: UUID
+    invite_id: UUID | None
+    # The approval's status: pending, approved, executed (sent), rejected, expired.
+    approval_status: str
+    # Approved on the buyer's behalf by the negotiation mandate.
+    approved_by_mandate: bool = False
+    # Goes out without anyone approving it: approved already, or inside the live
+    # mandate (possibly after a wait: `waiting_reason`).
+    will_send_automatically: bool = False
+    # Pending for a person, and why: the mandate's hold reason (`commitment_language`,
+    # `rounds_exceeded`...), `mandate_paused`, `mandate_expired`, `negotiation_not_open`,
+    # `no_active_mandate` or `not_covered_by_mandate`.
+    held_reason: str | None = None
+    # In bounds, not yet: `mailbox_not_connected`, or `daily_cap` until `waiting_until`.
+    waiting_reason: str | None = None
+    waiting_until: datetime | None = None
+
+
+async def email_outlook(
+    db: Db,
+    tenant_id: UUID,
+    rfq_id: UUID,
+    approval_ids: Sequence[UUID],
+    *,
+    now: datetime | None = None,
+) -> list[EmailOutlook]:
+    """For each approval (in the given order): approved, held for a person, or going out
+    on its own under the RFQ's live mandate. Unknown ids are left out."""
+    if not approval_ids:
+        return []
+    at = now or datetime.now(UTC)
+    async with tenant_session(db, tenant_id) as session:
+        rows = {
+            a.id: a
+            for a in await session.scalars(
+                select(Approval).where(Approval.id.in_(list(approval_ids)))
+            )
+        }
+        by_mandate = set(
+            await session.scalars(
+                select(MandateSend.approval_id).where(
+                    MandateSend.approval_id.in_(list(rows)),
+                    MandateSend.outcome == "auto_approved",
+                )
+            )
+        )
+        mandate = await live_mandate(session, rfq_id)
+        terms: ApproveMandateArgs | None = None
+        held: dict[UUID, str | None] = {}
+        applies, unchanged, ready = False, False, False
+        if mandate is not None:
+            terms = ApproveMandateArgs.model_validate(mandate.terms)
+            held = {
+                approval_id: reason
+                for approval_id, reason in (
+                    await session.execute(
+                        select(MandateSend.approval_id, MandateSend.reason).where(
+                            MandateSend.mandate_id == mandate.id, MandateSend.outcome == "held"
+                        )
+                    )
+                ).all()
+            }
+            rfq = await session.get(Rfq, rfq_id)
+            applies = rfq is not None and _mandate_applies(rfq, mandate, at)
+            if rfq is not None and applies:
+                lines = list(await session.scalars(select(RfqLine).where(RfqLine.rfq_id == rfq_id)))
+                unchanged = _limits_unchanged(rfq, lines, terms)
+                ready = await mailbox_connected(session, tenant_id, terms.sender_user_id)
+        found: list[EmailOutlook] = []
+        for approval_id in approval_ids:
+            approval = rows.get(approval_id)
+            if approval is None:
+                continue
+            invite_id = approval_invite(approval)
+            if approval.status in ("approved", "executed"):
+                found.append(
+                    EmailOutlook(
+                        approval.id,
+                        invite_id,
+                        approval.status,
+                        approved_by_mandate=approval.id in by_mandate,
+                        will_send_automatically=True,
+                    )
+                )
+                continue
+            if approval.status != "pending":
+                found.append(EmailOutlook(approval.id, invite_id, approval.status))
+                continue
+            hold: str | None
+            if mandate is None or terms is None:
+                hold = "no_active_mandate"
+            elif approval.tool not in AUTO_TOOLS or approval.session_id != f"rfq:{rfq_id}":
+                hold = "not_covered_by_mandate"
+            elif approval.id in held:
+                hold = held[approval.id] or "out_of_bounds"
+            elif mandate.status != "active":
+                hold = "mandate_paused"
+            elif at >= mandate.deadline:
+                hold = "mandate_expired"
+            elif not applies:
+                hold = "negotiation_not_open"
+            else:
+                verdict = await _decide(
+                    session, approval, mandate, terms, at, unchanged=unchanged, mailbox_ready=ready
+                )
+                if verdict.hold is None:
+                    wait = verdict.wait
+                    found.append(
+                        EmailOutlook(
+                            approval.id,
+                            invite_id,
+                            approval.status,
+                            will_send_automatically=True,
+                            waiting_reason=None
+                            if wait is None
+                            else "mailbox_not_connected"
+                            if wait.reason == "mailbox"
+                            else wait.reason,
+                            waiting_until=wait.until if wait is not None else None,
+                        )
+                    )
+                    continue
+                hold = verdict.hold
+            found.append(EmailOutlook(approval.id, invite_id, approval.status, held_reason=hold))
+    return found
 
 
 # --- Pause, resume, views ---------------------------------------------------------------

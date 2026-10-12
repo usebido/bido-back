@@ -20,7 +20,7 @@ None of them sends anything or awards anything.
 
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
-from typing import TYPE_CHECKING, Annotated, Final, cast
+from typing import TYPE_CHECKING, Annotated, Final, Literal, cast
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
@@ -43,9 +43,9 @@ from bido_back.copilot.proposals import (
     ProposedSupplier,
 )
 from bido_back.db import tenant_session
-from bido_back.db.models import Contact, Invite, Proposal, Supplier, SupplierContact
+from bido_back.db.models import Approval, Contact, Invite, Proposal, Supplier, SupplierContact
 from bido_back.mandates import service as mandates
-from bido_back.mandates.schemas import ProposeMandateRequest
+from bido_back.mandates.schemas import ApproveMandateArgs, ProposeMandateRequest
 from bido_back.negotiation import service as negotiation_service
 from bido_back.negotiation.schemas import LineLimitsUpdate
 from bido_back.outbound.domains import RecipientCheck
@@ -379,11 +379,23 @@ class ProposeMandateIn(BaseModel):
     )
 
 
+MandateRfqEmail = Literal["in_this_approval", "sent", "sent_and_answered", "declined"]
+
+
+class MandateInviteOut(BaseModel):
+    supplier_name: str
+    # Where the supplier's RFQ email stands: in_this_approval (not sent yet; goes out
+    # with this approval), sent (waiting for the reply), sent_and_answered, declined.
+    rfq_email: MandateRfqEmail
+
+
 class ProposeMandateOut(BaseModel):
     rfq: str
     approval_id: UUID
     suppliers: int
     lines: int
+    # RFQ emails not sent yet that this approval sends; 0: every supplier's RFQ email
+    # was already sent (`invites` says which replied).
     initial_emails: int
     deadline: datetime
     # For the model only, never shown to the buyer: what to say and do next. Not
@@ -399,6 +411,8 @@ class ProposeMandateOut(BaseModel):
     # True: the negotiation already runs under a mandate; this one replaces it once
     # approved (until then the current limits keep applying).
     replaces_current_mandate: bool = False
+    # Each supplier the mandate covers, and where its RFQ email stands.
+    invites: list[MandateInviteOut] = Field(default_factory=list[MandateInviteOut])
 
 
 class MandateStateOut(BaseModel):
@@ -929,6 +943,7 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             )
         except RfqError as exc:
             raise ToolError(_explain(exc)) from None
+        invites = await _mandate_invites(ctx, rfq_id, proposed.approval_id)
         return ProposeMandateOut(
             rfq=ref,
             approval_id=proposed.approval_id,
@@ -936,9 +951,18 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             lines=proposed.lines,
             initial_emails=proposed.initial_emails,
             deadline=proposed.deadline,
+            invites=invites,
             guidance=(
-                "Nothing was sent. One approval covers the initial emails and the "
-                "negotiation's limits; once approved, follow-ups and counter-offers within "
+                "This call sent nothing. One approval covers "
+                + (
+                    f"the {proposed.initial_emails} RFQ email(s) not sent yet (invites marked "
+                    "in_this_approval) and "
+                    if proposed.initial_emails
+                    else "no RFQ email: every supplier's RFQ email was already sent (invites "
+                    "say which replied), so never say an RFQ email waits for approval; it "
+                    "covers only "
+                )
+                + "the negotiation's limits; once approved, follow-ups and counter-offers within "
                 "those limits go out automatically until the deadline or until closed. "
                 "Emails go only to test domains or domains the buyer confirms in that "
                 "approval: list every recipient and warn about domains of real companies."
@@ -964,6 +988,34 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
             mailbox_connected=proposed.mailbox_connected,
             replaces_current_mandate=proposed.replaces_mandate_id is not None,
         )
+
+    async def _mandate_invites(
+        ctx: ToolContext, rfq_id: UUID, approval_id: UUID
+    ) -> list[MandateInviteOut]:
+        """The mandate's suppliers as its approval names them, with their RFQ email's state."""
+        async with tenant_session(db, ctx.tenant_id) as session:
+            approval = await session.get(Approval, approval_id)
+            invites = await queries.invites(session, rfq_id)
+        if approval is None:
+            return []
+        terms = ApproveMandateArgs.model_validate(approval.args)
+        initial = {email.invite_id for email in terms.initial_emails}
+        covered = {supplier.invite_id for supplier in terms.suppliers}
+        found: list[MandateInviteOut] = []
+        for invite, name in invites:
+            if invite.id not in covered:
+                continue
+            state: MandateRfqEmail = (
+                "in_this_approval"
+                if invite.id in initial
+                else "sent_and_answered"
+                if invite.status == "responded"
+                else "declined"
+                if invite.status == "declined"
+                else "sent"
+            )
+            found.append(MandateInviteOut(supplier_name=name, rfq_email=state))
+        return found
 
     async def _set_paused(ctx: ToolContext, args: RfqArg, *, paused: bool) -> MandateStateOut:
         principal = _principal(ctx)

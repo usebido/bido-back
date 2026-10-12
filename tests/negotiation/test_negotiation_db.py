@@ -466,7 +466,16 @@ async def test_the_copilot_reads_each_suppliers_state_and_cannot_double_a_counte
         assert isinstance(out, NegotiationStatusOut)
         return out
 
-    assert ((await propose()).proposed, (await propose()).proposed) == (1, 0)
+    first = await propose()
+    # No mandate: the one email waits for a person, and the result says so.
+    [email] = first.emails
+    assert (email.supplier_name, email.status, email.held_reason) == (
+        "Rhein",
+        "awaiting_approval",
+        "no_active_mandate",
+    )
+    assert not email.will_send_automatically
+    assert (first.proposed, (await propose()).proposed) == (1, 0)
     assert len(writer.calls) == 1
     suppliers = {s.supplier_name: s for s in (await status()).suppliers}
     assert (suppliers["Rhein"].state, suppliers["Rhein"].status) == ("held_for_approval", "open")

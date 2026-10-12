@@ -65,6 +65,7 @@ from bido_back.api.deps import (
     ApiResources,
     get_db,
     get_mailbox_senders,
+    get_optional_job_queue,
     get_principal,
     get_rfq_agents,
     get_storage,
@@ -88,6 +89,7 @@ from bido_back.onboarding.service import MAX_DIRECT_UPLOAD_BYTES, UPLOAD_EXTENSI
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.storage import BlobStorage
+from bido_back.worker.jobs import JobQueue
 
 Db = Annotated[async_sessionmaker[AsyncSession], Depends(get_db)]
 CurrentPrincipal = Annotated[Principal, Depends(get_principal)]
@@ -115,6 +117,7 @@ def get_copilot_deps(
     mailboxes: Annotated[MailboxSenderFactory, Depends(get_mailbox_senders)],
     runner_config: Annotated[RunnerConfig, Depends(get_copilot_runner_config)],
     titler: Annotated[Titler | None, Depends(get_copilot_titler)],
+    jobs: Annotated[JobQueue | None, Depends(get_optional_job_queue)],
 ) -> service.CopilotDeps:
     return service.CopilotDeps(
         db=db,
@@ -123,6 +126,7 @@ def get_copilot_deps(
         mailboxes=mailboxes,
         runner_config=runner_config,
         titler=titler,
+        jobs=jobs,
     )
 
 

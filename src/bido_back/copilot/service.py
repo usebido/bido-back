@@ -86,6 +86,7 @@ from bido_back.quotes.upload import QuoteExtractor, default_quote_extractor
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.mailbox import MailboxSenderFactory
 from bido_back.storage import BlobStorage
+from bido_back.worker.jobs import JobQueue
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,9 @@ class CopilotDeps:
     quote_extractor: QuoteExtractor | None = None
     # Writes the reply of a turn that ran the analysis; None = the default agent.
     analysis_writer: AgentDefinition[CopilotReply] | None = None
+    # Where negotiation-mandate approvals are enqueued for sending: propose_counteroffers
+    # runs the mandate's pass at once with it. None = the worker's next pass does.
+    jobs: JobQueue | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,6 +297,7 @@ async def stream_message(deps: CopilotDeps, prepared: PreparedMessage) -> AsyncI
             sheet_mapper=deps.sheet_mapper or default_sheet_mapper(deps.runner_config),
             quote_extractor=deps.quote_extractor or default_quote_extractor(deps.runner_config),
             conversation_id=prepared.conversation_id,
+            jobs=deps.jobs,
         )
     )
     agent = copilot_agent(
