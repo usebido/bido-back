@@ -243,12 +243,16 @@ async def test_uploads_are_refused_by_size_kind_and_type(funded: Funded, api: Mi
     unknown = await http.post(url, params=document("not_a_document", "a.jpg"), content=jpeg())
     bad_code = await http.post(url, params=document("Not A Code", "a.jpg"), content=jpeg())
     empty = await http.post(url, params=document(photos.code, "a.jpg"), content=b"")
-    no_name = await http.post(url, params={"doc_type": photos.code}, content=jpeg())
 
     assert too_big.status_code == 413
     assert (a_pdf.status_code, misnamed.status_code) == (415, 415)
-    assert [r.status_code for r in (unknown, bad_code, empty, no_name)] == [422] * 4
+    assert [r.status_code for r in (unknown, bad_code, empty)] == [422] * 3
     assert api.storage.puts == []
+
+    # A file sent without a name is kept under its document type's name (#134).
+    no_name = await http.post(url, params={"doc_type": photos.code}, content=jpeg())
+    assert (no_name.status_code, no_name.json()["filename"]) == (201, photos.code)
+    assert len(api.storage.puts) == 1
 
 
 @pytest.mark.db
