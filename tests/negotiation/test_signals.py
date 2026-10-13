@@ -30,6 +30,7 @@ from bido_back.negotiation.signals import (
     latest_order_date,
     offer_signals,
 )
+from bido_back.negotiation.strategy import UnitPrice
 from bido_back.quotes.lead_time import LeadTime, encode_lead_time
 from bido_back.supplier_email.builders import Header, RequestedLine
 from bido_back.supplier_email.checks import GateContext, email_problems
@@ -194,7 +195,7 @@ def position(
         ask_price=Decimal(ask) if ask is not None else None,
         best_price=best,
         deliver_by=deliver_by,
-        offered_price=Decimal(offered),
+        offered_unit_price=UnitPrice(Decimal(offered)),
         lead_time_days=19,
         offered_delivery=date(2026, 10, 28),
         delivery_exact=True,

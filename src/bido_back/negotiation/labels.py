@@ -114,6 +114,8 @@ _REASONS: Final[dict[str, str]] = {
     "negotiation ends",
     "payment_terms_shorter": "Needs your decision: the payment terms are shorter than the RFQ "
     "asked",
+    "effective_above_max": "Needs your decision: the unit price is within your maximum, but "
+    "with one-off charges (tooling) the effective price per unit is above it",
     "offer_blocked": "Needs your decision: the offer cannot be negotiated as it is",
     "no_priced_line": "Needs your decision: the reply has no price for any line",
     "needs_review": "Needs your decision: the offer needs your review",
@@ -156,6 +158,8 @@ _WARNINGS: Final[dict[str, str]] = {
     "order_by_before_decision": "order by this date to meet the need-by date, before the "
     "negotiation ends: decide earlier or it arrives late",
     "moq_above_quantity": "minimum order quantity above the requested quantity",
+    "effective_above_max": "unit price within your maximum; with one-off charges (tooling) "
+    "the effective price per unit is above it",
     "need_by_unreachable": "the need-by date can no longer be met",
     "delivery_estimated": "delivery date estimated from an approximate lead time",
     "validity_unknown": "validity unknown",
@@ -229,7 +233,12 @@ def _details(plan: SupplierPlan) -> list[str]:
             if required:
                 text += f", needed by {day(min(required))}"
             parts.append(text)
-    elif reason in ("moq_above_quantity", "clarification_unanswered", "price_meets_last_ask"):
+    elif reason in (
+        "moq_above_quantity",
+        "clarification_unanswered",
+        "price_meets_last_ask",
+        "effective_above_max",
+    ):
         lines = _lines_with(plan, reason)
         if lines:
             parts.append(f"line(s) {_positions(lines)}")

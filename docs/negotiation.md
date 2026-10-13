@@ -42,6 +42,41 @@ buyer.
 | hold | supplier question, review, or out of bounds | none; the buyer decides or answers |
 | close | after the best and final, a declared final position, round cap or cut-off | none; open problems are named for the buyer |
 
+## Prices: the limits apply to the unit price
+
+The buyer's target and maximum are **unit prices** ("per piece", in the RFQ's base
+currency), and every ask in an email names a unit price. So every comparison with the
+target or the maximum reads the supplier's offered **unit price**: the planner's price
+status (`in_target`, `in_range`, `above_max`, ...), the asks and concessions, acceptance,
+the recommendation's eligibility ("never above the maximum"), `within_target` /
+`above_target` on the outcome, and the mandate's check of the asks.
+
+One-off charges (tooling, setup) are **shown separately, never folded into that
+comparison**. The comparison still computes the **effective** unit price (unit price plus
+tooling spread over the quantity) and still **ranks** offers by it (or by the landed cost):
+it is what the line really costs. Freight is per offer and only counts in the landed cost.
+In code the two are distinct types, `strategy.UnitPrice` and `strategy.EffectivePrice`.
+
+When a line's unit price is within the maximum but its effective price is above it (a
+supplier may move cost into tooling), it is never silently accepted and never rejected:
+
+- the line plan carries `effective_above_max` (a reason code and a supplier warning); the
+  offer is not accepted internally, and once nothing is left to ask, or after the best and
+  final, the supplier reads "Needs your decision" with reason `effective_above_max` (its
+  last word: the RFQ can still become ready to close);
+- the comparison's cell has `buyer_limit_warnings: ["effective_above_max"]`, the
+  recommendation the advisory `effective_above_max`, `readiness: needs_review` and a
+  sentence in its justification;
+- the recommendation / outcome line shows `unit_price_base`, `tooling_base` and
+  `effective_unit_price_base` side by side, with `effective_above_max: true` and a
+  `price_warning` such as "Unit price within your maximum; with one-off charges (BRL 1,250
+  tooling) the effective price is BRL 3.525 per unit, above it."
+
+Example (RFQ-9): target 2.80, maximum 3.05 per piece, 2,000 pieces at 2.90 plus 1,250
+tooling: in range (above the target), recommended with `above_target` and the
+`effective_above_max` warning. At 3.10 per piece it is above the maximum and never
+recommended.
+
 When one supplier answer leaves open items *and* a price to negotiate, a single email asks
 the open items first and the revised offer after them, with at most three asks.
 
@@ -64,10 +99,12 @@ answered and either:
   waiting for the deadline only delays the buyer.
 
 While ready to close, `GET /v1/rfqs/{id}/negotiation` returns `recommendation`: what
-closing now would keep, the best eligible offer per line and tier. An offer above the
-maximum is never recommended (that line has no supplier and reads `no_feasible_offer`).
-An offer within the maximum but above the target is recommended with `above_target:
-true`, and the copilot's `get_negotiation_status` and `get_negotiation_outcome` say so.
+closing now would keep, the best eligible offer per line and tier. An offer whose unit
+price is above the maximum is never recommended (that line has no supplier and reads
+`no_feasible_offer`). An offer whose unit price is within the maximum but above the target
+is recommended with `above_target: true`, and the copilot's `get_negotiation_status` and
+`get_negotiation_outcome` say so; one-off charges that put its effective price above the
+maximum add `effective_above_max` and a `price_warning` (see above).
 The mandate keeps running as it does while open; closing (by the buyer, or the deadline)
 ends it and stores the same lines as `outcome`.
 

@@ -57,6 +57,9 @@ First match wins:
 7. Nothing to ask: accept internally when price <= target on every quoted
    line, delivery known and on time, validity known and lasting until the
    decision, no MOQ or payment deviation; otherwise the buyer decides (reason).
+   An offer that would be accepted but whose one-off charges put a line's
+   effective price above the maximum is the supplier's last word for the
+   buyer's decision (`effective_above_max`), never accepted internally.
 8. Something to ask, but the supplier did not move on anything we asked:
    stop (needs your decision, `no_progress`); a price ask our last email left
    for later (its questions came first) is no repeat. Round cap reached, or
@@ -70,6 +73,15 @@ First match wins:
 
 Rounds count SENT requests only: a canceled or rejected email never consumes a
 round, a replacement repeats the round it replaces, and a reminder is no round.
+
+Prices: the buyer's target and maximum are UNIT prices, compared with the
+supplier's offered unit price (`UnitPrice`), never with the effective price
+(`EffectivePrice`: the unit price plus one-off charges such as tooling spread over
+the quantity). The emails ask for a unit price, so what is asked and what is judged
+are the same number. When the unit price is within the maximum but the effective
+price is above it, the line says so (`effective_above_max`, a reason and a
+warning): the buyer decides knowingly; it is neither accepted internally nor
+rejected.
 """
 
 from collections.abc import Mapping, Sequence
@@ -89,8 +101,10 @@ from bido_back.negotiation.signals import (
 from bido_back.negotiation.strategy import (
     DeliveryAsk,
     DeliveryStatus,
+    EffectivePrice,
     PriceAsk,
     PriceStatus,
+    UnitPrice,
     delivery_position,
     price_position,
     required_by,
@@ -151,6 +165,7 @@ class LineTerms:
     position: int
     quantity: Decimal
     need_by: date | None = None
+    # Unit prices (per piece), compared with the offered unit price only.
     target: Decimal | None = None  # disclosed to suppliers
     max_price: Decimal | None = None  # never disclosed
     # A lead-time limit the buyer set (days). A limit derived from the need-by date
@@ -164,7 +179,8 @@ class LineQuote:
     """The supplier's current offer for one line (first tier, base currency)."""
 
     rfq_line_id: UUID
-    unit_price: Decimal | None
+    # The offered price per unit: what the target and the maximum apply to.
+    unit_price: UnitPrice | None
     # Decimals an ask on this line may use (currency minor unit, or finer as quoted).
     places: int = 2
     lead_time_days: int | None = None
@@ -182,6 +198,10 @@ class LineQuote:
     # (order date, expected delivery) for the order dates of earlier emails' decisions:
     # whether the supplier moved on a date is judged from the same order date.
     deliveries_then: tuple[tuple[date, date], ...] = ()
+    # The unit price plus one-off charges (tooling) spread over the quantity: shown, and
+    # checked against the maximum only to warn (`effective_above_max`). None: no one-off
+    # charge known, or not computable.
+    effective_price: EffectivePrice | None = None
 
     def delivery_on(self, order_date: date | None) -> date | None:
         """The expected delivery if ordered on `order_date` (None: not computed)."""
@@ -216,7 +236,8 @@ class LineAsk:
     ask_price: Decimal | None = None
     best_price: bool = False
     deliver_by: date | None = None
-    offered_price: Decimal | None = None
+    # The supplier's unit price when the email was decided.
+    offered_unit_price: UnitPrice | None = None
     offered_delivery: date | None = None
 
 
@@ -290,10 +311,15 @@ class LinePlan:
     status: LineStatus
     price: PriceAsk | None = None
     delivery: DeliveryAsk | None = None
-    offered_price: Decimal | None = None
+    # What the price status judges: the offered unit price.
+    offered_unit_price: UnitPrice | None = None
     acceptable: bool = False
     reasons: tuple[str, ...] = ()
     latest_order_date: date | None = None
+    # The unit price plus one-off charges per unit (shown, never judged against the
+    # target), and whether it is above the maximum while the unit price is within it.
+    effective_price: EffectivePrice | None = None
+    effective_above_max: bool = False
 
     @property
     def price_status(self) -> PriceStatus | None:
@@ -318,7 +344,7 @@ class PositionPlan:
     ask_price: Decimal | None
     best_price: bool
     deliver_by: date | None
-    offered_price: Decimal | None
+    offered_unit_price: UnitPrice | None
     lead_time_days: int | None
     offered_delivery: date | None
     delivery_exact: bool
@@ -456,7 +482,8 @@ def plan_line(
             terms.rfq_line_id,
             terms.position,
             "blocked",
-            offered_price=offered,
+            offered_unit_price=offered,
+            effective_price=quote.effective_price,
             reasons=quote.blockers,
         )
     if terms.rfq_line_id in clarification.lines:
@@ -464,7 +491,8 @@ def plan_line(
             terms.rfq_line_id,
             terms.position,
             "question_open",
-            offered_price=offered,
+            offered_unit_price=offered,
+            effective_price=quote.effective_price,
             reasons=("clarification_open",),
         )
     previous = _last_sent_ask(emails, terms.rfq_line_id)
@@ -475,7 +503,7 @@ def plan_line(
         places=quote.places,
         history=terms.history_price,
         previous_ask=previous.ask_price if previous is not None else None,
-        previous_offer=previous.offered_price if previous is not None else None,
+        previous_offer=previous.offered_unit_price if previous is not None else None,
         final_round=final_round,
     )
     required = required_by(terms.need_by, terms.max_lead_days, ctx.order_date)
@@ -496,11 +524,22 @@ def plan_line(
         reasons.append("moq_above_quantity")
     if terms.rfq_line_id in clarification.exhausted_lines:
         reasons.append("clarification_unanswered")
+    # The unit price is within the maximum, the one-off charges put the effective price
+    # above it: the buyer decides knowingly (never accepted internally, never rejected).
+    effective_above_max = (
+        price.status != "above_max"
+        and terms.max_price is not None
+        and quote.effective_price is not None
+        and offered <= terms.max_price < quote.effective_price
+    )
+    if effective_above_max:
+        reasons.append("effective_above_max")
     acceptable = (
         price.status == "in_target"
         and delivery.acceptable
         and "moq_above_quantity" not in reasons
         and "clarification_unanswered" not in reasons
+        and not effective_above_max
     )
     return LinePlan(
         terms.rfq_line_id,
@@ -508,10 +547,12 @@ def plan_line(
         "priced",
         price=price,
         delivery=delivery,
-        offered_price=offered,
+        offered_unit_price=offered,
         acceptable=acceptable,
         reasons=tuple(reasons),
         latest_order_date=quote.latest_order_date,
+        effective_price=quote.effective_price,
+        effective_above_max=effective_above_max,
     )
 
 
@@ -548,6 +589,8 @@ def _warnings(
             )
         if "moq_above_quantity" in plan.reasons:
             found.append(PlanWarning("moq_above_quantity", plan.position))
+        if plan.effective_above_max:
+            found.append(PlanWarning("effective_above_max", plan.position))
         if plan.delivery is not None and plan.delivery.status == "need_by_unreachable":
             found.append(PlanWarning("need_by_unreachable", plan.position, plan.delivery.expected))
         if quote.delivery is not None and not quote.delivery_exact:
@@ -608,8 +651,8 @@ def _moved(offer: Offer, last: EmailRecord) -> bool:
             continue
         if (
             (ask.ask_price is not None or ask.best_price)
-            and ask.offered_price is not None
-            and quote.unit_price < ask.offered_price
+            and ask.offered_unit_price is not None
+            and quote.unit_price < ask.offered_unit_price
         ):
             return True
         if ask.deliver_by is not None and quote.delivery is not None:
@@ -643,7 +686,12 @@ def _first_reason(plans: Sequence[LinePlan], warnings: Sequence[PlanWarning]) ->
         if code in reasons:
             return code
     codes = {w.code for w in warnings}
-    for code in ("validity_unknown", "validity_ends_before_decision", "payment_terms_shorter"):
+    for code in (
+        "validity_unknown",
+        "validity_ends_before_decision",
+        "payment_terms_shorter",
+        "effective_above_max",
+    ):
         if code in codes:
             return code
     if any(p.status == "blocked" for p in plans):
@@ -884,12 +932,12 @@ def _negotiate(
                 status="accepted",
                 order_by=order_by,
             )
-        # Only the price stands between this offer and an acceptance, and the supplier
-        # met what we last asked: nothing more to ask; the buyer decides on the above-
-        # target price at award time.
-        met_only = (
-            any(p.price_status == "ask_met" for p in priced)
-            and all(
+        # Only the price stands between this offer and an acceptance: the supplier met
+        # what we last asked, or one-off charges put a line's effective price above the
+        # maximum while its unit price is within it. Nothing more to ask; the buyer
+        # decides at award time (the effective price is named, never hidden).
+        settled = (
+            all(
                 p.price_status in ("in_target", "ask_met")
                 and p.delivery is not None
                 and p.delivery.acceptable
@@ -899,8 +947,10 @@ def _negotiate(
             and not any(p.status == "blocked" for p in plans)
             and not _accept_blockers(warnings)
         )
-        if met_only:
+        if settled and any(p.price_status == "ask_met" for p in priced):
             return _final(base, plans, warnings, "offer_meets_last_ask")
+        if settled and any(p.effective_above_max for p in priced):
+            return _final(base, plans, warnings, "effective_above_max")
         return replace(
             base,
             action="hold",
@@ -1113,6 +1163,9 @@ _FINAL_OPEN_PROBLEMS: Final = (
     ("validity_unknown", "validity_unknown"),
     ("validity_ends_before_decision", "validity_ends_before_decision"),
     ("payment_terms_shorter", "payment_terms_shorter"),
+    # The unit price is within the maximum, the effective price (with one-off charges)
+    # above it: the buyer decides knowingly.
+    ("effective_above_max", "effective_above_max"),
 )
 
 
@@ -1144,7 +1197,7 @@ def _position(plan: LinePlan, offer: Offer) -> PositionPlan:
         deliver_by=delivery.deliver_by if delivery is not None else None,
         # Unrounded: what the next offer is compared with (the email shows the quote as
         # the supplier wrote it, see `decision.QuotedTerms`).
-        offered_price=plan.offered_price,
+        offered_unit_price=plan.offered_unit_price,
         lead_time_days=quote.lead_time_days,
         offered_delivery=quote.delivery,
         delivery_exact=quote.delivery_exact,

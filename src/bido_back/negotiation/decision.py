@@ -97,7 +97,8 @@ class PositionDecision(BaseModel):
     quantity: Decimal
     unit: str
     currency: str
-    # The supplier's own offer for this position.
+    # The supplier's own offer for this position: its unit price in the base currency
+    # (what the target and the maximum apply to; one-off charges are not in it).
     offered_unit_price: Decimal | None = None
     offered_lead_time_days: int | None = None
     # Its expected delivery if ordered on `EmailDecision.order_date` (estimated when
@@ -238,7 +239,7 @@ def build_decision(
                 quantity=plain(line.quantity),
                 unit=line.unit,
                 currency=currency,
-                offered_unit_price=position.offered_price,
+                offered_unit_price=position.offered_unit_price,
                 offered_lead_time_days=position.lead_time_days,
                 offered_delivery=position.offered_delivery,
                 delivery_exact=position.delivery_exact,
@@ -288,8 +289,8 @@ def legacy_lines(decision: EmailDecision, plans: tuple[LinePlan, ...]) -> list[J
             "rfq_line_id": str(plan.rfq_line_id),
             "decision": _line_decision(plan, position),
             # Plain digits ("100", never "1E+2" or a stray "100.00").
-            "offered": format_decimal(plan.offered_price)
-            if plan.offered_price is not None
+            "offered": format_decimal(plan.offered_unit_price)
+            if plan.offered_unit_price is not None
             else None,
             "ask": format_decimal(ask) if ask is not None else None,
             "best_price": position.best_price if position is not None else False,

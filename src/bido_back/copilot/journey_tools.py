@@ -426,11 +426,13 @@ class OutcomeLineOut(BaseModel):
     description: str
     quantity: Decimal
     supplier: str | None
+    # The offered unit price (base currency): what the buyer's target and maximum apply
+    # to. One-off charges are separate (`tooling`, `effective_unit_price`).
     unit_price: Decimal | None
     lead_time_days: int | None
     within_target: bool | None
-    # The best offer is above the buyer's target (within the maximum: an offer above the
-    # maximum is never the best offer). Always tell the buyer.
+    # The best offer's unit price is above the buyer's target (within the maximum: an
+    # offer above the maximum is never the best offer). Always tell the buyer.
     above_target: bool = False
     covered: bool
     why_not: list[str]
@@ -447,6 +449,12 @@ class OutcomeLineOut(BaseModel):
     offer: DecisionOffer | None = None
     policy_reasons: list[str] = Field(default_factory=list[str])
     excluded: list[ExcludedOffer] = Field(default_factory=list[ExcludedOffer])
+    # The one-off tooling charge and the unit price plus tooling per unit (base currency).
+    tooling: Decimal | None = None
+    effective_unit_price: Decimal | None = None
+    # The unit price is within the maximum, the effective price above it: always tell the
+    # buyer (the buyer decides; it is not rejected).
+    effective_above_max: bool = False
 
 
 class OutcomeOut(BaseModel):
@@ -1061,7 +1069,8 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
                 continue
             line = lines.get(rec.rfq_line_id)
             target = line.target_unit_price if line else None
-            price = rec.effective_unit_price_base
+            # The target applies to the unit price, never to the price with tooling.
+            price = rec.unit_price_base
             out.append(
                 OutcomeLineOut(
                     position=line.position if line else 0,
@@ -1087,6 +1096,9 @@ def journey_tools(deps: "CopilotToolDeps") -> tuple[AnyTool, ...]:  # noqa: C901
                     offer=rec.offer,
                     policy_reasons=rec.policy_reasons,
                     excluded=rec.excluded,
+                    tooling=rec.tooling_base,
+                    effective_unit_price=rec.effective_unit_price_base,
+                    effective_above_max="effective_above_max" in rec.advisories,
                 )
             )
         uncovered = sum(1 for line in out if not line.covered)

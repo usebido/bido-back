@@ -30,6 +30,14 @@ makes the price untrustworthy or not comparable (no price, no currency or FX
 rate, unit mismatch, quantity below every price break, needs review, a
 low-confidence field on the offer, a low-confidence currency). Low-confidence
 values never decide a recommendation.
+
+The buyer's limits: an offer whose UNIT price is above the buyer's maximum is
+never recommended (`above_buyer_maximum`). Eligible offers are RANKED by the
+effective unit price (unit price plus tooling per unit) or the landed cost: what
+the line really costs. When the recommended offer's unit price is within the
+maximum but its effective price is above it, the recommendation says so
+(advisory `effective_above_max`, readiness `needs_review`, and a sentence in the
+justification): the buyer decides knowingly.
 """
 
 import re
@@ -285,6 +293,9 @@ def recommend(
         reasons.append("no_offer_meets_need_by")
     # A broker wins only when no authorized distributor or manufacturer offered.
     advisories = ["only_unauthorized_offers"] if _kind(winner_column) in _BROKERS else []
+    if "effective_above_max" in winner.buyer_limit_warnings:
+        # Within the maximum per unit, above it with the one-off charges: said, not hidden.
+        advisories.append("effective_above_max")
 
     runner_up: RunnerUp | None = None
     if len(ranked) > 1:
@@ -373,7 +384,11 @@ def recommend(
         proposal_line_id=winner.proposal_line_id,
         evidence_message_ids=winner.evidence_message_ids,
         landed_total_base=winner.landed_total_base,
-        readiness="needs_review" if gaps else "ready_for_buyer_review",
+        readiness="needs_review"
+        if gaps or "effective_above_max" in advisories
+        else "ready_for_buyer_review",
+        unit_price_base=winner.unit_price_base,
+        tooling_base=winner.tooling_base,
     )
 
 
@@ -506,6 +521,11 @@ def _justify(
         text += (
             " Only unauthorized resellers offered this line: check the parts' origin and"
             " authenticity before buying."
+        )
+    if "effective_above_max" in advisories:
+        text += (
+            " Its unit price is within your maximum, but with one-off charges the effective"
+            " price per unit is above it."
         )
     if excluded:
         text += f" {len(excluded)} other offer(s) excluded."

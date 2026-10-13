@@ -10,6 +10,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID, uuid4
 
+from bido_back.negotiation import service as negotiation_service
 from bido_back.negotiation.labels import phase_label
 from bido_back.negotiation.planner import (
     Context,
@@ -21,6 +22,7 @@ from bido_back.negotiation.planner import (
     LineQuote,
     LineTerms,
     Offer,
+    PlanWarning,
     SupplierFacts,
     SupplierPlan,
     ask_slots,
@@ -30,7 +32,9 @@ from bido_back.negotiation.planner import (
     ready_to_close,
 )
 from bido_back.negotiation.signals import ClarificationItem, ClarificationState
+from bido_back.negotiation.strategy import EffectivePrice, UnitPrice
 from bido_back.supplier_email.model import MAX_ASKS
+from tests.comparison import test_rules as comparison_rules
 
 NOW = datetime(2026, 10, 9, 12, tzinfo=UTC)
 TODAY = NOW.date()
@@ -77,7 +81,7 @@ def quote(
 ) -> LineQuote:
     return LineQuote(
         rfq_line_id=line_id,
-        unit_price=Decimal(price) if price is not None else None,
+        unit_price=UnitPrice(Decimal(price)) if price is not None else None,
         places=places,
         lead_time_days=lead,
         delivery=TODAY + timedelta(days=lead) if lead is not None else None,
@@ -174,7 +178,7 @@ def asked(line_id: UUID, ask: str | None, offered: str, deliver_by: date | None 
         rfq_line_id=line_id,
         ask_price=Decimal(ask) if ask is not None else None,
         deliver_by=deliver_by,
-        offered_price=Decimal(offered),
+        offered_unit_price=UnitPrice(Decimal(offered)),
     )
 
 
@@ -990,6 +994,111 @@ def test_a_final_offer_above_target_within_the_maximum_leaves_nothing_to_negotia
     assert every_supplier_final(waiting_suppliers=0, plans=[own_final])
 
 
+# RFQ-9 (2026-10-13): target 2.80, maximum 3.05 per piece, 2,000 pieces; the supplier adds
+# a one-off tooling charge of 1,250 (0.625 per piece).
+RFQ9_LINE = line(L1, 1, "2.80", "3.05", quantity="2000")
+RFQ9_COUNTER = email(sequence=1, round=1, version=1, asks=[asked(L1, "2.80", "3.20")])
+RFQ9_BAFO = email(
+    sequence=2,
+    round=2,
+    version=2,
+    kind="bafo",
+    asks=[asked(L1, "2.87", "2.95")],
+    cutoff=NOW + timedelta(days=2),
+)
+
+
+def tooled(price: str, effective: str | None) -> LineQuote:
+    """A quote whose effective price includes one-off charges spread per unit."""
+    return replace(
+        quote(L1, price),
+        effective_price=EffectivePrice(Decimal(effective)) if effective is not None else None,
+    )
+
+
+def test_rfq9_the_limits_apply_to_the_unit_price_and_tooling_is_a_warning() -> None:
+    final = plan(
+        facts(offer(tooled("2.90", "3.525"), version=3), RFQ9_COUNTER, RFQ9_BAFO), [RFQ9_LINE]
+    )
+    # Within the maximum per piece, above the target: never rejected. With the tooling the
+    # effective price is above the maximum: the buyer decides knowingly.
+    assert (final.action, final.phase, final.reason, final.status) == (
+        "close",
+        "needs_decision",
+        "effective_above_max",
+        "closed",
+    )
+    [line_plan] = final.lines
+    assert (line_plan.price_status, line_plan.acceptable, line_plan.effective_above_max) == (
+        "in_range",
+        False,
+        True,
+    )
+    assert (line_plan.offered_unit_price, line_plan.effective_price) == (
+        Decimal("2.90"),
+        Decimal("3.525"),
+    )
+    assert "effective_above_max" in line_plan.reasons
+    assert PlanWarning("effective_above_max", 1) in final.warnings
+    assert phase_label(final).startswith("Needs your decision: the unit price is within your")
+    # The supplier's last word: the RFQ can be closed, the outcome says why it is above.
+    assert every_supplier_final(waiting_suppliers=0, plans=[final])
+    assert not ready_to_close(line_ids=[L1], waiting_suppliers=0, plans=[final])
+
+
+def test_rfq9_a_unit_price_above_the_maximum_is_still_rejected() -> None:
+    final = plan(
+        facts(offer(tooled("3.10", "3.725"), version=3), RFQ9_COUNTER, RFQ9_BAFO), [RFQ9_LINE]
+    )
+    assert (final.action, final.status) == ("close", "rejected")
+    [line_plan] = final.lines
+    assert (line_plan.price_status, line_plan.effective_above_max) == ("above_max", False)
+    assert all(w.code != "effective_above_max" for w in final.warnings)
+
+
+def test_rfq9_without_one_off_charges_nothing_changes() -> None:
+    for effective in (None, "2.90"):
+        final = plan(
+            facts(offer(tooled("2.90", effective), version=3), RFQ9_COUNTER, RFQ9_BAFO),
+            [RFQ9_LINE],
+        )
+        assert (final.action, final.phase, final.reason, final.status) == (
+            "close",
+            "closed",
+            "bafo_answered",
+            "closed",
+        )
+        assert not final.lines[0].effective_above_max
+
+
+def test_rfq9_in_target_per_unit_with_tooling_above_the_maximum_is_never_accepted() -> None:
+    result = plan(facts(offer(tooled("2.75", "3.375"))), [RFQ9_LINE])
+    # Nothing to ask (in target per piece), but not accepted internally either.
+    assert (result.action, result.phase, result.reason, result.email) == (
+        "close",
+        "needs_decision",
+        "effective_above_max",
+        None,
+    )
+    assert result.lines[0].price_status == "in_target"
+    assert not ready_to_close(line_ids=[L1], waiting_suppliers=0, plans=[result])
+
+
+def test_rfq9_the_asks_and_the_concession_follow_the_unit_price() -> None:
+    # The first offer, 3.20 per piece (3.825 with tooling): above the maximum, ask 2.80.
+    first = plan(facts(offer(tooled("3.20", "3.825"))), [RFQ9_LINE])
+    assert first.email is not None and first.action == "revised_offer"
+    [position] = first.email.positions
+    assert (position.ask_price, position.offered_unit_price) == (Decimal("2.80"), Decimal("3.20"))
+    # It moves to 2.95 per piece (3.575 with tooling): within the maximum per piece, so
+    # the best-and-final request concedes half the gap: 2.80 + 0.15 / 2 = 2.875 -> 2.87.
+    moved = plan(facts(offer(tooled("2.95", "3.575"), version=2), RFQ9_COUNTER), [RFQ9_LINE])
+    assert moved.email is not None and moved.action == "bafo"
+    [position] = moved.email.positions
+    assert (position.ask_price, position.conceded) == (Decimal("2.87"), True)
+    assert moved.lines[0].price_status == "in_range"
+
+
 def test_one_supplier_still_negotiating_keeps_the_negotiation_open() -> None:
     final = plan(facts(offer(quote(L1, "2.75"), version=3), RFQ8_COUNTER, RFQ8_BAFO), [RFQ8_LINE])
     # Still within its best-and-final cut-off.
@@ -1060,12 +1169,12 @@ def test_the_decision_keeps_the_suppliers_price_unrounded() -> None:
     first = plan(facts(fine), max_rounds=3)
     assert first.email is not None
     [position] = first.email.positions
-    assert position.offered_price == Decimal("48.905")
+    assert position.offered_unit_price == Decimal("48.905")
     sent = email(
         sequence=1,
         round=1,
         version=1,
-        asks=[asked(L1, str(position.ask_price), str(position.offered_price))],
+        asks=[asked(L1, str(position.ask_price), str(position.offered_unit_price))],
     )
     again = plan(facts(replace(fine, proposal_id=P2, version=2), sent), max_rounds=3)
     assert (again.action, again.reason) == ("hold", "no_progress")
@@ -1083,7 +1192,7 @@ def test_a_shorter_lead_time_is_progress_from_the_order_date_it_was_asked_on() -
                     rfq_line_id=L1,
                     ask_price=Decimal("45.67"),
                     deliver_by=need_by,
-                    offered_price=Decimal("48.90"),
+                    offered_unit_price=UnitPrice(Decimal("48.90")),
                     offered_delivery=TODAY + timedelta(days=20),
                 )
             ],
@@ -1096,7 +1205,7 @@ def test_a_shorter_lead_time_is_progress_from_the_order_date_it_was_asked_on() -
     # three days earlier.
     shorter = LineQuote(
         rfq_line_id=L1,
-        unit_price=Decimal("48.90"),
+        unit_price=UnitPrice(Decimal("48.90")),
         lead_time_days=17,
         delivery=later.date() + timedelta(days=17),
         deliveries_then=((TODAY, TODAY + timedelta(days=17)),),
@@ -1149,3 +1258,52 @@ def test_a_final_offer_whose_only_gap_is_price_stands_as_closed() -> None:
         "closed",
         "supplier_declared_final",
     )
+
+
+# --- The outcome line: the unit price against the limits, the charges shown -----------------
+
+
+def test_rfq9_the_outcome_names_the_unit_price_the_tooling_and_the_effective_price() -> None:
+    line_9 = comparison_rules.requested(2000, max_unit_price="3.05")
+    comparison = comparison_rules.compare(
+        line_9,
+        comparison_rules.offer(line_9, "Torino", "2.90", tooling="1250", currency="BRL"),
+        base="BRL",
+    )
+    [outcome] = negotiation_service._outcome(comparison, {line_9.id: Decimal("2.80")})  # pyright: ignore[reportPrivateUsage]
+    assert (outcome.supplier_name, outcome.within_target, outcome.above_target) == (
+        "Torino",
+        False,
+        True,
+    )
+    assert (
+        outcome.unit_price_base,
+        outcome.tooling_base,
+        outcome.effective_unit_price_base,
+        outcome.effective_above_max,
+    ) == (Decimal("2.90"), Decimal("1250.00"), Decimal("3.525"), True)
+    assert outcome.price_warning == (
+        "Unit price within your maximum; with one-off charges (BRL 1,250 tooling) the "
+        "effective price is BRL 3.525 per unit, above it."
+    )
+    # Within target per unit: within_target reads the unit price, never the effective one.
+    [cheap] = negotiation_service._outcome(comparison, {line_9.id: Decimal("2.95")})  # pyright: ignore[reportPrivateUsage]
+    assert (cheap.within_target, cheap.above_target, cheap.effective_above_max) == (
+        True,
+        False,
+        True,
+    )
+
+
+def test_without_tooling_the_outcome_has_no_price_warning() -> None:
+    line_9 = comparison_rules.requested(2000, max_unit_price="3.05")
+    comparison = comparison_rules.compare(
+        line_9, comparison_rules.offer(line_9, "Torino", "2.90", currency="BRL"), base="BRL"
+    )
+    [outcome] = negotiation_service._outcome(comparison, {line_9.id: Decimal("2.80")})  # pyright: ignore[reportPrivateUsage]
+    assert (outcome.above_target, outcome.effective_above_max, outcome.price_warning) == (
+        True,
+        False,
+        None,
+    )
+    assert outcome.unit_price_base == outcome.effective_unit_price_base == Decimal("2.90")

@@ -12,6 +12,7 @@ from bido_back.agents.catalog.contracts import (
     NegotiationLineAsk,
 )
 from bido_back.negotiation.strategy import (
+    UnitPrice,
     ask_places,
     decimals,
     delivery_position,
@@ -71,30 +72,39 @@ def test_decimals_and_minor_units() -> None:
 
 def test_within_target_nothing_is_asked() -> None:
     ask = price_position(
-        offered=Decimal("44.90"), target=Decimal("45.67"), max_price=Decimal("51.91"), places=2
+        offered=UnitPrice(Decimal("44.90")),
+        target=Decimal("45.67"),
+        max_price=Decimal("51.91"),
+        places=2,
     )
     assert (ask.status, ask.ask, ask.asks) == ("in_target", None, False)
 
 
 def test_the_first_ask_is_the_target_rounded_down() -> None:
     ask = price_position(
-        offered=Decimal("46.90"), target=Decimal("45.6677"), max_price=Decimal("51.91"), places=2
+        offered=UnitPrice(Decimal("46.90")),
+        target=Decimal("45.6677"),
+        max_price=Decimal("51.91"),
+        places=2,
     )
     assert (ask.status, ask.ask, ask.conceded) == ("in_range", Decimal("45.66"), False)
 
 
 def test_above_the_maximum_the_target_is_asked_and_never_conceded() -> None:
     first = price_position(
-        offered=Decimal("279.00"), target=Decimal("234.52"), max_price=Decimal("266.28"), places=2
+        offered=UnitPrice(Decimal("279.00")),
+        target=Decimal("234.52"),
+        max_price=Decimal("266.28"),
+        places=2,
     )
     assert (first.status, first.ask) == ("above_max", Decimal("234.52"))
     moved = price_position(
-        offered=Decimal("270.00"),
+        offered=UnitPrice(Decimal("270.00")),
         target=Decimal("234.52"),
         max_price=Decimal("266.28"),
         places=2,
         previous_ask=Decimal("234.52"),
-        previous_offer=Decimal("279.00"),
+        previous_offer=UnitPrice(Decimal("279.00")),
         final_round=True,
     )
     assert (moved.status, moved.ask, moved.conceded) == ("above_max", Decimal("234.52"), False)
@@ -102,22 +112,22 @@ def test_above_the_maximum_the_target_is_asked_and_never_conceded() -> None:
 
 def test_a_supplier_that_moved_gets_a_quarter_step_then_half_in_the_final_round() -> None:
     counter = price_position(
-        offered=Decimal("46.50"),
+        offered=UnitPrice(Decimal("46.50")),
         target=Decimal("45.67"),
         max_price=Decimal("51.91"),
         places=2,
         previous_ask=Decimal("45.67"),
-        previous_offer=Decimal("48.90"),
+        previous_offer=UnitPrice(Decimal("48.90")),
     )
     # 45.67 + (46.50 - 45.67) / 4 = 45.8775, rounded down.
     assert (counter.ask, counter.conceded) == (Decimal("45.87"), True)
     final = price_position(
-        offered=Decimal("46.00"),
+        offered=UnitPrice(Decimal("46.00")),
         target=Decimal("45.67"),
         max_price=Decimal("51.91"),
         places=2,
         previous_ask=Decimal("45.87"),
-        previous_offer=Decimal("46.50"),
+        previous_offer=UnitPrice(Decimal("46.50")),
         final_round=True,
     )
     # 45.87 + (46.00 - 45.87) / 2 = 45.935, rounded down.
@@ -126,21 +136,21 @@ def test_a_supplier_that_moved_gets_a_quarter_step_then_half_in_the_final_round(
 
 def test_no_concession_without_movement_and_never_at_or_above_the_offer() -> None:
     same = price_position(
-        offered=Decimal("46.50"),
+        offered=UnitPrice(Decimal("46.50")),
         target=Decimal("45.67"),
         max_price=Decimal("51.91"),
         places=2,
         previous_ask=Decimal("45.67"),
-        previous_offer=Decimal("46.50"),
+        previous_offer=UnitPrice(Decimal("46.50")),
     )
     assert (same.ask, same.conceded) == (Decimal("45.67"), False)
     tiny = price_position(
-        offered=Decimal("45.68"),
+        offered=UnitPrice(Decimal("45.68")),
         target=Decimal("45.67"),
         max_price=Decimal("51.91"),
         places=2,
         previous_ask=Decimal("45.67"),
-        previous_offer=Decimal("46.00"),
+        previous_offer=UnitPrice(Decimal("46.00")),
     )
     # The step would round to the old ask: the ask holds instead of reaching the offer.
     assert tiny.ask == Decimal("45.67")
@@ -148,31 +158,39 @@ def test_no_concession_without_movement_and_never_at_or_above_the_offer() -> Non
 
 def test_meeting_our_last_ask_ends_the_price_ask() -> None:
     met = price_position(
-        offered=Decimal("45.85"),
+        offered=UnitPrice(Decimal("45.85")),
         target=Decimal("45.67"),
         max_price=Decimal("51.91"),
         places=2,
         previous_ask=Decimal("45.87"),
-        previous_offer=Decimal("46.50"),
+        previous_offer=UnitPrice(Decimal("46.50")),
     )
     assert (met.status, met.asks) == ("ask_met", False)
 
 
 def test_without_a_target_a_better_price_is_asked_without_a_number() -> None:
-    ask = price_position(offered=Decimal("0.050"), target=None, max_price=None, places=3)
+    ask = price_position(offered=UnitPrice(Decimal("0.050")), target=None, max_price=None, places=3)
     assert (ask.status, ask.ask, ask.best_price) == ("no_target", None, True)
     # The internal history reference accepts, but is never disclosed.
     history = price_position(
-        offered=Decimal("0.041"), target=None, max_price=None, places=3, history=Decimal("0.042")
+        offered=UnitPrice(Decimal("0.041")),
+        target=None,
+        max_price=None,
+        places=3,
+        history=Decimal("0.042"),
     )
     assert history.status == "in_target"
     over = price_position(
-        offered=Decimal("0.050"), target=None, max_price=None, places=3, history=Decimal("0.042")
+        offered=UnitPrice(Decimal("0.050")),
+        target=None,
+        max_price=None,
+        places=3,
+        history=Decimal("0.042"),
     )
     assert (over.ask, over.best_price) == (None, True)
     # A reference above the maximum is no reference at all.
     capped = price_position(
-        offered=Decimal("0.080"),
+        offered=UnitPrice(Decimal("0.080")),
         target=None,
         max_price=Decimal("0.060"),
         places=3,
@@ -181,15 +199,52 @@ def test_without_a_target_a_better_price_is_asked_without_a_number() -> None:
     assert (capped.status, capped.ask, capped.best_price) == ("above_max", None, True)
 
 
+def test_rfq9_asks_and_concessions_follow_the_unit_price() -> None:
+    # RFQ-9 (2026-10-13): target 2.80, maximum 3.05 per piece; the supplier also charges a
+    # one-off tooling of 1,250 on 2,000 pieces (0.625 per piece). The asks name a unit
+    # price, so they are computed against the unit price, never the effective one.
+    first = price_position(
+        offered=UnitPrice(Decimal("3.20")),
+        target=Decimal("2.80"),
+        max_price=Decimal("3.05"),
+        places=2,
+    )
+    assert (first.status, first.ask, first.conceded) == ("above_max", Decimal("2.80"), False)
+    # The supplier moves to 2.95 per piece (3.575 with tooling, above the maximum): the
+    # unit price is within it, so the final round concedes half the gap.
+    final = price_position(
+        offered=UnitPrice(Decimal("2.95")),
+        target=Decimal("2.80"),
+        max_price=Decimal("3.05"),
+        places=2,
+        previous_ask=Decimal("2.80"),
+        previous_offer=UnitPrice(Decimal("3.20")),
+        final_round=True,
+    )
+    # 2.80 + (2.95 - 2.80) / 2 = 2.875, rounded down.
+    assert (final.status, final.ask, final.conceded) == ("in_range", Decimal("2.87"), True)
+    # The best-and-final answer, 2.90 per piece: within the maximum, above the target.
+    answer = price_position(
+        offered=UnitPrice(Decimal("2.90")),
+        target=Decimal("2.80"),
+        max_price=Decimal("3.05"),
+        places=2,
+        previous_ask=Decimal("2.87"),
+        previous_offer=UnitPrice(Decimal("2.95")),
+        final_round=True,
+    )
+    assert answer.status == "in_range"
+
+
 def test_an_ask_is_never_above_the_maximum() -> None:
     for offered in ("51.90", "51.91", "60.00"):
         ask = price_position(
-            offered=Decimal(offered),
+            offered=UnitPrice(Decimal(offered)),
             target=Decimal("45.67"),
             max_price=Decimal("51.91"),
             places=2,
             previous_ask=Decimal("51.00"),
-            previous_offer=Decimal("70.00"),
+            previous_offer=UnitPrice(Decimal("70.00")),
             final_round=True,
         )
         assert ask.ask is not None and ask.ask < Decimal("51.91")
@@ -323,12 +378,12 @@ def test_a_target_with_more_than_three_decimals_is_read_whole() -> None:
 
 def test_an_old_ask_stored_in_exponent_notation_is_read_plainly() -> None:
     ask = price_position(
-        offered=Decimal("60"),
+        offered=UnitPrice(Decimal("60")),
         target=Decimal("45"),
         max_price=Decimal("70"),
         places=2,
         previous_ask=Decimal("5E+1"),
-        previous_offer=Decimal("60"),
+        previous_offer=UnitPrice(Decimal("60")),
     )
     assert ask.ask == Decimal(50) and "E" not in str(ask.ask)
 
@@ -336,12 +391,12 @@ def test_an_old_ask_stored_in_exponent_notation_is_read_plainly() -> None:
 def test_a_last_ask_above_a_lowered_maximum_is_no_anchor() -> None:
     # Our last ask was 95; the buyer then lowered the maximum to 90.
     lowered = price_position(
-        offered=Decimal("94"),
+        offered=UnitPrice(Decimal("94")),
         target=Decimal("80"),
         max_price=Decimal("90"),
         places=2,
         previous_ask=Decimal("95"),
-        previous_offer=Decimal("100"),
+        previous_offer=UnitPrice(Decimal("100")),
     )
     assert (lowered.status, lowered.ask) == ("above_max", Decimal("80.00"))
     # An offer meeting that old ask is above the maximum now: not "ask met".

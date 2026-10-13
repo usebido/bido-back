@@ -191,7 +191,13 @@ class World:
             NegotiationSettingsUpdate.model_validate(fields),
         )
 
-    async def offer(self, name: str, prices: tuple[str, str], lead: int = 30) -> UUID:
+    async def offer(
+        self,
+        name: str,
+        prices: tuple[str, str],
+        lead: int = 30,
+        tooling: tuple[str | None, str | None] = (None, None),
+    ) -> UUID:
         invite_id = self.invites[name]
         async with tenant_session(self.engine, self.people.tenant) as session:
             version = 1 + len(
@@ -226,13 +232,14 @@ class World:
             )
             session.add(proposal)
             await session.flush()
-            for line_id, price in zip(self.lines, prices, strict=True):
+            for line_id, price, charge in zip(self.lines, prices, tooling, strict=True):
                 session.add(
                     ProposalLine(
                         tenant_id=self.people.tenant,
                         proposal_id=proposal.id,
                         rfq_line_id=line_id,
                         unit_price=Decimal(price),
+                        tooling_cost=Decimal(charge) if charge is not None else None,
                         unit="pcs",
                         min_quantity=Decimal(100),
                         lead_time_days=lead,
@@ -433,7 +440,10 @@ async def test_rounds_advance_on_new_offers_and_end_with_best_and_final(world: W
 
 
 async def _to_final_answer(
-    world: World, writer: FakeNegotiationWriter, final: tuple[str, str]
+    world: World,
+    writer: FakeNegotiationWriter,
+    final: tuple[str, str],
+    tooling: tuple[str | None, str | None] = (None, None),
 ) -> None:
     """Rhein: counter (round 1), best-and-final (round 2), then its final answer."""
     await world.offer("rhein", ("0.050", "1.20"))
@@ -445,7 +455,7 @@ async def _to_final_answer(
     bafo = (await world.messages("rhein"))[-1]
     assert bafo.kind == "bafo"
     await world.approve(bafo.approval_id or bafo.id)
-    await world.offer("rhein", final)
+    await world.offer("rhein", final, tooling=tooling)
 
 
 async def _decline(world: World, name: str) -> None:
@@ -537,6 +547,81 @@ async def test_a_final_offer_above_the_maximum_is_never_recommended(world: World
         None,
     )
     assert second.readiness == "no_feasible_offer" and not second.above_target
+
+
+async def test_a_final_offer_within_the_maximum_per_unit_is_recommended_despite_tooling(
+    world: World,
+) -> None:
+    # RFQ-9 (2026-10-13): the limits are unit prices. Line 2 (500 pcs, target 1.00, max
+    # 1.50): 1.08 per piece plus a one-off tooling of 250 (0.50 per piece) is 1.58 per
+    # piece effective, above the maximum. Recommended, with the charge and a warning.
+    await world.configure(max_rounds=2, early_close=False)
+    writer = FakeNegotiationWriter()
+    await _decline(world, "lyon")
+    await _to_final_answer(world, writer, ("0.044", "1.08"), tooling=(None, "250"))
+    assert (await world.sweep(writer)).ready == 1
+    view = await service.get_negotiation(world.engine, buyer(world.people), world.rfq_id)
+    rhein = next(i for i in view.invites if i.supplier_name == "Rhein")
+    assert rhein.status == "closed" and rhein.state is not None
+    assert (rhein.state.phase, rhein.state.reason) == ("needs_decision", "effective_above_max")
+    plans = {p.rfq_line_id: p for p in rhein.line_plans}
+    second_plan = plans[world.lines[1]]
+    assert (
+        second_plan.price,
+        second_plan.offered_unit_price_base,
+        second_plan.effective_unit_price_base,
+        second_plan.effective_above_max,
+    ) == ("in_range", Decimal("1.08"), Decimal("1.58"), True)
+    assert not plans[world.lines[0]].effective_above_max
+    assert any(w.code == "effective_above_max" and w.position == 2 for w in view.warnings)
+
+    assert view.status == "ready_to_close" and view.recommendation is not None
+    by_line = {o.rfq_line_id: o for o in view.recommendation if o.tier == 0}
+    first, second = (by_line[line] for line in world.lines)
+    assert (first.supplier_name, first.effective_above_max, first.price_warning) == (
+        "Rhein",
+        False,
+        None,
+    )
+    assert (second.supplier_name, second.above_target, second.effective_above_max) == (
+        "Rhein",
+        True,
+        True,
+    )
+    assert (
+        second.unit_price_base,
+        second.tooling_base,
+        second.effective_unit_price_base,
+    ) == (Decimal("1.08"), Decimal("250.00"), Decimal("1.58"))
+    assert second.price_warning == (
+        "Unit price within your maximum; with one-off charges (EUR 250 tooling) the "
+        "effective price is EUR 1.58 per unit, above it."
+    )
+    # The copilot tells the buyer.
+    from bido_back.copilot.tools import CopilotToolDeps, NegotiationStatusOut, copilot_tools
+    from tests.rfqs.conftest import fake_agents
+
+    tools = {
+        tool.name: tool
+        for tool in copilot_tools(
+            CopilotToolDeps(
+                db=world.engine,
+                agents=fake_agents(),
+                mailboxes=world.mailboxes,
+                negotiation_writer=writer,
+            )
+        )
+    }
+    ctx = ToolContext(tenant_id=world.people.tenant, user_id=world.people.owner, run_id=uuid4())
+    tool = tools["get_negotiation_status"]
+    rfq = await world.rfq()
+    status = await tool.invoke(ctx, tool.parse_input({"rfq": rfq.ref}))
+    assert isinstance(status, NegotiationStatusOut)
+    assert "On line(s) 2 the unit price is within the maximum" in status.note
+    # Closing keeps it, with the same disclosure.
+    outcome = await service.close(world.engine, buyer(world.people), world.rfq_id)
+    kept = next(o for o in outcome if o.rfq_line_id == world.lines[1] and o.tier == 0)
+    assert (kept.supplier_name, kept.effective_above_max) == ("Rhein", True)
 
 
 async def test_early_close_on_target_is_unchanged(world: World) -> None:

@@ -48,7 +48,13 @@ sweep stays the safety net):
    The second applies whatever `early_close` says: nothing is left to negotiate, and
    waiting for the deadline only delays the buyer's decision. While ready, the view's
    `recommendation` is what closing would keep: the best eligible offer per line and
-   tier (never one above the maximum), `above_target` when it is above the target.
+   tier (never one whose unit price is above the maximum), `above_target` when its unit
+   price is above the target, `effective_above_max` when one-off charges put its
+   effective price per unit above the maximum (said, with the charges, never hidden).
+
+The buyer's target and maximum are UNIT prices: every comparison with them reads the
+offered unit price (`strategy.UnitPrice`); the effective price with one-off charges
+(`strategy.EffectivePrice`) ranks offers and is shown next to it.
 
 The view (`get_negotiation`) runs the same planner read-only, so what the buyer
 sees per supplier is what the next sweep does.
@@ -201,7 +207,7 @@ from bido_back.negotiation.signals import (
     offer_signals,
     stated_lead_time,
 )
-from bido_back.negotiation.strategy import ask_places, plain
+from bido_back.negotiation.strategy import EffectivePrice, UnitPrice, ask_places, plain
 from bido_back.rfqs.errors import AgentFailed, InvalidState, NotFound
 from bido_back.rfqs.language import country_code, thread_language
 from bido_back.rfqs.send import SEND_RFQ_EMAIL, send_proposal_ids
@@ -531,6 +537,19 @@ def _parse_decimal(value: object) -> Decimal | None:
     return plain(number) if number.is_finite() else None
 
 
+def _unit_price(value: Decimal | None) -> UnitPrice | None:
+    """A stored offered price, read as the unit price it is recorded as.
+
+    Decisions stored before the limits applied to the unit price recorded the effective
+    price for a line with tooling; such a line may read once as the supplier having
+    moved (no repeated ask, no early stop), never as an ask outside the maximum."""
+    return UnitPrice(value) if value is not None else None
+
+
+def _effective_price(value: Decimal | None) -> EffectivePrice | None:
+    return EffectivePrice(value) if value is not None else None
+
+
 def _legacy_asks(row: NegotiationMessage) -> tuple[LineAsk, ...]:
     """What an email written before typed decisions asked (its flat terms)."""
     asks: list[LineAsk] = []
@@ -557,7 +576,7 @@ def _legacy_asks(row: NegotiationMessage) -> tuple[LineAsk, ...]:
                 rfq_line_id=line_id,
                 ask_price=ask,
                 deliver_by=deliver_by,
-                offered_price=_parse_decimal(values.get("offered")),
+                offered_unit_price=_unit_price(_parse_decimal(values.get("offered"))),
             )
         )
     return tuple(asks)
@@ -597,7 +616,7 @@ def _record(row: NegotiationMessage, loaded: _Loaded) -> EmailRecord:
                 ask_price=p.target_unit_price,
                 best_price=p.best_price,
                 deliver_by=p.deliver_by,
-                offered_price=p.offered_unit_price,
+                offered_unit_price=_unit_price(p.offered_unit_price),
                 offered_delivery=p.offered_delivery,
             )
             for p in decision.positions
@@ -805,9 +824,8 @@ def _quotes(
         for cell in column.cells:
             if cell.tier != 0:
                 continue
-            same_basis = (cell.currency or "").upper() == rfq.base_currency.upper() and not (
-                cell.tooling_cost
-            )
+            # Asks are unit prices: the supplier's own precision applies, tooling or not.
+            same_basis = (cell.currency or "").upper() == rfq.base_currency.upper()
             lead = QuotedLeadTime(
                 days=cell.lead_time_days,
                 fields=line_fields.get(cell.proposal_line_id, {})
@@ -829,7 +847,10 @@ def _quotes(
             needed = need_by.get(cell.rfq_line_id)
             mine[cell.rfq_line_id] = LineQuote(
                 rfq_line_id=cell.rfq_line_id,
-                unit_price=cell.effective_unit_price_base,
+                # The limits apply to the unit price; the effective price (with tooling
+                # per unit) is only shown and checked for the buyer's warning.
+                unit_price=_unit_price(cell.unit_price_base),
+                effective_price=_effective_price(cell.effective_unit_price_base),
                 places=ask_places(rfq.base_currency, cell.unit_price if same_basis else None),
                 lead_time_days=cell.lead_time_days,
                 delivery=delivery[0] if delivery is not None else None,
@@ -851,18 +872,24 @@ def _quotes(
         quotes[column.invite_id] = mine
         shown[column.invite_id] = quoted
     # A lower eligible offer elsewhere may be mentioned (never whose, never how much).
+    # Lower is judged on the effective price (tooling per unit included), as offers are
+    # ranked: what the line really costs.
     for invite_id, mine in quotes.items():
         for line_id, quote in list(mine.items()):
-            if quote.unit_price is None or quote.blockers:
+            cost = quote.effective_price
+            if cost is None or quote.unit_price is None or quote.blockers:
                 continue
             others = [
-                q.unit_price
+                q.effective_price
                 for other, theirs in quotes.items()
                 if other != invite_id
                 for q in (theirs.get(line_id),)
-                if q is not None and q.unit_price is not None and not q.blockers
+                if q is not None
+                and q.effective_price is not None
+                and q.unit_price is not None
+                and not q.blockers
             ]
-            if others and min(others) < quote.unit_price:
+            if others and min(others) < cost:
                 mine[line_id] = replace(quote, better_offer_exists=True)
     return quotes, shown
 
@@ -1084,12 +1111,14 @@ def _line_views(
             LineDecisionView(
                 rfq_line_id=line.rfq_line_id,
                 decision=_line_decision(line),
-                offered_unit_price_base=line.offered_price,
+                offered_unit_price_base=line.offered_unit_price,
                 ask_unit_price=line.price.ask if line.price is not None else None,
                 lead_time_days=quote.lead_time_days if quote is not None else None,
                 ask_lead_time_days=_days_to(
                     line.delivery.deliver_by if line.delivery is not None else None, today
                 ),
+                effective_unit_price_base=line.effective_price,
+                effective_above_max=line.effective_above_max,
             )
         )
     return views
@@ -1103,7 +1132,7 @@ def _line_plan_views(plan: SupplierPlan) -> list[LinePlanView]:
             status=line.status,
             price=line.price_status,
             delivery=line.delivery_status,
-            offered_unit_price_base=line.offered_price,
+            offered_unit_price_base=line.offered_unit_price,
             ask_unit_price=line.price.ask if line.price is not None else None,
             asks_best_price=line.price.best_price if line.price is not None else False,
             deliver_by=line.delivery.deliver_by if line.delivery is not None else None,
@@ -1112,6 +1141,8 @@ def _line_plan_views(plan: SupplierPlan) -> list[LinePlanView]:
             latest_order_date=line.latest_order_date,
             acceptable=line.acceptable,
             reasons=line_reasons(line),
+            effective_unit_price_base=line.effective_price,
+            effective_above_max=line.effective_above_max,
         )
         for line in plan.lines
     ]
@@ -1635,20 +1666,44 @@ def _within(price: Decimal | None, target: Decimal | None) -> bool | None:
     return (price <= target) if price is not None and target is not None else None
 
 
+def _amount(value: Decimal) -> str:
+    return format(plain(value), ",f")
+
+
+def _price_warning(
+    *,
+    effective_above_max: bool,
+    tooling: Decimal | None,
+    effective: Decimal | None,
+    currency: str,
+) -> str | None:
+    """The buyer's sentence for a unit price within the maximum whose effective price,
+    with the one-off charges, is above it (numbers from code, in the base currency)."""
+    if not effective_above_max or effective is None:
+        return None
+    charges = f" ({currency} {_amount(tooling)} tooling)" if tooling is not None else ""
+    return (
+        f"Unit price within your maximum; with one-off charges{charges} the effective price"
+        f" is {currency} {_amount(effective)} per unit, above it."
+    )
+
+
 def _outcome_line(
-    rec: Recommendation, policy: ComparisonPolicy, target: Decimal | None
+    rec: Recommendation, policy: ComparisonPolicy, target: Decimal | None, currency: str
 ) -> OutcomeLine:
-    price = rec.effective_unit_price_base
+    # The target applies to the unit price; the effective price is shown next to it.
+    unit = rec.unit_price_base
+    above_max = "effective_above_max" in rec.advisories
     return OutcomeLine(
         rfq_line_id=rec.rfq_line_id,
         tier=rec.tier,
         quantity=rec.quantity,
         invite_id=rec.invite_id,
         supplier_name=rec.supplier_name,
-        effective_unit_price_base=price,
+        effective_unit_price_base=rec.effective_unit_price_base,
         lead_time_days=rec.lead_time_days,
-        within_target=_within(price, target),
-        above_target=_within(price, target) is False,
+        within_target=_within(unit, target),
+        above_target=_within(unit, target) is False,
         justification=rec.justification,
         readiness=rec.readiness,
         policy=policy,
@@ -1663,12 +1718,23 @@ def _outcome_line(
         proposal_line_id=rec.proposal_line_id,
         evidence_message_ids=rec.evidence_message_ids,
         landed_total_base=rec.landed_total_base,
+        unit_price_base=unit,
+        tooling_base=rec.tooling_base,
+        effective_above_max=above_max,
+        price_warning=_price_warning(
+            effective_above_max=above_max,
+            tooling=rec.tooling_base,
+            effective=rec.effective_unit_price_base,
+            currency=currency,
+        ),
     )
 
 
 def _outcome(comparison: Comparison, targets: dict[UUID, Decimal | None]) -> list[OutcomeLine]:
     return [
-        _outcome_line(rec, comparison.policy, targets.get(rec.rfq_line_id))
+        _outcome_line(
+            rec, comparison.policy, targets.get(rec.rfq_line_id), comparison.base_currency
+        )
         for rec in comparison.recommendations
     ]
 
@@ -1694,7 +1760,7 @@ def _awarded_line(
                 and rec.invite_id == line.invite_id
                 and rec.proposal_line_id in (None, line.proposal_line_id)
             ):
-                return _outcome_line(rec, policy, target)
+                return _outcome_line(rec, policy, target, base_currency)
     cell: ComparisonCell | None = None
     if comparison is not None:
         cell = next(
@@ -1707,20 +1773,25 @@ def _awarded_line(
             ),
             None,
         )
+    # The target applies to the unit price; the effective price is shown next to it.
     if cell is not None:
-        price = cell.effective_unit_price_base
+        unit = cell.unit_price_base
+        effective = cell.effective_unit_price_base
     else:
-        price = Decimal(line.unit_price) if line.currency == base_currency else None
+        unit = Decimal(line.unit_price) if line.currency == base_currency else None
+        effective = unit
+    above_max = cell is not None and "effective_above_max" in cell.buyer_limit_warnings
+    tooling = cell.tooling_base if cell is not None else None
     return OutcomeLine(
         rfq_line_id=line.rfq_line_id,
         tier=line.tier,
         quantity=Decimal(line.quantity),
         invite_id=line.invite_id,
         supplier_name=line.supplier_name,
-        effective_unit_price_base=price,
+        effective_unit_price_base=effective,
         lead_time_days=line.lead_time_days,
-        within_target=_within(price, target),
-        above_target=_within(price, target) is False,
+        within_target=_within(unit, target),
+        above_target=_within(unit, target) is False,
         justification=_AWARDED_WITHOUT_RECOMMENDATION
         if line.recommended_invite_id is None
         else _AWARDED_RECOMMENDATION
@@ -1733,6 +1804,15 @@ def _awarded_line(
         proposal_line_id=line.proposal_line_id,
         evidence_message_ids=cell.evidence_message_ids if cell is not None else [],
         landed_total_base=cell.landed_total_base if cell is not None else None,
+        unit_price_base=unit,
+        tooling_base=tooling,
+        effective_above_max=above_max,
+        price_warning=_price_warning(
+            effective_above_max=above_max,
+            tooling=tooling,
+            effective=effective,
+            currency=base_currency,
+        ),
     )
 
 
