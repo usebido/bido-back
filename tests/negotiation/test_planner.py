@@ -932,6 +932,48 @@ def test_a_line_that_must_be_ordered_before_the_negotiation_ends_is_flagged() ->
     assert "order by" in phase_label(result)
 
 
+def test_the_suppliers_order_deadline_is_when_to_order_an_accepted_offer() -> None:
+    # "provided we receive the purchase order by <day>": the offer holds until that day.
+    deadline = TODAY + timedelta(days=5)
+    result = plan(facts(replace(WITHIN, order_by=deadline)))
+    assert result.phase == "accepted_internally" and result.order_by == deadline
+    warning = next(w for w in result.warnings if w.code == "order_deadline")
+    assert warning.on == deadline
+    assert f"order by {deadline.isoformat()}, the supplier's order deadline" in phase_label(result)
+
+
+def test_an_offer_past_the_suppliers_order_deadline_is_not_accepted() -> None:
+    result = plan(facts(replace(WITHIN, order_by=TODAY - timedelta(days=1))))
+    assert (result.action, result.phase, result.reason) == (
+        "hold",
+        "needs_decision",
+        "order_deadline_passed",
+    )
+    assert any(w.code == "order_deadline_passed" for w in result.warnings)
+    assert phase_label(result).startswith(
+        "Needs your decision: the supplier's order deadline has passed"
+    )
+
+
+def test_a_held_offer_names_why_and_the_terms_the_reply_changed() -> None:
+    held = replace(
+        WITHIN,
+        holds=("offer_state_requires_review",),
+        hold_reasons=("changed_commercial_basis_requires_replacement",),
+        held_fields=("pos1.unit", "currency"),
+    )
+    result = plan(facts(held))
+    assert (result.phase, result.reason, result.offer_held) == (
+        "needs_decision",
+        "offer_state_requires_review",
+        True,
+    )
+    assert result.held_fields == ("pos1.unit", "currency")
+    label = phase_label(result)
+    assert "commercial basis" in label
+    assert "the reply changes: line 1 unit, currency" in label
+
+
 def test_ready_to_close_needs_every_line_accepted_and_every_supplier_answered() -> None:
     accepted = plan(facts(WITHIN))
     asking = plan(facts(ABOVE))

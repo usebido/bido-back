@@ -7,6 +7,7 @@ import pytest
 
 from bido_back.quotes.parsing import (
     DecimalSeparator,
+    WrittenDate,
     business_days_to_calendar,
     dates_in,
     day_months_in,
@@ -15,6 +16,7 @@ from bido_back.quotes.parsing import (
     find_number,
     incoterms_in,
     is_delivery_timing,
+    is_order_deadline_only,
     mentions_approximation,
     mentions_calendar_days,
     mentions_days,
@@ -24,6 +26,8 @@ from bido_back.quotes.parsing import (
     mentions_stock,
     mentions_weeks,
     mentions_working_days,
+    numeric_date_order,
+    order_deadlines,
     parse_amount,
     parse_canonical,
     parse_decimal,
@@ -336,3 +340,61 @@ def test_business_day_words_and_the_calendar_rule() -> None:
         35,
         42,
     ]
+
+
+OCT_21 = WrittenDate(dates=(date(2026, 10, 21),))
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("provided we receive the purchase order by 21/10/2026", OCT_21),
+        ("Delivery: all 2,000 pcs by 14/11/2026, provided we receive the PO by 21/10/2026", OCT_21),
+        ("if the PO is placed by October 21, 2026", OCT_21),
+        ("subject to PO no later than 2026-10-21", OCT_21),
+        ("Valid for orders received before 21 Oct 2026.", OCT_21),
+        ("desde que o pedido seja colocado até o dia 21/10/2026", OCT_21),
+        ("sofern die Bestellung spätestens am 21.10.2026 bei uns eingeht", OCT_21),
+        ("bei Bestellung bis zum 21.10.2026", OCT_21),
+        ("pour toute commande passée avant le 21/10/2026", OCT_21),
+        ("si recibimos la orden de compra antes del 21/10/2026", OCT_21),
+        ("per ordini ricevuti entro il 21/10/2026", OCT_21),
+        ("if ordered by 21/10", WrittenDate(day_months=((10, 21),))),
+        ("PO by 05/10/2026", WrittenDate(dates=(date(2026, 10, 5), date(2026, 5, 10)))),
+    ],
+)
+def test_an_order_deadline_is_read_in_any_language(text: str, expected: WrittenDate) -> None:
+    assert order_deadlines(text) == [expected]
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "in order to deliver by 14/11/2026",
+        "after receipt of the order we deliver by 14/11/2026",
+        "the ordered quantity will be shipped by 14/11/2026",
+        "order confirmation, delivery by 14/11/2026",
+        "lead time 6 weeks after order by email",
+        "Lieferung bis 14.11.2026 nach Bestellung",
+    ],
+)
+def test_a_delivery_date_is_not_an_order_deadline(text: str) -> None:
+    assert order_deadlines(text) == []
+
+
+def test_an_order_deadline_with_another_condition_is_not_only_a_deadline() -> None:
+    assert is_order_deadline_only("provided we receive the purchase order by 21/10/2026")
+    for text in (
+        "Price valid for 5,000 pcs or more if ordered by 21/10/2026",
+        "BRL 2.95 if ordered by 21/10/2026",
+        "subject to stock, if ordered by 21/10/2026",
+        "Delivery by 14/11/2026",
+    ):
+        assert not is_order_deadline_only(text), text
+
+
+def test_a_numeric_date_proves_its_order_and_a_price_does_not() -> None:
+    assert numeric_date_order("delivery by 14/11/2026") == "day_first"
+    assert numeric_date_order("delivery by 11/14/2026") == "month_first"
+    assert numeric_date_order("BRL 3.20 per piece, 05/10/2026") is None
+    assert numeric_date_order("14/11/2026 or 11/14/2026") is None

@@ -58,6 +58,11 @@ Also deterministic, never the model's call:
   term of the offer: it becomes an offer note and blocks no line; a condition
   sentence only about delivery timing ("a few additional days for the shafts")
   becomes that line's lead-time risk note;
+- an order deadline ("provided we receive the purchase order by 21/10/2026", in a
+  line's condition, an offer note or a lead-time statement) is the offer's `order_by`
+  header field: the earliest such date the supplier wrote. A condition sentence that
+  says nothing else leaves the line's conditions (it becomes an offer note), so an
+  amendment that adds one is not a change of the offer's commercial basis;
 - the supplier's signals (final offer, declined lines, questions) are grounded
   against its message (`ValidatedQuote.signals`).
 """
@@ -98,6 +103,7 @@ from bido_back.quotes.parsing import (
     INCOTERMS,
     ISO_CURRENCIES,
     DecimalSeparator,
+    WrittenDate,
     business_days_to_calendar,
     dates_in,
     day_months_in,
@@ -106,6 +112,7 @@ from bido_back.quotes.parsing import (
     find_number,
     incoterms_in,
     is_delivery_timing,
+    is_order_deadline_only,
     mentions_approximation,
     mentions_calendar_days,
     mentions_days,
@@ -116,6 +123,8 @@ from bido_back.quotes.parsing import (
     mentions_weeks,
     mentions_working_days,
     normalize_text,
+    numeric_date_order,
+    order_deadlines,
     own_words,
     parse_canonical,
     parse_decimal,
@@ -157,6 +166,9 @@ HEADER_FIELDS: Final[Mapping[str, FieldKind]] = {
     "payment_terms": "text",
     "validity": "validity",
     "lead_time": "lead_time",
+    # The date the supplier must receive the order by for its offer to hold ("provided
+    # we receive the PO by 21/10/2026"): derived by code, never extracted by the model.
+    "order_by": "date",
 }
 LINE_FIELDS: Final[Mapping[str, FieldKind]] = {
     "offered_mpn": "mpn",
@@ -405,6 +417,7 @@ def validate_quote(
         "lead_time": _lead_time_field(
             "lead_time", offer_lead, offer_lead.lead_time if offer_lead else None, ctx
         ),
+        "order_by": absent_field("order_by"),
     }
     merged = {**generic, **derived}
     header = {name: merged[name] for name in HEADER_FIELDS}
@@ -436,6 +449,11 @@ def validate_quote(
     drafts, line_fields, general = _general_terms(drafts, line_fields, notes)
     drafts, line_fields = _timing_out_of_conditions(drafts, line_fields, ctx)
     notes = _unique([*notes, *general])
+    drafts, line_fields, deadline_notes, order_by = _order_by_out_of_conditions(
+        output, drafts, line_fields, notes, ctx
+    )
+    notes = _unique([*notes, *deadline_notes])
+    header = {**header, "order_by": order_by}
     lines = [
         _check_line(
             draft, fields, by_position, currency, partial=output.reply_kind != "replacement"
@@ -1220,6 +1238,128 @@ def _timing_out_of_conditions(
         )
         out_drafts.append(draft.model_copy(update={"conditional_terms": condition.extracted}))
     return out_drafts, out_fields
+
+
+def _order_by_out_of_conditions(
+    output: QuoteExtractionOutput,
+    drafts: list[ProposalLineDraft],
+    line_fields: list[dict[str, FieldCheck]],
+    notes: list[str],
+    ctx: _Context,
+) -> tuple[list[ProposalLineDraft], list[dict[str, FieldCheck]], list[str], FieldCheck]:
+    """The offer's order deadline, taken out of the lines' conditions.
+
+    "Delivery by 14/11/2026, provided we receive the purchase order by 21/10/2026" says
+    until when the offer holds, not a condition on one line's price: it is the offer's
+    `order_by` (the earliest such date in a line's condition, an offer note or a
+    lead-time statement, each found word for word in the supplier's message). A
+    condition sentence that says nothing else becomes an offer note; one that also
+    sets another condition (a minimum, a bundle, stock) stays a condition. A date
+    that reads two ways the message does not settle (`05/10/2026`) is no deadline.
+    Returns the drafts, the fields, the moved sentences and the `order_by` field.
+    """
+    if not output.is_quote:
+        return drafts, line_fields, [], absent_field("order_by")
+    found: list[tuple[date, SourceRef | None]] = []
+
+    def deadline(text: str) -> date | None:
+        days = [d for written in order_deadlines(text) if (d := _read_date(written, ctx))]
+        return min(days) if days else None
+
+    out_drafts: list[ProposalLineDraft] = []
+    out_fields: list[dict[str, FieldCheck]] = []
+    moved: list[str] = []
+    for draft, fields in zip(drafts, line_fields, strict=True):
+        current = fields["conditional_terms"]
+        text = current.parsed
+        sentences = _sentences(text) if isinstance(text, str) else []
+        routed: list[str] = []
+        for sentence in sentences:
+            day = deadline(sentence)
+            if (
+                day is None
+                or not is_order_deadline_only(sentence)
+                or not _found(sentence, ctx.sources)
+            ):
+                continue
+            source = current.extracted.source
+            found.append((day, source.model_copy(update={"quote": sentence}) if source else None))
+            routed.append(sentence)
+        if not routed:
+            out_drafts.append(draft)
+            out_fields.append(fields)
+            continue
+        moved.extend(routed)
+        keep = [s for s in sentences if s not in routed]
+        if keep:
+            remaining = " ".join(keep)
+            condition = replace(
+                current,
+                extracted=current.extracted.model_copy(update={"value": remaining}),
+                parsed=remaining,
+            )
+        else:
+            condition = absent_field("conditional_terms")
+        out_fields.append({**fields, "conditional_terms": condition})
+        out_drafts.append(draft.model_copy(update={"conditional_terms": condition.extracted}))
+    stated = list(notes)
+    stated.extend(
+        lead.source.quote
+        for lead in (output.lead_time, *(draft.lead_time for draft in drafts))
+        if lead.source is not None and _found(lead.source.quote, ctx.sources)
+    )
+    for text in stated:
+        day = deadline(text)
+        if day is not None:
+            found.append((day, _source_of(text, ctx.sources)))
+    if not found:
+        return out_drafts, out_fields, [], absent_field("order_by")
+    day, source = min(found, key=lambda item: item[0])
+    order_by = FieldCheck(
+        name="order_by",
+        extracted=ExtractedValue(value=day.isoformat(), source=source, confidence=1.0),
+        parsed=day,
+    )
+    return out_drafts, out_fields, moved, order_by
+
+
+def _read_date(written: WrittenDate, ctx: _Context) -> date | None:
+    """The one date a supplier meant: the only reading, or the one the message's own
+    numeric dates settle (`14/11/2026` proves day first); without a year, the next
+    such day from the message date."""
+    readings: tuple[date, ...] | tuple[tuple[int, int], ...] = written.dates or written.day_months
+    if not readings:
+        return None
+    if len(readings) == 1:
+        chosen = readings[0]
+    else:
+        order = numeric_date_order(ctx.sources.email_text)
+        if order is None:
+            return None
+        chosen = readings[0] if order == "day_first" else readings[1]
+    if isinstance(chosen, date):
+        return chosen
+    month, day = chosen
+    return _next_day_month(month, day, ctx.reference - timedelta(days=1))
+
+
+def _source_of(text: str, sources: QuoteSources) -> SourceRef | None:
+    """Where a verified sentence is: the email, or the first attachment that has it."""
+    wanted = normalize_text(text)
+    if wanted in normalize_text(sources.email_text):
+        return SourceRef(kind="email_body", quote=text)
+    for name, document in sources.documents.items():
+        if document.readable and wanted in normalize_text(document.text):
+            lowered = name.casefold()
+            kind: Literal["pdf", "sheet", "email_body"] = (
+                "pdf"
+                if lowered.endswith(".pdf")
+                else "sheet"
+                if lowered.endswith((".xlsx", ".xls", ".csv"))
+                else "email_body"
+            )
+            return SourceRef(kind=kind, attachment=name, quote=text)
+    return None
 
 
 def _verified_notes(notes: Sequence[str], sources: QuoteSources) -> list[str]:

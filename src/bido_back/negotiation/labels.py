@@ -114,6 +114,8 @@ _REASONS: Final[dict[str, str]] = {
     "negotiation ends",
     "payment_terms_shorter": "Needs your decision: the payment terms are shorter than the RFQ "
     "asked",
+    "order_deadline_passed": "Needs your decision: the supplier's order deadline has passed, so "
+    "its offer no longer holds as stated",
     "offer_blocked": "Needs your decision: the offer cannot be negotiated as it is",
     "no_priced_line": "Needs your decision: the reply has no price for any line",
     "needs_review": "Needs your decision: the offer needs your review",
@@ -162,6 +164,43 @@ _WARNINGS: Final[dict[str, str]] = {
     "validity_ends_before_decision": "the offer expires before the negotiation ends",
     "payment_terms_shorter": "payment terms shorter than the RFQ asked",
     "line_not_quoted": "not quoted",
+    "order_deadline": "the supplier's offer holds only if the order reaches it by this date",
+    "order_deadline_passed": "the supplier's order deadline has passed: its offer (delivery "
+    "date included) no longer holds as stated",
+}
+
+# Why a supplier's reply could not be applied to its offer (the offer state's codes,
+# `bido_back.quotes.state`). Shared with the Copilot's follow-up tools.
+_OFFER_HOLDS: Final[dict[str, str]] = {
+    "amendment_without_explicit_preservation": "a partial update that does not say the other "
+    "terms are unchanged",
+    "amendment_without_prior_offer": "a partial update without an earlier offer",
+    "ambiguous_amendment_line_or_tier": "an update Bido cannot match to one line or tier",
+    "changed_commercial_basis_requires_replacement": "a change of the offer's commercial basis "
+    "(unit, price basis, minimum order, price conditions, currency, Incoterm or payment terms) "
+    "that Bido does not apply on its own",
+    "conflicting_update": "contradicting statements",
+    "conflicting_sources": "contradicting statements",
+    "supplier_clarification_required": "a reply that needs reading",
+    "uncertain_message_chronology": "replies whose order is unclear",
+    "untrusted_future_message_date": "a reply dated in the future",
+    "cyclic_reply_relationship": "replies whose order is unclear",
+    "unverified_withdrawal": "a withdrawal Bido could not verify",
+    "withdrawal_for_unknown_line": "a withdrawal of a line the offer does not have",
+}
+# The commercial terms a held reply may change (`pos1.unit`, `currency`).
+_HELD_FIELDS: Final[dict[str, str]] = {
+    "unit": "unit",
+    "price_basis_quantity": "price basis (quantity per price)",
+    "conditional_terms": "price conditions",
+    "moq": "minimum order quantity",
+    "currency": "currency",
+    "incoterm": "Incoterm",
+    "payment_terms": "payment terms",
+    "unit_price": "unit price",
+    "tooling_cost": "tooling cost",
+    "freight_cost": "freight cost",
+    "tax_rate_percent": "tax rate",
 }
 
 
@@ -187,6 +226,19 @@ def reason_text(code: str) -> str:
 
 def blocker_text(code: str) -> str:
     return _BLOCKERS.get(code, code.replace("_", " "))
+
+
+def hold_reason_text(code: str) -> str:
+    """Why a reply could not be applied, in words (unknown codes as they are)."""
+    return _OFFER_HOLDS.get(code, code.replace("_", " ").replace(":", ": "))
+
+
+def held_field_text(code: str) -> str:
+    """`pos1.unit` -> "line 1 unit", `currency` -> "currency"."""
+    where, _, name = code.partition(".")
+    if name and where.startswith("pos") and where[3:].isdigit():
+        return f"line {where[3:]} {_HELD_FIELDS.get(name, name.replace('_', ' '))}"
+    return _HELD_FIELDS.get(code, code.replace("_", " "))
 
 
 def warning_text(warning: PlanWarning) -> str:
@@ -240,6 +292,13 @@ def _details(plan: SupplierPlan) -> list[str]:
                     f"line {line.position}: "
                     + "; ".join(dict.fromkeys(blocker_text(b) for b in line.reasons))
                 )
+    if reason == "offer_state_requires_review":
+        if plan.hold_reasons:
+            why = dict.fromkeys(hold_reason_text(code) for code in plan.hold_reasons)
+            parts.append("why: " + "; ".join(why))
+        if plan.held_fields:
+            changed = ", ".join(held_field_text(code) for code in plan.held_fields)
+            parts.append(f"the reply changes: {changed}")
     if reason == "validity_ends_before_decision" and plan.valid_until is not None:
         parts.append(f"valid until {day(plan.valid_until)}")
     if reason == "clarification_due" and plan.detail in _AFTER_ANSWERS:
@@ -277,7 +336,14 @@ def phase_label(plan: SupplierPlan, *, chases_sent: int = 0) -> str:
     if plan.phase == "accepted_internally":
         extra: list[str] = []
         if plan.order_by is not None:
-            extra.append(f"order by {day(plan.order_by)} to meet the need-by dates")
+            supplier_deadline = any(
+                w.code == "order_deadline" and w.on == plan.order_by for w in plan.warnings
+            )
+            extra.append(
+                f"order by {day(plan.order_by)}, the supplier's order deadline"
+                if supplier_deadline
+                else f"order by {day(plan.order_by)} to meet the need-by dates"
+            )
         if plan.valid_until is not None:
             extra.append(f"valid until {day(plan.valid_until)}")
         not_quoted = [line for line in plan.lines if line.status in ("not_quoted", "declined")]

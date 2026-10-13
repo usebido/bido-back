@@ -25,6 +25,14 @@ How a reply changes the offer:
   are kept in `declined_line_positions` until a later reply offers them.
 - A buyer release ("use the current offer", `OfferEvent.released`) clears the
   holds up to that reply: the offer as shown is the offer.
+- An order deadline ("provided we receive the PO by 21/10/2026") is not a change of
+  the commercial basis: validation makes it the offer's `order_by` header field, and
+  an amendment applies it like any other stated term.
+- A change of the commercial basis an amendment cannot carry (unit, price basis, MOQ,
+  conditions, currency, Incoterm, payment terms) holds the offer as it was; each such
+  change is kept, with the value before and the value the reply states, in
+  `OfferState.held_changes` (`held_changes` in the stored offer state), so a person
+  sees what the reply asked to change.
 
 Holds are recomputed on every reply from this event history, never carried as
 leftovers: line issues that follow from a field (currency, missing price,
@@ -48,6 +56,7 @@ from bido_back.agents.catalog.contracts import (
     ProposalLineDraft,
     QuoteExtractionOutput,
 )
+from bido_back.comparison.compute import same_unit
 from bido_back.quotes.parsing import detect_currencies, normalize_text
 from bido_back.quotes.validation import (
     HEADER_FIELDS,
@@ -124,6 +133,37 @@ class OfferEvent:
 
 
 @dataclass(frozen=True, slots=True)
+class HeldChange:
+    """A term a reply changed that the offer could not take as it was (or took, and holds
+    for the buyer): the field, its line (None for the whole offer), and both values as
+    stored (`previous` is None when the offer had none)."""
+
+    message_id: UUID
+    field: str
+    position: int | None
+    previous: str | None
+    stated: str | None
+    # True when the offer now carries the stated value (an unasked change in a reply to
+    # our clarification); False when the offer kept the previous one.
+    applied: bool = False
+
+    @property
+    def code(self) -> str:
+        """`pos1.unit`, `currency`: the field and its line, for labels (no values)."""
+        return self.field if self.position is None else f"pos{self.position}.{self.field}"
+
+    def provenance(self) -> dict[str, JsonValue]:
+        return {
+            "message_id": str(self.message_id),
+            "field": self.field,
+            "position": self.position,
+            "previous": self.previous,
+            "stated": self.stated,
+            "applied": self.applied,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class OfferState:
     quote: ValidatedQuote
     active_message_id: UUID
@@ -140,6 +180,8 @@ class OfferState:
     declined_line_positions: tuple[int, ...] = ()
     # The replies whose holds are still active (not applied, or applied with a doubt).
     held_message_ids: tuple[UUID, ...] = ()
+    # What those replies changed in the commercial basis (see `HeldChange`).
+    held_changes: tuple[HeldChange, ...] = ()
 
     def provenance(self) -> dict[str, JsonValue]:
         return {
@@ -156,6 +198,7 @@ class OfferState:
             "answered_asks": [answer.provenance() for answer in self.answered],
             "declined_line_positions": list(self.declined_line_positions),
             "held_message_ids": [str(message_id) for message_id in self.held_message_ids],
+            "held_changes": [change.provenance() for change in self.held_changes],
         }
 
 
@@ -474,14 +517,31 @@ def _new_line(lines: Sequence[LineCheck], update: LineCheck) -> bool:
     )
 
 
-def _currency_changed(update: LineCheck, header: Mapping[str, FieldCheck]) -> bool:
-    """A price whose text names another currency than the offer's."""
+def _other_currencies(update: LineCheck, header: Mapping[str, FieldCheck]) -> tuple[str, ...]:
+    """The currencies a price's text names when none is the offer's (empty: no change)."""
     for name in _PRICED:
         source = update.fields[name].extracted.source
         currencies: set[str] = detect_currencies(source.quote) if source is not None else set()
         if currencies and header["currency"].parsed not in currencies:
-            return True
-    return False
+            return tuple(sorted(currencies))
+    return ()
+
+
+def _currency_change(
+    event: OfferEvent, update: LineCheck, header: Mapping[str, FieldCheck]
+) -> HeldChange | None:
+    """A line price in another currency than the offer's, as a held change."""
+    named = _other_currencies(update, header)
+    if not named:
+        return None
+    previous = header["currency"].parsed
+    return HeldChange(
+        message_id=event.message_id,
+        field="currency",
+        position=update.draft.rfq_line_position,
+        previous=_stored(previous),
+        stated=",".join(named),
+    )
 
 
 def _merged_line(old: LineCheck, update: LineCheck, fields: dict[str, FieldCheck]) -> LineCheck:
@@ -497,10 +557,52 @@ def _merged_line(old: LineCheck, update: LineCheck, fields: dict[str, FieldCheck
     )
 
 
+def _stored(value: object) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat() if isinstance(value, date) else str(value)
+
+
+def _basis_changed(name: str, old: FieldCheck, new: FieldCheck) -> bool:
+    """`new` states another value of a commercial-basis field than `old` (the same unit
+    or condition in other words, "pcs" for "piece", is no change)."""
+    if new.parsed is None or new.parsed == old.parsed:
+        return False
+    if name == "unit" and isinstance(old.parsed, str) and isinstance(new.parsed, str):
+        return not same_unit(old.parsed, new.parsed)
+    if isinstance(old.parsed, str) and isinstance(new.parsed, str):
+        return normalize_text(old.parsed) != normalize_text(new.parsed)
+    return True
+
+
+def _change(
+    event: OfferEvent,
+    name: str,
+    old: FieldCheck | None,
+    new: FieldCheck,
+    position: int | None,
+    *,
+    applied: bool = False,
+) -> HeldChange:
+    return HeldChange(
+        message_id=event.message_id,
+        field=name,
+        position=position,
+        previous=_stored(old.parsed) if old is not None else None,
+        stated=_stored(new.parsed),
+        applied=applied,
+    )
+
+
+_LINE_BASIS: Final = ("unit", "price_basis_quantity", "conditional_terms", "moq")
+_AmendResult = tuple[ValidatedQuote, tuple[str, ...], tuple[HeldChange, ...]]
+
+
 def _amend(
     previous: ValidatedQuote, event: OfferEvent, *, authority: OfferEvent | None = None
-) -> tuple[ValidatedQuote, tuple[str, ...]]:
-    """Apply an amendment: the merged offer, or `previous` and the reasons to hold.
+) -> _AmendResult:
+    """Apply an amendment: the merged offer, or `previous`, the reasons to hold and the
+    basis changes that hold it.
 
     `authority` is the later reply that covers this one (an amendment with an
     "other terms unchanged" statement, or answers to our clarification) when this
@@ -508,49 +610,51 @@ def _amend(
     """
     current = event.quote
     if authority is None and not _has_preservation(event):
-        return previous, ("amendment_without_explicit_preservation",)
+        return previous, ("amendment_without_explicit_preservation",), ()
     issues = tuple(
         issue
         for issue in current.issues
         if not (authority is not None and issue == "unverified:unchanged_terms")
     )
     if issues:
-        return previous, issues
+        return previous, issues, ()
     if current.output.conflicts:
-        return previous, ("conflicting_update",)
+        return previous, ("conflicting_update",), ()
     # A new currency/incoterm/payment basis cannot reuse old prices, even if a
     # broad preservation sentence also appears in the supplier's message.
-    changed_header = any(
-        current.header[name].parsed is not None
-        and current.header[name].parsed != previous.header[name].parsed
+    changed_header = tuple(
+        _change(event, name, previous.header[name], current.header[name], None)
         for name in _COMMERCIAL_HEADER
+        if _basis_changed(name, previous.header[name], current.header[name])
     )
     if changed_header:
-        return previous, ("changed_commercial_basis_requires_replacement",)
+        return previous, (_UNASKED_CHANGE,), changed_header
     basis = f"covered_by:{authority.message_id}" if authority is not None else None
     header = _merge_fields(previous.header, current.header, event, basis)
     lines = list(previous.lines)
     touched: set[int] = set()
     added: list[LineCheck] = []
     for update in current.lines:
-        if _currency_changed(update, header):
-            return previous, ("changed_commercial_basis_requires_replacement",)
+        position = update.draft.rfq_line_position
+        if (currency := _currency_change(event, update, header)) is not None:
+            return previous, (_UNASKED_CHANGE,), (currency,)
         if _new_line(lines, update):
             # A requested line the offer lacked ("the shaft, other terms unchanged").
             added.append(update)
             continue
         matches = _matches(lines, update)
         if len(matches) != 1 or matches[0] in touched:
-            return previous, ("ambiguous_amendment_line_or_tier",)
+            return previous, ("ambiguous_amendment_line_or_tier",), ()
         index = matches[0]
         touched.add(index)
         old = lines[index]
-        if any(
-            update.fields[name].parsed is not None
-            and update.fields[name].parsed != old.fields[name].parsed
-            for name in ("unit", "price_basis_quantity", "conditional_terms", "moq")
-        ):
-            return previous, ("changed_commercial_basis_requires_replacement",)
+        changed = tuple(
+            _change(event, name, old.fields[name], update.fields[name], position)
+            for name in _LINE_BASIS
+            if _basis_changed(name, old.fields[name], update.fields[name])
+        )
+        if changed:
+            return previous, (_UNASKED_CHANGE,), changed
         lines[index] = _merged_line(old, update, _merge_fields(old.fields, update.fields, event))
     for index, line in enumerate(lines):
         if index not in touched:
@@ -558,7 +662,8 @@ def _amend(
                 line,
                 fields={name: _inherit(check, event, basis) for name, check in line.fields.items()},
             )
-    return replace(current, header=header, lines=(*lines, *added), issues=previous.issues), ()
+    merged = replace(current, header=header, lines=(*lines, *added), issues=previous.issues)
+    return merged, (), ()
 
 
 # --- Answers to our clarification -------------------------------------------------------------
@@ -624,9 +729,10 @@ _UNASKED_CHANGE: Final = "changed_commercial_basis_requires_replacement"
 
 def _supplement(
     previous: ValidatedQuote, event: OfferEvent
-) -> tuple[ValidatedQuote, tuple[str, ...], bool]:
+) -> tuple[ValidatedQuote, tuple[str, ...], bool, tuple[HeldChange, ...]]:
     """A reply to our clarification, applied as an amendment of exactly what was asked:
-    (the offer, the reasons to hold it, whether the reply was applied).
+    (the offer, the reasons to hold it, whether the reply was applied, the commercial
+    terms it changed unasked).
 
     The asked fields are taken from the reply; everything else carries over, with no
     "other terms unchanged" sentence. Restated values and filled gaps change nothing
@@ -639,9 +745,9 @@ def _supplement(
     if current.output.conflicts or any(
         issue.startswith("conflicting_sources") for issue in current.issues
     ):
-        return previous, ("conflicting_update",), False
+        return previous, ("conflicting_update",), False, ()
     whole_offer = current.output.reply_kind == "replacement"
-    unasked = False
+    unasked: list[HeldChange] = []
     header_asked = {
         name
         for answer in event.answers
@@ -664,21 +770,22 @@ def _supplement(
             commercial=name in _COMMERCIAL_HEADER,
             whole_offer=whole_offer,
         )
-        unasked = unasked or changed
+        if changed:
+            unasked.append(_change(event, name, previous.header[name], new, None, applied=True))
     lines = list(previous.lines)
     touched: set[int] = set()
     added: list[LineCheck] = []
     for update in current.lines:
         if update.rfq_line_id is None:
-            return previous, ("ambiguous_amendment_line_or_tier",), False
-        if _currency_changed(update, header):
-            return previous, (_UNASKED_CHANGE,), False
+            return previous, ("ambiguous_amendment_line_or_tier",), False, ()
+        if (currency := _currency_change(event, update, header)) is not None:
+            return previous, (_UNASKED_CHANGE,), False, (currency,)
         if _new_line(lines, update):
             added.append(update)
             continue
         matches = _matches(lines, update)
         if len(matches) != 1 or matches[0] in touched:
-            return previous, ("ambiguous_amendment_line_or_tier",), False
+            return previous, ("ambiguous_amendment_line_or_tier",), False, ()
         index = matches[0]
         touched.add(index)
         old = lines[index]
@@ -694,7 +801,8 @@ def _supplement(
                 commercial=name in _COMMERCIAL_LINE,
                 whole_offer=whole_offer,
             )
-            unasked = unasked or changed
+            if changed:
+                unasked.append(_change(event, name, old.fields[name], new, position, applied=True))
         lines[index] = _merged_line(old, update, fields)
     for index, line in enumerate(lines):
         if index not in touched:
@@ -705,7 +813,7 @@ def _supplement(
                 },
             )
     merged = replace(current, header=header, lines=(*lines, *added), issues=previous.issues)
-    return merged, (_UNASKED_CHANGE,) if unasked else (), True
+    return merged, (_UNASKED_CHANGE,) if unasked else (), True, tuple(unasked)
 
 
 # --- Issues that follow from the fields -------------------------------------------------------
@@ -826,9 +934,16 @@ class _Progress:
     # Amendments held only for lack of an "other terms unchanged" statement.
     pending: list[OfferEvent] = field(default_factory=list[OfferEvent])
     declined: set[int] = field(default_factory=set[int])
+    # The basis changes behind the holds, in order.
+    changes: list[HeldChange] = field(default_factory=list[HeldChange])
 
     def hold(self, event: OfferEvent, *reasons: str) -> None:
         self.holds.extend((reason, event.message_id) for reason in reasons)
+
+    def clear(self) -> None:
+        self.holds = []
+        self.pending = []
+        self.changes = []
 
     def apply_pending(self, authority: OfferEvent) -> None:
         """Earlier amendments held only for a missing "other terms unchanged", now covered
@@ -843,8 +958,9 @@ class _Progress:
                     and reason == "amendment_without_explicit_preservation"
                 )
             ]
-            self.effective, reasons = _amend(self.effective, earlier, authority=authority)
+            self.effective, reasons, changes = _amend(self.effective, earlier, authority=authority)
             self.hold(earlier, *reasons)
+            self.changes.extend(changes)
         self.pending = []
 
     def apply(self, event: OfferEvent) -> bool:
@@ -855,16 +971,16 @@ class _Progress:
         if answers_offer(event, self.effective):
             self.apply_pending(event)
             assert self.effective is not None
-            self.effective, reasons, applied = _supplement(self.effective, event)
+            self.effective, reasons, applied, changes = _supplement(self.effective, event)
             self.hold(event, *reasons)
+            self.changes.extend(changes)
             if applied:
                 self.kind = "amendment"
             return applied
         if kind == "replacement":
             self.effective = current
             self.kind = "replacement"
-            self.holds = []
-            self.pending = []
+            self.clear()
             return True
         if kind == "amendment":
             return self._amendment(event)
@@ -890,8 +1006,9 @@ class _Progress:
             self.pending.append(event)
             return False
         self.apply_pending(event)
-        self.effective, reasons = _amend(self.effective, event)
+        self.effective, reasons, changes = _amend(self.effective, event)
         self.hold(event, *reasons)
+        self.changes.extend(changes)
         if reasons:
             return False
         self.kind = "amendment"
@@ -970,8 +1087,7 @@ def reconcile(events: list[OfferEvent]) -> OfferState:
             progress.hold(event, "conflicting_sources")
         if event.released:
             # The buyer took the offer as it stood after this reply: its holds go.
-            progress.holds = []
-            progress.pending = []
+            progress.clear()
             if progress.kind == "clarification":
                 progress.kind = "amendment"
             released_at = index
@@ -997,4 +1113,5 @@ def reconcile(events: list[OfferEvent]) -> OfferState:
         answered=answered,
         declined_line_positions=tuple(sorted(progress.declined)),
         held_message_ids=tuple(dict.fromkeys(message_id for _, message_id in progress.holds)),
+        held_changes=tuple(progress.changes),
     )

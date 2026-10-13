@@ -29,6 +29,7 @@ from bido_back.negotiation.signals import (
     extraction_expected_delivery,
     latest_order_date,
     offer_signals,
+    until_order_by,
 )
 from bido_back.quotes.lead_time import LeadTime, encode_lead_time
 from bido_back.supplier_email.builders import Header, RequestedLine
@@ -130,6 +131,38 @@ def test_offer_signals_read_the_extractions_typed_signals() -> None:
     # Questions the extraction kept only in the offer state still hold the offer.
     legacy = offer_signals({"_offer_state": {"technical_questions": ["Material?", "Finish?"]}})
     assert legacy.questions == 2 and not legacy.final_offer
+
+
+def test_an_order_after_the_suppliers_order_deadline_has_no_delivery_date() -> None:
+    # RFQ-9: "all 2,000 pcs by 14/11/2026, provided we receive the purchase order by 21/10".
+    by_date = QuotedLeadTime(
+        days=36, fields=stated(LeadTime(unit="date", delivery_date=date(2026, 11, 14)))
+    )
+    bounded = until_order_by(extraction_expected_delivery, date(2026, 10, 21))
+    assert bounded(by_date, date(2026, 10, 21)) == (date(2026, 11, 14), True)
+    assert bounded(by_date, date(2026, 10, 22)) is None
+    # The latest order date never passes the supplier's deadline.
+    assert latest_order_date(bounded, by_date, date(2026, 12, 1), FRIDAY) == date(2026, 10, 21)
+    assert until_order_by(extraction_expected_delivery, None) is extraction_expected_delivery
+
+
+def test_offer_signals_read_the_order_deadline_and_why_the_offer_is_held() -> None:
+    signals = offer_signals(
+        {
+            "order_by": {"parsed": "2026-10-21", "needs_review": False},
+            "_offer_state": {
+                "issues": ["changed_commercial_basis_requires_replacement"],
+                "held_changes": [
+                    {"field": "unit", "position": 1, "previous": "piece", "stated": "kg"},
+                    {"field": "currency", "position": None, "previous": "BRL", "stated": "USD"},
+                ],
+            },
+        }
+    )
+    assert signals.order_by == date(2026, 10, 21)
+    assert signals.hold_reasons == ("changed_commercial_basis_requires_replacement",)
+    assert signals.held_fields == ("pos1.unit", "currency")
+    assert offer_signals({"order_by": {"parsed": None}}).order_by is None
 
 
 def test_a_clarification_blocks_while_open() -> None:

@@ -26,7 +26,14 @@ shape here, so the planner (`bido_back.negotiation.planner`) stays pure:
      (never asked again);
    - `questions`: the supplier's questions (and `_offer_state.technical_questions`);
      only the buyer can answer them. Bido counts them and never reads their
-     text into a decision.
+     text into a decision;
+   - `order_by`: the date the supplier must receive the order by for its offer
+     to hold ("provided we receive the PO by 21/10/2026",
+     `quotes.terms.offer_terms(...).order_by`). An order after it has no delivery
+     date (`until_order_by`): the supplier's promise lapsed;
+   - `hold_reasons` and `held_fields`: why the offer is held for the buyer
+     (`_offer_state.issues`) and which commercial terms the held reply changed
+     (`_offer_state.held_changes`, as `pos1.unit` / `currency` codes, no values).
 3. `ClarificationState` (the clarification ledger, N2b): per supplier, what is
    still to ask (`to_ask` codes, `items` typed), what was asked and not
    answered, and what was asked once and is still unusable. One open request
@@ -144,22 +151,66 @@ class OfferSignals:
     final_offer: bool = False
     declined_positions: frozenset[int] = frozenset()
     questions: int = 0
+    order_by: date | None = None
+    hold_reasons: tuple[str, ...] = ()
+    held_fields: tuple[str, ...] = ()
 
 
 def offer_signals(fields: Mapping[str, object]) -> OfferSignals:
     """The reply facts the planner uses, from a proposal's typed terms (see above)."""
-    signals = offer_terms(fields).signals
+    terms = offer_terms(fields)
+    signals = terms.signals
     technical = 0
+    reasons: list[str] = []
+    held: list[str] = []
     raw = fields.get("_offer_state")
     if isinstance(raw, dict):
-        questions = cast(dict[str, object], raw).get("technical_questions")
+        state = cast(dict[str, object], raw)
+        questions = state.get("technical_questions")
         if isinstance(questions, list):
             technical = len(cast(list[object], questions))
+        issues = state.get("issues")
+        if isinstance(issues, list):
+            reasons = [str(issue) for issue in cast(list[object], issues)]
+        changes = state.get("held_changes")
+        if isinstance(changes, list):
+            held = [
+                code
+                for change in cast(list[object], changes)
+                if isinstance(change, dict)
+                and (code := _change_code(cast(dict[str, object], change))) is not None
+            ]
     return OfferSignals(
         final_offer=signals.final_offer,
         declined_positions=frozenset(signals.declined_line_positions),
         questions=max(len(signals.questions), technical),
+        order_by=terms.order_by,
+        hold_reasons=tuple(dict.fromkeys(reasons)),
+        held_fields=tuple(dict.fromkeys(held)),
     )
+
+
+def _change_code(change: Mapping[str, object]) -> str | None:
+    """`pos1.unit` / `currency`: a stored held change as a code (no values)."""
+    name = change.get("field")
+    if not isinstance(name, str):
+        return None
+    position = change.get("position")
+    return f"pos{position}.{name}" if isinstance(position, int) else name
+
+
+def until_order_by(expected_delivery: ExpectedDelivery, order_by: date | None) -> ExpectedDelivery:
+    """`expected_delivery` for an offer that holds only when ordered by `order_by`: an
+    order after that day has no delivery date (the supplier's promise lapsed), so the
+    latest order date never passes it."""
+    if order_by is None:
+        return expected_delivery
+    deadline = order_by
+
+    def bounded(line: QuotedLeadTime, order_date: date) -> tuple[date, bool] | None:
+        return None if order_date > deadline else expected_delivery(line, order_date)
+
+    return bounded
 
 
 # --- The clarification ledger (N2b) -------------------------------------------------------
