@@ -32,6 +32,7 @@ from bido_back.quotes.parsing import (
     parse_canonical,
     parse_decimal,
     ranges_in,
+    restated_price,
     stated_values,
 )
 
@@ -389,8 +390,99 @@ def test_an_order_deadline_with_another_condition_is_not_only_a_deadline() -> No
         "BRL 2.95 if ordered by 21/10/2026",
         "subject to stock, if ordered by 21/10/2026",
         "Delivery by 14/11/2026",
+        "discount 5% if ordered by 21/10/2026",
+        "Skonto 2 % bei Bestellung bis zum 21.10.2026",
+        "to hold the price of 2.95 per piece, the order must be placed by 21/10/2026",
     ):
         assert not is_order_deadline_only(text), text
+
+
+RFQ9_ADDITION = (
+    "to hold the price of BRL 2.90 per piece and delivery by 14/11/2026, "
+    "the purchase order must be placed by 24/10/2026"
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "decimal", "values", "currencies", "units"),
+    [
+        (RFQ9_ADDITION, ".", {Decimal("2.90")}, {"BRL"}, ("piece",)),
+        (
+            RFQ9_ADDITION.replace("BRL 2.90", "2.90"),
+            ".",
+            {Decimal("2.90")},
+            set[str](),
+            ("piece",),
+        ),
+        (
+            "R$ 2,90 por peça, desde que o pedido seja colocado até 24/10/2026",
+            None,
+            {Decimal("2.90")},
+            {"BRL"},
+            ("peça",),
+        ),
+        (
+            "EUR 2,90 pro Stück, sofern die Bestellung bis zum 24.10.2026 eingeht",
+            ",",
+            {Decimal("2.90")},
+            {"EUR"},
+            ("Stück",),
+        ),
+        ("BRL 2.95 if ordered by Oct 21, 2026", ".", {Decimal("2.95")}, {"BRL"}, ()),
+        # Every number besides the dates is kept, for the caller to compare.
+        (
+            RFQ9_ADDITION.replace("per piece", "per piece, or BRL 2.80 per piece"),
+            ".",
+            {Decimal("2.90"), Decimal("2.80")},
+            {"BRL"},
+            ("piece", "piece"),
+        ),
+        (
+            RFQ9_ADDITION.replace("per piece", "per piece for 2,000 pcs"),
+            ".",
+            {Decimal("2.90"), Decimal("2000")},
+            {"BRL"},
+            ("piece",),
+        ),
+    ],
+)
+def test_an_order_deadline_reads_the_price_it_names(
+    text: str,
+    decimal: DecimalSeparator | None,
+    values: set[Decimal],
+    currencies: set[str],
+    units: tuple[str, ...],
+) -> None:
+    assert not is_order_deadline_only(text)
+    stated = restated_price(text, decimal=decimal)
+    assert stated is not None
+    assert (set(stated.values), set(stated.currencies), stated.units) == (
+        values,
+        currencies,
+        units,
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "decimal"),
+    [
+        # Not an order deadline, or one with another condition beside it.
+        ("BRL 2.90 per piece", "."),
+        ("BRL 2.90 per piece, minimum 5,000 pcs, if ordered by 24/10/2026", "."),
+        ("BRL 2.90 per piece, 5% discount if ordered by 24/10/2026", "."),
+        # Another basis than one unit.
+        ("BRL 290 per 100 pcs if ordered by 24/10/2026", "."),
+        ("BRL 2.90 per thousand if ordered by 24/10/2026", "."),
+        # A number that reads two ways with no separator proven.
+        ("BRL 1,250 if ordered by 24/10/2026", None),
+        # No price at all: `is_order_deadline_only` reads it.
+        ("provided we receive the purchase order by 21/10/2026", "."),
+    ],
+)
+def test_no_restated_price_without_a_lone_order_deadline_and_a_readable_price(
+    text: str, decimal: DecimalSeparator | None
+) -> None:
+    assert restated_price(text, decimal=decimal) is None
 
 
 def test_a_numeric_date_proves_its_order_and_a_price_does_not() -> None:
