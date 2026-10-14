@@ -4,7 +4,15 @@ Every number and date Bido asks a supplier for comes from here; the model (or
 the email renderer) only puts it into words. The supplier-level stages (what
 to send next, when to stop) are in `bido_back.negotiation.planner`.
 
-Price (`price_position`), against the buyer's target `T` and private maximum `M`:
+Price (`price_position`), against the buyer's target `T` and private maximum `M`.
+`T` and `M` are UNIT prices ("per piece", what the buyer types and what every ask
+names), so they are compared with the supplier's offered unit price (`UnitPrice`,
+in the base currency), never with the effective price that spreads one-off charges
+such as tooling over the quantity (`EffectivePrice`). The two are distinct types so
+a comparison of one with the other's limit does not type-check. An effective price
+above `M` while the unit price is within it is a warning for the buyer
+(`bido_back.negotiation.planner`, `effective_above_max`), never a rejection:
+
 
 - `in_target`: the offer is at or below `T` (without a target: at or below the
   internal price-history reference, which is never disclosed). Nothing to ask.
@@ -47,7 +55,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import ROUND_FLOOR, ROUND_HALF_UP, Decimal
-from typing import Final, Literal
+from typing import Final, Literal, NewType
 
 from bido_back.decimals import plain_decimal
 
@@ -82,6 +90,14 @@ DEFAULT_MINOR_UNIT: Final = 2
 MAX_PLACES: Final = 4
 # The storage precision of prices (rfq_lines / proposal_lines are numeric(18, 6)).
 STORED_PLACES: Final = 6
+
+# The supplier's offered price per unit (per piece), in the RFQ's base currency: what the
+# buyer's target and maximum apply to, and what an ask names.
+UnitPrice = NewType("UnitPrice", Decimal)
+# The unit price plus one-off charges (tooling) spread over the quantity, in the base
+# currency: the cost of the line per unit, for ranking suppliers and for the buyer's
+# information. Never compared with the target or the maximum.
+EffectivePrice = NewType("EffectivePrice", Decimal)
 
 PriceStatus = Literal["in_target", "ask_met", "in_range", "above_max", "no_target"]
 DeliveryStatus = Literal[
@@ -159,19 +175,20 @@ FINAL_CONCESSION: Final = Decimal("0.5")
 
 def price_position(
     *,
-    offered: Decimal,
+    offered: UnitPrice,
     target: Decimal | None,
     max_price: Decimal | None,
     places: int,
     history: Decimal | None = None,
     previous_ask: Decimal | None = None,
-    previous_offer: Decimal | None = None,
+    previous_offer: UnitPrice | None = None,
     final_round: bool = False,
 ) -> PriceAsk:
     """Where one line's price stands and what we ask for it (see the module docstring).
 
-    `previous_ask` / `previous_offer`: our last disclosed ask on this line and
-    the supplier's price when we made it (from emails actually sent).
+    `offered`: the supplier's unit price (never the effective price with one-off
+    charges). `previous_ask` / `previous_offer`: our last disclosed ask on this line and
+    the supplier's unit price when we made it (from emails actually sent).
     `final_round`: the ask is for the best-and-final request.
     """
     if target is not None and max_price is not None and target > max_price:

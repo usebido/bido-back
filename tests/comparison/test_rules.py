@@ -27,6 +27,7 @@ def requested(
     qualification: str | None = None,
     need_by: date | None = None,
     mpn: str = "GCM188R71H104KA57D",
+    max_unit_price: str | None = None,
 ) -> RequestedLine:
     return RequestedLine(
         id=uuid4(),
@@ -38,6 +39,7 @@ def requested(
         incoterm="DAP",
         need_by=need_by,
         qualification=qualification,
+        max_unit_price=D(max_unit_price) if max_unit_price is not None else None,
     )
 
 
@@ -54,6 +56,8 @@ def offer(
     moq: str | None = None,
     low: tuple[str, ...] = (),
     currency_low: bool = False,
+    tooling: str | None = None,
+    currency: str = "EUR",
 ) -> SupplierQuote:
     return SupplierQuote(
         invite_id=uuid4(),
@@ -61,7 +65,7 @@ def offer(
         supplier_name=name,
         proposal_id=uuid4(),
         version=1,
-        currency="EUR",
+        currency=currency,
         valid_until=valid_until,
         incoterm="DAP",
         supplier_type=supplier_type,
@@ -78,15 +82,16 @@ def offer(
                 lead_time_days=lead_time_days,
                 qualification=qualification,
                 fields={name: FieldInfo(confidence=0.4) for name in low},
+                tooling_cost=D(tooling) if tooling is not None else None,
             ),
         ),
     )
 
 
-def compare(line: RequestedLine, *quotes: SupplierQuote) -> Comparison:
+def compare(line: RequestedLine, *quotes: SupplierQuote, base: str = "EUR") -> Comparison:
     comparison = compute_comparison(
         rfq_id=uuid4(),
-        base_currency="EUR",
+        base_currency=base,
         lines=[line],
         quotes=quotes,
         rates={},
@@ -315,3 +320,68 @@ def test_a_broker_alone_wins_and_says_so() -> None:
     assert rec.reasons == ["only_eligible_offer"]
     assert rec.advisories == ["only_unauthorized_offers"]
     assert "Only unauthorized resellers offered this line" in rec.justification
+
+
+# --- The buyer's maximum is a unit price ------------------------------------------------
+
+
+def test_rfq9_one_off_charges_above_the_maximum_are_a_warning_not_a_blocker() -> None:
+    # RFQ-9 (2026-10-13): maximum 3.05 per piece, 2,000 pieces at 2.90 plus tooling 1,250:
+    # the effective price is 3.525, above the maximum; the unit price is within it.
+    line = requested(2000, max_unit_price="3.05")
+    result = compare(
+        line, offer(line, "Torino", "2.90", tooling="1250", currency="BRL"), base="BRL"
+    )
+
+    [rec] = result.recommendations
+    assert rec.supplier_name == "Torino"
+    assert (rec.unit_price_base, rec.tooling_base, rec.effective_unit_price_base) == (
+        D("2.90"),
+        D("1250.00"),
+        D("3.525"),
+    )
+    assert "effective_above_max" in rec.advisories
+    assert rec.readiness == "needs_review"
+    assert "with one-off charges the effective price per unit is above it" in rec.justification
+    cell = result.suppliers[0].cells[0]
+    assert (cell.buyer_limit_issues, cell.buyer_limit_warnings) == ([], ["effective_above_max"])
+
+
+def test_a_unit_price_above_the_maximum_is_never_recommended() -> None:
+    line = requested(2000, max_unit_price="3.05")
+    result = compare(line, offer(line, "Torino", "3.10", tooling="1250"))
+
+    [rec] = result.recommendations
+    assert rec.invite_id is None and rec.readiness == "no_feasible_offer"
+    assert rec.excluded[0].reasons == ["above_buyer_maximum"]
+
+
+def test_without_one_off_charges_the_maximum_reads_as_before() -> None:
+    line = requested(2000, max_unit_price="3.05")
+    within = compare(line, offer(line, "Torino", "2.90"))
+    above = compare(line, offer(line, "Torino", "3.06"))
+
+    [rec] = within.recommendations
+    assert (rec.supplier_name, rec.unit_price_base, rec.tooling_base) == (
+        "Torino",
+        D("2.90"),
+        None,
+    )
+    assert "effective_above_max" not in rec.advisories
+    assert within.suppliers[0].cells[0].buyer_limit_warnings == []
+    assert above.recommendations[0].excluded[0].reasons == ["above_buyer_maximum"]
+
+
+def test_offers_are_still_ranked_by_their_effective_price() -> None:
+    # Cheaper per piece, dearer with its tooling: the other offer wins the ranking.
+    line = requested(2000, max_unit_price="3.05")
+    result = compare(
+        line,
+        offer(line, "Torino", "2.90", tooling="1250"),
+        offer(line, "Milano", "3.00"),
+    )
+
+    [rec] = result.recommendations
+    assert (rec.supplier_name, rec.effective_unit_price_base) == ("Milano", D("3.00"))
+    assert "effective_above_max" not in rec.advisories
+    assert [a.supplier_name for a in rec.alternatives] == ["Torino"]

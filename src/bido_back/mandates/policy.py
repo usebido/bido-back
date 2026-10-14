@@ -74,7 +74,10 @@ def _decimal(value: JsonValue) -> Decimal | None:
 def negotiation_terms_problem(
     terms: Mapping[str, JsonValue], mandate: ApproveMandateArgs
 ) -> str | None:
-    """Every price asked is within the mandate's maximum; same currency; known lines."""
+    """Every price asked is within the mandate's maximum; same currency; known lines.
+
+    Asks and the maximum are both unit prices (one-off charges such as tooling are never
+    in either), so they compare directly."""
     if terms.get("currency") != mandate.currency:
         return "currency_not_in_mandate"
     limits = {str(line.rfq_line_id): line for line in mandate.lines}

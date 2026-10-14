@@ -55,7 +55,9 @@ class LineLimitsView(BaseModel):
     position: int
     description: str
     mpn: str | None
-    # In the RFQ's base currency. Suppliers are told the target, never the max.
+    # In the RFQ's base currency, per unit: compared with the offered UNIT price, never
+    # with the effective price that spreads one-off charges (tooling) over the quantity.
+    # Suppliers are told the target, never the max.
     target_unit_price: Decimal | None
     max_unit_price: Decimal | None
     max_lead_time_days: int | None
@@ -144,10 +146,16 @@ class NegotiationMessageView(BaseModel):
 class LineDecisionView(BaseModel):
     rfq_line_id: UUID
     decision: LineDecisionName
+    # The offered unit price: what the target and the maximum apply to.
     offered_unit_price_base: Decimal | None
     ask_unit_price: Decimal | None
     lead_time_days: int | None
     ask_lead_time_days: int | None
+    # The unit price plus one-off charges (tooling) per unit, shown next to it.
+    effective_unit_price_base: Decimal | None = None
+    # The unit price is within the maximum, the effective price above it: the buyer
+    # decides knowingly (neither accepted internally nor rejected).
+    effective_above_max: bool = False
 
 
 class LinePlanView(BaseModel):
@@ -156,6 +164,8 @@ class LinePlanView(BaseModel):
     rfq_line_id: UUID
     position: int
     status: LinePlanStatus
+    # Judged on the offered unit price (`offered_unit_price_base`) against the target and
+    # the maximum; one-off charges never decide it.
     price: LinePriceStatus | None = None
     delivery: LineDeliveryStatus | None = None
     offered_unit_price_base: Decimal | None = None
@@ -170,6 +180,11 @@ class LinePlanView(BaseModel):
     # In target, on time, nothing open: acceptable as it is.
     acceptable: bool = False
     reasons: list[str] = Field(default_factory=list[str])
+    # The unit price plus one-off charges (tooling) per unit, shown next to it.
+    effective_unit_price_base: Decimal | None = None
+    # The unit price is within the maximum, the effective price above it (also a reason
+    # code): the buyer decides knowingly.
+    effective_above_max: bool = False
 
 
 class SupplierStateView(BaseModel):
@@ -235,9 +250,12 @@ class OutcomeLine(BaseModel):
     supplier_name: str | None
     effective_unit_price_base: Decimal | None
     lead_time_days: int | None
+    # Whether the recommended UNIT price is within the buyer's target (the target and the
+    # maximum apply to the unit price, never to the effective price).
     within_target: bool | None
-    # The recommended price is above the buyer's target: said, never hidden. It is within
-    # the maximum (an offer above the maximum is never recommended); the buyer decides.
+    # The recommended unit price is above the buyer's target: said, never hidden. It is
+    # within the maximum (an offer above the maximum is never recommended); the buyer
+    # decides.
     above_target: bool = False
     justification: str
     readiness: Literal["ready_for_buyer_review", "needs_review", "no_feasible_offer"] = (
@@ -256,6 +274,16 @@ class OutcomeLine(BaseModel):
     proposal_line_id: UUID | None = None
     evidence_message_ids: list[UUID] = Field(default_factory=list[UUID])
     landed_total_base: Decimal | None = None
+    # The offered unit price and the one-off tooling charge (not per unit), in the base
+    # currency; `effective_unit_price_base` is the unit price plus the tooling per unit.
+    # None on outcomes stored before they were recorded.
+    unit_price_base: Decimal | None = None
+    tooling_base: Decimal | None = None
+    # The unit price is within the maximum, but with the one-off charges the effective
+    # price is above it: shown to the buyer (`price_warning`), never hidden, never a
+    # rejection.
+    effective_above_max: bool = False
+    price_warning: str | None = None
 
     @model_validator(mode="before")
     @classmethod

@@ -834,6 +834,7 @@ class PrepareSendOut(BaseModel):
 class NegotiationLineOut(BaseModel):
     position: int
     decision: str
+    # The unit price: what the target and the maximum (and `price`) are judged on.
     offered_unit_price: Decimal | None
     ask_unit_price: Decimal | None
     lead_time_days: int | None
@@ -847,6 +848,10 @@ class NegotiationLineOut(BaseModel):
     required_by: date | None = None
     expected_delivery: date | None = None
     reasons: list[str] = Field(default_factory=list[str])
+    # The unit price plus one-off charges (tooling) per unit; above the maximum while the
+    # unit price is within it: `effective_above_max` (tell the buyer).
+    effective_unit_price: Decimal | None = None
+    effective_above_max: bool = False
 
 
 class NegotiationEmailOut(BaseModel):
@@ -2375,6 +2380,10 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                         required_by=plan.required_by if plan else None,
                         expected_delivery=plan.expected_delivery if plan else None,
                         reasons=plan.reasons if plan else [],
+                        effective_unit_price=plain(line.effective_unit_price_base)
+                        if line.effective_unit_price_base is not None
+                        else None,
+                        effective_above_max=line.effective_above_max,
                     )
                 )
             state = invite.state
@@ -2417,6 +2426,21 @@ def copilot_tools(deps: CopilotToolDeps) -> tuple[AnyTool, ...]:
                 note += (
                     f" The best offer is ABOVE TARGET on line(s) {lines_text} (within the "
                     "maximum): tell the buyer, it is their decision."
+                )
+            tooled = sorted(
+                {
+                    positions.get(o.rfq_line_id, 0)
+                    for o in view.recommendation
+                    if o.effective_above_max
+                }
+            )
+            if tooled:
+                lines_text = ", ".join(str(p) for p in tooled)
+                note += (
+                    f" On line(s) {lines_text} the unit price is within the maximum but, with "
+                    "one-off charges (tooling), the effective price per unit is ABOVE THE "
+                    "MAXIMUM: tell the buyer (get_negotiation_outcome gives the amounts), it "
+                    "is their decision."
                 )
             if uncovered:
                 lines_text = ", ".join(str(p) for p in uncovered)

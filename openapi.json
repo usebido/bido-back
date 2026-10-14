@@ -2762,6 +2762,13 @@
             "title": "Buyer Limit Issues",
             "type": "array"
           },
+          "buyer_limit_warnings": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Buyer Limit Warnings",
+            "type": "array"
+          },
           "conditional_terms": {
             "anyOf": [
               {
@@ -3017,6 +3024,18 @@
           "tier": {
             "title": "Tier",
             "type": "integer"
+          },
+          "tooling_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tooling Base"
           },
           "tooling_cost": {
             "anyOf": [
@@ -7578,6 +7597,23 @@
             "title": "Decision",
             "type": "string"
           },
+          "effective_above_max": {
+            "default": false,
+            "title": "Effective Above Max",
+            "type": "boolean"
+          },
+          "effective_unit_price_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Unit Price Base"
+          },
           "lead_time_days": {
             "anyOf": [
               {
@@ -7853,6 +7889,23 @@
               }
             ],
             "title": "Delivery"
+          },
+          "effective_above_max": {
+            "default": false,
+            "title": "Effective Above Max",
+            "type": "boolean"
+          },
+          "effective_unit_price_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Effective Unit Price Base"
           },
           "expected_delivery": {
             "anyOf": [
@@ -10121,6 +10174,11 @@
             "title": "Decision Version",
             "type": "integer"
           },
+          "effective_above_max": {
+            "default": false,
+            "title": "Effective Above Max",
+            "type": "boolean"
+          },
           "effective_unit_price_base": {
             "anyOf": [
               {
@@ -10217,6 +10275,17 @@
             "title": "Policy Reasons",
             "type": "array"
           },
+          "price_warning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Warning"
+          },
           "proposal_id": {
             "anyOf": [
               {
@@ -10282,6 +10351,30 @@
           "tier": {
             "title": "Tier",
             "type": "integer"
+          },
+          "tooling_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tooling Base"
+          },
+          "unit_price_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Price Base"
           },
           "within_target": {
             "anyOf": [
@@ -13773,6 +13866,30 @@
           "tier": {
             "title": "Tier",
             "type": "integer"
+          },
+          "tooling_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tooling Base"
+          },
+          "unit_price_base": {
+            "anyOf": [
+              {
+                "pattern": "^(?!^[-+.]*$)[+-]?0*\\d*\\.?\\d*$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Unit Price Base"
           }
         },
         "required": [

@@ -13,7 +13,12 @@ requested line and every requested quantity tier:
   leaves the base amounts empty and flagged.
 - **Tooling** (one-off NRE) is amortized over the tier quantity:
   `tooling_per_unit = tooling / tier`, and the line total is
-  `unit_price * tier + tooling`.
+  `unit_price * tier + tooling`. The effective unit price
+  (`unit_price + tooling_per_unit`) ranks offers; the buyer's maximum is a UNIT
+  price and is compared with the unit price only (`above_buyer_maximum`). When
+  the unit price is within the maximum and the effective price is above it, the
+  cell says so (`buyer_limit_warnings: effective_above_max`): a warning for the
+  buyer, never a blocker.
 - **Units** are compared, not converted: only identical units (and a few
   spellings of "pieces") count as the same. A mismatch is flagged and the
   line gets no total.
@@ -231,9 +236,17 @@ class Cell(BaseModel):
     known_total_base: Decimal | None = None
     landed_total_base: Decimal | None = None
     cost_gaps: list[str] = Field(default_factory=list[str])
+    # The buyer's limits this offer breaks (blocking for the recommendation): the UNIT
+    # price above the maximum (`above_buyer_maximum`), the lead time.
     buyer_limit_issues: list[str] = Field(default_factory=list[str])
     evidence_message_ids: list[UUID] = Field(default_factory=list[UUID])
     performance: SupplierPerformance = Field(default_factory=SupplierPerformance)
+    # The one-off tooling charge in the base currency (not per unit).
+    tooling_base: Decimal | None = None
+    # What the buyer should know about its limits without it blocking anything:
+    # `effective_above_max` (the unit price is within the maximum, the effective price
+    # with one-off charges is above it).
+    buyer_limit_warnings: list[str] = Field(default_factory=list[str])
 
 
 class TierTotal(BaseModel):
@@ -371,6 +384,11 @@ class Recommendation(BaseModel):
     readiness: Literal["ready_for_buyer_review", "needs_review", "no_feasible_offer"] = (
         "needs_review"
     )
+    # The recommended offer's unit price (what the buyer's target and maximum apply to)
+    # and its one-off tooling charge, both in the base currency; the effective price
+    # above is the unit price plus the tooling per unit.
+    unit_price_base: Decimal | None = None
+    tooling_base: Decimal | None = None
 
 
 class Comparison(BaseModel):
@@ -668,12 +686,13 @@ def compute_cell(
         cost_gaps.append("cost_evidence_needs_review")
     landed_total = known_total if not cost_gaps and unit_ok and applies else None
     buyer_limit_issues: list[str] = []
-    if (
-        line.max_unit_price is not None
-        and effective is not None
-        and effective > line.max_unit_price
-    ):
-        buyer_limit_issues.append("above_buyer_maximum")
+    buyer_limit_warnings: list[str] = []
+    # The maximum is a unit price: one-off charges never decide it, they are a warning.
+    if line.max_unit_price is not None and unit_price_base is not None:
+        if unit_price_base > line.max_unit_price:
+            buyer_limit_issues.append("above_buyer_maximum")
+        elif effective is not None and effective > line.max_unit_price:
+            buyer_limit_warnings.append("effective_above_max")
     if line.max_lead_time_days is not None:
         if chosen.lead_time_days is None:
             buyer_limit_issues.append("buyer_lead_time_unconfirmed")
@@ -712,6 +731,8 @@ def compute_cell(
         buyer_limit_issues=buyer_limit_issues,
         evidence_message_ids=list(chosen.source_message_ids),
         performance=quote.performance.get(line.id, SupplierPerformance()),
+        tooling_base=_q(tooling_base, _MONEY_PLACES) if chosen.tooling_cost is not None else None,
+        buyer_limit_warnings=buyer_limit_warnings,
     )
 
 
