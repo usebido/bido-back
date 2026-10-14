@@ -281,6 +281,7 @@ async def use_current_offer(
             {
                 "issues": [],
                 "held_message_ids": [],
+                "held_changes": [],
                 "reply_kind": "amendment"
                 if offer_state.get("reply_kind") == "clarification"
                 else offer_state.get("reply_kind"),

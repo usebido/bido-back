@@ -56,7 +56,10 @@ First match wins:
    after the supplier's final offer.
 7. Nothing to ask: accept internally when price <= target on every quoted
    line, delivery known and on time, validity known and lasting until the
-   decision, no MOQ or payment deviation; otherwise the buyer decides (reason).
+   decision, no MOQ or payment deviation, and the supplier's order deadline
+   (`Offer.order_by`) not passed; otherwise the buyer decides (reason). An
+   accepted offer's `order_by` is the earliest of the lines' latest order dates
+   and the supplier's order deadline.
 8. Something to ask, but the supplier did not move on anything we asked:
    stop (needs your decision, `no_progress`); a price ask our last email left
    for later (its questions came first) is no repeat. Round cap reached, or
@@ -206,6 +209,13 @@ class Offer:
     # The buyer released this offer's holds: negotiate it as it is (a withdrawal still
     # closes it).
     holds_released: bool = False
+    # The supplier's order deadline: its offer (delivery promise) holds only for an
+    # order on or before this day ("provided we receive the PO by 21/10/2026").
+    order_by: date | None = None
+    # Why the offer is held for review (the offer state's reason codes) and which
+    # commercial terms the held reply changed (`pos1.unit`, `currency`): codes only.
+    hold_reasons: tuple[str, ...] = ()
+    held_fields: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -371,6 +381,10 @@ class SupplierPlan:
     # The offer itself is on hold (a question, a withdrawal, something to review) and the
     # buyer has not released it: none of its lines counts as accepted.
     offer_held: bool = False
+    # For an offer held for review: why (the offer state's reason codes) and which
+    # commercial terms the held reply changed (`pos1.unit`, `currency`).
+    hold_reasons: tuple[str, ...] = ()
+    held_fields: tuple[str, ...] = ()
     # Items of the clarification ledger are open for this supplier (to ask, waiting for
     # approval, or asked and unanswered): none of its lines counts as accepted yet.
     questions_open: bool = False
@@ -558,6 +572,12 @@ def _warnings(
         found.append(PlanWarning("validity_ends_before_decision", on=offer.valid_until))
     if offer.payment_terms_shorter:
         found.append(PlanWarning("payment_terms_shorter"))
+    if offer.order_by is not None:
+        # The supplier's offer holds only when ordered by this day.
+        passed = offer.order_by < ctx.order_date
+        found.append(
+            PlanWarning("order_deadline_passed" if passed else "order_deadline", on=offer.order_by)
+        )
     not_quoted = [p.position for p in plans if p.status == "not_quoted"]
     for position in not_quoted:
         found.append(PlanWarning("line_not_quoted", position))
@@ -643,7 +663,7 @@ def _first_reason(plans: Sequence[LinePlan], warnings: Sequence[PlanWarning]) ->
         if code in reasons:
             return code
     codes = {w.code for w in warnings}
-    for code in ("validity_unknown", "validity_ends_before_decision", "payment_terms_shorter"):
+    for code in _ACCEPT_BLOCKERS:
         if code in codes:
             return code
     if any(p.status == "blocked" for p in plans):
@@ -651,11 +671,17 @@ def _first_reason(plans: Sequence[LinePlan], warnings: Sequence[PlanWarning]) ->
     return "needs_review"
 
 
+# Warnings that keep an offer from being accepted internally, most important first.
+_ACCEPT_BLOCKERS: Final = (
+    "order_deadline_passed",
+    "validity_unknown",
+    "validity_ends_before_decision",
+    "payment_terms_shorter",
+)
+
+
 def _accept_blockers(warnings: Sequence[PlanWarning]) -> bool:
-    return any(
-        w.code in ("validity_unknown", "validity_ends_before_decision", "payment_terms_shorter")
-        for w in warnings
-    )
+    return any(w.code in _ACCEPT_BLOCKERS for w in warnings)
 
 
 def plan_supplier(
@@ -768,7 +794,13 @@ def plan_supplier(
             review = "offer_state_requires_review"
             reason = review if review in offer.holds else offer.holds[0]
             return replace(
-                base, action="hold", phase="needs_decision", reason=reason, offer_held=True
+                base,
+                action="hold",
+                phase="needs_decision",
+                reason=reason,
+                offer_held=True,
+                hold_reasons=offer.hold_reasons,
+                held_fields=offer.held_fields,
             )
 
     # 4. One open request per supplier: a clarification waiting for approval or its answer.
@@ -855,7 +887,11 @@ def _negotiate(
         and not _accept_blockers(warnings)
     )
     order_by = min(
-        (p.latest_order_date for p in priced if p.latest_order_date is not None), default=None
+        (
+            *(p.latest_order_date for p in priced if p.latest_order_date is not None),
+            *((offer.order_by,) if offer.order_by is not None else ()),
+        ),
+        default=None,
     )
 
     # 6. Final: after a BAFO answer, or the supplier's own final offer.

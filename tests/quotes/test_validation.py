@@ -170,6 +170,7 @@ def test_provenance_keeps_value_source_confidence_and_reasons() -> None:
         "payment_terms",
         "validity",
         "lead_time",
+        "order_by",
         "_review",
     }
 

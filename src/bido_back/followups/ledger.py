@@ -666,6 +666,47 @@ def offer_holds(proposal_fields: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(reasons)
 
 
+@dataclass(frozen=True, slots=True)
+class HeldChange:
+    """A commercial term the held reply changed (`quotes.state.HeldChange`, as stored):
+    `code` is `pos1.unit` or `currency`; the values are the supplier's, as stored."""
+
+    code: str
+    previous: str | None
+    stated: str | None
+    # The offer took the stated value (an unasked change in an answer to our questions);
+    # otherwise it kept the previous one.
+    applied: bool
+
+
+def offer_held_changes(proposal_fields: Mapping[str, object]) -> tuple[HeldChange, ...]:
+    """What the replies holding the latest offer changed in its commercial basis."""
+    offer_state = proposal_fields.get("_offer_state")
+    if not isinstance(offer_state, Mapping):
+        return ()
+    raw = cast(Mapping[str, object], offer_state).get("held_changes")
+    if not isinstance(raw, list):
+        return ()
+    changes: list[HeldChange] = []
+    for item in cast(list[object], raw):
+        if not isinstance(item, Mapping):
+            continue
+        entry = cast(Mapping[str, object], item)
+        name, position = entry.get("field"), entry.get("position")
+        if not isinstance(name, str):
+            continue
+        previous, stated = entry.get("previous"), entry.get("stated")
+        changes.append(
+            HeldChange(
+                code=f"pos{position}.{name}" if isinstance(position, int) else name,
+                previous=previous if isinstance(previous, str) else None,
+                stated=stated if isinstance(stated, str) else None,
+                applied=entry.get("applied") is True,
+            )
+        )
+    return tuple(changes)
+
+
 def offered_lines(
     proposal: Proposal, lines: Sequence[ProposalLine], country: str | None
 ) -> list[OfferedLine]:
@@ -760,6 +801,8 @@ class Decision:
     field: FollowupField | None = None
     reasons: tuple[str, ...] = ()
     since: datetime | None = None
+    # For a held offer: the commercial terms the held reply changed.
+    changes: tuple[HeldChange, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1000,7 +1043,13 @@ async def supplier_followups(
         if proposal is not None and not declined_offer(proposal.fields):
             holds = offer_holds(proposal.fields)
             if holds:
-                decisions.append(Decision(kind="offer_held", reasons=holds))
+                decisions.append(
+                    Decision(
+                        kind="offer_held",
+                        reasons=holds,
+                        changes=offer_held_changes(proposal.fields),
+                    )
+                )
             items = proposal_items(
                 proposal,
                 lines[proposal.id],

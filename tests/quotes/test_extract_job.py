@@ -16,6 +16,7 @@ import pytest_asyncio
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from bido_back.agents.catalog.contracts import QuoteExtractionOutput
 from bido_back.agents.config import RunnerConfig
 from bido_back.auth import Principal
 from bido_back.corrections.schemas import LineCorrectionRequest
@@ -41,7 +42,7 @@ from tests.agents.test_runner import Script, final, script
 from tests.approvals.conftest import FakeJobQueue
 from tests.db.conftest import TwoTenants, app_engine, migrator_engine, two_tenants
 from tests.documents.fixtures import build_xlsx
-from tests.quotes import rfq6
+from tests.quotes import rfq6, rfq9
 
 __all__ = ["app_engine", "migrator_engine", "script", "two_tenants"]
 
@@ -953,3 +954,91 @@ async def test_a_reply_outside_a_negotiation_enqueues_no_replan(
     async with tenant_session(seeded.engine, seeded.tenant_id) as session:
         rfq = await session.get(Rfq, rfq_id)
     assert rfq is not None and rfq.negotiation_replan_requested_at is None
+
+
+# --- RFQ-9: a revised offer valid if the order arrives by a date ------------------------------
+
+
+def _on_line_2(output: QuoteExtractionOutput) -> dict[str, object]:
+    """An RFQ-9 extraction for the seeded RFQ's 2,000-piece line (position 2)."""
+    for line in output.lines:
+        line.rfq_line_position = 2
+    return output.model_dump(mode="json")
+
+
+async def test_rfq9_a_revised_offer_with_an_order_deadline_is_applied_not_held(
+    seeded: Seeded, script: Script
+) -> None:
+    async with tenant_session(seeded.engine, seeded.tenant_id) as session:
+        rfq_id = select(Invite.rfq_id).where(Invite.id == seeded.invite_id).scalar_subquery()
+        await session.execute(update(Rfq).where(Rfq.id == rfq_id).values(base_currency="BRL"))
+    script(final(**_on_line_2(rfq9.first_quote())))
+    first = await seeded.add_message(
+        body=rfq9.QUOTE, with_sheet=False, occurred_at=rfq9.QUOTE_AT, subject=rfq9.SUBJECT
+    )
+    await run_job(seeded, first)
+    # The supplier answers Bido's counter-offer: "... provided we receive the purchase
+    # order by 21/10/2026", which the model files as the line's condition.
+    script(final(**_on_line_2(rfq9.revised_offer())))
+    second = await seeded.add_message(
+        body=rfq9.REVISED,
+        with_sheet=False,
+        occurred_at=rfq9.REVISED_AT,
+        in_reply_to=rfq9.COUNTER_HEADER,
+        subject=rfq9.SUBJECT,
+    )
+    await run_job(seeded, second)
+
+    proposal, [line] = (await proposals_of(seeded))[-1]
+    assert proposal.version == 2
+    assert proposal.fields["_offer_state"]["issues"] == []
+    assert proposal.fields["_offer_state"]["held_changes"] == []
+    assert offer_terms(proposal.fields).order_by == rfq9.ORDER_BY
+    assert line.unit_price == Decimal("2.95")
+    assert line.tooling_cost == Decimal("1250")
+    assert not line.needs_review
+    stated = line_terms(line.fields).lead_time
+    assert stated is not None and stated.delivery_date == rfq9.DELIVERED
+    assert line.fields["conditional_terms"]["parsed"] is None
+
+
+async def test_rfq9_a_revised_offer_in_another_unit_is_held_with_both_values(
+    seeded: Seeded, script: Script
+) -> None:
+    async with tenant_session(seeded.engine, seeded.tenant_id) as session:
+        rfq_id = select(Invite.rfq_id).where(Invite.id == seeded.invite_id).scalar_subquery()
+        await session.execute(update(Rfq).where(Rfq.id == rfq_id).values(base_currency="BRL"))
+    script(final(**_on_line_2(rfq9.first_quote())))
+    first = await seeded.add_message(
+        body=rfq9.QUOTE, with_sheet=False, occurred_at=rfq9.QUOTE_AT, subject=rfq9.SUBJECT
+    )
+    await run_job(seeded, first)
+    revised = rfq9.revised_offer(unit="kg")
+    revised.lines[0].unit = rfq9.ev("kg", "2,000 pcs at BRL 2.95 per kg")
+    revised.lines[0].unit_price = rfq9.ev("2.95", "2,000 pcs at BRL 2.95 per kg")
+    script(final(**_on_line_2(revised)))
+    second = await seeded.add_message(
+        body=rfq9.REVISED.replace("per piece", "per kg"),
+        with_sheet=False,
+        occurred_at=rfq9.REVISED_AT,
+        in_reply_to=rfq9.COUNTER_HEADER,
+        subject=rfq9.SUBJECT,
+    )
+    await run_job(seeded, second)
+
+    proposal, [line] = (await proposals_of(seeded))[-1]
+    state = proposal.fields["_offer_state"]
+    assert state["issues"] == ["changed_commercial_basis_requires_replacement"]
+    assert state["held_changes"] == [
+        {
+            "message_id": str(second),
+            "field": "unit",
+            "position": 2,
+            "previous": "piece",
+            "stated": "kg",
+            "applied": False,
+        }
+    ]
+    # The offer as it was; the held reply's own values are stored with it.
+    assert line.unit_price == Decimal("3.20")
+    assert proposal.fields["_quote_event"]["lines"][0]["fields"]["unit_price"]["parsed"] == "2.95"

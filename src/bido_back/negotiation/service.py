@@ -200,6 +200,7 @@ from bido_back.negotiation.signals import (
     latest_order_date,
     offer_signals,
     stated_lead_time,
+    until_order_by,
 )
 from bido_back.negotiation.strategy import ask_places, plain
 from bido_back.rfqs.errors import AgentFailed, InvalidState, NotFound
@@ -802,6 +803,8 @@ def _quotes(
         mine: dict[UUID, LineQuote] = {}
         quoted: dict[UUID, QuotedTerms] = {}
         asked_on = _asked_order_dates(item)
+        # An order after the supplier's order deadline has no delivery date.
+        delivered = until_order_by(expected_delivery, offer_signals(item.proposal.fields).order_by)
         for cell in column.cells:
             if cell.tier != 0:
                 continue
@@ -816,13 +819,13 @@ def _quotes(
                 offer_fields=item.proposal.fields,
                 country=item.supplier.country,
             )
-            delivery = expected_delivery(lead, order_date)
+            delivery = delivered(lead, order_date)
             quoted[cell.rfq_line_id] = _shown(cell, lead)
             # The delivery as of the order dates of the emails that asked for a date: the
             # supplier moved when it is earlier than what it offered then.
-            then = {day: expected_delivery(lead, day) for day in asked_on}
+            then = {day: delivered(lead, day) for day in asked_on}
             at_reply_by = (
-                expected_delivery(lead, rfq.response_due)
+                delivered(lead, rfq.response_due)
                 if rfq.response_due is not None and rfq.response_due > order_date
                 else None
             )
@@ -835,7 +838,7 @@ def _quotes(
                 delivery=delivery[0] if delivery is not None else None,
                 delivery_exact=delivery[1] if delivery is not None else True,
                 delivery_at_reply_by=at_reply_by[0] if at_reply_by is not None else None,
-                latest_order_date=latest_order_date(expected_delivery, lead, needed, order_date)
+                latest_order_date=latest_order_date(delivered, lead, needed, order_date)
                 if needed is not None
                 else None,
                 moq=cell.moq,
@@ -908,6 +911,9 @@ def _offer(
         declined_lines=frozenset(positions[p] for p in declined if p in positions),
         payment_terms_shorter=offered is not None and requested is not None and offered < requested,
         holds_released=item.invite.negotiation_released_proposal_id == proposal.id,
+        order_by=signals.order_by,
+        hold_reasons=signals.hold_reasons,
+        held_fields=signals.held_fields,
     )
 
 

@@ -52,6 +52,7 @@ from bido_back.followups import missing as missing_rules
 from bido_back.followups.missing import OpenItem
 from bido_back.followups.schemas import AnswerQuestionsRequest, DismissQuestionRequest
 from bido_back.negotiation import service as negotiation_service
+from bido_back.negotiation.labels import held_field_text, hold_reason_text
 from bido_back.rfqs.errors import RfqError
 
 if TYPE_CHECKING:
@@ -74,18 +75,6 @@ _FIELDS: Final[dict[str, str]] = {
     "quantity": "quantity tier",
     "lead_time": "lead time",
     "delivery_date": "delivery date",
-}
-_HOLDS: Final[dict[str, str]] = {
-    "amendment_without_explicit_preservation": "a partial update that does not say the other "
-    "terms are unchanged",
-    "ambiguous_amendment_line_or_tier": "an update Bido cannot match to one line or tier",
-    "changed_commercial_basis_requires_replacement": "a change of price, currency, unit or "
-    "terms nobody asked about",
-    "conflicting_update": "contradicting statements",
-    "conflicting_sources": "contradicting statements",
-    "supplier_clarification_required": "a reply that needs reading",
-    "uncertain_message_chronology": "replies whose order is unclear",
-    "unverified_withdrawal": "a withdrawal Bido could not verify",
 }
 
 
@@ -146,6 +135,14 @@ def _late(item: OpenItem) -> str:
     return f"pos {item.position}: delivery expected {expected}, needed by {needed}"
 
 
+def _held_change(change: ledger.HeldChange) -> str:
+    """`line 1 unit from "pcs" to "kg" (not applied)`: the values are the supplier's."""
+    before = f'"{change.previous}"' if change.previous is not None else "nothing"
+    after = f'"{change.stated}"' if change.stated is not None else "nothing"
+    applied = "applied, to confirm" if change.applied else "not applied"
+    return f"{held_field_text(change.code)} from {before} to {after} ({applied})"
+
+
 def _decision(decision: ledger.Decision) -> str:
     item = _item(decision.position, decision.field or "")
     match decision.kind:
@@ -154,12 +151,15 @@ def _decision(decision: ledger.Decision) -> str:
         case "asked_before":
             return f"{item}: answered before, missing again"
         case "offer_held":
-            why = sorted({_HOLDS.get(r, r) for r in decision.reasons})
-            return (
-                "the supplier's latest reply could not be applied as it was ("
-                + "; ".join(why)
-                + "): check it, correct it, or use the current offer"
-            )
+            why = sorted({hold_reason_text(r) for r in decision.reasons})
+            text = "the supplier's latest reply could not be applied as it was (" + "; ".join(why)
+            if decision.changes:
+                text += "; it changes " + "; ".join(_held_change(c) for c in decision.changes)
+            text += "): check it, correct it, or use the current offer"
+            if any(not change.applied for change in decision.changes):
+                # "Use the current offer" releases the offer as shown: the values before.
+                text += " (the current offer keeps the values from before that reply)"
+            return text
         case "no_answer":
             return f"no answer to our email of {_day(decision.since)}, even after the reminder"
         case "email_held":
