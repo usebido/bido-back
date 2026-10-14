@@ -421,17 +421,128 @@ def _ordered(events: list[OfferEvent]) -> tuple[list[OfferEvent], list[tuple[str
     return result, issues
 
 
-_UNCHANGED = re.compile(
-    r"(?:other|remaining|all|same)\s+(?:commercial\s+)?(?:terms|conditions)\s+(?:(?:remain|are|stay)\s+)?unchanged"
-    r"|(?:demais|outras|todas\s+as)\s+condi[cç][oõ]es\s+(?:(?:permanecem|seguem|ficam)\s+)?(?:inalteradas|mantidas)"
-    r"|mantendo\s+(?:as\s+)?(?:demais|outras)\s+condi[cç][oõ]es"
-    r"|(?:alle\s+)?(?:anderen|übrigen)\s+(?:konditionen|bedingungen)\s+(?:bleiben\s+)?unverändert"
-    r"|(?:otras|dem[aá]s)\s+condiciones\s+(?:sin\s+cambios|no\s+cambian)"
-    r"|autres\s+conditions\s+(?:restent\s+)?inchang[eé]es",
-    re.IGNORECASE,
+# A supplier's statement that what an amendment does not restate stays as it was:
+# "all other terms (of our final offer) are unchanged", "everything else remains the
+# same", "le altre condizioni restano invariate". It is read on `normalize_text`
+# output (casefolded, spaces collapsed) and only double-checks the evidence the model
+# cited; `_NEGATED_PRESERVATION` and a "?" still reject it.
+#
+# Between the terms and what they stay, a short qualifier is allowed: a preposition
+# and at most five more words with no punctuation ("of our final offer", "della
+# nostra offerta", "da proposta"). Never an open-ended gap: a longer or punctuated
+# span is no preservation statement, and the amendment is held.
+_WORD = r"[^\s.;:,!?]+"
+
+
+def _qualifier(prepositions: str) -> str:
+    return rf"(?:\s+(?:{prepositions})(?:\s+{_WORD}){{0,5}}?)?"
+
+
+# The offers a supplier refers back to ("as per our previous offer").
+_EN_OFFER = r"(?:offer|quote|quotation|proposal)"
+_EN_REST = (
+    r"(?:(?:all\s+(?:the\s+)?)?(?:other|remaining)|all|same)\s+(?:commercial\s+)?"
+    r"(?:terms|conditions)(?:\s+(?:and|&)\s+conditions)?"
+    r"|everything\s+else|all\s+else"
+    rf"|(?:the\s+)?rest\s+of\s+(?:the|our|my)\s+(?:{_WORD}\s+)?{_EN_OFFER}"
 )
+_EN_STAYS = (
+    # "unchanged" may stand alone ("all other terms unchanged").
+    r"(?:\s+(?:(?:will|shall)\s+)?(?:remains?|stays?|are|is|be))?\s+unchanged"
+    r"|\s+(?:(?:will|shall)\s+)?(?:remains?|stays?|are|is|be)\s+(?:the\s+same|as\s+before)"
+    r"|\s+(?:(?:will|shall)\s+)?(?:remains?|stays?)\s+(?:valid|in\s+(?:force|effect))"
+    r"|\s+(?:still|continue\s+to)\s+apply"
+    rf"|(?:\s+(?:remains?|stays?|are|is))?\s+as\s+(?:per|in)\s+(?:our|the|my)\s+"
+    rf"(?:(?:previous|earlier|last|original|initial|prior|final)\s+)?{_EN_OFFER}"
+)
+_EN = rf"\b(?:{_EN_REST}){_qualifier(r'of|in|from|under|for')}(?:{_EN_STAYS})"
+
+# Italian: "(tutte) le altre condizioni (della nostra offerta) restano invariate",
+# "il resto dell'offerta rimane invariato", "invariate / ferme restando le altre
+# condizioni", "restano confermate tutte le altre condizioni".
+_IT_TERMS = r"(?:condizioni|termini|clausole)(?:\s+commerciali)?"
+_IT_REST = (
+    rf"(?:tutt[ei]\s+)?(?:(?:le|gli|i)\s+)?(?:altr[ei]|restanti|rimanenti)\s+{_IT_TERMS}"
+    r"|(?:tutto\s+)?il\s+resto"
+)
+_IT_OF = rf"del|della|dello|dei|delle|degli|dell['’]{_WORD}|di|nel|nella|in"
+_IT_STAYS = (
+    r"(?:invariat[aeio]|immutat[aeio]|confermat[aeio]|valid[aeio]|gli\s+stessi|le\s+stesse"
+    r"|lo\s+stesso|la\s+stessa)"
+)
+_IT = (
+    rf"\b(?:{_IT_REST}){_qualifier(_IT_OF)}"
+    rf"(?:\s+(?:(?:restano|rimangono|sono|resteranno|rimarranno|resta|rimane|è)\s+{_IT_STAYS})"
+    r"|\s+invariat[aeio])"
+    rf"|\b(?:invariat[ei]|ferm[ei]\s+restando|restano\s+{_IT_STAYS}|rimangono\s+{_IT_STAYS})"
+    rf"\s+(?:tutt[ei]\s+)?(?:le|gli|i)\s+(?:altr[ei]|restanti|rimanenti)\s+{_IT_TERMS}"
+)
+
+# Portuguese: "as demais condições (da proposta) permanecem inalteradas", "o restante
+# da proposta permanece inalterado", "mantidas as demais condições".
+_PT_TERMS = r"(?:condi[cç][oõ]es|termos)(?:\s+comerciais)?"
+_PT_REST = (
+    rf"(?:todas\s+)?(?:as\s+|os\s+)?(?:demais|outr[ao]s|restantes)\s+{_PT_TERMS}"
+    rf"|todas\s+as\s+{_PT_TERMS}|(?:todo\s+)?o\s+(?:restante|resto)"
+)
+_PT_OF = r"da|de|do|das|dos|na|no|em"
+_PT_VERB = (
+    r"(?:permanecem|permanece|seguem|segue|ficam|fica|continuam|continua|se\s+mant[eê]m"
+    r"|s[aã]o|[eé])"
+)
+_PT = (
+    rf"\b(?:{_PT_REST}){_qualifier(_PT_OF)}"
+    rf"(?:(?:\s+{_PT_VERB})?\s+(?:inalterad[ao]s?|mantid[ao]s?)"
+    rf"|\s+{_PT_VERB}\s+(?:iguais|igual|as\s+mesmas|os\s+mesmos|o\s+mesmo|v[aá]lid[ao]s?))"
+    r"|\b(?:mantendo|mantidas|mantidos)\s+(?:(?:as|os)\s+)?(?:demais|outr[ao]s)\s+"
+    rf"{_PT_TERMS}"
+)
+
+# German: "alle anderen Konditionen (unseres Angebots) bleiben unverändert",
+# "alles andere / der Rest des Angebots bleibt unverändert".
+_DE_REST = (
+    r"(?:alle\s+)?(?:anderen|übrigen|weiteren|sonstigen)\s+(?:konditionen|bedingungen)"
+    r"|alles\s+andere|der\s+rest"
+)
+_DE_OF = r"des|der|dem|unseres|unserer|aus|im|in"
+_DE = (
+    rf"\b(?:{_DE_REST}){_qualifier(_DE_OF)}"
+    r"(?:(?:\s+(?:bleiben|bleibt|sind|ist))?\s+unverändert"
+    r"|\s+(?:bleiben|bleibt)\s+(?:gleich|bestehen|gültig))"
+)
+
+# Spanish: "las demás condiciones (de la oferta) se mantienen sin cambios".
+_ES_REST = (
+    r"(?:todas\s+)?(?:las\s+)?(?:otras|dem[aá]s|restantes)\s+condiciones"
+    r"|(?:todo\s+)?el\s+resto"
+)
+_ES_OF = r"de|del|de\s+la|en"
+_ES_VERB = r"(?:se\s+mantienen|se\s+mantiene|permanecen|permanece|siguen|sigue|quedan|queda|son|es)"
+_ES = (
+    rf"\b(?:{_ES_REST}){_qualifier(_ES_OF)}"
+    rf"(?:(?:\s+{_ES_VERB})?\s+sin\s+cambios"
+    rf"|\s+{_ES_VERB}\s+(?:iguales|igual|inalterad[ao]s?|las\s+mismas|v[aá]lid[ao]s?))"
+    # Read by the regex, but the negation guard rejects its "no" (fails closed).
+    r"|\b(?:otras|dem[aá]s)\s+condiciones\s+no\s+cambian"
+)
+
+# French: "les autres conditions (de notre offre) restent inchangées", "le reste de
+# l'offre reste inchangé".
+_FR_REST = r"(?:toutes\s+)?(?:les\s+)?autres\s+conditions|le\s+reste"
+_FR_OF = rf"de|du|des|d['’]{_WORD}|de\s+l['’]{_WORD}"
+_FR_VERB = r"(?:restent|reste|demeurent|demeure|sont|est)"
+_FR = (
+    rf"\b(?:{_FR_REST}){_qualifier(_FR_OF)}"
+    rf"(?:(?:\s+{_FR_VERB})?\s+inchang[eé]e?s?"
+    rf"|\s+{_FR_VERB}\s+(?:identiques?|les\s+m[eê]mes|le\s+m[eê]me|valables?))"
+)
+
+_UNCHANGED = re.compile("|".join((_EN, _IT, _PT, _DE, _ES, _FR)), re.IGNORECASE)
+# Words that turn a preservation statement into its opposite or carve an exception out
+# of it ("not unchanged", "unchanged except payment", "invariate tranne il pagamento").
 _NEGATED_PRESERVATION = re.compile(
-    r"\b(?:not|never|unless|except|não|nao|exceto|salvo|nicht|keine|kein|no|ne|pas)\b",
+    r"\b(?:not|never|unless|except|exception|apart|não|nao|exceto|salvo|nicht|keine|kein"
+    r"|außer|ausser|no|ne|pas|sauf|excepté|excepte|excepto|non|tranne|eccetto|eccezione)\b",
     re.IGNORECASE,
 )
 

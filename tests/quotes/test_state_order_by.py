@@ -200,3 +200,52 @@ def test_an_order_deadline_without_a_year_is_the_next_such_day() -> None:
     quote = rfq9.validate(rfq9.revised_offer(condition=condition), body, at=rfq9.REVISED_AT)
     assert quote.parsed("order_by") == date(2026, 10, 21)
     assert quote.lines[0].parsed("conditional_terms") is None
+
+
+def _amendment_thread(deadline_as: str) -> tuple[OfferState, OfferEvent, OfferEvent]:
+    final = rfq9.validate(rfq9.final_offer(), rfq9.FINAL, at=rfq9.FINAL_AT)
+    first = replace(
+        _event(final, revised=False),
+        occurred_at=rfq9.FINAL_AT,
+        received_at=rfq9.FINAL_AT + timedelta(minutes=1),
+    )
+    amended = rfq9.validate(
+        rfq9.order_deadline_amendment(deadline_as=deadline_as),
+        rfq9.AMENDMENT,
+        at=rfq9.AMENDED_AT,
+    )
+    second = replace(
+        _event(amended, revised=True),
+        in_reply_to=first.message_header,
+        occurred_at=rfq9.AMENDED_AT,
+        received_at=rfq9.AMENDED_AT + timedelta(minutes=1),
+    )
+    return reconcile([first, second]), first, second
+
+
+@pytest.mark.parametrize("deadline_as", ["note", "lead_time"])
+def test_an_order_deadline_added_to_a_final_offer_is_applied(deadline_as: str) -> None:
+    # RFQ-9, 2026-10-14: "All other terms of our final offer are unchanged" is the
+    # supplier's statement that the rest of the final offer stands.
+    state, first, second = _amendment_thread(deadline_as)
+
+    assert state.issues == ()
+    assert state.held_message_ids == ()
+    assert state.held_changes == ()
+    assert state.reply_kind == "amendment"
+    assert not state.quote.needs_review
+    assert state.quote.parsed("order_by") == rfq9.AMENDED_ORDER_BY
+    assert state.quote.header["order_by"].message_id == second.message_id
+    # The final offer carries over under the statement.
+    [line] = state.quote.lines
+    assert line.parsed("unit_price") == Decimal("2.90")
+    assert line.parsed("tooling_cost") == Decimal("1250")
+    assert line.fields["tooling_cost"].message_id == first.message_id
+    assert state.quote.parsed("incoterm") == "DAP"
+    assert state.quote.parsed("payment_terms") == "30 days net"
+    retained = state.quote.header["incoterm"].retained_by
+    assert retained[-1]["message_id"] == str(second.message_id)
+    lead = decode_lead_time(line.parsed("lead_time_terms"))
+    assert lead is not None
+    assert lead.delivery_date == rfq9.DELIVERED
+    assert restore_quote(store_quote(state.quote)) == state.quote
