@@ -93,13 +93,51 @@ buyer to settle in the chat.
   organization is refused (403 "select an organization").
 - Link an organization ahead of time (local or dev):
   `uv run python scripts/link_demo_org.py --clerk-org-id org_... --with-motor-demo`
-  (or `--tenant-id <uuid>`, or `--name "<company>"` for a new empty one).
+  (or `--tenant-id <uuid>`, or `--company-name "<company>"` for a new empty
+  one). In prd, see [Letting a customer in on prd](#letting-a-customer-in-on-prd).
 - Clerk dashboard: organizations enabled and required for sessions; sign-up
   restricted (invitations or allowlist) outside dev; optionally a session token
   claim `"email": "{{user.primary_email_address}}"`, or set `CLERK_SECRET_KEY`
   so provisioning can read the e-mail and the organization's name.
 - Locally, `AUTH_DEV_MODE=true` still accepts `X-Dev-User: <clerk_user_id>` for
   the seeded users, with `X-Tenant-Id` to pick among several memberships.
+
+## Letting a customer in on prd
+
+prd runs with `AUTH_AUTO_PROVISION=false`, so a customer's Clerk organization
+gets 403 "organization not enabled" until an operator links it to a company,
+once. `scripts/link_demo_org.py` does it, and in prd it insists on a
+deliberate run:
+
+```bash
+python scripts/link_demo_org.py --confirm-environment prd \
+  --clerk-org-id org_... --company-name "Acme S.p.A." --operator <your name>
+```
+
+- `--confirm-environment prd` must match `ENVIRONMENT`; without it, or with
+  another value, nothing runs. `--clerk-org-id` (from the prd Clerk
+  instance), `--company-name` and `--operator` are required; `--tenant-id` and
+  `--with-motor-demo` are refused. It creates one empty company with the
+  default policies, the same row a first login with auto-provisioning would
+  create, and nothing else: no users, no demo data. Members get their
+  memberships on their first sign-in (Clerk admins as owners).
+- Re-running it for the same organization and name prints `unchanged` and
+  writes nothing. An organization already linked to another company is
+  refused.
+- **Record:** each link writes an `audit_events` row in the company's tenant,
+  action `tenant.linked`, payload `{source: "operator", operator,
+  clerk_org_id, created}`, in the same transaction as the company. The
+  script prints the tenant id; no customer content goes to logs.
+- If `CLERK_ALLOWED_ORG_IDS` is set, the organization must be listed there too.
+
+**Where to run it: there is no established way yet.** The database is only
+reachable from inside the environment's VPC, and the image ships `src`,
+`migrations` and `prompts` but not `scripts/`. The only one-off task an
+environment has is `<env>-migrate` (`aws ecs run-task`, see
+`bido-infra/b2b/prd/README.md`), which has `ENVIRONMENT`, `DATABASE_URL` and
+`MIGRATION_DATABASE_URL`, enough for this script. Running the script as a
+command override of that task needs the script in the image first; that
+change has not been made.
 
 ## Tenancy and row-level security
 

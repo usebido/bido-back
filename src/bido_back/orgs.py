@@ -11,7 +11,8 @@ linked to its organization through `tenants.clerk_org_id` (migration 0018).
    SECURITY DEFINER lookup: the app role cannot search `tenants` under RLS).
    None linked: with `AUTH_AUTO_PROVISION` it creates one, named after the
    organization; without, the organization is not enabled (403). Tenants are
-   linked ahead of time with `scripts/link_demo_org.py`.
+   linked ahead of time with `scripts/link_demo_org.py` (`link_new_company`,
+   `link_org`): in prd that script is how a pilot customer is let in.
 3. Finds the caller's membership there, or creates it: the verified token
    proves the caller belongs to the organization. Clerk admins become owners,
    everyone else members. An existing role is never lowered; a member whose
@@ -286,17 +287,98 @@ async def principal_for_org(
     return Principal(tenant_id=tenant_id, user_id=user_id, role=role)
 
 
-async def link_org(db: async_sessionmaker[AsyncSession], tenant_id: UUID, org_id: str) -> None:
+# --- Operator linking (scripts/link_demo_org.py) -----------------------------------
+
+
+class OrgLinkRefused(LookupError):
+    """The organization or the company is already linked elsewhere; nothing was changed."""
+
+
+@dataclass(frozen=True, slots=True)
+class OrgLink:
+    tenant_id: UUID
+    # False: the organization was already linked exactly like this; nothing written.
+    changed: bool
+
+
+def _linked_by_operator(
+    tenant_id: UUID, org_id: str, operator: str, *, created: bool
+) -> AuditEvent:
+    """The durable record of an operator link: ids and who ran it, no customer content."""
+    return AuditEvent(
+        tenant_id=tenant_id,
+        action="tenant.linked",
+        payload={
+            "source": "operator",
+            "operator": operator,
+            "clerk_org_id": org_id,
+            "created": created,
+        },
+    )
+
+
+async def link_new_company(
+    db: async_sessionmaker[AsyncSession], org_id: str, name: str, *, operator: str
+) -> OrgLink:
+    """Create a company named `name`, linked to the organization, as the app role.
+
+    The same insert as a first login with `AUTH_AUTO_PROVISION` (default
+    policies, nothing else), plus a `tenant.linked` audit event in the same
+    transaction. Idempotent: an organization already linked to a company with
+    exactly this name is reported unchanged; linked to any other company,
+    refused. Nothing is created before that check.
+    """
+    linked = await tenant_for_org(db, org_id)
+    if linked is not None:
+        async with tenant_session(db, linked) as session:
+            existing = await session.get(Tenant, linked)
+        if existing is not None and existing.name == name:
+            return OrgLink(tenant_id=linked, changed=False)
+        raise OrgLinkRefused(f"{org_id} is already linked to another company (tenant {linked})")
+
+    tenant_id = uuid4()
+    async with tenant_session(db, tenant_id) as session:
+        created = await session.scalar(
+            insert(Tenant)
+            .values(id=tenant_id, name=name, clerk_org_id=org_id)
+            .on_conflict_do_nothing(index_elements=[Tenant.clerk_org_id])
+            .returning(Tenant.id)
+        )
+        if created is not None:
+            session.add(_linked_by_operator(tenant_id, org_id, operator, created=True))
+    if created is None:
+        raise OrgLinkRefused(f"{org_id} was linked by someone else meanwhile; re-run to see where")
+    logger.info(
+        "orgs: tenant linked tenant=%s org=%s operator=%s created=true", tenant_id, org_id, operator
+    )
+    return OrgLink(tenant_id=tenant_id, changed=True)
+
+
+async def link_org(
+    db: async_sessionmaker[AsyncSession], tenant_id: UUID, org_id: str, *, operator: str
+) -> OrgLink:
     """Link an existing tenant to a Clerk organization (operator scripts).
 
     `db` must be the MIGRATION role: the app role cannot UPDATE tenants
     (migration 0017), so a request can never re-link a company to another
-    organization. Only operator scripts and tests call this.
+    organization. Only operator scripts and tests call this. Idempotent:
+    re-linking the same pair writes nothing; a change writes a `tenant.linked`
+    audit event in the same transaction.
     """
     async with tenant_session(db, tenant_id) as session:
         tenant = await session.get(Tenant, tenant_id)
         if tenant is None:
             raise LookupError(f"tenant {tenant_id} not found")
-        if tenant.clerk_org_id not in (None, org_id):
+        if tenant.clerk_org_id == org_id:
+            return OrgLink(tenant_id=tenant_id, changed=False)
+        if tenant.clerk_org_id is not None:
             raise LookupError(f"tenant {tenant_id} is already linked to another organization")
         tenant.clerk_org_id = org_id
+        session.add(_linked_by_operator(tenant_id, org_id, operator, created=False))
+    logger.info(
+        "orgs: tenant linked tenant=%s org=%s operator=%s created=false",
+        tenant_id,
+        org_id,
+        operator,
+    )
+    return OrgLink(tenant_id=tenant_id, changed=True)
