@@ -6,6 +6,8 @@ from decimal import Decimal
 from typing import Any, cast
 from uuid import uuid4
 
+import pytest
+
 from bido_back.agents.catalog.contracts import (
     ExtraOfferDraft,
     OfferConflict,
@@ -203,15 +205,110 @@ def test_technical_question_holds_existing_commercial_state() -> None:
     assert state.provenance()["requires_clarification"] is True
 
 
-def test_negated_or_questioned_preservation_cannot_authorize_inheritance() -> None:
+def _with_preservation(statement: str) -> ValidatedQuote:
+    """The delivery-only amendment, citing `statement` as its "other terms unchanged"."""
+    update = amendment()
+    return replace(
+        update, output=update.output.model_copy(update={"unchanged_terms": ev(statement)})
+    )
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        # RFQ-9 (dev, 2026-10-14): a qualifier between the terms and the verb.
+        "All other terms of our final offer are unchanged.",
+        "All other terms unchanged",
+        "All other terms are unchanged.",
+        "The other terms of the offer remain unchanged.",
+        "All other terms and conditions remain unchanged.",
+        "All other terms of the quotation remain the same.",
+        "Other terms in our offer stay unchanged.",
+        "Everything else in our offer remains unchanged.",
+        "Everything else stays the same.",
+        "The rest of our offer is unchanged.",
+        "The rest of our final offer remains unchanged.",
+        "All other terms remain as per our previous offer.",
+        "All other terms remain as before.",
+        "All other conditions remain valid.",
+        "All other terms still apply.",
+        # Italian
+        "Tutte le altre condizioni della nostra offerta finale restano invariate.",
+        "Le altre condizioni rimangono invariate.",
+        "Le altre condizioni restano le stesse.",
+        "Tutti gli altri termini restano invariati.",
+        "Il resto dell'offerta rimane invariato.",
+        "Il resto dell’offerta rimane invariato.",
+        "Invariate le altre condizioni.",
+        "Ferme restando tutte le altre condizioni.",
+        "Restano confermate tutte le altre condizioni.",
+        # Portuguese
+        "As demais condições permanecem inalteradas",
+        "As demais condições da proposta permanecem inalteradas.",
+        "Todas as outras condições da nossa proposta seguem as mesmas.",
+        "O restante da proposta permanece inalterado.",
+        "Mantidas as demais condições.",
+        "mantendo as demais condições",
+        # German
+        "Alle anderen Bedingungen bleiben unverändert.",
+        "Alle anderen Konditionen unseres Angebots bleiben unverändert.",
+        "Der Rest des Angebots bleibt unverändert.",
+        # Spanish
+        "Las demás condiciones de la oferta se mantienen sin cambios.",
+        "Otras condiciones sin cambios.",
+        # French
+        "Les autres conditions de notre offre restent inchangées.",
+        "Le reste de l'offre reste inchangé.",
+    ],
+)
+def test_an_explicit_preservation_statement_carries_the_other_terms(statement: str) -> None:
     first = event(validate(output()))
-    for statement in ("Not all other terms unchanged", "All other terms unchanged?"):
-        update = amendment()
-        update = replace(
-            update, output=update.output.model_copy(update={"unchanged_terms": ev(statement)})
-        )
-        state = reconcile([first, event(update, 1, parent=first)])
-        assert "amendment_without_explicit_preservation" in state.issues
+    state = reconcile([first, event(_with_preservation(statement), 1, parent=first)])
+    assert "amendment_without_explicit_preservation" not in state.issues
+    assert not state.quote.needs_review
+    [offer] = state.quote.lines
+    assert offer.parsed("lead_time_days") == 15
+    assert offer.parsed("unit_price") == Decimal("0.45")
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        # Negated, questioned, or with an exception carved out.
+        "Not all other terms unchanged",
+        "All other terms unchanged?",
+        "Are all other terms of our offer unchanged?",
+        "The other terms are not unchanged.",
+        "Other terms remain unchanged except payment.",
+        "All other terms remain unchanged, with the exception of payment.",
+        "All other terms remain unchanged apart from the payment terms.",
+        "Unless agreed otherwise, all other terms remain unchanged.",
+        "Le altre condizioni non restano invariate.",
+        "Tutte le altre condizioni restano invariate, tranne il pagamento.",
+        "Le altre condizioni restano invariate, eccetto il pagamento.",
+        "As demais condições permanecem inalteradas, exceto o pagamento.",
+        "Alle anderen Bedingungen bleiben unverändert, außer der Zahlung.",
+        "Otras condiciones no cambian.",
+        "Les autres conditions restent inchangées, sauf le paiement.",
+        # One term unchanged is not the rest of the offer.
+        "Price unchanged.",
+        "Price and delivery unchanged.",
+        "Payment terms are unchanged.",
+        "The delivery schedule remains the same.",
+        "Prezzo invariato.",
+        # No open-ended gap between the terms and "unchanged".
+        "All other terms of the offer we sent you last week by email to your team are unchanged.",
+        "All other terms, as discussed, are unchanged.",
+        # Neither the buyer's terms nor a conditional validity.
+        "All other terms as per your counter-offer.",
+        "As demais condições válidas para pedidos acima de 1000.",
+    ],
+)
+def test_no_explicit_preservation_cannot_authorize_inheritance(statement: str) -> None:
+    first = event(validate(output()))
+    state = reconcile([first, event(_with_preservation(statement), 1, parent=first)])
+    assert "amendment_without_explicit_preservation" in state.issues
+    assert state.quote.lines[0].parsed("lead_time_days") == 42
 
 
 def test_partial_withdrawal_preserves_other_requested_lines() -> None:

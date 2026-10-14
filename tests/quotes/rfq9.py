@@ -176,3 +176,89 @@ def validate(
 
 ORDER_BY: Final = date(2026, 10, 21)
 DELIVERED: Final = date(2026, 11, 14)
+
+
+# --- The amendment to the best and final offer (dev, 2026-10-14) -----------------------
+#
+# The supplier's best and final offer, then one addition: an order deadline. The
+# amendment was held as `amendment_without_explicit_preservation` because "All other
+# terms of our final offer are unchanged" has a qualifier between the terms and the verb.
+
+FINAL_AT: Final = datetime(2026, 10, 13, 15, tzinfo=UTC)
+AMENDED_AT: Final = datetime(2026, 10, 14, 10, tzinfo=UTC)
+
+FINAL: Final = """Hello,
+
+Our best and final offer for RFQ-9:
+
+2,000 pcs at BRL 2.90 per piece (total BRL 5,800.00); tooling BRL 1,250.
+Delivery: all 2,000 pcs by 14/11/2026.
+DAP Centro 1000, 30 days net, valid 30 days.
+
+Best regards,
+Sales"""
+
+ADDITION: Final = (
+    "to hold the price of BRL 2.90 per piece and delivery by 14/11/2026, "
+    "the purchase order must be placed by 24/10/2026"
+)
+KEPT: Final = "All other terms of our final offer are unchanged."
+AMENDMENT: Final = f"""Hello,
+
+further to our best and final offer for RFQ-9, one addition: {ADDITION}. {KEPT}
+
+Best regards,
+Sales"""
+
+AMENDED_ORDER_BY: Final = date(2026, 10, 24)
+
+
+def final_offer() -> QuoteExtractionOutput:
+    return QuoteExtractionOutput(
+        is_quote=True,
+        currency=ev("BRL", "BRL 2.90"),
+        valid_until=NONE,
+        validity=ValidityValue(
+            value="30",
+            unit="calendar_days",
+            source=SourceRef(kind="email_body", quote="valid 30 days"),
+            confidence=0.95,
+        ),
+        incoterm=ev("DAP", "DAP Centro 1000"),
+        delivery_location=ev("Centro 1000", "DAP Centro 1000"),
+        payment_terms=ev("30 days net", "30 days net"),
+        lines=[
+            bracket(
+                "2.90",
+                "2,000 pcs at BRL 2.90 per piece",
+                lead_time=lead("2026-11-14", DELIVERY_DATE, "date"),
+            )
+        ],
+    )
+
+
+def order_deadline_amendment(*, deadline_as: str = "note") -> QuoteExtractionOutput:
+    """The addition as an amendment. `deadline_as` says where the model put it: an offer
+    `note` with no line restated, or the `lead_time` statement of the restated line."""
+    lines: list[ProposalLineDraft] = []
+    if deadline_as == "lead_time":
+        lines = [
+            bracket(
+                "2.90",
+                "BRL 2.90 per piece",
+                tooling="",
+                lead_time=lead("2026-11-14", ADDITION, "date"),
+            ).model_copy(update={"tooling_cost": NONE, "unit": ev("piece", "BRL 2.90 per piece")})
+        ]
+    return QuoteExtractionOutput(
+        is_quote=True,
+        currency=ev("BRL", "BRL 2.90") if lines else NONE,
+        valid_until=NONE,
+        incoterm=NONE,
+        payment_terms=NONE,
+        lines=lines,
+        reply_kind="amendment",
+        unchanged_terms=ev(KEPT, KEPT),
+        update_evidence=ev("one addition", "one addition"),
+        offer_notes=[ADDITION] if deadline_as == "note" else [],
+    )
