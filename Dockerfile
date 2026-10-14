@@ -64,6 +64,10 @@ COPY --from=builder /app/src /app/src
 COPY alembic.ini ./
 COPY migrations ./migrations
 COPY prompts ./prompts
+# The one operator script prd needs: linking a customer's Clerk organization
+# (README, "Letting a customer in on prd"). Run as a command override of the
+# migrate task; it refuses prd unless told so explicitly.
+COPY scripts/link_demo_org.py ./scripts/link_demo_org.py
 
 ENV PATH="/app/.venv/bin:${PATH}" \
     PYTHONUNBUFFERED=1 \
