@@ -13,7 +13,7 @@ import unicodedata
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from typing import Literal
+from typing import Final, Literal
 
 DecimalSeparator = Literal[",", "."]
 
@@ -707,3 +707,141 @@ def mentions_per_unit(text: str) -> bool:
     stands in for a written number.
     """
     return _PER_UNIT.search(text) is not None and _PER_QUANTITY.search(text) is None
+
+
+# --- Order deadlines ---------------------------------------------------------------
+
+# The buyer's order, as a supplier names it ("purchase order", "PO", "ordered", "pedido",
+# "Bestellung", "Auftrag", "commande", "orden de compra", "ordini"). Never "in order to".
+_ORDER_NOUN = (
+    r"(?<!in )\b(?:purchase\s+orders?|orders?|ordered|ordering|p\.?\s?o\.?s?(?!\w)"
+    r"|pedidos?|ordem\s+de\s+compra|encomendas?|bestell\w*|auftr[aä]g\w*|command\w*"
+    r"|[oó]rden(?:es)?(?:\s+de\s+compra)?|ordin[ei]|ordinat\w*)"
+)
+# The deadline the order must meet ("by", "no later than", "até", "bis zum", "avant le").
+_ORDER_BY = (
+    r"(?:no\s+later\s+than|on\s+or\s+before|not\s+later\s+than|by|before|until|till"
+    r"|at[eé]|antes\s+d[eo]l?|no\s+m[aá]ximo\s+at[eé]"
+    r"|bis(?:\s+(?:zum|sp[äa]testens))?|sp[äa]testens(?:\s+(?:am|bis(?:\s+zum)?))?|vor\s+dem"
+    r"|avant|d'ici|au\s+plus\s+tard|hasta|a\s+m[aá]s\s+tardar|entro(?:\s+e\s+non\s+oltre)?"
+    r"|prima\s+del)"
+)
+_ORDER_DEADLINE = re.compile(
+    rf"{_ORDER_NOUN}(?P<filler>(?:\s+[^\s.;:,!?\d]+){{0,6}}?)\s+{_ORDER_BY}\s+"
+    r"(?:(?:the|o\s+dia|dia|o|dem|le|el|il)\s+)?",
+    re.IGNORECASE,
+)
+# A sentence with an order deadline that also sets another condition (a minimum, a bundle,
+# stock): that sentence stays a condition for the buyer to review.
+_OTHER_CONDITION_WORDS = re.compile(
+    r"\b(?:minimum|min\.|at\s+least|or\s+more|or\s+above|together|combined|bundle|stock"
+    r"|prior\s+sale|commitment|forecast|availability|m[ií]nim\w*|pelo\s+menos|ou\s+mais"
+    r"|em\s+conjunto|estoque|disponibilidade|mindest\w*|zusammen|lager\w*|vorrat\w*"
+    r"|verf[üu]gbarkeit|au\s+moins|ou\s+plus|ensemble|disponibilit[ée]|al\s+menos|o\s+m[aá]s"
+    r"|junto|existencias|disponibilidad|almeno|o\s+pi[uù]|insieme|scorta|disponibilit[aà])\b",
+    re.IGNORECASE,
+)
+# Date forms read at a position, full dates first ("21/10/2026" before "21/10").
+_DATES_AT: Final = (_ISO_DATE, _NUMERIC_DATE, _DAY_MONTH_YEAR, _MONTH_DAY_YEAR)
+_DAY_MONTHS_AT: Final = (_DAY_MONTH, _DAY_MONTH_NAME, _MONTH_NAME_DAY)
+
+
+@dataclass(frozen=True, slots=True)
+class WrittenDate:
+    """One date as a supplier wrote it, every valid reading: day first, then month first
+    (`21/10/2026` has one, `05/10/2026` two). `dates` when a year is written, else the
+    (month, day) readings in `day_months` (`21/10`, `Oct 21`)."""
+
+    dates: tuple[date, ...] = ()
+    day_months: tuple[tuple[int, int], ...] = ()
+
+
+def _date_at(text: str, position: int) -> WrittenDate | None:
+    """The date written at `position` of `text` (casefolded), if one starts there."""
+    for pattern in _DATES_AT:
+        match = pattern.match(text, position)
+        if match is None:
+            continue
+        found: set[date] = set()
+        readings: list[date] = []
+        if pattern is _ISO_DATE:
+            _add_date(found, int(match[1]), int(match[2]), int(match[3]))
+            readings.extend(found)
+        elif pattern is _NUMERIC_DATE:
+            year = int(match[3]) + 2000 if len(match[3]) == 2 else int(match[3])
+            for month, day in ((int(match[2]), int(match[1])), (int(match[1]), int(match[2]))):
+                one: set[date] = set()
+                _add_date(one, year, month, day)
+                readings.extend(one)
+        elif pattern is _DAY_MONTH_YEAR and match[2] in _MONTHS:
+            _add_date(found, int(match[3]), _MONTHS[match[2]], int(match[1]))
+            readings.extend(found)
+        elif pattern is _MONTH_DAY_YEAR and match[1] in _MONTHS:
+            _add_date(found, int(match[3]), _MONTHS[match[1]], int(match[2]))
+            readings.extend(found)
+        if readings:
+            return WrittenDate(dates=tuple(dict.fromkeys(readings)))
+    for pattern in _DAY_MONTHS_AT:
+        match = pattern.match(text, position)
+        if match is None:
+            continue
+        pairs: list[tuple[int, int]] = []
+        if pattern is _DAY_MONTH:
+            pairs = [(int(match[2]), int(match[1])), (int(match[1]), int(match[2]))]
+        elif pattern is _DAY_MONTH_NAME and match[2] in _MONTHS:
+            pairs = [(_MONTHS[match[2]], int(match[1]))]
+        elif pattern is _MONTH_NAME_DAY and match[1] in _MONTHS:
+            pairs = [(_MONTHS[match[1]], int(match[2]))]
+        valid: list[tuple[int, int]] = []
+        for month, day in pairs:
+            checked: set[tuple[int, int]] = set()
+            _add_day_month(checked, month, day)
+            valid.extend(checked)
+        if valid:
+            return WrittenDate(day_months=tuple(dict.fromkeys(valid)))
+    return None
+
+
+def order_deadlines(text: str) -> list[WrittenDate]:
+    """The dates `text` says the buyer's order must arrive by for the offer to hold.
+
+    "provided we receive the purchase order by 21/10/2026", "if ordered by Oct 21",
+    "desde que o pedido seja colocado até 21/10", "sofern die Bestellung bis zum
+    21.10.2026 eingeht", "pour toute commande passée avant le 21/10/2026". Words between
+    the order and its deadline never name a delivery ("order ... delivered by 14/11" is
+    a delivery date, not an order deadline).
+    """
+    lowered = text.casefold()
+    found: list[WrittenDate] = []
+    for match in _ORDER_DEADLINE.finditer(lowered):
+        if _DELIVERY_WORDS.search(match["filler"]) is not None:
+            continue
+        written = _date_at(lowered, match.end())
+        if written is not None:
+            found.append(written)
+    return found
+
+
+def is_order_deadline_only(sentence: str) -> bool:
+    """A sentence whose only condition is an order deadline: no price, no minimum, no
+    bundle or stock condition besides it (the delivery it qualifies may be named)."""
+    return (
+        bool(order_deadlines(sentence))
+        and _OTHER_CONDITION_WORDS.search(sentence) is None
+        and not detect_currencies(sentence)
+    )
+
+
+def numeric_date_order(text: str) -> Literal["day_first", "month_first"] | None:
+    """Which part comes first in the numeric dates of `text` (with a year), when a date
+    proves it (`14/11/2026` is day first; `11/14/2026` month first); None when none does
+    or they disagree."""
+    orders: set[str] = set()
+    for first, second, _ in _NUMERIC_DATE.findall(text):
+        if int(first) > 12 >= int(second):
+            orders.add("day_first")
+        elif int(second) > 12 >= int(first):
+            orders.add("month_first")
+    if len(orders) != 1:
+        return None
+    return "day_first" if "day_first" in orders else "month_first"

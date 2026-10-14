@@ -5,7 +5,7 @@ The extraction (`bido_back.quotes.extract_job`) stores these in the provenance
 JSON of the proposal and its lines. Read them only through this module:
 
 - `offer_terms(proposal.fields)`: the validity period, the offer-level lead
-  time, general notes, and the signals of the message the proposal was
+  time, the order deadline, general notes, and the signals of the message the proposal was
   extracted from (final offer, declined lines, the supplier's questions);
 - `line_terms(proposal_line.fields)`: the line's lead time as data, and which
   quantity its price applies to.
@@ -15,6 +15,7 @@ return empty values (no lead time, no signals, an unknown quantity basis).
 """
 
 from collections.abc import Mapping
+from datetime import date
 from typing import Literal, cast
 
 from pydantic import BaseModel, ConfigDict, ValidationError
@@ -99,6 +100,9 @@ class OfferTerms(BaseModel):
     # The lead time stated for the whole offer (each line also carries the lead
     # time that applies to it: `line_terms`).
     lead_time: StoredLeadTime | None = None
+    # The date the supplier must receive the order by for the offer (its delivery
+    # promise) to hold ("provided we receive the PO by 21/10/2026"); None when it set none.
+    order_by: date | None = None
     # General conditions of the whole offer (packaging, warranty...), verbatim. They
     # never block a line.
     notes: tuple[str, ...] = ()
@@ -134,6 +138,7 @@ def offer_terms(fields: Mapping[str, object]) -> OfferTerms:
     return OfferTerms(
         validity=validity,
         lead_time=decode_lead_time(_entry(fields, "lead_time").get("parsed")),
+        order_by=_date(fields, "order_by") if _usable(fields, "order_by") else None,
         notes=notes,
         signals=_signals(fields.get(SIGNALS_KEY)),
     )
@@ -159,6 +164,16 @@ def line_terms(fields: Mapping[str, object]) -> LineTerms:
 def _entry(fields: Mapping[str, object], name: str) -> dict[str, object]:
     entry = fields.get(name)
     return cast(dict[str, object], entry) if isinstance(entry, dict) else {}
+
+
+def _date(fields: Mapping[str, object], name: str) -> date | None:
+    raw = _entry(fields, name).get("parsed")
+    if not isinstance(raw, str):
+        return None
+    try:
+        return date.fromisoformat(raw)
+    except ValueError:
+        return None
 
 
 def _usable(fields: Mapping[str, object], name: str) -> bool:
