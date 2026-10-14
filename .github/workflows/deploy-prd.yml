@@ -1,0 +1,80 @@
+name: Deploy (prd)
+
+# Production deploy: the same steps as Deploy (dev) (deploy.yml), against the
+# prd account (b2b-prd). ECR is per account, so prd builds and pushes its own
+# image, tagged with the same git SHA.
+#
+# Only by hand, only from main, and only a commit whose CI run on main
+# succeeded; the `prd` environment's required reviewers approve each run.
+# Rollback: run it with `image_tag` set to an earlier SHA already in prd's
+# ECR; nothing is rebuilt.
+#
+# Inert until the `prd` environment has its variables (README, "Deploy"):
+# without them the job logs a notice and does nothing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Roll back to an image already in prd's ECR (a full git SHA from main). Empty: build main's head."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-prd
+  cancel-in-progress: false
+
+jobs:
+  # Runs before the environment's approval, so a wrong ref or a red commit
+  # fails at once instead of waiting for a reviewer.
+  preflight:
+    name: Preflight (main, green CI)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    env:
+      REF: ${{ github.ref }}
+      RUN_SHA: ${{ github.sha }}
+      INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Main only, and CI on main succeeded for the deployed commit
+        run: |
+          set -euo pipefail
+          if [ "$REF" != "refs/heads/main" ]; then
+            echo "::error::Deploy (prd) runs only from main, not $REF. Run it with 'Use workflow from: main'."
+            exit 1
+          fi
+          # A rollback deploys image_tag, so that is the commit to check.
+          if [ -n "$INPUT_IMAGE_TAG" ]; then
+            if ! [[ "$INPUT_IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::image_tag must be a full 40-character git SHA from main (prd images are tagged with it)."
+              exit 1
+            fi
+            sha="$INPUT_IMAGE_TAG"
+          else
+            sha="$RUN_SHA"
+          fi
+          runs=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$sha&branch=main&event=push&status=success&per_page=1" \
+            --jq .total_count)
+          if [ "$runs" -lt 1 ]; then
+            echo "::error::No successful CI run on main for $sha. Deploy (prd) deploys only commits whose CI on main passed."
+            exit 1
+          fi
+          echo "CI on main succeeded for $sha"
+
+  deploy:
+    needs: preflight
+    # The called job assumes the prd deploy role through OIDC.
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/deploy.yml
+    with:
+      environment: prd
+      image_tag: ${{ inputs.image_tag }}
