@@ -32,7 +32,10 @@ from bido_back.db.models import AuditEvent, Membership, Tenant, User
 from bido_back.orgs import (
     ClerkBackendApi,
     NoClerkDirectory,
+    OrgLink,
+    OrgLinkRefused,
     OrgPolicy,
+    link_new_company,
     link_org,
     principal_for_org,
     tenant_for_org,
@@ -111,6 +114,16 @@ async def _audit_actions(engine: AsyncEngine, tenant_id: UUID) -> list[str]:
         return sorted(rows)
 
 
+async def _link_events(engine: AsyncEngine, tenant_id: UUID) -> list[dict[str, Any]]:
+    async with tenant_session(engine, tenant_id) as session:
+        rows = await session.scalars(
+            select(AuditEvent.payload).where(
+                AuditEvent.tenant_id == tenant_id, AuditEvent.action == "tenant.linked"
+            )
+        )
+        return list(rows)
+
+
 def _db(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
     return create_sessionmaker(engine)
 
@@ -181,7 +194,7 @@ async def test_without_auto_provision_only_linked_organizations_get_in(
     created.tenant_ids.append(tenant_id)
     async with tenant_session(db, tenant_id) as session:
         session.add(Tenant(id=tenant_id, name="Linked S.p.A."))
-    await link_org(_db(migrator_engine), tenant_id, org_id)
+    await link_org(_db(migrator_engine), tenant_id, org_id, operator="test")
 
     principal = await principal_for_org(db, _session(user_id, org_id), CLOSED, NoClerkDirectory())
     assert principal.tenant_id == tenant_id
@@ -199,20 +212,81 @@ async def test_link_org_refuses_a_tenant_linked_elsewhere(
     async with tenant_session(db, tenant_id) as session:
         session.add(Tenant(id=tenant_id, name="Once"))
     first = created.org()
-    await link_org(operator, tenant_id, first)
-    await link_org(operator, tenant_id, first)  # idempotent
+    linked = await link_org(operator, tenant_id, first, operator="ops")
+    again = await link_org(operator, tenant_id, first, operator="ops")  # idempotent
 
+    assert linked == OrgLink(tenant_id=tenant_id, changed=True)
+    assert again == OrgLink(tenant_id=tenant_id, changed=False)
+    assert await _link_events(app_engine, tenant_id) == [
+        {"source": "operator", "operator": "ops", "clerk_org_id": first, "created": False}
+    ]
     with pytest.raises(LookupError, match="another organization"):
-        await link_org(operator, tenant_id, created.org())
+        await link_org(operator, tenant_id, created.org(), operator="ops")
     with pytest.raises(LookupError, match="not found"):
-        await link_org(operator, uuid4(), created.org())
+        await link_org(operator, uuid4(), created.org(), operator="ops")
     # The app role can never write a link, even to an unlinked company.
     unlinked = uuid4()
     created.tenant_ids.append(unlinked)
     async with tenant_session(db, unlinked) as session:
         session.add(Tenant(id=unlinked, name="Unlinked"))
     with pytest.raises(ProgrammingError, match="permission denied"):
-        await link_org(db, unlinked, created.org())
+        await link_org(db, unlinked, created.org(), operator="ops")
+
+
+@pytest.mark.db
+async def test_link_new_company_creates_only_the_linked_company_and_its_audit_event(
+    app_engine: AsyncEngine, created: Created
+) -> None:
+    db = _db(app_engine)
+    org_id = created.org()
+
+    link = await link_new_company(db, org_id, "Pilot S.p.A.", operator="ops")
+
+    assert link.changed is True
+    assert await tenant_for_org(db, org_id) == link.tenant_id
+    async with tenant_session(app_engine, link.tenant_id) as session:
+        tenant = await session.get(Tenant, link.tenant_id)
+        members = await session.scalars(
+            select(Membership.id).where(Membership.tenant_id == link.tenant_id)
+        )
+        member_ids = list(members)
+    assert tenant is not None and tenant.name == "Pilot S.p.A."
+    # The same defaults as a first login with auto-provisioning; nobody is a member yet.
+    assert tenant.allow_self_approval is True
+    assert tenant.outbound_requires_confirmed_domains is True
+    assert member_ids == []
+    assert await _audit_actions(app_engine, link.tenant_id) == ["tenant.linked"]
+    assert await _link_events(app_engine, link.tenant_id) == [
+        {"source": "operator", "operator": "ops", "clerk_org_id": org_id, "created": True}
+    ]
+
+    # The organization's members get in without auto-provisioning.
+    principal = await principal_for_org(
+        db, _session(created.user(), org_id, "org:admin"), CLOSED, NoClerkDirectory()
+    )
+    assert principal.tenant_id == link.tenant_id
+    assert principal.role == "owner"
+
+
+@pytest.mark.db
+async def test_link_new_company_is_idempotent_and_refuses_another_company(
+    app_engine: AsyncEngine, created: Created
+) -> None:
+    db = _db(app_engine)
+    org_id = created.org()
+    first = await link_new_company(db, org_id, "Pilot S.p.A.", operator="ops")
+
+    again = await link_new_company(db, org_id, "Pilot S.p.A.", operator="someone else")
+    assert again == OrgLink(tenant_id=first.tenant_id, changed=False)
+
+    with pytest.raises(OrgLinkRefused, match="already linked to another company"):
+        await link_new_company(db, org_id, "Another S.p.A.", operator="ops")
+
+    assert await tenant_for_org(db, org_id) == first.tenant_id
+    async with tenant_session(app_engine, first.tenant_id) as session:
+        tenant = await session.get(Tenant, first.tenant_id)
+    assert tenant is not None and tenant.name == "Pilot S.p.A."
+    assert len(await _link_events(app_engine, first.tenant_id)) == 1
 
 
 @pytest.mark.db
