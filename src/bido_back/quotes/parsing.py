@@ -10,6 +10,7 @@ or flags it for review.
 
 import re
 import unicodedata
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -822,13 +823,114 @@ def order_deadlines(text: str) -> list[WrittenDate]:
     return found
 
 
-def is_order_deadline_only(sentence: str) -> bool:
-    """A sentence whose only condition is an order deadline: no price, no minimum, no
-    bundle or stock condition besides it (the delivery it qualifies may be named)."""
+# A discount or a percentage ("5% off", "Skonto", "desconto de 3%"): a price condition.
+_DISCOUNT_WORDS = re.compile(
+    r"%|\b(?:per\s*cent|percent\w*|por\s*cento|prozent|pourcent|porcentaje|porcentagem"
+    r"|percentual|discount\w*|rebate\w*|desconto\w*|abatimento\w*|rabatt\w*|skonto"
+    r"|nachlass\w*|descuento\w*|bonificaci[oó]n\w*|remise\w*|rabais|scont[oi]|ribass\w*)\b",
+    re.IGNORECASE,
+)
+# A price named in words ("to hold the price of 2.90 per piece").
+_PRICE_WORDS = re.compile(
+    r"\b(?:price\w*|pricing|pre[çc]o\w*|preis\w*|prix|precio\w*|prezz\w*)\b", re.IGNORECASE
+)
+# What a price is stated per ("per piece", "/kg", "je Stück", "pro 100"): the word after.
+_PER_WORD = re.compile(r"(?:\b(?:per|por|pro|par|je|cada)\s+|/\s*)([^\W\d_]+)", re.IGNORECASE)
+
+
+def _is_order_deadline(sentence: str) -> bool:
+    """An order deadline, with no minimum, bundle, stock or discount condition beside it."""
     return (
         bool(order_deadlines(sentence))
         and _OTHER_CONDITION_WORDS.search(sentence) is None
-        and not detect_currencies(sentence)
+        and _DISCOUNT_WORDS.search(sentence) is None
+    )
+
+
+_SLASH_DAY_MONTH = re.compile(r"(?<![\d./-])(\d{1,2})/(\d{1,2})(?!\d|[./-]\d)")
+
+
+def _without_dates(text: str) -> str:
+    """`text` with its written dates blanked out: full dates (`24/10/2026`, `2026-10-24`,
+    `24 de outubro de 2026`, `Oct 24, 2026`), a day and a month name (`24 October`,
+    `Oct 24`) and `24/10`. Never `24.10` or `2,10`: those may be a price."""
+
+    def blank(match: re.Match[str]) -> str:
+        return " " * len(match.group())
+
+    def numeric(match: re.Match[str]) -> str:
+        first, second = int(match[1]), int(match[2])
+        valid = 1 <= first <= 31 and 1 <= second <= 31 and min(first, second) <= 12
+        return blank(match) if valid else match.group()
+
+    def named(month_group: int) -> Callable[[re.Match[str]], str]:
+        def masked(match: re.Match[str]) -> str:
+            return blank(match) if match[month_group].casefold() in _MONTHS else match.group()
+
+        return masked
+
+    text = _ISO_DATE.sub(blank, text)
+    text = _NUMERIC_DATE.sub(numeric, text)
+    text = _DAY_MONTH_YEAR.sub(named(2), text)
+    text = _MONTH_DAY_YEAR.sub(named(1), text)
+    text = _DAY_MONTH_NAME.sub(named(2), text)
+    text = _MONTH_NAME_DAY.sub(named(1), text)
+    return _SLASH_DAY_MONTH.sub(numeric, text)
+
+
+def names_price(sentence: str) -> bool:
+    """`sentence` names a price: a currency, or a number besides its dates beside a price
+    word or a per-unit statement ("the price of 2.90 per piece")."""
+    if detect_currencies(sentence):
+        return True
+    if _PRICE_WORDS.search(sentence) is None and _PER_UNIT.search(sentence) is None:
+        return False
+    return bool(_value_tokens(_without_dates(sentence)))
+
+
+def is_order_deadline_only(sentence: str) -> bool:
+    """A sentence whose only condition is an order deadline: no price, no minimum, no
+    bundle, stock or discount condition besides it (the delivery it qualifies may be
+    named). A sentence that names a price is read by `restated_price`."""
+    return _is_order_deadline(sentence) and not names_price(sentence)
+
+
+@dataclass(frozen=True, slots=True)
+class RestatedPrice:
+    """What an order-deadline sentence says about price: "to hold the price of BRL 2.90
+    per piece ..., the purchase order must be placed by 24/10/2026"."""
+
+    # Every number of the sentence besides its dates, as read.
+    values: frozenset[Decimal]
+    # The currencies it names (none: the offer's, as for any number a supplier writes bare).
+    currencies: frozenset[str]
+    # The words a price is stated per ("piece" in "per piece"), as written.
+    units: tuple[str, ...]
+
+
+def restated_price(sentence: str, *, decimal: DecimalSeparator | None) -> RestatedPrice | None:
+    """The price an order-deadline sentence names, for the caller to compare with the
+    line's own price; None unless the sentence is an order deadline with no other
+    condition (`is_order_deadline_only` but for the price), names a price, states no
+    basis other than one unit ("per 100 pcs") and every number in it reads one way
+    with `decimal` (the separator the supplier's own numbers prove)."""
+    if not _is_order_deadline(sentence) or not names_price(sentence):
+        return None
+    undated = _without_dates(sentence)
+    if _PER_QUANTITY.search(undated) is not None:
+        return None
+    values: set[Decimal] = set()
+    for token in _value_tokens(undated):
+        if len(token) == 1:
+            values.add(token[0].value)
+        elif decimal is not None:
+            values.add(_preferred(token, decimal).value)
+        else:
+            return None
+    return RestatedPrice(
+        values=frozenset(values),
+        currencies=frozenset(detect_currencies(sentence)),
+        units=tuple(match[1] for match in _PER_WORD.finditer(undated)),
     )
 
 

@@ -61,8 +61,10 @@ Also deterministic, never the model's call:
 - an order deadline ("provided we receive the purchase order by 21/10/2026", in a
   line's condition, an offer note or a lead-time statement) is the offer's `order_by`
   header field: the earliest such date the supplier wrote. A condition sentence that
-  says nothing else leaves the line's conditions (it becomes an offer note), so an
-  amendment that adds one is not a change of the offer's commercial basis;
+  says nothing else, or names a price only to restate the line's own price ("to hold
+  the price of BRL 2.90 per piece, the purchase order must be placed by 24/10/2026"),
+  leaves the line's conditions (it becomes an offer note), so an amendment that adds
+  one is not a change of the offer's commercial basis;
 - the supplier's signals (final offer, declined lines, questions) are grounded
   against its message (`ValidatedQuote.signals`).
 """
@@ -87,6 +89,7 @@ from bido_back.agents.catalog.contracts import (
     SourceRef,
     ValidityValue,
 )
+from bido_back.comparison.compute import same_unit
 from bido_back.documents import DocumentText
 from bido_back.quotes.lead_time import (
     LeadTime,
@@ -129,6 +132,7 @@ from bido_back.quotes.parsing import (
     parse_canonical,
     parse_decimal,
     ranges_in,
+    restated_price,
     stated_values,
 )
 from bido_back.quotes.terms import (
@@ -450,7 +454,7 @@ def validate_quote(
     drafts, line_fields = _timing_out_of_conditions(drafts, line_fields, ctx)
     notes = _unique([*notes, *general])
     drafts, line_fields, deadline_notes, order_by = _order_by_out_of_conditions(
-        output, drafts, line_fields, notes, ctx
+        output, drafts, line_fields, notes, currency, ctx
     )
     notes = _unique([*notes, *deadline_notes])
     header = {**header, "order_by": order_by}
@@ -1245,6 +1249,7 @@ def _order_by_out_of_conditions(
     drafts: list[ProposalLineDraft],
     line_fields: list[dict[str, FieldCheck]],
     notes: list[str],
+    currency: FieldCheck,
     ctx: _Context,
 ) -> tuple[list[ProposalLineDraft], list[dict[str, FieldCheck]], list[str], FieldCheck]:
     """The offer's order deadline, taken out of the lines' conditions.
@@ -1253,10 +1258,12 @@ def _order_by_out_of_conditions(
     until when the offer holds, not a condition on one line's price: it is the offer's
     `order_by` (the earliest such date in a line's condition, an offer note or a
     lead-time statement, each found word for word in the supplier's message). A
-    condition sentence that says nothing else becomes an offer note; one that also
-    sets another condition (a minimum, a bundle, stock) stays a condition. A date
-    that reads two ways the message does not settle (`05/10/2026`) is no deadline.
-    Returns the drafts, the fields, the moved sentences and the `order_by` field.
+    condition sentence that says nothing else becomes an offer note, and so does one
+    that names a price only to restate the line's own (`_restates_line_price`); one that
+    also sets another condition (a minimum, a bundle, stock, a discount, another price)
+    stays a condition. A date that reads two ways the message does not settle
+    (`05/10/2026`) is no deadline. Returns the drafts, the fields, the moved sentences
+    and the `order_by` field.
     """
     if not output.is_quote:
         return drafts, line_fields, [], absent_field("order_by")
@@ -1278,7 +1285,10 @@ def _order_by_out_of_conditions(
             day = deadline(sentence)
             if (
                 day is None
-                or not is_order_deadline_only(sentence)
+                or not (
+                    is_order_deadline_only(sentence)
+                    or _restates_line_price(sentence, fields, currency, ctx)
+                )
                 or not _found(sentence, ctx.sources)
             ):
                 continue
@@ -1321,6 +1331,42 @@ def _order_by_out_of_conditions(
         parsed=day,
     )
     return out_drafts, out_fields, moved, order_by
+
+
+def _restates_line_price(
+    sentence: str, fields: Mapping[str, FieldCheck], currency: FieldCheck, ctx: _Context
+) -> bool:
+    """An order-deadline sentence that names a price only to carry the line's own price
+    forward: "to hold the price of BRL 2.90 per piece and delivery by 14/11/2026, the
+    purchase order must be placed by 24/10/2026", on a line this reply prices at BRL 2.90
+    per piece.
+
+    Every number in it besides its dates is that price, read with the separator the
+    supplier's numbers prove (a number that still reads two ways fails); any currency it
+    names is the offer's (none named: the offer's, as for the line's own bare price); a
+    unit it names is the line's; no other basis, discount, minimum or second price.
+    Without a verified price, unit basis and currency on the line there is nothing to
+    compare with, and the sentence stays a condition.
+    """
+    price = fields["unit_price"]
+    unit = fields["unit"].parsed
+    basis = fields["price_basis_quantity"].parsed
+    if (
+        not isinstance(price.parsed, Decimal)
+        or price.needs_review
+        or not isinstance(currency.parsed, str)
+        or currency.needs_review
+        or (basis is not None and basis != 1)
+    ):
+        return False
+    stated = restated_price(sentence, decimal=ctx.decimal)
+    return (
+        stated is not None
+        and bool(stated.values)
+        and all(value == price.parsed for value in stated.values)
+        and stated.currencies <= {currency.parsed}
+        and all(isinstance(unit, str) and same_unit(word, unit) for word in stated.units)
+    )
 
 
 def _read_date(written: WrittenDate, ctx: _Context) -> date | None:
