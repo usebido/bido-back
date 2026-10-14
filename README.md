@@ -130,14 +130,23 @@ python scripts/link_demo_org.py --confirm-environment prd \
   script prints the tenant id; no customer content goes to logs.
 - If `CLERK_ALLOWED_ORG_IDS` is set, the organization must be listed there too.
 
-**Where to run it: there is no established way yet.** The database is only
-reachable from inside the environment's VPC, and the image ships `src`,
-`migrations` and `prompts` but not `scripts/`. The only one-off task an
-environment has is `<env>-migrate` (`aws ecs run-task`, see
-`bido-infra/b2b/prd/README.md`), which has `ENVIRONMENT`, `DATABASE_URL` and
-`MIGRATION_DATABASE_URL`, enough for this script. Running the script as a
-command override of that task needs the script in the image first; that
-change has not been made.
+**Where to run it:** as a command override of the environment's one-off
+`<env>-migrate` task. The database is only reachable from inside the VPC, and
+that task already has `ENVIRONMENT`, `DATABASE_URL` and
+`MIGRATION_DATABASE_URL`. The image ships this one script (and no other file
+from `scripts/`):
+
+```bash
+aws ecs run-task --profile bido-b2b-prd --cluster bido-prd --launch-type FARGATE \
+  --task-definition bido-prd-migrate \
+  --network-configuration "$(terraform -chdir=../bido-infra/b2b/prd output -raw run_task_network_configuration)" \
+  --overrides '{"containerOverrides":[{"name":"migrate","command":[
+    "python","scripts/link_demo_org.py","--confirm-environment","prd",
+    "--clerk-org-id","org_...","--company-name","Acme S.p.A.","--operator","<your name>"]}]}'
+```
+
+The output (the tenant id, or why it refused) is in the task's log stream,
+`/ecs/bido-prd/migrate`.
 
 ## Tenancy and row-level security
 

@@ -26,6 +26,7 @@ build
 tests
 docs
 scripts
+!scripts/link_demo_org.py
 openapi.json
 docker-compose*.yml
 Dockerfile
