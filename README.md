@@ -499,42 +499,68 @@ filter msg = "request"
 | sort status desc, p95_ms desc
 ```
 
-## Deploy (dev)
+## Deploy
 
-`.github/workflows/deploy-dev.yml` deploys to the `dev` environment (AWS
-account `b2b-dev`, Terraform in `bido-infra/b2b/dev`). It runs after CI
-succeeds on a push to `main`, or by hand from the Actions tab.
+Both environments run the same steps, kept once in the reusable workflow
+`.github/workflows/deploy.yml`:
 
-1. Build the arm64 image once and push it to ECR, tagged with the git SHA.
-   ECR tags are immutable; an SHA that is already there is reused.
+1. Build the arm64 image once and push it to the environment's ECR, tagged
+   with the git SHA. ECR tags are immutable; an SHA that is already there is
+   reused. ECR is per account, so dev and prd each build their own image of
+   the same commit.
 2. Register new `api`, `worker` and `migrate` task definitions, changing only
    the image. Everything else stays as Terraform defined it.
 3. Run `alembic upgrade head` as a one-off `migrate` task. If it fails, the
    deploy stops and prints the task's log; the services keep the old image.
 4. Roll the `api` and `worker` services and wait until they are stable.
 
-**Rollback:** run the workflow by hand with `image_tag` set to an earlier
-SHA. Nothing is rebuilt. Migrations are not rolled back: keep them backward
-compatible with the previous image.
+**Rollback:** run the environment's workflow by hand with `image_tag` set to
+an earlier SHA. Nothing is rebuilt. Migrations are not rolled back: keep them
+backward compatible with the previous image.
 
-It authenticates with GitHub OIDC; no AWS keys are stored. The role trusts
-only this repository in the `dev` GitHub environment, so that environment's
-protection rules (required reviewers, allowed branches) decide who deploys.
-Until the variables below exist, the job logs a notice and does nothing.
+It authenticates with GitHub OIDC; no AWS keys are stored. Each deploy role
+trusts only this repository in one GitHub environment (`dev` or `prd`), so
+that environment's protection rules (required reviewers, allowed branches)
+decide who deploys. Until an environment has the variables below, its job
+logs a notice and does nothing.
 
-| `dev` environment variable | Value (`terraform output` in `bido-infra/b2b/dev`) |
+| Environment variable | Value (`terraform output` in `bido-infra/b2b/<env>`) |
 |---|---|
 | `AWS_DEPLOY_ROLE` | `github_deploy_back_role_arn` |
 | `ECR_REPOSITORY` | `ecr_repository_url` |
 | `RUN_TASK_NETWORK_CONFIGURATION` | `run_task_network_configuration` (the JSON as is) |
 | `AWS_REGION` (optional) | default `us-east-2` |
-| `ECS_CLUSTER` (optional) | default `bido-dev` |
-| `TASK_FAMILY_PREFIX` (optional) | default `bido-dev` |
+| `ECS_CLUSTER` (optional) | default `bido-<env>` (`bido-dev`, `bido-prd`) |
+| `TASK_FAMILY_PREFIX` (optional) | default `bido-<env>` (`bido-dev`, `bido-prd`) |
+
+### dev
+
+`.github/workflows/deploy-dev.yml` deploys to the `dev` environment (AWS
+account `b2b-dev`, Terraform in `bido-infra/b2b/dev`). It runs after CI
+succeeds on a push to `main` (only main's current head), or by hand from the
+Actions tab.
+
+### prd
+
+`.github/workflows/deploy-prd.yml` deploys to the `prd` environment (AWS
+account `b2b-prd`, 723681698795, `us-east-2`, Terraform in
+`bido-infra/b2b/prd`). It never runs on its own:
+
+- **Manual only:** Actions tab, "Deploy (prd)", "Run workflow", or
+  `gh workflow run deploy-prd.yml --ref main`.
+- **Main only:** a run from any other ref fails in preflight.
+- **Green CI only:** preflight fails unless CI succeeded on a push to `main`
+  for the commit being deployed (main's head, or `image_tag` on a rollback).
+- **Approved:** the `prd` environment's required reviewers approve each run
+  after preflight. Set them in the repository settings (Environments, `prd`),
+  together with "Deployment branches: `main` only".
+- **Rollback:** `image_tag` must be a full 40-character SHA from `main` whose
+  image is already in prd's ECR.
+
+Runs queue in the `deploy-prd` concurrency group; none is cancelled.
 
 ## Not here yet (deliberately)
 
-- **Production deploy:** a `prd` environment and promotion of the same image
-  come with `bido-infra/b2b/prd`.
 - **Staff (cross-tenant) access** and roles managed from the app (roles come
   from Clerk on first sign-in and from the database).
 - **Product features:** this is the scaffold that features build on.
