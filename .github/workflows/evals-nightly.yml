@@ -1,0 +1,182 @@
+name: Evals (nightly)
+
+# The live evals (evals.run, evals.flow, evals.source_corpus) against the real
+# models, every night on main, so a regression in a prompt, the mapper or the
+# planning code shows up the next morning instead of when a buyer finds it.
+#
+# Report-only for now: failing cases leave the run green and are listed in the
+# job summary and the uploaded reports. The run turns red only when a harness
+# crashes. To make failing cases fail the run, set FAIL_ON_EVAL_FAILURES below
+# to "true".
+#
+# No email leaves the runner (the harness captures every send under the real
+# recipient guard), and only the generated synthetic workbooks reach OpenAI.
+# Langfuse and Sentry are not configured here, so no prompt content goes to a
+# third party besides the model provider.
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # 06:00 UTC, 03:00 in São Paulo
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "live (real models, OPENAI_API_KEY) or mock (scripted, free)"
+        type: choice
+        options: [live, mock]
+        default: live
+      k:
+        description: "Runs per case (pass^k)"
+        type: string
+        default: "3"
+      suites:
+        description: "Comma-separated: run, flow, sources"
+        type: string
+        default: "run,flow,sources"
+
+permissions:
+  contents: read
+
+# One nightly run at a time; a manual run waits instead of cancelling one in
+# progress.
+concurrency:
+  group: evals-nightly
+  cancel-in-progress: false
+
+env:
+  UV_VERSION: "0.12.21"
+  PYTHON_VERSION: "3.12"
+  # The failure policy, in one place: "false" = report-only.
+  FAIL_ON_EVAL_FAILURES: "false"
+  # Runs per case on the scheduled run (a manual run takes its own k). Cost and
+  # runner minutes grow linearly with it: see "Nightly evals" in README.md.
+  NIGHTLY_K: "3"
+
+jobs:
+  # Decides what runs. Live mode without the OPENAI_API_KEY secret runs
+  # nothing, so the schedule costs a few seconds until the key is set.
+  plan:
+    name: Plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    environment: evals
+    outputs:
+      suites: ${{ steps.plan.outputs.suites }}
+      mode: ${{ steps.plan.outputs.mode }}
+      k: ${{ steps.plan.outputs.k }}
+      ready: ${{ steps.plan.outputs.ready }}
+    steps:
+      - name: Suites, mode and k
+        id: plan
+        env:
+          SUITES: ${{ inputs.suites || 'run,flow,sources' }}
+          MODE: ${{ inputs.mode || 'live' }}
+          K: ${{ inputs.k || env.NIGHTLY_K }}
+          HAS_KEY: ${{ secrets.OPENAI_API_KEY != '' }}
+        run: |
+          case "$K" in ''|*[!0-9]*) echo "::error::k must be a number"; exit 1 ;; esac
+          if [ "$K" -lt 1 ] || [ "$K" -gt 5 ]; then echo "::error::k must be 1 to 5"; exit 1; fi
+          json="["
+          for suite in ${SUITES//,/ }; do
+            case "$suite" in
+              run|flow|sources) json="$json\"$suite\"," ;;
+              *) echo "::error::unknown suite '$suite' (run, flow, sources)"; exit 1 ;;
+            esac
+          done
+          json="${json%,}]"
+          if [ "$json" = "[]" ]; then echo "::error::no suite selected"; exit 1; fi
+          ready=true
+          if [ "$MODE" = "live" ] && [ "$HAS_KEY" != "true" ]; then
+            ready=false
+            echo "::warning::OPENAI_API_KEY is not set in the 'evals' environment; live evals skipped."
+            echo "Live evals skipped: no OPENAI_API_KEY in the \`evals\` environment." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          {
+            echo "suites=$json"
+            echo "mode=$MODE"
+            echo "k=$K"
+            echo "ready=$ready"
+          } >> "$GITHUB_OUTPUT"
+
+  evals:
+    name: Evals (${{ matrix.suite }})
+    needs: plan
+    if: needs.plan.outputs.ready == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    environment: evals
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: ${{ fromJSON(needs.plan.outputs.suites) }}
+    services:
+      db:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres # throwaway CI database
+          POSTGRES_DB: bido
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d bido"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      ENVIRONMENT: test
+      DATABASE_URL: postgresql+asyncpg://bido_app:app@localhost:5432/bido
+      MIGRATION_DATABASE_URL: postgresql+asyncpg://bido_migrator:migrator@localhost:5432/bido
+      AGNO_DATABASE_URL: postgresql+asyncpg://bido_agno:agno@localhost:5432/bido
+      AGNO_TELEMETRY: "false"
+      MODE: ${{ needs.plan.outputs.mode }}
+      K: ${{ needs.plan.outputs.k }}
+      SUITE: ${{ matrix.suite }}
+      OUT: evals/reports/nightly
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --locked
+
+      - name: Bootstrap roles and extensions (init.sql, as superuser)
+        env:
+          PGPASSWORD: postgres
+        run: >-
+          psql -h localhost -p 5432 -U postgres -d bido
+          -v ON_ERROR_STOP=1 -f docker/postgres/init.sql
+
+      - name: Apply migrations (migration role)
+        run: uv run alembic upgrade head
+
+      - name: Run the ${{ matrix.suite }} evals
+        id: run
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          args=("$SUITE" --out "$OUT" -k "$K")
+          if [ "$MODE" = "mock" ]; then
+            args+=(--mock)
+            unset OPENAI_API_KEY
+          fi
+          if [ "$FAIL_ON_EVAL_FAILURES" = "true" ]; then args+=(--fail-on-failures); fi
+          uv run python -m evals.nightly "${args[@]}"
+
+      - name: Job summary
+        if: always()
+        run: uv run python -m evals.nightly summary --out "$OUT" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evals-${{ matrix.suite }}-${{ needs.plan.outputs.mode }}-${{ github.run_id }}
+          path: evals/reports/nightly/
+          retention-days: 30
+          if-no-files-found: warn
