@@ -2,7 +2,8 @@
 
 Responses carry only what the screens need. Personal data (contact names and
 email addresses) appears only where a person must see it to act: the supplier
-list (to pick a contact) and the approval queue (to review who gets the email).
+list (to pick a contact), the approval queue (to review who gets the email) and
+an invite's email thread (to read what was exchanged with the supplier).
 """
 
 from datetime import date, datetime
@@ -520,3 +521,50 @@ class RfqActivityItem(BaseModel):
     )
     supplier_name: str | None = None
     summary: str = Field(description="One short English sentence written by code")
+
+
+MessageDirection = Literal["in", "out"]
+
+
+class MessageAttachment(BaseModel):
+    """A file that came with a supplier's email (inbound only)."""
+
+    id: UUID = Field(
+        description="A library file id: download with GET /v1/files/{id}/download, "
+        "show with GET /v1/files/{id}/preview"
+    )
+    filename: str
+    content_type: str = Field(description="What the download serves it as (from its extension)")
+    size_bytes: int
+
+
+class InviteMessage(BaseModel):
+    """One email of an invite's thread, as stored: plain text, never HTML."""
+
+    id: UUID
+    direction: MessageDirection = Field(description="in: from the supplier; out: from the buyer")
+    origin: str = Field(
+        description="email: it went through a mailbox; copilot_upload: a quote the buyer "
+        "attached in the Copilot (no email body)"
+    )
+    status: str = Field(description="stored, unmatched, quarantined, extracted or failed")
+    quarantined: bool = Field(
+        description="Bido set it aside: an auto-reply, a bounce, or a sender outside the "
+        "supplier's domain. Listed so the buyer sees it; never read as a quote"
+    )
+    subject: str | None
+    body_text: str | None = Field(description="The text body; render it as text, not HTML")
+    from_name: str | None = Field(
+        description="The sender's contact: the supplier's person, or the buyer who sent it"
+    )
+    from_email: str | None
+    occurred_at: datetime
+    attachments: list[MessageAttachment]
+
+
+class InviteMessages(BaseModel):
+    """The emails exchanged with one supplier about one RFQ, oldest first."""
+
+    invite_id: UUID
+    supplier_name: str
+    messages: list[InviteMessage]
