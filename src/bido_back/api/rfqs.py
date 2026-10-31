@@ -20,6 +20,7 @@ from bido_back.comparison.compute import Comparison
 from bido_back.comparison.loader import load_comparison
 from bido_back.compliance import service as compliance_service
 from bido_back.rfqs import activity as activity_service
+from bido_back.rfqs import messages as messages_service
 from bido_back.rfqs import overview, service
 from bido_back.rfqs.agents import RfqAgents
 from bido_back.rfqs.errors import (
@@ -39,6 +40,7 @@ from bido_back.rfqs.schemas import (
     AddLineRequest,
     CreateInviteRequest,
     CreateRfqRequest,
+    InviteMessages,
     InviteView,
     PrepareSendResponse,
     RfqActivityItem,
@@ -247,6 +249,20 @@ def rfqs_router() -> APIRouter:
         """Take a supplier off a draft RFQ before an email was prepared for it (409 after)."""
         try:
             return await service.remove_invite(db, principal, rfq_id, invite_id)
+        except RfqError as exc:
+            raise rfq_http_error(exc) from None
+
+    @router.get(
+        "/{rfq_id}/invites/{invite_id}/messages",
+        responses=error_responses(status.HTTP_404_NOT_FOUND),
+    )
+    async def invite_messages(  # pyright: ignore[reportUnusedFunction]
+        rfq_id: UUID, invite_id: UUID, principal: CurrentPrincipal, db: Db
+    ) -> InviteMessages:
+        """The emails exchanged with this supplier about this RFQ, oldest first, with their
+        text, sender and attachments (download them through /v1/files/{id}/download)."""
+        try:
+            return await messages_service.invite_messages(db, principal, rfq_id, invite_id)
         except RfqError as exc:
             raise rfq_http_error(exc) from None
 
