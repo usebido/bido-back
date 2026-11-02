@@ -217,6 +217,7 @@ class World:
             email_domain=EMAIL_DOMAIN,
             mailbox_senders=self.mailboxes,
             clock=lambda: self.now,
+            storage=env.storage,
         )
         register_act_tools(self.registry, deps)
         register_followup_act_tools(self.registry, deps)

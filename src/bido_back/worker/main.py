@@ -173,10 +173,12 @@ def build_worker_registry(
     from bido_back.storage import build_storage
 
     act_tools = ActToolRegistry()
+    storage = build_storage(settings)
     act_deps = RfqActDeps(
         db=engine,
         email_domain=settings.email_domain,
         mailbox_senders=mailbox_senders_for(settings),
+        storage=storage,
     )
     register_act_tools(act_tools, act_deps)
     register_followup_act_tools(act_tools, act_deps)
@@ -202,7 +204,6 @@ def build_worker_registry(
             act_tools, engine, build_payment_providers(settings), jobs, settings=settings
         )
     registry = build_registry(engine, act_tools)
-    storage = build_storage(settings)
     runner_config = RunnerConfig.from_settings(settings)
     registry.register(
         FOLLOWUPS_SWEEP,

@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import QueryableAttribute
 
 from bido_back.db import tenant_session
-from bido_back.db.models import Attachment, FileText, TemplateUpload
+from bido_back.db.models import Attachment, FileText, Message, TemplateUpload
 from bido_back.documents.extract import extract_text
 from bido_back.storage import BlobNotFound, BlobStorage
 from bido_back.worker.envelope import Envelope
@@ -82,7 +82,11 @@ def _pending_query(limit: int):  # noqa: ANN202 - a SQLAlchemy select
         Attachment.size_bytes,
         Attachment.storage_key,
         Attachment.created_at,
-    ).where(_not_indexed("supplier_attachment", Attachment.id))
+    ).where(
+        # Only what suppliers sent: the library does not list Bido's own sent files.
+        Attachment.message_id.in_(select(Message.id).where(Message.direction == "in")),
+        _not_indexed("supplier_attachment", Attachment.id),
+    )
     both = uploads.union_all(attachments).subquery("pending")
     return select(both).order_by(both.c.created_at, both.c.id).limit(limit)
 

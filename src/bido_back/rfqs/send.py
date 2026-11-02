@@ -17,7 +17,8 @@ marker) and `body` from the approved arguments. The handler adds only the
 From name/address (the buyer) and our own Message-ID, plus the RFQ document as
 a PDF when the approved arguments carry one (`document`): it is rendered from
 those approved arguments, never from the live RFQ, and the send is refused when
-the RFQ no longer says what was approved (`bido_back.rfqs.document`).
+the RFQ no longer says what was approved (`bido_back.rfqs.document`). The PDF
+that went out is kept with the outbound message (`supplier_email.sent_files`).
 
 Idempotency (the executor may retry after a crash):
 
@@ -90,6 +91,8 @@ from bido_back.rfqs.document import (
 from bido_back.rfqs.errors import InvalidState, NotFound
 from bido_back.rfqs.mailbox import MailboxSenderFactory, default_mailbox_sender
 from bido_back.rfqs.schemas import EmailAddress
+from bido_back.storage import BlobStorage
+from bido_back.supplier_email.sent_files import keep_sent_attachments
 
 logger = logging.getLogger(__name__)
 
@@ -165,6 +168,9 @@ class RfqActDeps:
     # When a follow-up went out (its schedule and the clarification ledger read it);
     # evals pin it to their simulated clock.
     clock: Callable[[], datetime] = field(default=_utc_now)
+    # Where the files attached to a sent email are kept for its thread
+    # (`supplier_email.sent_files`); None keeps none (tests that do not look).
+    storage: BlobStorage | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,6 +326,10 @@ class _SendRfqEmail:
                 .on_conflict_do_nothing(constraint=_MESSAGES_UNIQUE)
                 .returning(Message.id)
             )
+            if message_row is not None:
+                await keep_sent_attachments(
+                    session, self._deps.storage, ctx.tenant_id, message_row, attachments
+                )
             invite.thread_message_id = message_id
             invite.status = "sent"
             invite.sent_at = now
