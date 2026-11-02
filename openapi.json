@@ -6779,6 +6779,141 @@
         "title": "InviteFollowups",
         "type": "object"
       },
+      "InviteMessage": {
+        "description": "One email of an invite's thread, as stored: plain text, never HTML.",
+        "properties": {
+          "attachments": {
+            "items": {
+              "$ref": "#/components/schemas/MessageAttachment"
+            },
+            "title": "Attachments",
+            "type": "array"
+          },
+          "body_text": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The text body; render it as text, not HTML",
+            "title": "Body Text"
+          },
+          "direction": {
+            "description": "in: from the supplier; out: from the buyer",
+            "enum": [
+              "in",
+              "out"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "from_email": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "From Email"
+          },
+          "from_name": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The sender's contact: the supplier's person, or the buyer who sent it",
+            "title": "From Name"
+          },
+          "id": {
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "occurred_at": {
+            "format": "date-time",
+            "title": "Occurred At",
+            "type": "string"
+          },
+          "origin": {
+            "description": "email: it went through a mailbox; copilot_upload: a quote the buyer attached in the Copilot (no email body)",
+            "title": "Origin",
+            "type": "string"
+          },
+          "quarantined": {
+            "description": "Bido set it aside: an auto-reply, a bounce, or a sender outside the supplier's domain. Listed so the buyer sees it; never read as a quote",
+            "title": "Quarantined",
+            "type": "boolean"
+          },
+          "status": {
+            "description": "stored, unmatched, quarantined, extracted or failed",
+            "title": "Status",
+            "type": "string"
+          },
+          "subject": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Subject"
+          }
+        },
+        "required": [
+          "id",
+          "direction",
+          "origin",
+          "status",
+          "quarantined",
+          "subject",
+          "body_text",
+          "from_name",
+          "from_email",
+          "occurred_at",
+          "attachments"
+        ],
+        "title": "InviteMessage",
+        "type": "object"
+      },
+      "InviteMessages": {
+        "description": "The emails exchanged with one supplier about one RFQ, oldest first.",
+        "properties": {
+          "invite_id": {
+            "format": "uuid",
+            "title": "Invite Id",
+            "type": "string"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/InviteMessage"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "supplier_name": {
+            "title": "Supplier Name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "invite_id",
+          "supplier_name",
+          "messages"
+        ],
+        "title": "InviteMessages",
+        "type": "object"
+      },
       "InviteNegotiation": {
         "properties": {
           "invite_id": {
@@ -8915,6 +9050,38 @@
           "ask_unit_price"
         ],
         "title": "MessageAskView",
+        "type": "object"
+      },
+      "MessageAttachment": {
+        "description": "A file that came with a supplier's email (inbound only).",
+        "properties": {
+          "content_type": {
+            "description": "What the download serves it as (from its extension)",
+            "title": "Content Type",
+            "type": "string"
+          },
+          "filename": {
+            "title": "Filename",
+            "type": "string"
+          },
+          "id": {
+            "description": "A library file id: download with GET /v1/files/{id}/download, show with GET /v1/files/{id}/preview",
+            "format": "uuid",
+            "title": "Id",
+            "type": "string"
+          },
+          "size_bytes": {
+            "title": "Size Bytes",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "filename",
+          "content_type",
+          "size_bytes"
+        ],
+        "title": "MessageAttachment",
         "type": "object"
       },
       "MilestoneDocumentRefView": {
@@ -33499,6 +33666,123 @@
           }
         ],
         "summary": "Invite Document",
+        "tags": [
+          "rfqs"
+        ]
+      }
+    },
+    "/v1/rfqs/{rfq_id}/invites/{invite_id}/messages": {
+      "get": {
+        "description": "The emails exchanged with this supplier about this RFQ, oldest first, with their\ntext, sender and attachments (download them through /v1/files/{id}/download).",
+        "operationId": "invite_messages_v1_rfqs__rfq_id__invites__invite_id__messages_get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "rfq_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Rfq Id",
+              "type": "string"
+            }
+          },
+          {
+            "in": "path",
+            "name": "invite_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "title": "Invite Id",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+            "in": "header",
+            "name": "X-Tenant-Id",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Dev mode only: picks the tenant for users with several memberships. Ignored with a Clerk token (the active organization decides).",
+              "title": "X-Tenant-Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InviteMessages"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Bad Request"
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Unauthorized"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Forbidden"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            },
+            "description": "Not Found"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "HTTPBearer": []
+          }
+        ],
+        "summary": "Invite Messages",
         "tags": [
           "rfqs"
         ]

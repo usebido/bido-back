@@ -77,6 +77,7 @@ async def test_routes_require_authentication() -> None:
             await http.delete(f"/v1/rfqs/{uuid4()}/lines/{uuid4()}"),
             await http.delete(f"/v1/rfqs/{uuid4()}/invites/{uuid4()}"),
             await http.get(f"/v1/rfqs/{uuid4()}/invites/{uuid4()}/document.pdf"),
+            await http.get(f"/v1/rfqs/{uuid4()}/invites/{uuid4()}/messages"),
             await http.get(f"/v1/rfqs/{uuid4()}/document.pdf"),
         ]
     assert [r.status_code for r in responses] == [401] * len(responses)
