@@ -41,6 +41,10 @@ from tests.purchasing.test_api import build_app
 from tests.purchasing.test_workbook import XLSX, workbook
 from tests.rfqs.test_service import buyer
 
+# The fixtures are dated October 2026; pin the clock so an undated plant's
+# reference date (`as_of_today`) does not drift past their production orders.
+TODAY = date(2026, 10, 9)
+
 BUYER = ScopeRequest(
     product="Motor MTR-100", location="plant a", horizon_days=14, safety_stock=Decimal(0)
 )
@@ -353,6 +357,7 @@ async def _analyze(scope: ScopeRequest | None, data: bytes, mapper: Mapper) -> S
         _context(),
         mapper,
         scope=scope,
+        today=TODAY,
     )
 
 
