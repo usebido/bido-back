@@ -31,6 +31,7 @@ from bido_back.email.types import OutboundAttachment, OutboundEmail
 from bido_back.rfqs.errors import NotFound
 from bido_back.rfqs.language import thread_language
 from bido_back.rfqs.send import SEND_RFQ_EMAIL, RfqActDeps, send_proposal_ids
+from bido_back.supplier_email.sent_files import keep_sent_attachments
 from bido_back.supplier_email.subject import reply_subject
 from bido_back.supplier_email.threading import reply_headers
 
@@ -119,8 +120,9 @@ async def deliver(
 ) -> tuple[str, UUID | None]:
     """Send from the sender's mailbox as a reply in the thread; store the outbound message.
 
-    Returns the Message-ID used and the `messages` row id (None if a retry
-    already stored it).
+    The files attached (a PO's PDF and .xlsx) are kept with that row, the exact
+    bytes sent (`supplier_email.sent_files`). Returns the Message-ID used and the
+    `messages` row id (None if a retry already stored it).
     """
     buyer = await session.get(User, email.sender_user_id)
     tenant = await session.get(Tenant, ctx.tenant_id)
@@ -175,4 +177,6 @@ async def deliver(
         .on_conflict_do_nothing(constraint=_MESSAGES_UNIQUE)
         .returning(Message.id)
     )
+    if row is not None:
+        await keep_sent_attachments(session, deps.storage, ctx.tenant_id, row, email.attachments)
     return message_id, row

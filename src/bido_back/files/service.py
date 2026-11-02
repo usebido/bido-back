@@ -231,7 +231,10 @@ def _rows(principal: Principal, filters: FileFilters) -> SelectBase:
         .outerjoin(User, User.id == TemplateUpload.user_id)
         .where(*upload_where)
     )
-    attachment_where = _common(filters, Attachment.filename, Attachment.created_at)
+    # What suppliers sent: the files Bido attached to its own emails (an RFQ's or
+    # a PO's PDF) are shown in the invite's thread, not in the library.
+    attachment_where = [Message.direction == "in"]
+    attachment_where += _common(filters, Attachment.filename, Attachment.created_at)
     if filters.rfq_id is not None:
         attachment_where.append(Rfq.id == filters.rfq_id)
     if filters.supplier_id is not None:
@@ -411,7 +414,8 @@ def _location(marker: str) -> str | None:
 
 
 async def get_file(db: Db, principal: Principal, file_id: UUID) -> LibraryFile:
-    """A file the caller may read, by id (an upload or a supplier attachment)."""
+    """A file the caller may read, by id: an upload, or an email attachment (a supplier's,
+    or one Bido sent)."""
     async with tenant_session(db, principal.tenant_id) as session:
         upload = await session.get(TemplateUpload, file_id)
         if upload is not None and can_read_upload(upload.user_id, principal):

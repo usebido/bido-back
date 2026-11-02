@@ -3,7 +3,8 @@
 * `GET /v1/files`: buyers' uploads and suppliers' reply attachments, newest
   first; `q` matches the name or the content (with a snippet), plus filters.
 * `GET /v1/files/{id}/download` and `/preview`: as `/v1/uploads/{id}/...`, for
-  any library file the caller may read.
+  any library file the caller may read, and for a file Bido attached to an
+  email it sent (listed in the invite's thread, not in the library).
 * `POST /v1/files/{id}/attach`: an upload id the caller owns for this file,
   for a Copilot message's `attachment_ids` (no copy of the bytes).
 

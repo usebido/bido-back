@@ -7,9 +7,11 @@ authenticated member of the company that owns the RFQ (the `tenant_session`
 below, forced RLS); for anyone else the RFQ and the invite do not exist (404).
 
 What is stored is what is shown: the text body (outbound HTML and recipients are
-not kept), and attachments of inbound emails only. Quarantined messages (an
-auto-reply, a bounce, a sender outside the supplier's domain) are listed and
-flagged. Nothing read here is logged.
+not kept), and the attachments of both directions: what the supplier sent, and
+the files Bido attached to the emails it sent (the RFQ's PDF, the PO's PDF and
+.xlsx; `supplier_email.sent_files`). Emails sent before Bido kept those files
+list none. Quarantined messages (an auto-reply, a bounce, a sender outside the
+supplier's domain) are listed and flagged. Nothing read here is logged.
 
 Three queries whatever the thread's length: the invite, its messages with their
 senders, their attachments.

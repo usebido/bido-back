@@ -1,17 +1,29 @@
 """Award, purchase orders and "not selected" notices against Postgres; fake writer and mailbox."""
 
 import io
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
+from fastapi import FastAPI
 from sqlalchemy import func, select, update
-from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bido_back.agents.catalog.contracts import AwardNoticeInput, EmailNoteOutput
 from bido_back.agents.context import ToolContext
+from bido_back.api.deps import (
+    ApiResources,
+    get_db,
+    get_download_links,
+    get_optional_job_queue,
+    get_principal,
+    get_storage,
+)
+from bido_back.api.files import files_router
 from bido_back.approvals import (
     ActToolRegistry,
     ApprovalExecutor,
@@ -23,9 +35,10 @@ from bido_back.awards import service
 from bido_back.awards.render import XLSX_MEDIA_TYPE
 from bido_back.awards.schemas import AwardRequest, AwardSelection
 from bido_back.awards.send import AWARD_REJECT_HOOKS, AWARD_RFQ, register_award_act_tools
-from bido_back.db import tenant_session
+from bido_back.db import create_sessionmaker, tenant_session
 from bido_back.db.models import (
     Approval,
+    Attachment,
     AuditEvent,
     Award,
     AwardNotice,
@@ -42,11 +55,15 @@ from bido_back.db.models import (
 )
 from bido_back.negotiation import service as negotiation_service
 from bido_back.negotiation.schemas import LineLimitsUpdate, NegotiationSettingsUpdate
+from bido_back.rfqs import messages as rfq_messages
 from bido_back.rfqs import service as rfq_service
 from bido_back.rfqs import suppliers
 from bido_back.rfqs.errors import InvalidState, NotFound
 from bido_back.rfqs.schemas import ContactIn, CreateSupplierRequest, RfqDetail
 from bido_back.rfqs.send import RfqActDeps, register_act_tools
+from bido_back.settings import Settings
+from bido_back.storage import BlobNotFound
+from bido_back.storage.links import Disposition, FileLink
 from tests.approvals.conftest import FakeJobQueue, People
 from tests.negotiation.test_negotiation_db import FakeNegotiationWriter
 from tests.rfqs.conftest import FakeIntake, FakeMailboxes, FakeWriter
@@ -54,6 +71,7 @@ from tests.rfqs.conftest import FakeIntake, FakeMailboxes, FakeWriter
 pytestmark = pytest.mark.db
 
 EMAIL_DOMAIN = "quotes.example.test"
+UNUSED_DB = "postgresql+asyncpg://app@localhost:5432/unused"
 TODAY = date(2026, 10, 7)
 
 
@@ -74,16 +92,42 @@ class FakeNoticeWriter:
         return EmailNoteOutput(note="")
 
 
+class MemoryStorage:
+    """Blob storage in memory; `broken` refuses every write (S3 down)."""
+
+    def __init__(self, *, broken: bool = False) -> None:
+        self.blobs: dict[str, bytes] = {}
+        self.broken = broken
+
+    async def put(self, key: str, data: bytes, content_type: str) -> None:
+        if self.broken:
+            raise OSError("storage unavailable")
+        self.blobs[key] = data
+
+    async def get(self, key: str) -> bytes:
+        if key not in self.blobs:
+            raise BlobNotFound("not stored")
+        return self.blobs[key]
+
+
 class World:
     """One open RFQ (2 lines) sent to Rhein and Lyon; both quoted, Rhein cheaper."""
 
-    def __init__(self, engine: AsyncEngine, people: People) -> None:
+    def __init__(
+        self, engine: AsyncEngine, people: People, storage: MemoryStorage | None = None
+    ) -> None:
         self.engine = engine
         self.people = people
         self.mailboxes = FakeMailboxes()
         self.jobs = FakeJobQueue()
         self.registry = ActToolRegistry()
-        deps = RfqActDeps(db=engine, email_domain=EMAIL_DOMAIN, mailbox_senders=self.mailboxes)
+        self.storage = storage or MemoryStorage()
+        deps = RfqActDeps(
+            db=engine,
+            email_domain=EMAIL_DOMAIN,
+            mailbox_senders=self.mailboxes,
+            storage=self.storage,
+        )
         register_act_tools(self.registry, deps)
         register_award_act_tools(self.registry, deps)
         self.executor = ApprovalExecutor(engine, self.registry)
@@ -419,6 +463,131 @@ async def test_a_purchase_order_is_sent_in_the_thread_after_approval(world: Worl
     [po] = await world.orders()
     assert po.status == "sent" and po.sent_at is not None
     assert po.message_id_header == po_email.message_id
+
+
+@dataclass
+class _Links:
+    keys: list[str] = field(default_factory=list[str])
+
+    async def presign_get(
+        self,
+        key: str,
+        *,
+        filename: str,
+        content_type: str,
+        disposition: Disposition,
+        expires_in: timedelta,
+    ) -> FileLink:
+        self.keys.append(key)
+        return FileLink(url=f"https://files.test/{key}", expires_at=datetime.now(UTC) + expires_in)
+
+
+async def _send_po(world: World) -> None:
+    await world.award()
+    [po] = await world.orders()
+    requested = await service.request_po_send(
+        world.engine, buyer(world.people), po.id, world.mailboxes
+    )
+    await world.approve(requested.approval_id)
+
+
+async def test_the_files_bido_sent_are_in_the_invite_thread_and_download(
+    world: World, app_engine: AsyncEngine
+) -> None:
+    await _send_po(world)
+    rfq_email = next(
+        e for e in world.mailboxes.sender.sent if e.to == ("sales@rhein.example.test",)
+    )
+    po_email = world.mailboxes.sender.sent[-1]
+    assert rfq_email.attachments and len(po_email.attachments) == 2
+
+    thread = await rfq_messages.invite_messages(
+        world.engine, buyer(world.people), world.rfq.id, world.invites["Rhein"]
+    )
+    rfq_message, po_message = [m for m in thread.messages if m.direction == "out"]
+    [rfq_pdf] = rfq_email.attachments
+    assert [(a.filename, a.content_type, a.size_bytes) for a in rfq_message.attachments] == [
+        (rfq_pdf.filename, "application/pdf", len(rfq_pdf.data))
+    ]
+    assert [(a.filename, a.content_type) for a in po_message.attachments] == [
+        ("PO-1.pdf", "application/pdf"),
+        ("PO-1.xlsx", XLSX_MEDIA_TYPE),
+    ]
+    # The exact bytes that went out, not a new rendering.
+    sent = {
+        rfq_message.attachments[0].id: rfq_pdf.data,
+        po_message.attachments[0].id: po_email.attachments[0].data,
+        po_message.attachments[1].id: po_email.attachments[1].data,
+    }
+    async with tenant_session(world.engine, world.people.tenant) as session:
+        rows = list(await session.scalars(select(Attachment).where(Attachment.id.in_(sent))))
+    assert len(rows) == 3
+    for row in rows:
+        assert world.storage.blobs[row.storage_key] == sent[row.id]
+        assert row.tenant_id == world.people.tenant
+
+    # Served by the file routes, to this company only; not listed in its file library.
+    app = FastAPI()
+    app.state.resources = ApiResources(
+        Settings.model_validate({"environment": "test", "database_url": UNUSED_DB})
+    )
+    app.include_router(files_router())
+    sessionmaker = create_sessionmaker(app_engine)
+    links = _Links()
+    current = {"principal": buyer(world.people)}
+
+    def db() -> async_sessionmaker[AsyncSession]:
+        return sessionmaker
+
+    app.dependency_overrides[get_principal] = lambda: current["principal"]
+    app.dependency_overrides[get_db] = db
+    app.dependency_overrides[get_storage] = lambda: world.storage
+    app.dependency_overrides[get_download_links] = lambda: links
+    app.dependency_overrides[get_optional_job_queue] = lambda: world.jobs
+    po_pdf = po_message.attachments[0].id
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        download = await http.get(f"/v1/files/{po_pdf}/download")
+        assert download.status_code == 200, download.text
+        assert links.keys == [next(r.storage_key for r in rows if r.id == po_pdf)]
+        preview = await http.get(f"/v1/files/{po_message.attachments[1].id}/preview")
+        assert preview.status_code == 200, preview.text
+        assert preview.json()["kind"] == "table"
+        listed = (await http.get("/v1/files", params={"rfq_id": str(world.rfq.id)})).json()
+        assert listed["items"] == []
+
+        current["principal"] = Principal(
+            tenant_id=world.people.other_tenant,
+            user_id=world.people.other_approver,
+            role="approver",
+        )
+        for attachment_id in sent:
+            response = await http.get(f"/v1/files/{attachment_id}/download")
+            assert response.status_code == 404
+    assert len(links.keys) == 1
+    other = Principal(
+        tenant_id=world.people.other_tenant, user_id=world.people.other_approver, role="approver"
+    )
+    with pytest.raises(NotFound):
+        await rfq_messages.invite_messages(
+            world.engine, other, world.rfq.id, world.invites["Rhein"]
+        )
+
+
+async def test_an_email_is_sent_and_recorded_when_its_files_cannot_be_kept(
+    app_engine: AsyncEngine, award_rows: People
+) -> None:
+    world = await World(app_engine, award_rows, MemoryStorage(broken=True)).setup()
+    await _send_po(world)
+
+    [po] = await world.orders()
+    assert po.status == "sent"
+    thread = await rfq_messages.invite_messages(
+        world.engine, buyer(world.people), world.rfq.id, world.invites["Rhein"]
+    )
+    outbound = [m for m in thread.messages if m.direction == "out"]
+    assert len(outbound) == 2
+    assert all(m.attachments == [] for m in outbound)
 
 
 async def test_a_rejected_po_send_goes_back_to_draft(world: World) -> None:

@@ -448,6 +448,56 @@ async def test_preview_and_download_of_a_supplier_attachment(
 
 
 @pytest.mark.db
+async def test_a_file_bido_sent_is_served_but_not_in_the_library(
+    app_engine: AsyncEngine, library: Library
+) -> None:
+    """A PO or RFQ PDF Bido attached to its own email: shown in the invite's thread,
+    downloadable, but the library lists and reads only what suppliers sent."""
+    supplier = await _attachment(app_engine, library, "cotacao.csv", b"item;preco\nM8;0,19\n")
+    async with tenant_session(app_engine, library.people.tenant) as session:
+        invite_id = await session.scalar(
+            select(Message.invite_id).where(Message.id == library.message_id)
+        )
+        outbound = Message(
+            tenant_id=library.people.tenant,
+            invite_id=invite_id,
+            direction="out",
+            subject="PO-1",
+            occurred_at=datetime.now(UTC),
+        )
+        session.add(outbound)
+        await session.flush()
+        key = f"attachments/{library.people.tenant}/{outbound.id}/1-PO-1.csv"
+        sent = Attachment(
+            tenant_id=library.people.tenant,
+            message_id=outbound.id,
+            filename="PO-1.csv",
+            content_type="text/csv",
+            size_bytes=12,
+            storage_key=key,
+        )
+        session.add(sent)
+        await session.flush()
+        sent_id = sent.id
+    await library.storage.put(key, b"item;qty\nM8;9\n", "text/csv")
+
+    body = (await library.http.get("/v1/files")).json()
+    assert [item["id"] for item in body["items"]] == [str(supplier)]
+    assert (await index.index_pending(app_engine, library.storage, library.people.tenant)) == (
+        1,
+        False,
+    )
+    async with tenant_session(app_engine, library.people.tenant) as session:
+        assert list(await session.scalars(select(FileText.file_id))) == [supplier]
+
+    download = await library.http.get(f"/v1/files/{sent_id}/download")
+    assert download.status_code == 200, download.text
+    assert library.links.calls[-1][0] == key
+    library.act_as(_principal(library.people.other_tenant, library.people.other_approver))
+    assert (await library.http.get(f"/v1/files/{sent_id}/download")).status_code == 404
+
+
+@pytest.mark.db
 async def test_attach_gives_an_upload_the_caller_owns(
     app_engine: AsyncEngine, library: Library
 ) -> None:
